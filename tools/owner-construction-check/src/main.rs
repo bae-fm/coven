@@ -116,9 +116,39 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "load",
     ),
     (
+        "crates/coven/src/sync/pull_tests.rs",
+        "PersistedCycleRemoval",
+        "build",
+    ),
+    (
         "crates/coven/src/sync/store/owner/circles/tests/recovery.rs",
         "RevokedOperation",
         "prepare",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/publication.rs",
+        "ClosingFounderCircle",
+        "build",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/publication.rs",
+        "SilentParticipantCircle",
+        "build",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/resolution.rs",
+        "ConflictFixture",
+        "build",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
+        "RotationFixture",
+        "build",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
+        "ActiveMemberCircleSnapshot",
+        "build",
     ),
     (
         "crates/coven/src/sync/store/owner/pull/tests.rs",

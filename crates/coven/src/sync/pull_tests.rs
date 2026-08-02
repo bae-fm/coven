@@ -350,6 +350,24 @@ trait TestStoreStorage: Sync {
             .await
             .map_err(|error| error.to_string())
     }
+
+    /// Push one captured changeset through Store write preparation and publish
+    /// the resulting immutable Store objects as `keypair`.
+    async fn publish_test_cycle(
+        &self,
+        db: &crate::database::Database,
+        tables: &[SyncedTable],
+        outgoing: Vec<u8>,
+        local_seq: u64,
+        keypair: &UserKeypair,
+        store_dir: &crate::store_dir::StoreDir,
+    ) {
+        let result = self
+            .sync_for_test(db, tables, outgoing, local_seq, "", keypair, store_dir)
+            .await
+            .expect("sync");
+        assert!(result.is_some(), "the captured rows publish a Store commit");
+    }
 }
 
 #[async_trait]
@@ -4406,7 +4424,9 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
         ),
     ];
     let outgoing = db.capture_test_changeset(&rows).await;
-    push_cycle(&db, &tables, &storage, outgoing.clone(), 0, &keypair, &ld).await;
+    storage
+        .publish_test_cycle(&db, &tables, outgoing.clone(), 0, &keypair, &ld)
+        .await;
     let cover_key = db.row_blob_object_key("note_photos", "p1cover").await;
     assert_eq!(
         home.get(&cover_key).as_deref(),
@@ -4639,7 +4659,9 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
             ),
         ])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .await;
     let old_key = db1.row_blob_object_key("note_photos", "p1cover").await;
     assert_eq!(
         home.get(&old_key).as_deref(),
@@ -4665,7 +4687,9 @@ async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
             crate::blob::content_hash(new_bytes),
         )])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+        .await;
     let new_key = db1.row_blob_object_key("note_photos", "p2cover").await;
 
     assert_eq!(
@@ -4742,7 +4766,9 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
             ),
         ])
         .await;
-    push_cycle(&db_a, &tables, &storage, outgoing, 0, &keypair, &ld_a).await;
+    storage
+        .publish_test_cycle(&db_a, &tables, outgoing, 0, &keypair, &ld_a)
+        .await;
 
     // Each replacement uses a fresh blob id and readable path.
     ld_a.store_local("pAcover", from_a).await;
@@ -4754,7 +4780,9 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
             crate::blob::content_hash(from_a),
         )])
         .await;
-    push_cycle(&db_a, &tables, &storage, outgoing_a, 1, &keypair, &ld_a).await;
+    storage
+        .publish_test_cycle(&db_a, &tables, outgoing_a, 1, &keypair, &ld_a)
+        .await;
     let from_a_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
     ld_a.store_local("pBcover", from_b).await;
@@ -4766,7 +4794,9 @@ async fn run_plain_scheme_two_replacements_write_two_objects() {
             crate::blob::content_hash(from_b),
         )])
         .await;
-    push_cycle(&db_a, &tables, &storage, outgoing_b, 2, &keypair, &ld_a).await;
+    storage
+        .publish_test_cycle(&db_a, &tables, outgoing_b, 2, &keypair, &ld_a)
+        .await;
     let from_b_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
     // Neither replacement overwrote the other: both objects stand, each holding the bytes
@@ -4855,7 +4885,9 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
             ),
         ])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .await;
 
     // Another blob is published while the laggard is away.
     ld1.store_local("p2cover", new_bytes).await;
@@ -4869,7 +4901,9 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
             crate::blob::content_hash(new_bytes),
         )])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+        .await;
 
     // The laggard pulls from zero: it applies the pre-replacement changeset first, whose
     // row names the replaced blob. Its bytes are still at their own key.
@@ -4944,7 +4978,9 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
             ),
         ])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .await;
     let audio_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
     assert_eq!(
@@ -5009,7 +5045,9 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
             ),
         ])
         .await;
-    push_cycle(&db, &tables, &storage, outgoing, 0, &keypair, &ld).await;
+    storage
+        .publish_test_cycle(&db, &tables, outgoing, 0, &keypair, &ld)
+        .await;
     let audio_key = db.row_blob_object_key("note_photos", "ph1").await;
 
     // Repoint the write-once row at a second blob — the move that would rewrite the object
@@ -5098,7 +5136,9 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
             ),
         ])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .await;
     let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
     assert_eq!(
         home.get(&old_key).as_deref(),
@@ -5128,7 +5168,9 @@ async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
             crate::blob::content_hash(new_bytes),
         )])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+        .await;
     let new_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
     assert_eq!(
@@ -5205,7 +5247,9 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
             ),
         ])
         .await;
-    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    storage
+        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .await;
     let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
     // The repointing leaves `cloud_path` naming the blob it replaced, so the new blob
@@ -5234,25 +5278,6 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         Some(old_bytes.as_slice()),
         "the replaced blob's object is untouched — the cycle aborted before any upload",
     );
-}
-
-/// Push one cycle's captured changeset through the sync loop's Store writer
-/// prepares (and uploads the host-provided blobs of) the gated changeset, then
-/// publishes the resulting immutable Store objects, as `device`.
-async fn push_cycle(
-    db: &crate::database::Database,
-    tables: &[SyncedTable],
-    storage: &Arc<CloudSyncStorage>,
-    outgoing: Vec<u8>,
-    local_seq: u64,
-    keypair: &UserKeypair,
-    store_dir: &crate::store_dir::StoreDir,
-) {
-    let result = storage
-        .sync_for_test(db, tables, outgoing, local_seq, "", keypair, store_dir)
-        .await
-        .expect("sync");
-    assert!(result.is_some(), "the captured rows publish a Store commit");
 }
 
 /// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
@@ -6036,92 +6061,100 @@ struct PersistedCycleRemoval {
     removed_member_pubkey: String,
 }
 
-async fn persisted_cycle_removal() -> PersistedCycleRemoval {
-    let founder = UserKeypair::generate();
-    let second_owner = UserKeypair::generate();
-    let removed_member = UserKeypair::generate();
-    let founder_pubkey = hex::encode(founder.public_key());
-    let second_owner_pubkey = hex::encode(second_owner.public_key());
-    let removed_member_pubkey = hex::encode(removed_member.public_key());
-    let db = open_test_db();
-    let storage = create_store(&db, founder.clone()).await;
-    let encryption = EncryptionService::from_key([42; 32]);
-    storage
-        .invite_member(
-            &db,
-            &founder,
-            &crate::sync::hlc::Hlc::new(
-                "persisted-cycle-second-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &second_owner_pubkey,
-            None,
-            MemberRole::Member,
-            &encryption,
-            "Test Store",
-        )
-        .await
-        .expect("invite second Owner as a Member");
-    let second_owner_db = open_test_db();
-    storage
-        .activate_joined_device(&db, &second_owner_db, &second_owner, "2026-03-01T00:00:45Z")
-        .await
-        .expect("activate second Owner device");
-    storage
-        .promote_active_member_fixture(&db, &second_owner_db, &founder, &second_owner, &encryption)
-        .await
-        .expect("promote active second Owner");
-    let loaded = storage
-        .open_into(&db)
-        .await
-        .expect("load membership after second Owner promotion");
-    let mut chain = ExactMembershipChain::load_from_device(&storage, &loaded).await;
-    let second_owner_stream = membership_author_stream(&chain, &second_owner);
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &founder,
-            membership_author_stream(&chain, &founder),
-            pubkey_hex(&removed_member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:02:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
-    chain.publish_entry(add_member, &founder).await;
-    let remove_member = chain
-        .signed_remove_member_in_stream(
-            &second_owner,
-            second_owner_stream,
-            pubkey_hex(&removed_member),
-            "2026-03-01T00:03:00Z".to_string(),
-        )
-        .expect("active Owner removes membership grant");
-    chain.publish_entry(remove_member, &second_owner).await;
-    let second_owner_head = chain
-        .head_refs()
-        .iter()
-        .find(|head| head.coord.author_pubkey == second_owner_pubkey)
-        .expect("second Owner has an exact membership head")
-        .clone();
+impl PersistedCycleRemoval {
+    async fn build() -> Self {
+        let founder = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let removed_member = UserKeypair::generate();
+        let founder_pubkey = hex::encode(founder.public_key());
+        let second_owner_pubkey = hex::encode(second_owner.public_key());
+        let removed_member_pubkey = hex::encode(removed_member.public_key());
+        let db = open_test_db();
+        let storage = create_store(&db, founder.clone()).await;
+        let encryption = EncryptionService::from_key([42; 32]);
+        storage
+            .invite_member(
+                &db,
+                &founder,
+                &crate::sync::hlc::Hlc::new(
+                    "persisted-cycle-second-owner".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &second_owner_pubkey,
+                None,
+                MemberRole::Member,
+                &encryption,
+                "Test Store",
+            )
+            .await
+            .expect("invite second Owner as a Member");
+        let second_owner_db = open_test_db();
+        storage
+            .activate_joined_device(&db, &second_owner_db, &second_owner, "2026-03-01T00:00:45Z")
+            .await
+            .expect("activate second Owner device");
+        storage
+            .promote_active_member_fixture(
+                &db,
+                &second_owner_db,
+                &founder,
+                &second_owner,
+                &encryption,
+            )
+            .await
+            .expect("promote active second Owner");
+        let loaded = storage
+            .open_into(&db)
+            .await
+            .expect("load membership after second Owner promotion");
+        let mut chain = ExactMembershipChain::load_from_device(&storage, &loaded).await;
+        let second_owner_stream = membership_author_stream(&chain, &second_owner);
+        let add_member = chain
+            .signed_set_member_in_stream(
+                &founder,
+                membership_author_stream(&chain, &founder),
+                pubkey_hex(&removed_member),
+                None,
+                MemberRole::Member,
+                "2026-03-01T00:02:00Z".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.publish_entry(add_member, &founder).await;
+        let remove_member = chain
+            .signed_remove_member_in_stream(
+                &second_owner,
+                second_owner_stream,
+                pubkey_hex(&removed_member),
+                "2026-03-01T00:03:00Z".to_string(),
+            )
+            .expect("active Owner removes membership grant");
+        chain.publish_entry(remove_member, &second_owner).await;
+        let second_owner_head = chain
+            .head_refs()
+            .iter()
+            .find(|head| head.coord.author_pubkey == second_owner_pubkey)
+            .expect("second Owner has an exact membership head")
+            .clone();
 
-    let initial = loaded
-        .membership_for_test()
-        .await
-        .expect("accept and persist the complete multi-author chain");
-    assert!(!initial.can_write_now(&removed_member_pubkey));
+        let initial = loaded
+            .membership_for_test()
+            .await
+            .expect("accept and persist the complete multi-author chain");
+        assert!(!initial.can_write_now(&removed_member_pubkey));
 
-    PersistedCycleRemoval {
-        storage,
-        db,
-        founder_pubkey,
-        second_owner_head,
-        removed_member_pubkey,
+        Self {
+            storage,
+            db,
+            founder_pubkey,
+            second_owner_head,
+            removed_member_pubkey,
+        }
     }
 }
 
 #[tokio::test]
 async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
-    let fixture = persisted_cycle_removal().await;
+    let fixture = PersistedCycleRemoval::build().await;
 
     let recovered = fixture
         .storage
@@ -6146,7 +6179,7 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 
 #[tokio::test]
 async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
-    let fixture = persisted_cycle_removal().await;
+    let fixture = PersistedCycleRemoval::build().await;
     fixture
         .storage
         .storage

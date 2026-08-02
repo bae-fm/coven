@@ -2212,184 +2212,185 @@ struct ClosingFounderCircle {
     prior_fingerprint: crate::KeyFingerprint,
 }
 
-/// Drive a founder Circle to a member removal waiting on close responses, sharing
-/// the removal-test fixture. The returned handles resume from
-/// `CircleOperationState::WaitingForCloseResponses`.
-async fn setup_closing_founder_circle(name: &str) -> ClosingFounderCircle {
-    let db = open_circle_routing_test_db();
-    let (store, signer, founder) = persist_merge_operation(&db, name).await;
-    let circle_id = founder.circle_id();
-    let owner_device = store
-        .bind_device(&db, &signer)
-        .await
-        .expect("bind Circle test Store");
-    owner_device
-        .resume_circle_operations()
-        .await
-        .expect("activate founder transition");
+impl ClosingFounderCircle {
+    /// Drive a founder Circle to a member removal waiting on close responses.
+    /// The returned fixture resumes from `CircleOperationState::WaitingForCloseResponses`.
+    async fn build(name: &str) -> Self {
+        let db = open_circle_routing_test_db();
+        let (store, signer, founder) = persist_merge_operation(&db, name).await;
+        let circle_id = founder.circle_id();
+        let owner_device = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store");
+        owner_device
+            .resume_circle_operations()
+            .await
+            .expect("activate founder transition");
 
-    let member = UserKeypair::generate();
-    let member_pubkey = keys::public_key_hex(&member);
-    store
-        .invite_member(
-            &db,
-            &signer,
-            &crate::sync::hlc::Hlc::new(
-                "circle-cancel-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &member_pubkey,
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Circle cancel Store",
-        )
-        .await
-        .expect("invite Store member");
-    let remaining_member = UserKeypair::generate();
-    let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
-    store
-        .invite_member(
-            &db,
-            &signer,
-            &crate::sync::hlc::Hlc::new(
-                "circle-cancel-second-member".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &remaining_member_pubkey,
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Circle cancel Store",
-        )
-        .await
-        .expect("invite remaining Store member");
-    let member_db = open_circle_routing_test_db();
-    store
-        .activate_joined_device(&db, &member_db, &member, "2026-07-24T00:00:00Z")
-        .await
-        .expect("activate Store member device");
+        let member = UserKeypair::generate();
+        let member_pubkey = keys::public_key_hex(&member);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &crate::sync::hlc::Hlc::new(
+                    "circle-cancel-owner".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &member_pubkey,
+                None,
+                MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Circle cancel Store",
+            )
+            .await
+            .expect("invite Store member");
+        let remaining_member = UserKeypair::generate();
+        let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &crate::sync::hlc::Hlc::new(
+                    "circle-cancel-second-member".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &remaining_member_pubkey,
+                None,
+                MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Circle cancel Store",
+            )
+            .await
+            .expect("invite remaining Store member");
+        let member_db = open_circle_routing_test_db();
+        store
+            .activate_joined_device(&db, &member_db, &member, "2026-07-24T00:00:00Z")
+            .await
+            .expect("activate Store member device");
 
-    let (_temp, store_dir) = temp_store_dir();
-    let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        signer.clone(),
-    )
-    .expect("open Circle owner storage");
-    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
-        crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-        ),
-        owner_storage,
-        crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("prepare Circle owner sync")
-    .initialize()
-    .await
-    .expect("initialize Circle owner sync");
-    components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            member_pubkey.clone(),
-            CircleRole::Member,
-        )
-        .await
-        .expect("add Circle member");
-    components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            remaining_member_pubkey.clone(),
-            CircleRole::Member,
-        )
-        .await
-        .expect("add remaining Circle member");
-
-    // The member's own device installs the Circle bootstrap and becomes an active
-    // effective member holding the epoch key.
-    let member_storage = Arc::new(
-        crate::storage::CloudSyncStorage::new(
+        let (_temp, store_dir) = temp_store_dir();
+        let owner_storage = crate::storage::CloudSyncStorage::new(
             store.home.clone(),
             crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             crate::storage::BlobPathScheme::Hashed,
             store.storage.store_id(),
+            signer.clone(),
+        )
+        .expect("open Circle owner storage");
+        let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+            crate::database::StoreDatabase::new(&db),
+            crate::sync::test_owner_graph::local_blob_access(
+                crate::database::StoreDatabase::new(&db),
+                store_dir.clone(),
+            ),
+            owner_storage,
+            crate::sync::cycle::StoreInitialization::OpenStore {
+                expected_store_root: store.root.clone(),
+            },
+            Some(EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("prepare Circle owner sync")
+        .initialize()
+        .await
+        .expect("initialize Circle owner sync");
+        components
+            .add_circle_member(
+                &store_dir,
+                circle_id,
+                member_pubkey.clone(),
+                CircleRole::Member,
+            )
+            .await
+            .expect("add Circle member");
+        components
+            .add_circle_member(
+                &store_dir,
+                circle_id,
+                remaining_member_pubkey.clone(),
+                CircleRole::Member,
+            )
+            .await
+            .expect("add remaining Circle member");
+
+        // The member's own device installs the Circle bootstrap and becomes an active
+        // effective member holding the epoch key.
+        let member_storage = Arc::new(
+            crate::storage::CloudSyncStorage::new(
+                store.home.clone(),
+                crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+                crate::storage::BlobPathScheme::Hashed,
+                store.storage.store_id(),
+                member.clone(),
+            )
+            .expect("open Circle member storage"),
+        );
+        let (_member_temp, member_store_dir) = temp_store_dir();
+        crate::sync::store::Store::load(
+            StoreDatabase::new(&member_db),
+            member_storage.clone(),
             member.clone(),
         )
-        .expect("open Circle member storage"),
-    );
-    let (_member_temp, member_store_dir) = temp_store_dir();
-    crate::sync::store::Store::load(
-        StoreDatabase::new(&member_db),
-        member_storage.clone(),
-        member.clone(),
-    )
-    .await
-    .expect("load Circle member Store")
-    .authorize_writer()
-    .await
-    .expect("authorize Circle member Store")
-    .pull(
-        &member_store_dir,
-        Some(&EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("member installs the Circle bootstrap");
-
-    let prior = crate::database::StoreDatabase::new(&db)
-        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
-        .expect("load pre-close Circle control")
-        .0;
-    let prior_epoch = prior.control.value.epoch_id();
-    let prior_fingerprint = prior.control.value.key_fingerprint();
-
-    let operation_id = components
-        .remove_circle_member(circle_id, member_pubkey.clone())
+        .expect("load Circle member Store")
+        .authorize_writer()
         .await
-        .expect("activate Circle epoch close");
-    assert_eq!(
-        crate::database::StoreDatabase::new(&db)
-            .circle_operation(&operation_id)
+        .expect("authorize Circle member Store")
+        .pull(
+            &member_store_dir,
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("member installs the Circle bootstrap");
+
+        let prior = crate::database::StoreDatabase::new(&db)
+            .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
             .await
-            .expect("read Circle removal operation")
-            .expect("Circle removal waits for close responses")
-            .state(),
-        CircleOperationState::WaitingForCloseResponses
-    );
+            .expect("load pre-close Circle control")
+            .0;
+        let prior_epoch = prior.control.value.epoch_id();
+        let prior_fingerprint = prior.control.value.key_fingerprint();
 
-    ClosingFounderCircle {
-        _temp,
-        store_dir,
-        db,
-        store,
-        signer,
-        components,
-        circle_id,
-        member,
-        member_db,
-        _member_temp,
-        member_store_dir,
-        member_pubkey,
-        remaining_member_pubkey,
-        operation_id,
-        prior_epoch,
-        prior_fingerprint,
+        let operation_id = components
+            .remove_circle_member(circle_id, member_pubkey.clone())
+            .await
+            .expect("activate Circle epoch close");
+        assert_eq!(
+            crate::database::StoreDatabase::new(&db)
+                .circle_operation(&operation_id)
+                .await
+                .expect("read Circle removal operation")
+                .expect("Circle removal waits for close responses")
+                .state(),
+            CircleOperationState::WaitingForCloseResponses
+        );
+
+        Self {
+            _temp,
+            store_dir,
+            db,
+            store,
+            signer,
+            components,
+            circle_id,
+            member,
+            member_db,
+            _member_temp,
+            member_store_dir,
+            member_pubkey,
+            remaining_member_pubkey,
+            operation_id,
+            prior_epoch,
+            prior_fingerprint,
+        }
     }
 }
 
 #[tokio::test]
 async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
-    let fixture = setup_closing_founder_circle("circle-cancel-reopen").await;
+    let fixture = ClosingFounderCircle::build("circle-cancel-reopen").await;
 
     // Authoring is frozen while the epoch is closing; capture the exact close
     // control the reopen must name as its predecessor.
@@ -2564,7 +2565,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
 
 #[tokio::test]
 async fn cancelling_a_finalized_close_is_refused() {
-    let fixture = setup_closing_founder_circle("circle-cancel-refused").await;
+    let fixture = ClosingFounderCircle::build("circle-cancel-refused").await;
 
     // Finalize the close: publish the sole owner-device response, then drive the
     // cycle that activates the exact outcome.
@@ -2620,7 +2621,7 @@ async fn cancelling_a_finalized_close_is_refused() {
 /// the re-add restores its access to the Circle's current state.
 #[tokio::test]
 async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf() {
-    let fixture = setup_closing_founder_circle("circle-readd-after-close").await;
+    let fixture = ClosingFounderCircle::build("circle-readd-after-close").await;
 
     // The member holds the Circle bootstrap and current content from before the
     // removal.
@@ -2777,7 +2778,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
 
 #[tokio::test]
 async fn reopen_control_without_a_slot_cancellation_is_invalid() {
-    let fixture = setup_closing_founder_circle("circle-cancel-sabotage").await;
+    let fixture = ClosingFounderCircle::build("circle-cancel-sabotage").await;
     let owner_pubkey = keys::public_key_hex(&fixture.signer);
 
     // Prepare a legitimate reopen but do not publish it.
@@ -3026,7 +3027,7 @@ async fn interrupted_cancellation_flow() {
     // A crash between beginning the cancellation's finalization and publishing it:
     // the durable operation resumes and completes exactly once. Its distinct write
     // identity keeps it from being re-derived as a finalization.
-    let before_publication = setup_closing_founder_circle("circle-cancel-restart-before").await;
+    let before_publication = ClosingFounderCircle::build("circle-cancel-restart-before").await;
     before_publication.begin_cancellation_finalization().await;
     assert_eq!(
         StoreDatabase::new(&before_publication.db)
@@ -3062,7 +3063,7 @@ async fn interrupted_cancellation_flow() {
     // 2*access + 5 exact objects (cancellation, access leaves, control, control
     // head, access envelopes, then the commit and the head); failing before the
     // final head create leaves the commit published and activation not recorded.
-    let after_publication = setup_closing_founder_circle("circle-cancel-restart-after").await;
+    let after_publication = ClosingFounderCircle::build("circle-cancel-restart-after").await;
     after_publication.begin_cancellation_finalization().await;
     let journal = StoreDatabase::new(&after_publication.db)
         .circle_operation(&after_publication.operation_id)
@@ -3130,7 +3131,7 @@ async fn interrupted_cancellation_flow() {
 
 #[tokio::test]
 async fn interrupted_finalization_resumes_from_its_recorded_payload() {
-    let fixture = setup_closing_founder_circle("circle-finalize-durable-first").await;
+    let fixture = ClosingFounderCircle::build("circle-finalize-durable-first").await;
     let store = fixture
         .store
         .bind_device(&fixture.db, &fixture.signer)
@@ -3277,6 +3278,148 @@ struct SilentParticipantClose {
 }
 
 impl SilentParticipantCircle {
+    async fn build(name: &str) -> Self {
+        let db = open_circle_routing_test_db();
+        let (store, signer, founder) = persist_merge_operation(&db, name).await;
+        let circle_id = founder.circle_id();
+        let owner_device = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store");
+        owner_device
+            .resume_circle_operations()
+            .await
+            .expect("activate founder transition");
+
+        let removed = UserKeypair::generate();
+        let removed_pubkey = keys::public_key_hex(&removed);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &crate::sync::hlc::Hlc::new(
+                    "circle-exclude-removed".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &removed_pubkey,
+                None,
+                MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Circle exclude Store",
+            )
+            .await
+            .expect("invite removed Store member");
+        let silent = UserKeypair::generate();
+        let silent_pubkey = keys::public_key_hex(&silent);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &crate::sync::hlc::Hlc::new(
+                    "circle-exclude-silent".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &silent_pubkey,
+                None,
+                MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Circle exclude Store",
+            )
+            .await
+            .expect("invite silent Store member");
+        let silent_db = open_circle_routing_test_db();
+        store
+            .activate_joined_device(&db, &silent_db, &silent, "2026-07-24T01:00:00Z")
+            .await
+            .expect("activate silent participant device");
+        let silent_device_id = silent_db
+            .local_store_device_id_for_test()
+            .await
+            .expect("read silent participant device id");
+
+        let (_temp, store_dir) = temp_store_dir();
+        let owner_storage = crate::storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            crate::storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            signer.clone(),
+        )
+        .expect("open Circle owner storage");
+        let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+            crate::database::StoreDatabase::new(&db),
+            crate::sync::test_owner_graph::local_blob_access(
+                crate::database::StoreDatabase::new(&db),
+                store_dir.clone(),
+            ),
+            owner_storage,
+            crate::sync::cycle::StoreInitialization::OpenStore {
+                expected_store_root: store.root.clone(),
+            },
+            Some(EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("prepare Circle owner sync")
+        .initialize()
+        .await
+        .expect("initialize Circle owner sync");
+        components
+            .add_circle_member(
+                &store_dir,
+                circle_id,
+                removed_pubkey.clone(),
+                CircleRole::Member,
+            )
+            .await
+            .expect("add removed Circle member");
+        components
+            .add_circle_member(
+                &store_dir,
+                circle_id,
+                silent_pubkey.clone(),
+                CircleRole::Member,
+            )
+            .await
+            .expect("add silent Circle member");
+
+        let silent_storage = Arc::new(
+            crate::storage::CloudSyncStorage::new(
+                store.home.clone(),
+                crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+                crate::storage::BlobPathScheme::Hashed,
+                store.storage.store_id(),
+                silent.clone(),
+            )
+            .expect("open silent participant storage"),
+        );
+
+        let prior_epoch = crate::database::StoreDatabase::new(&db)
+            .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
+            .await
+            .expect("load pre-close Circle control")
+            .0
+            .control
+            .value
+            .epoch_id();
+
+        Self {
+            _temp,
+            store_dir,
+            db,
+            store,
+            owner_device,
+            signer,
+            components,
+            circle_id,
+            removed_pubkey,
+            silent,
+            silent_device_id,
+            silent_db,
+            silent_storage,
+            prior_epoch,
+        }
+    }
+
     /// Pull every Store commit onto the silent participant's device from its own
     /// Store view.
     async fn silent_pull(
@@ -3348,6 +3491,56 @@ impl SilentParticipantCircle {
             .await
             .expect("Owner pulls the published commits");
     }
+
+    /// Publish an accepted old-epoch row, pull it onto the silent participant,
+    /// then close the epoch, exclude that participant, and finalize the successor
+    /// without pulling the participant's later writes.
+    async fn close_and_exclude_silent(&self, covered_id: &str) -> StoreBatchCommitRef {
+        let covered_write = self
+            .db
+            .capture_circle_document_for_test(
+                covered_id,
+                self.circle_id,
+                "0000000003000-0000-owner",
+            )
+            .await
+            .expect("capture Circle document row");
+        self.components
+            .run_cycle(&crate::clock::SystemClock, None, &self.store_dir, None)
+            .await
+            .expect("publish the accepted old-epoch Circle row");
+        let covered_commit_ref = match crate::database::StoreDatabase::new(&self.db)
+            .write_status(&covered_write)
+            .await
+            .expect("read the accepted pre-close write status")
+        {
+            crate::WriteStatus::Published(position) => position.commit,
+            status => panic!("the accepted pre-close Circle write must publish: {status:?}"),
+        };
+        self.silent_pull()
+            .await
+            .expect("silent participant pulls the active epoch");
+        self.components
+            .remove_circle_member(self.circle_id, self.removed_pubkey.clone())
+            .await
+            .expect("activate the Circle epoch close");
+        self.store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("bind Circle test Store")
+            .publish_circle_epoch_close_response()
+            .await
+            .expect("publish Owner close response");
+        self.components
+            .exclude_circle_close_device(self.circle_id, self.silent_device_id)
+            .await
+            .expect("exclude the silent participant");
+        self.components
+            .run_cycle(&crate::clock::SystemClock, None, &self.store_dir, None)
+            .await
+            .expect("finalize the successor after exclusion");
+        covered_commit_ref
+    }
 }
 
 impl SilentParticipantClose {
@@ -3406,7 +3599,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         silent_db,
         silent_storage: _,
         prior_epoch,
-    } = setup_circle_with_silent_member(name).await;
+    } = SilentParticipantCircle::build(name).await;
 
     let operation_id = components
         .remove_circle_member(circle_id, removed_pubkey.clone())
@@ -3435,148 +3628,6 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         silent_device_id,
         silent_db,
         operation_id,
-        prior_epoch,
-    }
-}
-
-async fn setup_circle_with_silent_member(name: &str) -> SilentParticipantCircle {
-    let db = open_circle_routing_test_db();
-    let (store, signer, founder) = persist_merge_operation(&db, name).await;
-    let circle_id = founder.circle_id();
-    let owner_device = store
-        .bind_device(&db, &signer)
-        .await
-        .expect("bind Circle test Store");
-    owner_device
-        .resume_circle_operations()
-        .await
-        .expect("activate founder transition");
-
-    let removed = UserKeypair::generate();
-    let removed_pubkey = keys::public_key_hex(&removed);
-    store
-        .invite_member(
-            &db,
-            &signer,
-            &crate::sync::hlc::Hlc::new(
-                "circle-exclude-removed".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &removed_pubkey,
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Circle exclude Store",
-        )
-        .await
-        .expect("invite removed Store member");
-    let silent = UserKeypair::generate();
-    let silent_pubkey = keys::public_key_hex(&silent);
-    store
-        .invite_member(
-            &db,
-            &signer,
-            &crate::sync::hlc::Hlc::new(
-                "circle-exclude-silent".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &silent_pubkey,
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Circle exclude Store",
-        )
-        .await
-        .expect("invite silent Store member");
-    let silent_db = open_circle_routing_test_db();
-    store
-        .activate_joined_device(&db, &silent_db, &silent, "2026-07-24T01:00:00Z")
-        .await
-        .expect("activate silent participant device");
-    let silent_device_id = silent_db
-        .local_store_device_id_for_test()
-        .await
-        .expect("read silent participant device id");
-
-    let (_temp, store_dir) = temp_store_dir();
-    let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        signer.clone(),
-    )
-    .expect("open Circle owner storage");
-    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
-        crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-        ),
-        owner_storage,
-        crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("prepare Circle owner sync")
-    .initialize()
-    .await
-    .expect("initialize Circle owner sync");
-    components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            removed_pubkey.clone(),
-            CircleRole::Member,
-        )
-        .await
-        .expect("add removed Circle member");
-    components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            silent_pubkey.clone(),
-            CircleRole::Member,
-        )
-        .await
-        .expect("add silent Circle member");
-
-    let silent_storage = Arc::new(
-        crate::storage::CloudSyncStorage::new(
-            store.home.clone(),
-            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            store.storage.store_id(),
-            silent.clone(),
-        )
-        .expect("open silent participant storage"),
-    );
-
-    let prior_epoch = crate::database::StoreDatabase::new(&db)
-        .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
-        .await
-        .expect("load pre-close Circle control")
-        .0
-        .control
-        .value
-        .epoch_id();
-
-    SilentParticipantCircle {
-        _temp,
-        store_dir,
-        db,
-        store,
-        owner_device,
-        signer,
-        components,
-        circle_id,
-        removed_pubkey,
-        silent,
-        silent_device_id,
-        silent_db,
-        silent_storage,
         prior_epoch,
     }
 }
@@ -3783,7 +3834,7 @@ fn settlement_of_in(
 /// coverage is recorded, and it publishes under the successor epoch afterward.
 #[tokio::test]
 async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
-    let fixture = setup_circle_with_silent_member("circle-exclude-reset").await;
+    let fixture = SilentParticipantCircle::build("circle-exclude-reset").await;
 
     // An accepted old-epoch Circle row the close cutoff covers, published under
     // the active epoch before the close.
@@ -3910,74 +3961,15 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         "the reset participant publishes under the successor epoch"
     );
 }
-
-/// Publish an accepted old-epoch Circle row, pull it onto the silent
-/// participant, then close the epoch excluding that participant and finalize the
-/// successor — without ever pulling the participant's later writes.
-async fn drive_close_and_exclude_silent(
-    fixture: &SilentParticipantCircle,
-    covered_id: &str,
-) -> StoreBatchCommitRef {
-    let covered_write = fixture
-        .db
-        .capture_circle_document_for_test(covered_id, fixture.circle_id, "0000000003000-0000-owner")
-        .await
-        .expect("capture Circle document row");
-    fixture
-        .components
-        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
-        .await
-        .expect("publish the accepted old-epoch Circle row");
-    let covered_commit_ref = match crate::database::StoreDatabase::new(&fixture.db)
-        .write_status(&covered_write)
-        .await
-        .expect("read the accepted pre-close write status")
-    {
-        crate::WriteStatus::Published(position) => position.commit,
-        status => panic!("the accepted pre-close Circle write must publish: {status:?}"),
-    };
-    fixture
-        .silent_pull()
-        .await
-        .expect("silent participant pulls the active epoch");
-    fixture
-        .components
-        .remove_circle_member(fixture.circle_id, fixture.removed_pubkey.clone())
-        .await
-        .expect("activate the Circle epoch close");
-    fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("bind Circle test Store")
-        .publish_circle_epoch_close_response()
-        .await
-        .expect("publish Owner close response");
-    let silent_device_id = fixture.silent_device_id;
-    fixture
-        .components
-        .exclude_circle_close_device(fixture.circle_id, silent_device_id)
-        .await
-        .expect("exclude the silent participant");
-    fixture
-        .components
-        .run_cycle(&crate::clock::SystemClock, None, &fixture.store_dir, None)
-        .await
-        .expect("finalize the successor after exclusion");
-    covered_commit_ref
-}
-
 /// A Circle package published beyond an epoch close's accepted cutoff is invalid
-/// by construction: every device applies the same cutoff predicate the pull path
-/// applies and skips it, so it never materializes anywhere and no snapshot will
-/// ever cover it. The Owner reclaims it on that ground alone — no coverage
-/// evidence, no acknowledgements — while the package the same cutoff accepts
-/// stays untouched.
+/// by construction: every device applies the same cutoff and skips it, so it is
+/// never materialized or covered by a snapshot. The Owner reclaims it without
+/// coverage evidence or acknowledgements while retaining the accepted package.
 #[tokio::test]
 async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
-    let fixture = setup_circle_with_silent_member("circle-beyond-cutoff-reclaim").await;
+    let fixture = SilentParticipantCircle::build("circle-beyond-cutoff-reclaim").await;
     let covered_id = "00000000-0000-4000-8000-000000000001";
-    let covered_commit_ref = drive_close_and_exclude_silent(&fixture, covered_id).await;
+    let covered_commit_ref = fixture.close_and_exclude_silent(covered_id).await;
     let covered_package = fixture.store.circle_package_in(&covered_commit_ref).await;
 
     // Still holding the closed epoch and unaware of the close, the excluded
@@ -4068,7 +4060,7 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
 /// untouched.
 #[tokio::test]
 async fn responding_member_pulls_the_successor_with_prior_retained_content() {
-    let fixture = setup_circle_with_silent_member("circle-responding-member").await;
+    let fixture = SilentParticipantCircle::build("circle-responding-member").await;
 
     // An accepted old-epoch Circle row the responding member pulls and retains.
     let covered_id = "00000000-0000-4000-8000-000000000001";
@@ -4188,8 +4180,10 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
 /// reseed records coverage, the gate derives clear and publication succeeds.
 #[tokio::test]
 async fn excluded_device_publication_is_gated_until_the_reset_completes() {
-    let fixture = setup_circle_with_silent_member("circle-exclude-gate").await;
-    drive_close_and_exclude_silent(&fixture, "00000000-0000-4000-8000-000000000001").await;
+    let fixture = SilentParticipantCircle::build("circle-exclude-gate").await;
+    fixture
+        .close_and_exclude_silent("00000000-0000-4000-8000-000000000001")
+        .await;
 
     // The successor bootstrap image objects, one per remaining member — read from
     // the finalized activation's access references. Holding every copy makes the
@@ -4309,7 +4303,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
 /// the reset is taken only during a verified successor materialization.
 #[tokio::test]
 async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
-    let fixture = setup_circle_with_silent_member("circle-exclude-forgery").await;
+    let fixture = SilentParticipantCircle::build("circle-exclude-forgery").await;
     let covered_id = "00000000-0000-4000-8000-000000000001";
     fixture
         .db
@@ -4373,9 +4367,9 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
 /// retrying re-runs the identical reset and completes it.
 #[tokio::test]
 async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
-    let fixture = setup_circle_with_silent_member("circle-exclude-crash").await;
+    let fixture = SilentParticipantCircle::build("circle-exclude-crash").await;
     let covered_id = "00000000-0000-4000-8000-000000000001";
-    drive_close_and_exclude_silent(&fixture, covered_id).await;
+    fixture.close_and_exclude_silent(covered_id).await;
 
     let beyond_id = "00000000-0000-4000-8000-000000000002";
     fixture
@@ -4705,7 +4699,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
 
 #[tokio::test]
 async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
-    let fixture = setup_closing_founder_circle("circle-delete-closing").await;
+    let fixture = ClosingFounderCircle::build("circle-delete-closing").await;
     let owner_pubkey = keys::public_key_hex(&fixture.signer);
 
     // The Circle is mid-close: its winning control is an EpochClose waiting for

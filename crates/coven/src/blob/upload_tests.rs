@@ -389,7 +389,7 @@ impl UploadFixture {
             crate::storage::StagedBlobFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
-            self.db
+            crate::database::StoreDatabase::new(&self.db)
                 .register_external_blob_for_test("note_photos", id, &path)
                 .await;
             paths.push(path);
@@ -412,6 +412,23 @@ impl UploadFixture {
         .await
         .expect("enqueue real make_remote upload journals");
         paths
+    }
+
+    async fn seed_uploads(&self, store_dir: &StoreDir, count: usize) -> Vec<String> {
+        let owned = (0..count)
+            .map(|index| {
+                (
+                    format!("blob{index:04}"),
+                    format!("bytes-{index}").into_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let borrowed = owned
+            .iter()
+            .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>();
+        self.plant_uploads(store_dir, &borrowed, false).await;
+        owned.into_iter().map(|(id, _)| id).collect()
     }
 }
 
@@ -987,28 +1004,11 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     );
 }
 
-async fn seed_uploads(fixture: &UploadFixture, store_dir: &StoreDir, count: usize) -> Vec<String> {
-    let owned = (0..count)
-        .map(|index| {
-            (
-                format!("blob{index:04}"),
-                format!("bytes-{index}").into_bytes(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let borrowed = owned
-        .iter()
-        .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
-        .collect::<Vec<_>>();
-    fixture.plant_uploads(store_dir, &borrowed, false).await;
-    owned.into_iter().map(|(id, _)| id).collect()
-}
-
 #[tokio::test]
 async fn limit_one_drains_every_entry_in_order() {
     let fixture = UploadFixture::new(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = seed_uploads(&fixture, &store_dir, 3).await;
+    let ids = fixture.seed_uploads(&store_dir, 3).await;
     let observer = RecordingObserver::new();
 
     let outcome = fixture
@@ -1046,7 +1046,7 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
     let home = Arc::new(InstrumentedHome::with_barrier(Some(2)));
     let fixture = UploadFixture::with_home(2, home.clone()).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = seed_uploads(&fixture, &store_dir, 4).await;
+    let ids = fixture.seed_uploads(&store_dir, 4).await;
     home.enable_barrier();
 
     let outcome = fixture
@@ -1093,7 +1093,7 @@ async fn concurrent_drain_isolates_a_failed_upload() {
 async fn paused_queue_admits_nothing_under_concurrency() {
     let fixture = UploadFixture::new(3).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = seed_uploads(&fixture, &store_dir, 3).await;
+    let ids = fixture.seed_uploads(&store_dir, 3).await;
     let observer = PausingObserver::new(0);
 
     let outcome = fixture
@@ -1114,7 +1114,7 @@ async fn paused_queue_admits_nothing_under_concurrency() {
 async fn pause_after_first_finishes_inflight_and_stops_admitting() {
     let fixture = UploadFixture::new(1).await;
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = seed_uploads(&fixture, &store_dir, 2).await;
+    let ids = fixture.seed_uploads(&store_dir, 2).await;
     let observer = PausingObserver::new(1);
 
     let outcome = fixture

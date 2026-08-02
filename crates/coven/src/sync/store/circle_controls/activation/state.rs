@@ -1431,41 +1431,6 @@ mod derived_state_tests {
     use crate::protocol::circle::{CircleRole, CircleState};
     use std::collections::BTreeSet;
 
-    /// An installed `Active` current state and its owner pubkey.
-    async fn installed_active_state() -> (CircleCurrentState, String) {
-        let owner = crate::database::test_circle_owner_keypair();
-        let owner_pubkey = crate::keys::public_key_hex(&owner);
-        let db = crate::sync::test_helpers::open_test_db();
-        let state = db
-            .test_sql(|database| {
-                database.apply_coven_routing_schema()?;
-                let (circle_id, _) = database.install_test_active_circle("derived-state");
-                database.circle_current_state(circle_id)?.ok_or_else(|| {
-                    crate::database::DbError::Message(
-                        "installed active circle has no current state".to_string(),
-                    )
-                })
-            })
-            .await
-            .expect("install and read the active current state");
-        (state, owner_pubkey)
-    }
-
-    async fn installed_inactive_state() -> CircleCurrentState {
-        let db = crate::sync::test_helpers::open_test_db();
-        db.test_sql(|database| {
-            database.apply_coven_routing_schema()?;
-            let (circle_id, _) = database.install_test_inactive_circle("derived-state-inactive");
-            database.circle_current_state(circle_id)?.ok_or_else(|| {
-                crate::database::DbError::Message(
-                    "installed inactive circle has no current state".to_string(),
-                )
-            })
-        })
-        .await
-        .expect("install and read the inactive current state")
-    }
-
     fn accessible(state: &CircleCurrentState) -> Box<CircleAccessibleState> {
         match state {
             CircleCurrentState::Active(accessible) => accessible.clone(),
@@ -1475,7 +1440,12 @@ mod derived_state_tests {
 
     #[tokio::test]
     async fn active_maps_by_rotation_over_the_membership() {
-        let (state, owner_pubkey) = installed_active_state().await;
+        let owner_pubkey =
+            crate::keys::public_key_hex(&crate::database::test_circle_owner_keypair());
+        let state = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
+            .install_test_active_circle_state("derived-state".to_string())
+            .await
+            .expect("install and read the active current state");
 
         // Owner still a Store member: Active.
         let members = BTreeSet::from([owner_pubkey.clone()]);
@@ -1498,7 +1468,13 @@ mod derived_state_tests {
 
     #[tokio::test]
     async fn closing_maps_to_closing_regardless_of_rotation() {
-        let (active, owner_pubkey) = installed_active_state().await;
+        let owner_pubkey =
+            crate::keys::public_key_hex(&crate::database::test_circle_owner_keypair());
+        let active =
+            crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
+                .install_test_active_circle_state("derived-state".to_string())
+                .await
+                .expect("install and read the active current state");
         let closing = CircleCurrentState::Closing(accessible(&active));
         // A closing Circle whose roster still names the (removed) member stays
         // Closing rather than reporting RotationRequired.
@@ -1514,7 +1490,10 @@ mod derived_state_tests {
 
     #[tokio::test]
     async fn inactive_maps_to_inactive_with_no_name_or_role() {
-        let state = installed_inactive_state().await;
+        let state = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
+            .install_test_inactive_circle_state("derived-state-inactive".to_string())
+            .await
+            .expect("install and read the inactive current state");
         assert_eq!(state.derived_state(&BTreeSet::new()), CircleState::Inactive);
         let (name, role) = state.display("anyone");
         assert_eq!(name, None);
@@ -1523,7 +1502,11 @@ mod derived_state_tests {
 
     #[tokio::test]
     async fn deleted_maps_to_deleted() {
-        let (active, _) = installed_active_state().await;
+        let active =
+            crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
+                .install_test_active_circle_state("derived-state".to_string())
+                .await
+                .expect("install and read the active current state");
         let deleted = CircleCurrentState::Deleted(Box::new(accessible(&active).current.clone()));
         assert_eq!(
             deleted.derived_state(&BTreeSet::new()),
@@ -1534,7 +1517,11 @@ mod derived_state_tests {
 
     #[tokio::test]
     async fn control_conflict_maps_to_its_retained_branches() {
-        let (active, _) = installed_active_state().await;
+        let active =
+            crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
+                .install_test_active_circle_state("derived-state".to_string())
+                .await
+                .expect("install and read the active current state");
         let current = accessible(&active).current.clone();
         let expected = vec![current.coordinate().clone()];
         let conflict = CircleCurrentState::ControlConflict {

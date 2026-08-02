@@ -54,64 +54,6 @@ impl<'fixture> HistoryPublisher<'fixture> {
     }
 }
 
-async fn historical_read_slots(history_length: u64) -> (Vec<ObjectSlot>, ObjectSlot) {
-    let signer = UserKeypair::generate();
-    let db = open_test_db();
-    let store = TestStore::create(
-        &db,
-        &format!("materialized-history-{history_length}"),
-        signer,
-    )
-    .await
-    .expect("create Merge Store");
-    let device = store
-        .bind_device(&db, &store.signer)
-        .await
-        .expect("bind materialized-history Store");
-    let (_temp, store_dir) = temp_store_dir();
-    let publisher = HistoryPublisher::new(&db, &device, &store_dir);
-
-    for sequence in 1..=history_length {
-        publisher.publish_note(sequence).await;
-    }
-
-    let retained = device
-        .retained_merge_replay_inputs_for_test()
-        .await
-        .expect("load retained verified Merge history");
-    assert_eq!(
-        retained.len() as u64,
-        history_length,
-        "every published Merge commit has retained verified inputs",
-    );
-    let historical_slots = retained
-        .iter()
-        .flat_map(|entry| {
-            [
-                entry.commit_ref().object.slot().clone(),
-                entry.activation_head_object().slot().clone(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    let registration_anchor_head_slot = retained
-        .first()
-        .expect("published history has a first retained commit")
-        .activation_head_object()
-        .slot()
-        .clone();
-
-    store.home.clear_exact_reads();
-    publisher.publish_note(history_length + 1).await;
-
-    let reread = store
-        .home
-        .exact_reads()
-        .into_iter()
-        .filter(|slot| historical_slots.contains(slot))
-        .collect();
-    (reread, registration_anchor_head_slot)
-}
-
 struct PublishedHistory {
     db: crate::database::Database,
     store: TestStore,
@@ -145,14 +87,20 @@ impl PublishedHistory {
         for sequence in 1..=history_length {
             publisher.publish_note(sequence).await;
         }
-        Self {
+        let fixture = Self {
             db,
             store,
             device,
             membership,
             _temp: temp,
             store_dir,
-        }
+        };
+        assert_eq!(
+            fixture.retained_history().await.len() as u64,
+            history_length,
+            "every published Merge commit has retained verified inputs",
+        );
+        fixture
     }
 
     async fn retained_history(&self) -> Vec<crate::database::OwnedVerifiedMergeMaterialization> {
@@ -160,6 +108,40 @@ impl PublishedHistory {
             .retained_merge_replay_inputs_for_test()
             .await
             .expect("load retained verified Merge history")
+    }
+
+    async fn historical_read_slots(&self) -> (Vec<ObjectSlot>, ObjectSlot) {
+        let retained = self.retained_history().await;
+        let history_length = retained.len() as u64;
+        let historical_slots = retained
+            .iter()
+            .flat_map(|entry| {
+                [
+                    entry.commit_ref().object.slot().clone(),
+                    entry.activation_head_object().slot().clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let registration_anchor_head_slot = retained
+            .first()
+            .expect("published history has a first retained commit")
+            .activation_head_object()
+            .slot()
+            .clone();
+
+        self.store.home.clear_exact_reads();
+        HistoryPublisher::new(&self.db, &self.device, &self.store_dir)
+            .publish_note(history_length + 1)
+            .await;
+
+        let reread = self
+            .store
+            .home
+            .exact_reads()
+            .into_iter()
+            .filter(|slot| historical_slots.contains(slot))
+            .collect();
+        (reread, registration_anchor_head_slot)
     }
 
     async fn prepare_sabotaged_successor(&self) -> String {
@@ -216,8 +198,14 @@ async fn assert_signed_head_rejects_summary(
 
 #[tokio::test]
 async fn merge_successor_publication_does_not_reread_materialized_history() {
-    let (shallow, _) = historical_read_slots(1).await;
-    let (deeper, registration_anchor_head_slot) = historical_read_slots(100).await;
+    let (shallow, _) = PublishedHistory::publish(1)
+        .await
+        .historical_read_slots()
+        .await;
+    let (deeper, registration_anchor_head_slot) = PublishedHistory::publish(100)
+        .await
+        .historical_read_slots()
+        .await;
     assert!(
         shallow.is_empty()
             && deeper.is_empty()

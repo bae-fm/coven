@@ -11,6 +11,7 @@ use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobC
 #[derive(Clone)]
 pub(crate) struct TestOwnerGraph {
     database: StoreDatabase,
+    store_dir: StoreDir,
     cache: StoreBlobCache,
     local_access: LocalStoreBlobAccess,
     local_transitions: LocalBlobTransitions,
@@ -41,10 +42,116 @@ impl TestOwnerGraph {
         );
         Self {
             database,
+            store_dir,
             cache,
             local_access,
             local_transitions,
         }
+    }
+
+    /// Insert a Local release: a gated-off note plus a blob-bearing photo with an
+    /// external source file registered for it. Returns the external source path.
+    pub(crate) async fn seed_local_release(
+        &self,
+        user_dir: &std::path::Path,
+        note_id: &str,
+        photo_id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) -> std::path::PathBuf {
+        self.database
+            .seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
+            .await;
+        std::fs::create_dir_all(user_dir).expect("create external blob fixture directory");
+        let source = user_dir.join(format!("{photo_id}.jpg"));
+        std::fs::write(&source, bytes).expect("write external blob fixture");
+        self.database
+            .register_external_blob_for_test("note_photos", photo_id, &source)
+            .await;
+        source
+    }
+
+    /// Insert a Remote release: a gated-on note plus a photo whose blob is already
+    /// in cloud storage at the readable path the plaintext scheme derives.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn seed_remote_release(
+        &self,
+        store: &crate::sync::test_helpers::TestStore,
+        hlc: &crate::sync::hlc::Hlc,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        note_id: &str,
+        photo_id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) {
+        self.database
+            .seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
+            .await;
+        StoreDir::store_local_blob(&self.store_dir, "fixture_sources", photo_id, bytes)
+            .await
+            .expect("write exact remote fixture source");
+        let source = self
+            .store_dir
+            .local_blob_path("fixture_sources", photo_id)
+            .expect("build exact remote fixture source path");
+        self.database
+            .register_external_blob_for_test("note_photos", photo_id, &source)
+            .await;
+        store
+            .open_into_store_database(&self.database)
+            .await
+            .expect("open exact test Store");
+        self.make_remote("notes", note_id, false)
+            .await
+            .expect("queue exact remote fixture upload");
+        let outcome = store
+            .drain_uploads(
+                &self.database,
+                &self.store_dir,
+                &crate::clock::SystemClock,
+                hlc,
+                routing_encryption,
+                None,
+            )
+            .await
+            .expect("create exact remote fixture blob");
+        assert_eq!(outcome.uploaded(), 1);
+        assert!(outcome.yielded_for_publish());
+        assert!(
+            store
+                .publish_pending_store_database(&self.database, &self.store_dir)
+                .await
+                .expect("publish exact remote fixture"),
+            "remote fixture publishes its Store write",
+        );
+    }
+
+    pub(crate) async fn stage_pending_upload_for_test(
+        &self,
+        source_dir: &std::path::Path,
+        blob_id: &str,
+        bytes: &[u8],
+        created_at: &str,
+    ) {
+        let source = source_dir.join(blob_id);
+        crate::storage::StagedBlobFile::write_for_test(&source, bytes)
+            .await
+            .expect("write upload source");
+        let reference = self
+            .database
+            .row_blob_ref("note_photos", blob_id)
+            .await
+            .expect("load exact Local row blob reference");
+        self.database
+            .enqueue_blob_upload_for_test(
+                "notes",
+                &format!("note-{blob_id}"),
+                &reference,
+                &source,
+                created_at,
+            )
+            .await
+            .expect("enqueue exact Local row upload");
     }
 
     pub(crate) fn local_access(&self) -> LocalStoreBlobAccess {

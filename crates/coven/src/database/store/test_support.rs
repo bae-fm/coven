@@ -23,6 +23,89 @@ struct PreparedWriteTransfer {
 }
 
 impl StoreDatabase {
+    pub(crate) async fn seed_local_release_rows_for_test(
+        &self,
+        note_id: &str,
+        photo_id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) {
+        let note_id = note_id.to_string();
+        let photo_id = photo_id.to_string();
+        let cloud_path = cloud_path.to_string();
+        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
+        let hash = crate::blob::content_hash(bytes);
+        self.connection
+            .call(move |connection| {
+                connection
+                    .execute(
+                        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
+                         VALUES (?1, 'Release', NULL, ?2, '0000000001000-0000-A', '2026-01-01')",
+                        rusqlite::params![note_id, 0_i64],
+                    )
+                    .map_err(DbError::from)?;
+                connection
+                    .execute(
+                        "INSERT INTO note_photos
+                         (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
+                         VALUES (?1, ?2, 'image', ?3, ?4,
+                                 '0000000001000-0000-A', '2026-01-01', ?5)",
+                        rusqlite::params![photo_id, note_id, size, hash, cloud_path],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .await
+            .expect("seed exact release rows");
+    }
+
+    pub(crate) async fn register_external_blob_for_test(
+        &self,
+        table: &str,
+        row_id: &str,
+        path: &std::path::Path,
+    ) {
+        let reference = self
+            .row_blob_ref(table, row_id)
+            .await
+            .expect("load exact Local row blob reference");
+        let path = path.to_path_buf();
+        self.connection
+            .call(move |connection| {
+                crate::database::DatabaseTestSql::new(connection)
+                    .register_external_blob(&reference, &path)
+            })
+            .await
+            .expect("register exact external blob reference");
+    }
+
+    pub(crate) async fn enqueue_blob_upload_for_test(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        reference: &crate::blob::RowBlobRef,
+        source_path: &std::path::Path,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        let reference = reference.clone();
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        let source_path = source_path.to_path_buf();
+        let created_at = created_at.to_string();
+        self.connection
+            .call(move |connection| {
+                crate::database::DatabaseTestSql::new(connection).enqueue_blob_upload(
+                    &root_table,
+                    &root_id,
+                    &reference,
+                    &source_path,
+                    false,
+                    &created_at,
+                )
+            })
+            .await
+    }
+
     pub(crate) async fn insert_fixture_position_for_test(
         &self,
         note_id: &str,
@@ -203,6 +286,38 @@ impl StoreDatabase {
                 let database = crate::database::DatabaseTestSql::new(connection);
                 let (circle_id, _) = database.install_test_active_circle(&label);
                 Ok(circle_id)
+            })
+            .await
+    }
+
+    pub(crate) async fn install_test_active_circle_state(
+        &self,
+        label: String,
+    ) -> Result<crate::sync::CircleCurrentState, DbError> {
+        self.connection
+            .call(move |connection| {
+                let database = crate::database::DatabaseTestSql::new(connection);
+                database.apply_coven_routing_schema()?;
+                let (circle_id, _) = database.install_test_active_circle(&label);
+                database.circle_current_state(circle_id)?.ok_or_else(|| {
+                    DbError::Message("installed active circle has no current state".to_string())
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn install_test_inactive_circle_state(
+        &self,
+        label: String,
+    ) -> Result<crate::sync::CircleCurrentState, DbError> {
+        self.connection
+            .call(move |connection| {
+                let database = crate::database::DatabaseTestSql::new(connection);
+                database.apply_coven_routing_schema()?;
+                let (circle_id, _) = database.install_test_inactive_circle(&label);
+                database.circle_current_state(circle_id)?.ok_or_else(|| {
+                    DbError::Message("installed inactive circle has no current state".to_string())
+                })
             })
             .await
     }

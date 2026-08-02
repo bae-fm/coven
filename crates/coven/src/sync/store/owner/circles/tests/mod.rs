@@ -15,9 +15,8 @@ use crate::protocol::membership::MemberRole;
 use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
-    CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor,
-    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StreamActivation,
+    CircleAccessLeafObjectRef, CircleAccessObjectRef, GrantStreamAnchor, ObjectHash,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StreamActivation,
 };
 use crate::storage::cloud::CloudHome;
 use crate::storage::{CloudCipher, CloudCipherAccess};
@@ -60,38 +59,6 @@ async fn persist_merge_operation(
         .await
         .expect("persist circle operation");
     (store, signer, journal)
-}
-
-async fn resign_merge_journal_with_objects(
-    db: &Database,
-    store: &TestStore,
-    signer: &UserKeypair,
-    journal: &mut CircleOperationJournal,
-    mutate: impl FnOnce(&mut CircleActivationObjects),
-) {
-    let old_commit = journal.commit().expect("parse prepared Circle commit");
-    let [old_reference] = old_commit.circle_controls() else {
-        panic!("Circle operation must carry one control")
-    };
-    let mut objects = old_reference.objects().clone();
-    mutate(&mut objects);
-    let reference = journal
-        .operation()
-        .creation
-        .control_ref(objects, Some(old_reference.head_object().clone()));
-    let device = store
-        .bind_device(db, signer)
-        .await
-        .expect("bind substituted Circle object Store");
-    let mut writer = device
-        .authorize_writer()
-        .await
-        .expect("authorize substituted Circle object Store");
-    writer
-        .circles()
-        .resign_merge_journal_with_reference_for_test(journal, reference, |_| {})
-        .await
-        .expect("re-sign Circle commit with substituted exact graph");
 }
 
 fn promote_store_member_access_without_adding_to_circle_roster(

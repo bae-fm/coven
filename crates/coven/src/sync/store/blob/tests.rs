@@ -336,7 +336,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
         .plant_blob_row_for_test("external-corrupt", false, external_bytes)
         .await;
     let external_path = write_external_file(tmp.path(), "external-corrupt", external_bytes);
-    external_db
+    crate::database::StoreDatabase::new(&external_db)
         .register_external_blob_for_test("note_photos", "external-corrupt", &external_path)
         .await;
     std::fs::write(&external_path, vec![b'!'; external_bytes.len()])
@@ -1009,7 +1009,8 @@ async fn cache_lazy_fetches_on_first_read() {
         crate::blob::content_hash(&bytes),
     ))
     .await;
-    db1.register_external_blob_for_test("note_photos", "aud01234", &external_path)
+    crate::database::StoreDatabase::new(&db1)
+        .register_external_blob_for_test("note_photos", "aud01234", &external_path)
         .await;
     db1.execute_test_host_write(
         "UPDATE notes
@@ -1573,7 +1574,8 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     db.plant_blob_row_for_test(&blob.id, false, &full).await;
     let path = write_external_file(tmp.path(), "song.flac", &full);
 
-    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
@@ -1643,7 +1645,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         .plant_blob_row_for_test("strm-ext1", false, &full)
         .await;
     let external_path = write_external_file(tmp.path(), "strm-ext1.flac", &full);
-    external_db
+    crate::database::StoreDatabase::new(&external_db)
         .register_external_blob_for_test("note_photos", "strm-ext1", &external_path)
         .await;
     let external = external_db
@@ -1764,7 +1766,8 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
     let db = read_test_db("audio");
     db.plant_blob_row_for_test("strm-ext2", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext2.flac", &full);
-    db.register_external_blob_for_test("note_photos", "strm-ext2", &path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "strm-ext2", &path)
         .await;
     let reference = db
         .row_blob_ref("note_photos", "strm-ext2")
@@ -1825,7 +1828,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
         .plant_blob_row_for_test("strm-ext3", false, &full)
         .await;
     let external_path = write_external_file(tmp.path(), "strm-ext3.flac", &full);
-    external_db
+    crate::database::StoreDatabase::new(&external_db)
         .register_external_blob_for_test("note_photos", "strm-ext3", &external_path)
         .await;
     std::fs::write(&external_path, &corrupt).expect("write same-length external corruption");
@@ -1901,7 +1904,8 @@ async fn a_relengthened_external_file_is_refused_at_open() {
     let db = read_test_db("audio");
     db.plant_blob_row_for_test("strm-ext4", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext4.flac", &full);
-    db.register_external_blob_for_test("note_photos", "strm-ext4", &path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "strm-ext4", &path)
         .await;
     std::fs::write(&path, &full[..full.len() - 1]).expect("truncate the external file");
     let reference = db
@@ -1940,7 +1944,8 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
         .create_exact_opaque_blob(&missing.namespace, &missing.id, &cloud_bytes)
         .await;
     let missing_path = tmp.path().join("external").join("gone.flac");
-    db.register_external_blob_for_test("note_photos", &missing.id, &missing_path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &missing.id, &missing_path)
         .await;
     let missing_reference = db
         .row_blob_ref("note_photos", &missing.id)
@@ -1971,7 +1976,8 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     )
     .await;
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
-    db.register_external_blob_for_test("note_photos", &mism.id, &mism_path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &mism.id, &mism_path)
         .await;
     let mism_reference = db
         .row_blob_ref("note_photos", &mism.id)
@@ -2005,7 +2011,8 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     db.plant_blob_row_for_test(&blob.id, false, &ext_bytes)
         .await;
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
-    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let local_reference = db
         .row_blob_ref("note_photos", &blob.id)
@@ -2097,7 +2104,8 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 
     // The real bytes: the user's external file.
     let path = write_external_file(tmp.path(), "precedence.flac", &ext_bytes);
-    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
@@ -2161,7 +2169,8 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
     let ext_path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
-    db.register_external_blob_for_test("note_photos", &blob.id, &ext_path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &blob.id, &ext_path)
         .await;
 
     // The real bytes: the host-provided local store.
@@ -2537,7 +2546,8 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let cloud_bytes = ramp(2048);
     db.plant_blob_row_for_test(&blob.id, false, &cloud_bytes)
         .await;
-    db.register_external_blob_for_test("note_photos", &blob.id, &path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     db.set_blob_remote_for_test(&blob.id, true).await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)

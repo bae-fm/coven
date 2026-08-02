@@ -38,41 +38,6 @@ impl Database {
             .unwrap_or_else(|error| panic!("test host write failed: {error}"));
     }
 
-    pub(crate) async fn seed_local_release_rows_for_test(
-        &self,
-        note_id: &str,
-        photo_id: &str,
-        cloud_path: &str,
-        bytes: &[u8],
-    ) {
-        let note_id = note_id.to_string();
-        let photo_id = photo_id.to_string();
-        let cloud_path = cloud_path.to_string();
-        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::blob::content_hash(bytes);
-        self.test_sql(move |database| {
-            database
-                .execute(
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
-                     VALUES (?1, 'Release', NULL, ?2, '0000000001000-0000-A', '2026-01-01')",
-                    rusqlite::params![note_id, 0_i64],
-                )
-                .map_err(DbError::from)?;
-            database
-                .execute(
-                    "INSERT INTO note_photos
-                     (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
-                     VALUES (?1, ?2, 'image', ?3, ?4,
-                             '0000000001000-0000-A', '2026-01-01', ?5)",
-                    rusqlite::params![photo_id, note_id, size, hash, cloud_path],
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
-        .await
-        .expect("seed exact release rows");
-    }
-
     pub(crate) async fn add_local_photo_for_test(
         &self,
         note_id: &str,
@@ -93,7 +58,8 @@ impl Database {
                      '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
         ))
         .await;
-        self.register_external_blob_for_test("note_photos", &photo_id, source)
+        crate::database::StoreDatabase::new(self)
+            .register_external_blob_for_test("note_photos", &photo_id, source)
             .await;
     }
 
@@ -305,22 +271,6 @@ impl Database {
         })
         .await
         .expect("change test blob locality");
-    }
-
-    pub(crate) async fn register_external_blob_for_test(
-        &self,
-        table: &str,
-        row_id: &str,
-        path: &std::path::Path,
-    ) {
-        let reference = self
-            .row_blob_ref(table, row_id)
-            .await
-            .expect("load exact Local row blob reference");
-        let path = path.to_path_buf();
-        self.test_sql(move |database| database.register_external_blob(&reference, &path))
-            .await
-            .expect("register exact external blob reference");
     }
 
     pub(crate) async fn run_scoped_host_write_for_test(&self, sql: String) {

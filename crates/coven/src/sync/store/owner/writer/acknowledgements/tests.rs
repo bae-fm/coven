@@ -676,77 +676,76 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
 
 #[tokio::test]
 async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
-    Box::pin(run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs()).await;
-}
-
-async fn run_acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
-    let LosingAckFixture {
-        home,
-        signer: _,
-        storage: _,
-        db,
-        device,
-        outbound,
-        losing,
-    } = Box::pin(losing_ack_fixture(Path::new(":memory:"))).await;
-    home.fail_exact_delete_on_call(1);
-    assert!(Box::pin(device.drain_acknowledgements_exact())
-        .await
-        .is_err());
-
-    let head = crate::protocol::store_commit::StoreDeviceHeadRef {
-        head_hash: losing.head.head_hash(),
-        object: losing.prepared_head.reference().clone(),
-    };
-    let mut remote = db
-        .remote_object_for_test(head.object.clone())
-        .await
-        .expect("load test head ownership");
-    {
-        let crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
-            &mut remote
-        else {
-            panic!("test head is not retained authority");
-        };
-        let crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
-            former_candidates,
-        } = &mut record.state
-        else {
-            panic!("test head is not proven uncreated");
-        };
-        let Some(nonactivation) = former_candidates.first_mut() else {
-            panic!("test head has no loss proof");
-        };
-        let crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-            winner_head,
-        } = nonactivation.proof_mut_for_test()
-        else {
-            panic!("test head has a non-Merge loss proof");
-        };
-        let tampered_bytes = b"different winner at the same head slot";
-        winner_head.object = crate::storage::ExactObjectRef::new(
-            winner_head.object.slot().clone(),
-            tampered_bytes.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(tampered_bytes),
-        );
-        remote.validate().expect("validate test head ownership");
-    }
-    db.replace_remote_object_for_test(head.object, remote)
-        .await
-        .expect("install mismatched durable head proof");
-
-    assert!(Box::pin(device.drain_acknowledgements_exact())
-        .await
-        .is_err());
-    assert_eq!(
-        store_database(&db)
-            .oldest_outbound_store_ack()
+    Box::pin(async {
+        let LosingAckFixture {
+            home,
+            signer: _,
+            storage: _,
+            db,
+            device,
+            outbound,
+            losing,
+        } = Box::pin(losing_ack_fixture(Path::new(":memory:"))).await;
+        home.fail_exact_delete_on_call(1);
+        assert!(Box::pin(device.drain_acknowledgements_exact())
             .await
-            .unwrap()
-            .expect("mismatched proof keeps acknowledgement pending")
-            .reference,
-        outbound.reference
-    );
+            .is_err());
+
+        let head = crate::protocol::store_commit::StoreDeviceHeadRef {
+            head_hash: losing.head.head_hash(),
+            object: losing.prepared_head.reference().clone(),
+        };
+        let mut remote = db
+            .remote_object_for_test(head.object.clone())
+            .await
+            .expect("load test head ownership");
+        {
+            let crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
+                &mut remote
+            else {
+                panic!("test head is not retained authority");
+            };
+            let crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
+                former_candidates,
+            } = &mut record.state
+            else {
+                panic!("test head is not proven uncreated");
+            };
+            let Some(nonactivation) = former_candidates.first_mut() else {
+                panic!("test head has no loss proof");
+            };
+            let crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+                winner_head,
+            } = nonactivation.proof_mut_for_test()
+            else {
+                panic!("test head has a non-Merge loss proof");
+            };
+            let tampered_bytes = b"different winner at the same head slot";
+            winner_head.object = crate::storage::ExactObjectRef::new(
+                winner_head.object.slot().clone(),
+                tampered_bytes.len() as u64,
+                crate::protocol::store_commit::ObjectHash::digest(tampered_bytes),
+            );
+            remote.validate().expect("validate test head ownership");
+        }
+        db.replace_remote_object_for_test(head.object, remote)
+            .await
+            .expect("install mismatched durable head proof");
+
+        assert!(Box::pin(device.drain_acknowledgements_exact())
+            .await
+            .is_err());
+        assert_eq!(
+            store_database(&db)
+                .oldest_outbound_store_ack()
+                .await
+                .unwrap()
+                .expect("mismatched proof keeps acknowledgement pending")
+                .reference,
+            outbound.reference
+        );
+    })
+    .await;
 }
 
 #[tokio::test]

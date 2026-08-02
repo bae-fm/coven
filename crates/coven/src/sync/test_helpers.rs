@@ -2658,7 +2658,7 @@ impl TestStore {
 
     pub(crate) async fn drain_uploads(
         &self,
-        db: &Database,
+        database: &crate::database::StoreDatabase,
         store_dir: &crate::store_dir::StoreDir,
         clock: &dyn crate::clock::Clock,
         hlc: &crate::sync::hlc::Hlc,
@@ -2666,7 +2666,7 @@ impl TestStore {
         observer: Option<&dyn crate::blob::BlobTransitionObserver>,
     ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
         let store = self
-            .bind_device(db, &self.signer)
+            .bind_store_device(database, &self.signer)
             .await
             .map_err(crate::database::DbError::Message)?;
         store

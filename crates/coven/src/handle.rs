@@ -2859,43 +2859,42 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_plaintext_membership_operations_are_typed())
-                    .await
-                    .expect("plaintext membership test task");
+                tokio::task::spawn_local(async {
+                    await_test_orchestration(tokio::spawn(async {
+                        test_keyring::install();
+
+                        let (_tmp, store_dir) = temp_store_dir();
+                        let db = read_test_db("images");
+                        let handle = test_handle("lib-plaintext-membership", store_dir, db);
+                        handle
+                            .connect_sync_with_test_home(
+                                Arc::new(InMemoryCloudHome::new()),
+                                CloudCipher::Plaintext,
+                            )
+                            .await
+                            .expect("connect plaintext home");
+
+                        let public_key_hex =
+                            hex::encode(crate::keys::UserKeypair::generate().public_key());
+                        let invite = handle
+                            .invite_member(&public_key_hex, None, MemberRole::Member)
+                            .await;
+                        let remove = handle.remove_member(&public_key_hex).await;
+                        let circle = handle.circles().create("Household").await;
+
+                        assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
+                        assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
+                        assert!(
+                            matches!(&circle, Err(crate::CircleError::BrowsableStorage)),
+                            "{circle:?}"
+                        );
+                    }))
+                    .await;
+                })
+                .await
+                .expect("plaintext membership test task");
             })
             .await;
-    }
-
-    async fn run_plaintext_membership_operations_are_typed() {
-        await_test_orchestration(tokio::spawn(async {
-            test_keyring::install();
-
-            let (_tmp, store_dir) = temp_store_dir();
-            let db = read_test_db("images");
-            let handle = test_handle("lib-plaintext-membership", store_dir, db);
-            handle
-                .connect_sync_with_test_home(
-                    Arc::new(InMemoryCloudHome::new()),
-                    CloudCipher::Plaintext,
-                )
-                .await
-                .expect("connect plaintext home");
-
-            let public_key_hex = hex::encode(crate::keys::UserKeypair::generate().public_key());
-            let invite = handle
-                .invite_member(&public_key_hex, None, MemberRole::Member)
-                .await;
-            let remove = handle.remove_member(&public_key_hex).await;
-            let circle = handle.circles().create("Household").await;
-
-            assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
-            assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
-            assert!(
-                matches!(&circle, Err(crate::CircleError::BrowsableStorage)),
-                "{circle:?}"
-            );
-        }))
-        .await;
     }
 
     async fn await_test_orchestration(task: tokio::task::JoinHandle<()>) {
@@ -3151,77 +3150,74 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_reconnect_sync_stops_the_previous_loop())
-                    .await
-                    .expect("sync reconnect test task");
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
+
+                    let (_tmp, store_dir) = temp_store_dir();
+                    let db = read_test_db("images");
+                    let mut config = Config::with_defaults(
+                        "lib-reconnect-loop".to_string(),
+                        "test-device".to_string(),
+                        store_dir.clone(),
+                        "Test Store".to_string(),
+                    );
+                    config.cloud_home.storage = HomeStorage::Browsable;
+                    let config_provider: ConfigProvider = {
+                        let config = config.clone();
+                        Arc::new(move || config.clone())
+                    };
+                    // These tests never call `sql_read`, and the in-memory test database has
+                    // no shareable read-only companion, so the writer clone stands in.
+                    let handle = CovenHandle::new(
+                        db.clone(),
+                        db.clone(),
+                        db.stamper(),
+                        store_dir.clone(),
+                        config_provider,
+                        StoreKeys::bind("lib-reconnect-loop".to_string()),
+                        test_key_custody(),
+                        test_identity_custody(),
+                        crate::oauth::OAuthClients::empty(),
+                        Arc::new(SystemClock),
+                        None,
+                        None,
+                        StoreOpenGuard::acquire_for_test(&store_dir),
+                        crate::storage::BlobChunking::DEFAULT,
+                    );
+
+                    let home = Arc::new(InMemoryCloudHome::new());
+                    handle
+                        .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
+                        .await
+                        .expect("first connect over injected home");
+                    let first_loop = handle
+                        .sync
+                        .cloud_sync_for_test()
+                        .expect("first loop installed");
+                    assert!(first_loop.is_running(), "first loop starts running");
+
+                    handle
+                        .connect_sync_with_test_home(home, CloudCipher::Plaintext)
+                        .await
+                        .expect("second connect over injected home");
+                    let replacement_loop = handle
+                        .sync
+                        .cloud_sync_for_test()
+                        .expect("replacement loop installed");
+
+                    assert!(
+                        !first_loop.is_running(),
+                        "reconnect must stop the old loop before installing a replacement",
+                    );
+                    assert!(
+                        replacement_loop.is_running(),
+                        "reconnect leaves the replacement loop running",
+                    );
+                })
+                .await
+                .expect("sync reconnect test task");
             })
             .await;
-    }
-
-    async fn run_reconnect_sync_stops_the_previous_loop() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
-        let mut config = Config::with_defaults(
-            "lib-reconnect-loop".to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.storage = HomeStorage::Browsable;
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let handle = CovenHandle::new(
-            db.clone(),
-            // `read_db`: these tests never call `sql_read`, and the test db is
-            // `:memory:` (unique per connection, no shareable read-only companion),
-            // so the writer clone stands in.
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            StoreKeys::bind("lib-reconnect-loop".to_string()),
-            test_key_custody(),
-            test_identity_custody(),
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            None,
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        let home = Arc::new(InMemoryCloudHome::new());
-        handle
-            .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
-            .await
-            .expect("first connect over injected home");
-        let first_loop = handle
-            .sync
-            .cloud_sync_for_test()
-            .expect("first loop installed");
-        assert!(first_loop.is_running(), "first loop starts running");
-
-        handle
-            .connect_sync_with_test_home(home, CloudCipher::Plaintext)
-            .await
-            .expect("second connect over injected home");
-        let replacement_loop = handle
-            .sync
-            .cloud_sync_for_test()
-            .expect("replacement loop installed");
-
-        assert!(
-            !first_loop.is_running(),
-            "reconnect must stop the old loop before installing a replacement",
-        );
-        assert!(
-            replacement_loop.is_running(),
-            "reconnect leaves the replacement loop running",
-        );
     }
 
     #[tokio::test]
@@ -3229,65 +3225,65 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_stopped_installed_loop_blocks_blob_transitions())
-                    .await
-                    .expect("stopped-loop readiness test task");
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
+
+                    let (_tmp, store_dir) = temp_store_dir();
+                    let db = read_test_db("images");
+                    let mut config = Config::with_defaults(
+                        "lib-stopped-loop-readiness".to_string(),
+                        "test-device".to_string(),
+                        store_dir.clone(),
+                        "Test Store".to_string(),
+                    );
+                    config.cloud_home.storage = HomeStorage::Browsable;
+                    let config_provider: ConfigProvider = {
+                        let config = config.clone();
+                        Arc::new(move || config.clone())
+                    };
+                    // These tests never call `sql_read`, and the in-memory test database has
+                    // no shareable read-only companion, so the writer clone stands in.
+                    let handle = CovenHandle::new(
+                        db.clone(),
+                        db.clone(),
+                        db.stamper(),
+                        store_dir.clone(),
+                        config_provider,
+                        StoreKeys::bind("lib-stopped-loop-readiness".to_string()),
+                        test_key_custody(),
+                        test_identity_custody(),
+                        crate::oauth::OAuthClients::empty(),
+                        Arc::new(SystemClock),
+                        None,
+                        None,
+                        StoreOpenGuard::acquire_for_test(&store_dir),
+                        crate::storage::BlobChunking::DEFAULT,
+                    );
+
+                    handle
+                        .connect_sync_with_test_home(
+                            Arc::new(InMemoryCloudHome::new()),
+                            CloudCipher::Plaintext,
+                        )
+                        .await
+                        .expect("connect over injected home");
+                    let loop_handle = handle.sync.cloud_sync_for_test().expect("loop installed");
+
+                    loop_handle.stop().expect("stop installed loop");
+
+                    let make_remote = handle.make_remote("notes", "note-1", false).await;
+                    assert!(matches!(make_remote, Err(MakeRemoteError::SyncNotReady)));
+
+                    let (_cancel_tx, cancel_rx) = watch::channel(false);
+                    let make_local = handle
+                        .make_local("notes", "note-1", &HashMap::new(), &cancel_rx)
+                        .await;
+                    assert!(matches!(make_local, Err(MakeLocalError::SyncNotReady)));
+                })
+                .await
+                .expect("stopped-loop readiness test task");
             })
             .await;
-    }
-
-    async fn run_stopped_installed_loop_blocks_blob_transitions() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
-        let mut config = Config::with_defaults(
-            "lib-stopped-loop-readiness".to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        config.cloud_home.storage = HomeStorage::Browsable;
-        let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
-        };
-        let handle = CovenHandle::new(
-            db.clone(),
-            // `read_db`: these tests never call `sql_read`, and the test db is
-            // `:memory:` (unique per connection, no shareable read-only companion),
-            // so the writer clone stands in.
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            StoreKeys::bind("lib-stopped-loop-readiness".to_string()),
-            test_key_custody(),
-            test_identity_custody(),
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            None,
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
-            .await
-            .expect("connect over injected home");
-        let loop_handle = handle.sync.cloud_sync_for_test().expect("loop installed");
-
-        loop_handle.stop().expect("stop installed loop");
-
-        let make_remote = handle.make_remote("notes", "note-1", false).await;
-        assert!(matches!(make_remote, Err(MakeRemoteError::SyncNotReady)));
-
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let make_local = handle
-            .make_local("notes", "note-1", &HashMap::new(), &cancel_rx)
-            .await;
-        assert!(matches!(make_local, Err(MakeLocalError::SyncNotReady)));
     }
 
     #[tokio::test]
@@ -3295,146 +3291,142 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_encrypted_session_keeps_its_binding_after_config_changes(),
-                )
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
+
+                    let (tmp, store_dir) = temp_store_dir();
+                    let db = host_blob_test_db("images");
+
+                    let config = Config::with_defaults(
+                        "lib-test".to_string(),
+                        "test-device".to_string(),
+                        store_dir.clone(),
+                        "Test Store".to_string(),
+                    );
+                    let live_config = Arc::new(RwLock::new(config));
+                    let config_provider: ConfigProvider = {
+                        let live_config = live_config.clone();
+                        Arc::new(move || {
+                            live_config
+                                .read()
+                                .expect("test config lock is not poisoned")
+                                .clone()
+                        })
+                    };
+
+                    let handle = CovenHandle::new(
+                        db.clone(),
+                        // `read_db`: these tests never call `sql_read`, and the test db is
+                        // `:memory:` (unique per connection, no shareable read-only companion),
+                        // so the writer clone stands in.
+                        db.clone(),
+                        db.stamper(),
+                        store_dir.clone(),
+                        config_provider,
+                        StoreKeys::bind("lib-test".to_string()),
+                        test_key_custody(),
+                        test_identity_custody(),
+                        crate::oauth::OAuthClients::empty(),
+                        Arc::new(SystemClock),
+                        None,
+                        None,
+                        StoreOpenGuard::acquire_for_test(&store_dir),
+                        crate::storage::BlobChunking::DEFAULT,
+                    );
+
+                    let home = Arc::new(InMemoryCloudHome::new());
+                    handle
+                        .connect_sync_with_test_home(
+                            home.clone(),
+                            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+                        )
+                        .await
+                        .expect("connect encrypted injected home");
+                    let loop_handle = handle
+                        .sync
+                        .cloud_sync_for_test()
+                        .expect("sync loop installed");
+
+                    {
+                        let mut next_config = live_config
+                            .write()
+                            .expect("test config lock is not poisoned");
+                        next_config.store_id = "next-lib".to_string();
+                        next_config.store_dir = StoreDir::new(tmp.path().join("next-store"));
+                        next_config.cloud_home.storage = HomeStorage::Browsable;
+                    }
+
+                    assert_eq!(loop_handle.config().store_id, "lib-test");
+                    assert_eq!(loop_handle.store_dir(), &store_dir);
+                    assert!(matches!(
+                        loop_handle.blob_path_scheme(),
+                        BlobPathScheme::Hashed
+                    ));
+
+                    let rotated = EncryptionService::from_key([7u8; 32])
+                        .with_appended_generation(2, [8u8; 32])
+                        .expect("append generation");
+                    loop_handle
+                        .adopt_key_rotation_for_test(rotated)
+                        .expect("adopt encrypted generation");
+                    assert_eq!(
+                        loop_handle
+                            .current_encryption()
+                            .expect("session remains encrypted")
+                            .current_generation(),
+                        2,
+                    );
+
+                    let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
+                    let blob = handle
+                        .publish_host_blob("plain-cover", "plain-cover", &plaintext)
+                        .await;
+                    let cloud_key = blob
+                        .stored()
+                        .expect("published blob has exact storage")
+                        .object()
+                        .slot()
+                        .logical_key();
+                    let stored = home.get(cloud_key).expect("uploaded cloud object");
+                    assert_ne!(
+                        stored.as_slice(),
+                        plaintext.as_slice(),
+                        "an encrypted session must never upload plaintext cloud bytes",
+                    );
+
+                    let aad_context = |store_id: &str| {
+                        let mut context = Vec::new();
+                        context.extend_from_slice(&(store_id.len() as u64).to_le_bytes());
+                        context.extend_from_slice(store_id.as_bytes());
+                        context.extend_from_slice(&(cloud_key.len() as u64).to_le_bytes());
+                        context.extend_from_slice(cloud_key.as_bytes());
+                        context
+                    };
+                    let encryption = loop_handle
+                        .current_encryption()
+                        .expect("session remains encrypted");
+                    let (fingerprint, header, chunks) =
+                        crate::storage::split_sealed_blob(&stored).expect("stored blob layout");
+                    assert_eq!(fingerprint, encryption.seal_key_fingerprint());
+                    assert_eq!(
+                        encryption
+                            .blob_opener(header, &aad_context("lib-test"))
+                            .open_chunks(0..header.chunk_count(), chunks)
+                            .expect("open with the installed session binding"),
+                        plaintext,
+                    );
+                    assert!(
+                        encryption
+                            .blob_opener(header, &aad_context("next-lib"))
+                            .open_chunks(0..header.chunk_count(), chunks)
+                            .is_err(),
+                        "a later config must not change the installed session's store binding",
+                    );
+                })
                 .await
                 .expect("encrypted-session binding test task");
             })
             .await;
-    }
-
-    async fn run_encrypted_session_keeps_its_binding_after_config_changes() {
-        test_keyring::install();
-
-        let (tmp, store_dir) = temp_store_dir();
-        let db = host_blob_test_db("images");
-
-        let config = Config::with_defaults(
-            "lib-test".to_string(),
-            "test-device".to_string(),
-            store_dir.clone(),
-            "Test Store".to_string(),
-        );
-        let live_config = Arc::new(RwLock::new(config));
-        let config_provider: ConfigProvider = {
-            let live_config = live_config.clone();
-            Arc::new(move || {
-                live_config
-                    .read()
-                    .expect("test config lock is not poisoned")
-                    .clone()
-            })
-        };
-
-        let handle = CovenHandle::new(
-            db.clone(),
-            // `read_db`: these tests never call `sql_read`, and the test db is
-            // `:memory:` (unique per connection, no shareable read-only companion),
-            // so the writer clone stands in.
-            db.clone(),
-            db.stamper(),
-            store_dir.clone(),
-            config_provider,
-            StoreKeys::bind("lib-test".to_string()),
-            test_key_custody(),
-            test_identity_custody(),
-            crate::oauth::OAuthClients::empty(),
-            Arc::new(SystemClock),
-            None,
-            None,
-            StoreOpenGuard::acquire_for_test(&store_dir),
-            crate::storage::BlobChunking::DEFAULT,
-        );
-
-        let home = Arc::new(InMemoryCloudHome::new());
-        handle
-            .connect_sync_with_test_home(
-                home.clone(),
-                CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
-            )
-            .await
-            .expect("connect encrypted injected home");
-        let loop_handle = handle
-            .sync
-            .cloud_sync_for_test()
-            .expect("sync loop installed");
-
-        {
-            let mut next_config = live_config
-                .write()
-                .expect("test config lock is not poisoned");
-            next_config.store_id = "next-lib".to_string();
-            next_config.store_dir = StoreDir::new(tmp.path().join("next-store"));
-            next_config.cloud_home.storage = HomeStorage::Browsable;
-        }
-
-        assert_eq!(loop_handle.config().store_id, "lib-test");
-        assert_eq!(loop_handle.store_dir(), &store_dir);
-        assert!(matches!(
-            loop_handle.blob_path_scheme(),
-            BlobPathScheme::Hashed
-        ));
-
-        let rotated = EncryptionService::from_key([7u8; 32])
-            .with_appended_generation(2, [8u8; 32])
-            .expect("append generation");
-        loop_handle
-            .adopt_key_rotation_for_test(rotated)
-            .expect("adopt encrypted generation");
-        assert_eq!(
-            loop_handle
-                .current_encryption()
-                .expect("session remains encrypted")
-                .current_generation(),
-            2,
-        );
-
-        let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
-        let blob = handle
-            .publish_host_blob("plain-cover", "plain-cover", &plaintext)
-            .await;
-        let cloud_key = blob
-            .stored()
-            .expect("published blob has exact storage")
-            .object()
-            .slot()
-            .logical_key();
-        let stored = home.get(cloud_key).expect("uploaded cloud object");
-        assert_ne!(
-            stored.as_slice(),
-            plaintext.as_slice(),
-            "an encrypted session must never upload plaintext cloud bytes",
-        );
-
-        let aad_context = |store_id: &str| {
-            let mut context = Vec::new();
-            context.extend_from_slice(&(store_id.len() as u64).to_le_bytes());
-            context.extend_from_slice(store_id.as_bytes());
-            context.extend_from_slice(&(cloud_key.len() as u64).to_le_bytes());
-            context.extend_from_slice(cloud_key.as_bytes());
-            context
-        };
-        let encryption = loop_handle
-            .current_encryption()
-            .expect("session remains encrypted");
-        let (fingerprint, header, chunks) =
-            crate::storage::split_sealed_blob(&stored).expect("stored blob layout");
-        assert_eq!(fingerprint, encryption.seal_key_fingerprint());
-        assert_eq!(
-            encryption
-                .blob_opener(header, &aad_context("lib-test"))
-                .open_chunks(0..header.chunk_count(), chunks)
-                .expect("open with the installed session binding"),
-            plaintext,
-        );
-        assert!(
-            encryption
-                .blob_opener(header, &aad_context("next-lib"))
-                .open_chunks(0..header.chunk_count(), chunks)
-                .is_err(),
-            "a later config must not change the installed session's store binding",
-        );
     }
 
     fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
@@ -3480,58 +3472,55 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_subscribed_host_sees_offline_checking_publishing_then_synchronized(),
-                )
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
+
+                    let (_tmp, handle) = status_test_handle("lib-status-syncing");
+                    let mut rx = handle.subscribe_sync_status();
+                    assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
+
+                    let home = InMemoryCloudHome::new();
+                    let (probe_reached, release_probe) = home.pause_next_probe();
+                    handle
+                        .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
+                        .await
+                        .expect("connect over injected home");
+
+                    tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
+                        .await
+                        .expect("the reachability probe reaches its test pause");
+                    assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
+
+                    let (publication_reached, release_publication) =
+                        home.pause_after_exact_create_call(1);
+                    release_probe.notify_one();
+                    tokio::time::timeout(Duration::from_secs(20), publication_reached.notified())
+                        .await
+                        .expect("publication reaches its test pause");
+                    let publishing = rx.borrow().clone();
+                    assert_eq!(format!("{publishing:?}"), "Publishing");
+
+                    release_publication.notify_one();
+                    tokio::time::timeout(Duration::from_secs(20), async {
+                        loop {
+                            if matches!(&*rx.borrow(), SyncLoopStatus::Synchronized(_)) {
+                                break;
+                            }
+                            rx.changed().await.expect("the status channel remains open");
+                        }
+                    })
+                    .await
+                    .expect("a synchronized status arrives within the timeout");
+                    let done = rx.borrow().clone();
+                    assert!(
+                        format!("{done:?}").starts_with("Synchronized("),
+                        "a successful cycle ends synchronized, got {done:?}",
+                    );
+                })
                 .await
                 .expect("sync status sequence test task");
             })
             .await;
-    }
-
-    async fn run_subscribed_host_sees_offline_checking_publishing_then_synchronized() {
-        test_keyring::install();
-
-        let (_tmp, handle) = status_test_handle("lib-status-syncing");
-        let mut rx = handle.subscribe_sync_status();
-        assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
-
-        let home = InMemoryCloudHome::new();
-        let (probe_reached, release_probe) = home.pause_next_probe();
-        handle
-            .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
-            .await
-            .expect("connect over injected home");
-
-        tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
-            .await
-            .expect("the reachability probe reaches its test pause");
-        assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
-
-        let (publication_reached, release_publication) = home.pause_after_exact_create_call(1);
-        release_probe.notify_one();
-        tokio::time::timeout(Duration::from_secs(20), publication_reached.notified())
-            .await
-            .expect("publication reaches its test pause");
-        let publishing = rx.borrow().clone();
-        assert_eq!(format!("{publishing:?}"), "Publishing");
-
-        release_publication.notify_one();
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                if matches!(&*rx.borrow(), SyncLoopStatus::Synchronized(_)) {
-                    break;
-                }
-                rx.changed().await.expect("the status channel remains open");
-            }
-        })
-        .await
-        .expect("a synchronized status arrives within the timeout");
-        let done = rx.borrow().clone();
-        assert!(
-            format!("{done:?}").starts_with("Synchronized("),
-            "a successful cycle ends synchronized, got {done:?}",
-        );
     }
 
     #[tokio::test]
@@ -3539,35 +3528,26 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_transport_failure_after_reachability_probe_returns_to_offline(),
-                )
-                .await
-                .expect("transport failure status test task");
-            })
-            .await;
-    }
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
 
-    async fn run_transport_failure_after_reachability_probe_returns_to_offline() {
-        test_keyring::install();
+                    let (_tmp, handle) = status_test_handle("lib-status-cycle-transport");
+                    let mut rx = handle.subscribe_sync_status();
+                    let home = InMemoryCloudHome::new();
+                    let (probe_reached, release_probe) = home.pause_next_probe();
+                    handle
+                        .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
+                        .await
+                        .expect("connect over injected home");
 
-        let (_tmp, handle) = status_test_handle("lib-status-cycle-transport");
-        let mut rx = handle.subscribe_sync_status();
-        let home = InMemoryCloudHome::new();
-        let (probe_reached, release_probe) = home.pause_next_probe();
-        handle
-            .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
-            .await
-            .expect("connect over injected home");
+                    tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
+                        .await
+                        .expect("the reachability probe reaches the provider");
+                    assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
+                    home.arm_write_failures();
+                    release_probe.notify_one();
 
-        tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
-            .await
-            .expect("the reachability probe reaches the provider");
-        assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
-        home.arm_write_failures();
-        release_probe.notify_one();
-
-        tokio::time::timeout(Duration::from_secs(20), async {
+                    tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 rx.changed().await.expect("the status channel remains open");
                 match rx.borrow().clone() {
@@ -3581,6 +3561,11 @@ mod tests {
         })
         .await
         .expect("the failed cycle publishes a terminal status");
+                })
+                .await
+                .expect("transport failure status test task");
+            })
+            .await;
     }
 
     /// A subscription created before any provider is connected keeps receiving
@@ -3592,46 +3577,44 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(run_subscription_survives_a_reconnect())
-                    .await
-                    .expect("status subscription reconnect test task");
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
+
+                    let (_tmp, handle) = status_test_handle("lib-status-reconnect");
+
+                    // Subscribe before any provider is connected — valid because the channel
+                    // is handle-owned.
+                    let mut rx = handle.subscribe_sync_status();
+                    let home = Arc::new(InMemoryCloudHome::new());
+
+                    handle
+                        .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
+                        .await
+                        .expect("first connect");
+                    // Reconnect immediately: this drops the first loop and starts a second one
+                    // over the same store home before the first loop's startup delay elapses.
+                    handle
+                        .connect_sync_with_test_home(home, CloudCipher::Plaintext)
+                        .await
+                        .expect("reconnect");
+
+                    tokio::time::timeout(Duration::from_secs(20), rx.changed())
+                        .await
+                        .expect("a status arrives from the post-reconnect loop")
+                        .expect("a reconnect does not close the handle-owned status channel");
+                    let status = rx.borrow().clone();
+                    assert!(
+                        matches!(
+                            status,
+                            SyncLoopStatus::CheckingStorage | SyncLoopStatus::Publishing
+                        ),
+                        "the received status is a cycle start marker, got {status:?}",
+                    );
+                })
+                .await
+                .expect("status subscription reconnect test task");
             })
             .await;
-    }
-
-    async fn run_subscription_survives_a_reconnect() {
-        test_keyring::install();
-
-        let (_tmp, handle) = status_test_handle("lib-status-reconnect");
-
-        // Subscribe before any provider is connected — valid because the channel
-        // is handle-owned.
-        let mut rx = handle.subscribe_sync_status();
-        let home = Arc::new(InMemoryCloudHome::new());
-
-        handle
-            .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
-            .await
-            .expect("first connect");
-        // Reconnect immediately: this drops the first loop and starts a second one
-        // over the same store home before the first loop's startup delay elapses.
-        handle
-            .connect_sync_with_test_home(home, CloudCipher::Plaintext)
-            .await
-            .expect("reconnect");
-
-        tokio::time::timeout(Duration::from_secs(20), rx.changed())
-            .await
-            .expect("a status arrives from the post-reconnect loop")
-            .expect("a reconnect does not close the handle-owned status channel");
-        let status = rx.borrow().clone();
-        assert!(
-            matches!(
-                status,
-                SyncLoopStatus::CheckingStorage | SyncLoopStatus::Publishing
-            ),
-            "the received status is a cycle start marker, got {status:?}",
-        );
     }
 
     /// `stop_sync` keeps the provider connection so `start_sync` can resume it;
@@ -3644,39 +3627,38 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                tokio::task::spawn_local(
-                    run_disconnect_sync_drops_the_connection_not_just_the_loop(),
-                )
+                tokio::task::spawn_local(async {
+                    test_keyring::install();
+
+                    let (_tmp, store_dir) = temp_store_dir();
+                    let db = read_test_db("images");
+                    let handle = test_handle("lib-disconnect-drops-connection", store_dir, db);
+
+                    handle
+                        .connect_sync_with_test_home(
+                            Arc::new(InMemoryCloudHome::new()),
+                            CloudCipher::Plaintext,
+                        )
+                        .await
+                        .expect("connect over injected home");
+                    assert!(handle.sync.is_connected(), "connect installs a connection");
+
+                    handle.stop_sync();
+                    assert!(
+                        handle.sync.is_connected(),
+                        "stop_sync keeps the connection installed so start_sync can resume it",
+                    );
+
+                    handle.disconnect_sync();
+                    assert!(
+                        !handle.sync.is_connected(),
+                        "disconnect_sync drops the connection entirely — nothing it \
+             cached survives past this call",
+                    );
+                })
                 .await
                 .expect("disconnect-connection test task");
             })
             .await;
-    }
-
-    async fn run_disconnect_sync_drops_the_connection_not_just_the_loop() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
-        let handle = test_handle("lib-disconnect-drops-connection", store_dir, db);
-
-        handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
-            .await
-            .expect("connect over injected home");
-        assert!(handle.sync.is_connected(), "connect installs a connection");
-
-        handle.stop_sync();
-        assert!(
-            handle.sync.is_connected(),
-            "stop_sync keeps the connection installed so start_sync can resume it",
-        );
-
-        handle.disconnect_sync();
-        assert!(
-            !handle.sync.is_connected(),
-            "disconnect_sync drops the connection entirely — nothing it \
-             cached survives past this call",
-        );
     }
 }

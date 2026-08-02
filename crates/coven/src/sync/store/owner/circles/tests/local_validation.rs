@@ -99,7 +99,12 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
     let db = open_test_db();
     let (store, signer, mut journal) =
         persist_merge_operation(&db, "circle-substituted-signed-edges").await;
-    resign_merge_journal_with_objects(&db, &store, &signer, &mut journal, |objects| {
+    let old_commit = journal.commit().expect("parse prepared Circle commit");
+    let [old_reference] = old_commit.circle_controls() else {
+        panic!("Circle operation must carry one control")
+    };
+    let mut objects = old_reference.objects().clone();
+    {
         let roster_coord = objects
             .roster_entries
             .keys()
@@ -122,8 +127,24 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
             .expect("load exact metadata edge");
         let metadata_object = std::mem::replace(&mut metadata.object, roster);
         objects.roster_entries.insert(roster_coord, metadata_object);
-    })
-    .await;
+    }
+    let reference = journal
+        .operation()
+        .creation
+        .control_ref(objects, Some(old_reference.head_object().clone()));
+    let device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind substituted Circle object Store");
+    let mut writer = device
+        .authorize_writer()
+        .await
+        .expect("authorize substituted Circle object Store");
+    writer
+        .circles()
+        .resign_merge_journal_with_reference_for_test(&mut journal, reference, |_| {})
+        .await
+        .expect("re-sign Circle commit with substituted exact graph");
     let store_commit = journal.operation().commit_ref.object.clone();
     let store_head = journal
         .operation()

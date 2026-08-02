@@ -162,70 +162,6 @@ impl BlobTransitionObserver for Recorder {
     }
 }
 
-/// Insert a Local release: a gated-off note plus a blob-bearing photo with an
-/// external source file registered for it. Returns the external source path.
-async fn seed_local_release(
-    db: &Database,
-    user_dir: &std::path::Path,
-    note_id: &str,
-    photo_id: &str,
-    cloud_path: &str,
-    bytes: &[u8],
-) -> PathBuf {
-    db.seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
-        .await;
-    std::fs::create_dir_all(user_dir).unwrap();
-    let src = user_dir.join(format!("{photo_id}.jpg"));
-    std::fs::write(&src, bytes).unwrap();
-    db.register_external_blob_for_test("note_photos", photo_id, &src)
-        .await;
-    src
-}
-
-/// Insert a Remote release: a gated-on note plus a photo whose blob is already in
-/// the cloud (plaintext, at the readable key the `Plain` scheme derives).
-async fn seed_remote_release(
-    owners: &TestOwnerGraph,
-    storage: &TestStore,
-    db: &Database,
-    store_dir: &StoreDir,
-    hlc: &Hlc,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    note_id: &str,
-    photo_id: &str,
-    cloud_path: &str,
-    bytes: &[u8],
-) {
-    db.seed_local_release_rows_for_test(note_id, photo_id, cloud_path, bytes)
-        .await;
-    crate::store_dir::StoreDir::store_local_blob(store_dir, "fixture_sources", photo_id, bytes)
-        .await
-        .expect("write exact remote fixture source");
-    let source = store_dir
-        .local_blob_path("fixture_sources", photo_id)
-        .expect("build exact remote fixture source path");
-    db.register_external_blob_for_test("note_photos", photo_id, &source)
-        .await;
-    storage.open_into(db).await.expect("open exact test Store");
-    owners
-        .make_remote("notes", note_id, false)
-        .await
-        .expect("queue exact remote fixture upload");
-    let outcome = storage
-        .drain_uploads(db, store_dir, &SystemClock, hlc, routing_encryption, None)
-        .await
-        .expect("create exact remote fixture blob");
-    assert_eq!(outcome.uploaded(), 1);
-    assert!(outcome.yielded_for_publish());
-    assert!(
-        storage
-            .publish_pending(db, store_dir)
-            .await
-            .expect("publish exact remote fixture"),
-        "remote fixture publishes its Store write",
-    );
-}
-
 async fn shared_flag(db: &Database, note_id: &str) -> i64 {
     let v = db
         .query_test_text(&format!(
@@ -393,15 +329,15 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let owners_a = TestOwnerGraph::new(StoreDatabase::new(&db_a), lib_a.clone());
     let bytes = b"PHOTO-BYTES-one-file".to_vec();
 
-    let src = seed_local_release(
-        &db_a,
-        &tmp_a.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    let src = owners_a
+        .seed_local_release(
+            &tmp_a.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     // A cycle while the note is gated off: nothing reaches a peer.
     storage
@@ -537,15 +473,15 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
     let bytes = b"PHOTO-repin".to_vec();
 
-    seed_local_release(
-        &db,
-        &tmp.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     owners
         .make_remote("notes", "n1", false)
@@ -591,8 +527,9 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     let bytes = b"PHOTO-relocate".to_vec();
     let user_dir = tmp.path().join("user");
 
-    let src1 =
-        seed_local_release(&db, &user_dir, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
+    let src1 = owners
+        .seed_local_release(&user_dir, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes)
+        .await;
     owners
         .make_remote("notes", "n1", false)
         .await
@@ -606,7 +543,8 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     // The user moves the file: re-register it at a new path and remove the old one.
     let src2 = user_dir.join("relocated.jpg");
     std::fs::write(&src2, &bytes).unwrap();
-    db.register_external_blob_for_test("note_photos", "photoaaa", &src2)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "photoaaa", &src2)
         .await;
     std::fs::remove_file(&src1).unwrap();
 
@@ -647,15 +585,15 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
 
-    seed_local_release(
-        &db,
-        &tmp.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
     owners
         .make_remote("notes", "n1", false)
         .await
@@ -724,11 +662,8 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let peer = Box::pin(storage.invite_and_activate_peer(&db_a, &db_b, &kp_b))
             .await
             .expect("invite and activate peer Store device");
-        Box::pin(seed_remote_release(
-            &owners_a,
+        Box::pin(owners_a.seed_remote_release(
             &storage,
-            &db_a,
-            &lib_a,
             &hlc_a,
             None,
             "n1",
@@ -862,19 +797,17 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"scoped-managed-photo".to_vec();
     let routing_encryption = crate::encryption::EncryptionService::from_key([5; 32]);
-    seed_remote_release(
-        &owners,
-        &storage,
-        &db,
-        &lib,
-        &hlc,
-        Some(&routing_encryption),
-        "n-scoped",
-        "photoscoped",
-        "cv/photoscoped.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_remote_release(
+            &storage,
+            &hlc,
+            Some(&routing_encryption),
+            "n-scoped",
+            "photoscoped",
+            "cv/photoscoped.jpg",
+            &bytes,
+        )
+        .await;
     let store_state_before = db
         .test_sql(|database| database.scoped_store_state_counts())
         .await
@@ -1021,7 +954,8 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     std::fs::create_dir_all(&user_dir).unwrap();
     let source = user_dir.join("photo-user-scoped.jpg");
     std::fs::write(&source, bytes).unwrap();
-    db.register_external_blob_for_test("note_photos", "photo-user-scoped", &source)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "photo-user-scoped", &source)
         .await;
     owners
         .make_remote("notes", "n-user-scoped", false)
@@ -1034,7 +968,14 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
         .expect("read scoped Store state");
 
     let error = match storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
     {
         Ok(_) => panic!("a scoped upload completion requires routing encryption before upload"),
@@ -1087,7 +1028,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
 
     let outcome = storage
         .drain_uploads(
-            &db,
+            &StoreDatabase::new(&db),
             &lib,
             &SystemClock,
             &hlc,
@@ -1175,7 +1116,14 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         .expect("read scoped Store state");
 
     let error = match storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
     {
         Err(error) => error,
@@ -1224,7 +1172,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
 
     let completed = storage
         .drain_uploads(
-            &db,
+            &StoreDatabase::new(&db),
             &lib,
             &SystemClock,
             &hlc,
@@ -1293,15 +1241,15 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
     // Seed a gated-off release: a note + a user-provided photo (external ref) + a
     // host-provided cover (in the local store).
-    let src = seed_local_release(
-        &db_a,
-        &tmp_a.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &photo,
-    )
-    .await;
+    let src = owners_a
+        .seed_local_release(
+            &tmp_a.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &photo,
+        )
+        .await;
     db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
@@ -1603,11 +1551,25 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     // Each upload drain stops after one root becomes publishable. Both flips now
     // own exact Created handoffs and durable local-store cleanup intents.
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("create pinned exact blob and flip its root");
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("create unpinned exact blob and flip its root");
 
@@ -2084,15 +2046,15 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"PHOTO-BYTES-full-length".to_vec();
 
-    let src = seed_local_release(
-        &db,
-        &tmp.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    let src = owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     // Truncate the source on disk so its length no longer matches the size the
     // blob row recorded at registration — the drift the pre-enqueue check catches.
@@ -2167,15 +2129,15 @@ async fn make_local_rejects_already_local_root() {
     let bytes = b"already-local".to_vec();
 
     // A Local release (gate off) with its blob at a registered external file.
-    seed_local_release(
-        &db,
-        &tmp.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     let stamp_before = gate_stamp(&db, "n1").await;
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
@@ -2235,7 +2197,9 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     let user = tmp.path().join("user");
 
     // Two photos under one release.
-    let _src1 = seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
+    let _src1 = owners
+        .seed_local_release(&user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first")
+        .await;
     let src2 = user.join("photobbb.jpg");
     std::fs::write(&src2, b"second").unwrap();
     db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
@@ -2250,7 +2214,14 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     // Drain with photobbb's source removed: photoaaa uploads (not the last, no flip), photobbb fails.
     std::fs::remove_file(&src2).unwrap();
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("partial drain");
     assert_eq!(
@@ -2277,7 +2248,14 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         .await
         .expect("cancel make_remote");
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("drain cancelled make_remote cleanup");
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
@@ -2331,9 +2309,11 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let cover_source = user_dir.join("cover.bin");
     std::fs::write(&photo_source, bytes).unwrap();
     std::fs::write(&cover_source, bytes).unwrap();
-    db.register_external_blob_for_test("note_photos", "photo-a", &photo_source)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "photo-a", &photo_source)
         .await;
-    db.register_external_blob_for_test("note_photos", "photo-b", &cover_source)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "photo-b", &cover_source)
         .await;
 
     owners
@@ -2449,7 +2429,14 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await
         .expect("cancel same-locator uploads");
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("drain exact cancellation cleanup");
 
@@ -2479,15 +2466,15 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     );
     let (tmp, lib) = temp_store_dir();
 
-    let src = seed_local_release(
-        &db,
-        &tmp.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        b"orphan-bytes",
-    )
-    .await;
+    let src = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone())
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            b"orphan-bytes",
+        )
+        .await;
     // Enqueue an upload with no intent to model impossible durable state directly.
     let row = photo_ref(&db, "photoaaa").await;
     db.test_sql(move |database| {
@@ -2498,7 +2485,14 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
 
     let deletes_before = storage.home.exact_delete_count();
     let outcome = storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("drain");
 
@@ -2542,19 +2536,17 @@ async fn cancel_make_local_before_commit_stays_remote() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"still-managed".to_vec();
 
-    seed_remote_release(
-        &owners,
-        &storage,
-        &db,
-        &lib,
-        &hlc,
-        None,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_remote_release(
+            &storage,
+            &hlc,
+            None,
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
@@ -2606,19 +2598,17 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"managed-bytes".to_vec();
 
-    seed_remote_release(
-        &owners,
-        &storage,
-        &db,
-        &lib,
-        &hlc,
-        None,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_remote_release(
+            &storage,
+            &hlc,
+            None,
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     // Block the dest: make the dest's parent dir a FILE, so create_dir_all fails.
     let blocker = tmp.path().join("blocker");
@@ -2683,19 +2673,17 @@ async fn make_local_commit_failure_removes_materialized_files() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"materialized-before-commit-failure".to_vec();
 
-    seed_remote_release(
-        &owners,
-        &storage,
-        &db,
-        &lib,
-        &hlc,
-        None,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_remote_release(
+            &storage,
+            &hlc,
+            None,
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
     db.test_sql(|connection| {
         connection
             .execute_batch(
@@ -2775,19 +2763,17 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"managed-bytes".to_vec();
 
-    seed_remote_release(
-        &owners,
-        &storage,
-        &db,
-        &lib,
-        &hlc,
-        None,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_remote_release(
+            &storage,
+            &hlc,
+            None,
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     // A dest whose filename is not valid UTF-8: `to_str()` returns None, so the
     // conversion must fail loud instead of lossily rewriting the path. Kept under the
@@ -2857,7 +2843,9 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let user = tmp.path().join("user");
 
-    seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
+    owners
+        .seed_local_release(&user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first")
+        .await;
     let src2 = user.join("photobbb.jpg");
     std::fs::write(&src2, b"second").unwrap();
     db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
@@ -2872,7 +2860,14 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // first drain uploads only photoaaa, leaving the make_remote in flight.
     std::fs::remove_file(&src2).unwrap();
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("partial drain");
     assert_eq!(shared_flag(&db, "n1").await, 0, "still Local-uploading");
@@ -2894,7 +2889,14 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     std::fs::write(&src2, b"second").unwrap();
     db.reset_cloud_outbox_backoff().await.unwrap();
     storage
-        .drain_uploads(&db, &lib, &SystemClock, &hlc, None, None)
+        .drain_uploads(
+            &StoreDatabase::new(&db),
+            &lib,
+            &SystemClock,
+            &hlc,
+            None,
+            None,
+        )
         .await
         .expect("resume drain");
     assert_eq!(shared_flag(&db, "n1").await, 1, "converged to Remote");
@@ -2949,19 +2951,17 @@ async fn make_local_abort_then_retry_converges() {
     let owners = TestOwnerGraph::new(store_database, lib.clone());
     let bytes = b"materialize-me".to_vec();
 
-    seed_remote_release(
-        &owners,
-        &storage,
-        &db,
-        &lib,
-        &hlc,
-        None,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_remote_release(
+            &storage,
+            &hlc,
+            None,
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
 
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
@@ -3027,15 +3027,15 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let bytes = b"round-trip-photo".to_vec();
 
     // Start Local, make it Remote.
-    seed_local_release(
-        &db,
-        &tmp.path().join("user"),
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.jpg",
-        &bytes,
-    )
-    .await;
+    owners
+        .seed_local_release(
+            &tmp.path().join("user"),
+            "n1",
+            "photoaaa",
+            "cv/photoaaa.jpg",
+            &bytes,
+        )
+        .await;
     owners
         .make_remote("notes", "n1", true)
         .await

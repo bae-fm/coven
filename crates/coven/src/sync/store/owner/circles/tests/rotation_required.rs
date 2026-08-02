@@ -113,6 +113,109 @@ impl RotationMemberDevice {
 }
 
 impl RotationFixture {
+    async fn build(label: &str) -> Self {
+        let db = open_circle_routing_test_db();
+        let (store, signer, founder) = persist_merge_operation(&db, label).await;
+        let circle_id = founder.circle_id();
+        let owner_device = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store");
+        owner_device
+            .resume_circle_operations()
+            .await
+            .expect("activate founder transition");
+
+        let member = UserKeypair::generate();
+        let member_pubkey = keys::public_key_hex(&member);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &crate::sync::hlc::Hlc::new(
+                    format!("{label}-owner"),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &member_pubkey,
+                None,
+                MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Rotation Store",
+            )
+            .await
+            .expect("invite Store member");
+        let member_db = open_circle_routing_test_db();
+        let member_device = store
+            .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+            .await
+            .expect("activate Store member device");
+        let (member_temp, member_store_dir) = temp_store_dir();
+        let member_device = RotationMemberDevice {
+            device: member_device,
+            _temp: member_temp,
+            store_dir: member_store_dir,
+        };
+
+        let (store_temp, store_dir) = temp_store_dir();
+        let owner_storage = crate::storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            crate::storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            signer.clone(),
+        )
+        .expect("open Circle owner storage");
+        let components = PreparedSyncComponents::prepare(
+            crate::database::StoreDatabase::new(&db),
+            crate::sync::test_owner_graph::local_blob_access(
+                crate::database::StoreDatabase::new(&db),
+                store_dir.clone(),
+            ),
+            owner_storage,
+            StoreInitialization::OpenStore {
+                expected_store_root: store.root.clone(),
+            },
+            Some(EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("prepare Circle owner sync")
+        .initialize()
+        .await
+        .expect("initialize Circle owner sync");
+        components
+            .add_circle_member(
+                &store_dir,
+                circle_id,
+                member_pubkey.clone(),
+                CircleRole::Member,
+            )
+            .await
+            .expect("add Circle member");
+
+        let custody = crate::sync::test_helpers::TestCustody::default();
+        custody.set_initial_key([42; 32]);
+        let security = crate::sync::test_helpers::test_store_security(
+            "circle-rotation-test",
+            Arc::new(custody),
+        );
+
+        Self {
+            db,
+            store,
+            owner_device,
+            signer,
+            components,
+            circle_id,
+            member,
+            member_pubkey,
+            member_db,
+            member_device,
+            store_dir,
+            _store_temp: store_temp,
+            security,
+        }
+    }
+
     async fn remove_store_member(&self) {
         self.components
             .remove_member(&self.member_pubkey, &self.security)
@@ -448,110 +551,9 @@ impl RotationFixture {
     }
 }
 
-async fn rotation_fixture(label: &str) -> RotationFixture {
-    let db = open_circle_routing_test_db();
-    let (store, signer, founder) = persist_merge_operation(&db, label).await;
-    let circle_id = founder.circle_id();
-    let owner_device = store
-        .bind_device(&db, &signer)
-        .await
-        .expect("bind Circle test Store");
-    owner_device
-        .resume_circle_operations()
-        .await
-        .expect("activate founder transition");
-
-    let member = UserKeypair::generate();
-    let member_pubkey = keys::public_key_hex(&member);
-    store
-        .invite_member(
-            &db,
-            &signer,
-            &crate::sync::hlc::Hlc::new(
-                format!("{label}-owner"),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &member_pubkey,
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Rotation Store",
-        )
-        .await
-        .expect("invite Store member");
-    let member_db = open_circle_routing_test_db();
-    let member_device = store
-        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
-        .await
-        .expect("activate Store member device");
-    let (member_temp, member_store_dir) = temp_store_dir();
-    let member_device = RotationMemberDevice {
-        device: member_device,
-        _temp: member_temp,
-        store_dir: member_store_dir,
-    };
-
-    let (store_temp, store_dir) = temp_store_dir();
-    let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        signer.clone(),
-    )
-    .expect("open Circle owner storage");
-    let components = PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
-        crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-        ),
-        owner_storage,
-        StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("prepare Circle owner sync")
-    .initialize()
-    .await
-    .expect("initialize Circle owner sync");
-    components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            member_pubkey.clone(),
-            CircleRole::Member,
-        )
-        .await
-        .expect("add Circle member");
-
-    let custody = crate::sync::test_helpers::TestCustody::default();
-    custody.set_initial_key([42; 32]);
-    let security =
-        crate::sync::test_helpers::test_store_security("circle-rotation-test", Arc::new(custody));
-
-    RotationFixture {
-        db,
-        store,
-        owner_device,
-        signer,
-        components,
-        circle_id,
-        member,
-        member_pubkey,
-        member_db,
-        member_device,
-        store_dir,
-        _store_temp: store_temp,
-        security,
-    }
-}
-
 #[tokio::test]
 async fn store_member_removal_blocks_affected_circle_and_leaves_others_running() {
-    let fixture = rotation_fixture("rotation-blocks-affected").await;
+    let fixture = RotationFixture::build("rotation-blocks-affected").await;
     let unaffected = fixture
         .components
         .create_circle("Unaffected")
@@ -644,7 +646,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
 
 #[tokio::test]
 async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
-    let fixture = rotation_fixture("rotation-gates-lifecycle").await;
+    let fixture = RotationFixture::build("rotation-gates-lifecycle").await;
     fixture.remove_store_member().await;
 
     let rename = fixture
@@ -691,7 +693,7 @@ async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
 
 #[tokio::test]
 async fn re_adding_the_store_member_clears_rotation_required() {
-    let fixture = rotation_fixture("rotation-readd-clears").await;
+    let fixture = RotationFixture::build("rotation-readd-clears").await;
     fixture.remove_store_member().await;
     assert!(fixture
         .circles()
@@ -738,7 +740,7 @@ async fn re_adding_the_store_member_clears_rotation_required() {
 
 #[tokio::test]
 async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
-    let fixture = rotation_fixture("rotation-close-clears").await;
+    let fixture = RotationFixture::build("rotation-close-clears").await;
     fixture.remove_store_member().await;
     assert!(fixture
         .circles()
@@ -817,7 +819,7 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
 
 #[tokio::test]
 async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
-    let fixture = rotation_fixture("rotation-close-with-blocked-write").await;
+    let fixture = RotationFixture::build("rotation-close-with-blocked-write").await;
     fixture.remove_store_member().await;
 
     // A Circle write captured after the removal stays durable blocked; its rows
@@ -978,7 +980,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
 
 #[tokio::test]
 async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
-    let fixture = rotation_fixture("close-cut-projection").await;
+    let fixture = RotationFixture::build("close-cut-projection").await;
 
     // An accepted Circle row: captured and published under the active control.
     let published_id = "00000000-0000-4000-8000-000000000050";
@@ -1057,7 +1059,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
 
 #[tokio::test]
 async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
-    let fixture = rotation_fixture("store-cut-gate").await;
+    let fixture = RotationFixture::build("store-cut-gate").await;
     fixture
         .capture_document(
             "00000000-0000-4000-8000-000000000060",
@@ -1096,7 +1098,7 @@ async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
 
 #[tokio::test]
 async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
-    let fixture = rotation_fixture("rotation-unaffected-removal").await;
+    let fixture = RotationFixture::build("rotation-unaffected-removal").await;
     let outsider = UserKeypair::generate();
     let outsider_pubkey = keys::public_key_hex(&outsider);
     fixture
@@ -1157,7 +1159,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
 
 #[tokio::test]
 async fn device_join_succeeds_after_a_circle_epoch_close() {
-    let fixture = rotation_fixture("device-join-after-close").await;
+    let fixture = RotationFixture::build("device-join-after-close").await;
 
     // Drive a Circle member-removal epoch close through to successor activation.
     fixture
@@ -1250,165 +1252,164 @@ enum CircleFixtureMode {
     Closed,
 }
 
-async fn setup_active_member_circle_snapshot(
-    name: &str,
-    mode: CircleFixtureMode,
-) -> ActiveMemberCircleSnapshot {
-    let routing = EncryptionService::from_key([42; 32]);
-    let db = open_circle_routing_test_db();
-    let (store, signer, founder) = persist_merge_operation(&db, name).await;
-    let circle_id = founder.circle_id();
-    store
-        .bind_device(&db, &signer)
-        .await
-        .expect("bind Circle test Store")
-        .resume_circle_operations()
-        .await
-        .expect("activate founder transition");
-
-    let member = UserKeypair::generate();
-    let member_pubkey = keys::public_key_hex(&member);
-    store
-        .invite_member(
-            &db,
-            &signer,
-            &crate::sync::hlc::Hlc::new(
-                format!("{name}-owner"),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &member_pubkey,
-            None,
-            MemberRole::Member,
-            &routing,
-            "Restore Store",
-        )
-        .await
-        .expect("invite Store member");
-    let (_store_temp, store_dir) = temp_store_dir();
-    let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
-        crate::storage::CloudCipher::Encrypted(routing.clone()),
-        crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
-        signer.clone(),
-    )
-    .expect("open Circle owner storage");
-    let components = PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
-        crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-        ),
-        owner_storage,
-        StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(routing.clone()),
-    )
-    .await
-    .expect("prepare Circle owner sync")
-    .initialize()
-    .await
-    .expect("initialize Circle owner sync");
-    components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            member_pubkey.clone(),
-            CircleRole::Member,
-        )
-        .await
-        .expect("add Circle member");
-
-    // Pre-close Circle content the member holds access to, under the live epoch.
-    db.capture_document_for_test(
-        "00000000-0000-4000-8000-000000000090",
-        Some(circle_id),
-        "0000000002000-0000-owner",
-    )
-    .await
-    .expect("capture Circle content");
-    components
-        .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
-        .await
-        .expect("publish pre-close Circle content");
-
-    // Close the epoch by removing the member. The successor bootstrap's activating
-    // commit is retained, so the restored device resolves the head control and the
-    // remaining owner's own leaf names that successor bootstrap image (in storage)
-    // as its Circle image.
-    if matches!(mode, CircleFixtureMode::Closed) {
-        components
-            .remove_circle_member(circle_id, member_pubkey.clone())
-            .await
-            .expect("close the epoch by removing the roster member");
+impl ActiveMemberCircleSnapshot {
+    async fn build(name: &str, mode: CircleFixtureMode) -> Self {
+        let routing = EncryptionService::from_key([42; 32]);
+        let db = open_circle_routing_test_db();
+        let (store, signer, founder) = persist_merge_operation(&db, name).await;
+        let circle_id = founder.circle_id();
         store
             .bind_device(&db, &signer)
             .await
             .expect("bind Circle test Store")
-            .publish_circle_epoch_close_response()
+            .resume_circle_operations()
             .await
-            .expect("publish local Circle epoch-close response");
+            .expect("activate founder transition");
+
+        let member = UserKeypair::generate();
+        let member_pubkey = keys::public_key_hex(&member);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &crate::sync::hlc::Hlc::new(
+                    format!("{name}-owner"),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &member_pubkey,
+                None,
+                MemberRole::Member,
+                &routing,
+                "Restore Store",
+            )
+            .await
+            .expect("invite Store member");
+        let (_store_temp, store_dir) = temp_store_dir();
+        let owner_storage = crate::storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::storage::CloudCipher::Encrypted(routing.clone()),
+            crate::storage::BlobPathScheme::Hashed,
+            store.storage.store_id(),
+            signer.clone(),
+        )
+        .expect("open Circle owner storage");
+        let components = PreparedSyncComponents::prepare(
+            crate::database::StoreDatabase::new(&db),
+            crate::sync::test_owner_graph::local_blob_access(
+                crate::database::StoreDatabase::new(&db),
+                store_dir.clone(),
+            ),
+            owner_storage,
+            StoreInitialization::OpenStore {
+                expected_store_root: store.root.clone(),
+            },
+            Some(routing.clone()),
+        )
+        .await
+        .expect("prepare Circle owner sync")
+        .initialize()
+        .await
+        .expect("initialize Circle owner sync");
+        components
+            .add_circle_member(
+                &store_dir,
+                circle_id,
+                member_pubkey.clone(),
+                CircleRole::Member,
+            )
+            .await
+            .expect("add Circle member");
+
+        // Pre-close Circle content the member holds access to, under the live epoch.
+        db.capture_document_for_test(
+            "00000000-0000-4000-8000-000000000090",
+            Some(circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await
+        .expect("capture Circle content");
         components
             .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
             .await
-            .expect("activate the Circle epoch-close outcome");
-    }
+            .expect("publish pre-close Circle content");
 
-    let loaded_store = store
-        .bind_device(&db, &signer)
-        .await
-        .expect("load the Store snapshot");
-    let mut authorized = loaded_store
-        .authorize_writer()
-        .await
-        .expect("authorize the Store snapshot");
-    let (_snapshot_temp, snapshot_dir) = temp_store_dir();
-    let cut = authorized
-        .capture_snapshot_cut(
-            snapshot_dir.as_ref().to_path_buf(),
-            db.synced_tables().to_vec(),
-            Some(&routing),
-        )
-        .await
-        .expect("capture the Store snapshot cut");
-    let coverage = cut.coverage.clone();
-    authorized
-        .push_snapshot_cut(cut, "2026-07-24T01:00:00Z".to_string())
-        .await
-        .expect("publish the Store snapshot");
-    loaded_store
-        .stage_acknowledgement(coverage.clone(), "2026-07-24T01:00:01Z".to_string())
-        .await
-        .expect("stage snapshot stability acknowledgement");
-    loaded_store
-        .drain_acknowledgements()
-        .await
-        .expect("activate snapshot stability acknowledgement");
+        // Close the epoch by removing the member. The successor bootstrap's activating
+        // commit is retained, so the restored device resolves the head control and the
+        // remaining owner's own leaf names that successor bootstrap image (in storage)
+        // as its Circle image.
+        if matches!(mode, CircleFixtureMode::Closed) {
+            components
+                .remove_circle_member(circle_id, member_pubkey.clone())
+                .await
+                .expect("close the epoch by removing the roster member");
+            store
+                .bind_device(&db, &signer)
+                .await
+                .expect("bind Circle test Store")
+                .publish_circle_epoch_close_response()
+                .await
+                .expect("publish local Circle epoch-close response");
+            components
+                .run_cycle(&crate::clock::SystemClock, None, &store_dir, None)
+                .await
+                .expect("activate the Circle epoch-close outcome");
+        }
 
-    let membership = store
-        .bind_device(&db, &signer)
-        .await
-        .expect("load snapshot Store")
-        .membership_for_test()
-        .await
-        .expect("load membership for snapshot restore");
+        let loaded_store = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("load the Store snapshot");
+        let mut authorized = loaded_store
+            .authorize_writer()
+            .await
+            .expect("authorize the Store snapshot");
+        let (_snapshot_temp, snapshot_dir) = temp_store_dir();
+        let cut = authorized
+            .capture_snapshot_cut(
+                snapshot_dir.as_ref().to_path_buf(),
+                db.synced_tables().to_vec(),
+                Some(&routing),
+            )
+            .await
+            .expect("capture the Store snapshot cut");
+        let coverage = cut.coverage.clone();
+        authorized
+            .push_snapshot_cut(cut, "2026-07-24T01:00:00Z".to_string())
+            .await
+            .expect("publish the Store snapshot");
+        loaded_store
+            .stage_acknowledgement(coverage.clone(), "2026-07-24T01:00:01Z".to_string())
+            .await
+            .expect("stage snapshot stability acknowledgement");
+        loaded_store
+            .drain_acknowledgements()
+            .await
+            .expect("activate snapshot stability acknowledgement");
 
-    ActiveMemberCircleSnapshot {
-        db,
-        store,
-        signer,
-        member,
-        routing,
-        circle_id,
-        membership,
+        let membership = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("load snapshot Store")
+            .membership_for_test()
+            .await
+            .expect("load membership for snapshot restore");
+
+        Self {
+            db,
+            store,
+            signer,
+            member,
+            routing,
+            circle_id,
+            membership,
+        }
     }
 }
 
 #[tokio::test]
 async fn restore_reports_a_circle_with_no_coverage_image() {
     let base =
-        setup_active_member_circle_snapshot("snapshot-restore-no-image", CircleFixtureMode::Live)
+        ActiveMemberCircleSnapshot::build("snapshot-restore-no-image", CircleFixtureMode::Live)
             .await;
     let ActiveMemberCircleSnapshot {
         db,
@@ -1470,7 +1471,7 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
 #[tokio::test]
 async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
     let base =
-        setup_active_member_circle_snapshot("snapshot-restore-sabotage", CircleFixtureMode::Closed)
+        ActiveMemberCircleSnapshot::build("snapshot-restore-sabotage", CircleFixtureMode::Closed)
             .await;
     let ActiveMemberCircleSnapshot {
         db,
@@ -1547,8 +1548,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
 #[tokio::test]
 async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
     let base =
-        setup_active_member_circle_snapshot("snapshot-restore-crash", CircleFixtureMode::Live)
-            .await;
+        ActiveMemberCircleSnapshot::build("snapshot-restore-crash", CircleFixtureMode::Live).await;
     let ActiveMemberCircleSnapshot {
         db,
         store,
@@ -2098,7 +2098,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
 
 #[tokio::test]
 async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
-    let fixture = rotation_fixture("rotation-ack-read").await;
+    let fixture = RotationFixture::build("rotation-ack-read").await;
     let owner_pk = keys::public_key_hex(&fixture.signer);
 
     // A cycle publishes the owner's Circle acknowledgement under the current
@@ -2175,7 +2175,7 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
 
 #[tokio::test]
 async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge() {
-    let fixture = rotation_fixture("snapshot-stability").await;
+    let fixture = RotationFixture::build("snapshot-stability").await;
     let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
 
     // Author a Circle snapshot before any device has acknowledged coverage.
@@ -2234,7 +2234,7 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
 
 #[tokio::test]
 async fn circle_snapshot_stays_readable_across_epoch_rotation() {
-    let fixture = rotation_fixture("rotation-snapshot-read").await;
+    let fixture = RotationFixture::build("rotation-snapshot-read").await;
     let owner_pk = keys::public_key_hex(&fixture.signer);
     let (old_authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &owner_pk)
@@ -2313,7 +2313,7 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
 /// no image could be authored at all.
 #[tokio::test]
 async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_key() {
-    let fixture = rotation_fixture("standalone-snapshot-true-routing").await;
+    let fixture = RotationFixture::build("standalone-snapshot-true-routing").await;
     let owner_pk = keys::public_key_hex(&fixture.signer);
 
     // Circle content captured through the host write path, routed with the Store key.
@@ -2374,7 +2374,7 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
 /// after the close.
 #[tokio::test]
 async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
-    let fixture = rotation_fixture("standalone-snapshot-rotation").await;
+    let fixture = RotationFixture::build("standalone-snapshot-rotation").await;
 
     fixture
         .capture_document(
@@ -2436,7 +2436,7 @@ async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
 
 #[tokio::test]
 async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
-    let fixture = rotation_fixture("circle-ack-seeded-from").await;
+    let fixture = RotationFixture::build("circle-ack-seeded-from").await;
     let circle_id = fixture.circle_id;
 
     // The member device installs the Circle bootstrap: its projection seeds from a
@@ -2509,7 +2509,7 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
 
 #[tokio::test]
 async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
-    let fixture = rotation_fixture("successor-snapshot-unreadable").await;
+    let fixture = RotationFixture::build("successor-snapshot-unreadable").await;
     let circle_id = fixture.circle_id;
     let owner_pk = keys::public_key_hex(&fixture.signer);
 
@@ -2585,7 +2585,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     // Derive the number of exact object creates one Circle snapshot publication
     // makes (the image, then its metadata) from a clean run rather than hardcoding
     // it, then use the metadata create as the crash boundary.
-    let baseline = rotation_fixture("snapshot-resume-baseline").await;
+    let baseline = RotationFixture::build("snapshot-resume-baseline").await;
     let baseline_temp = tempfile::tempdir().expect("baseline snapshot temp dir");
     let before = baseline.store.home.exact_create_count();
     baseline
@@ -2612,7 +2612,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     // failure and continues. The next run resumes it and completes it exactly once,
     // the exact readback accepting the image already uploaded.
     {
-        let fixture = rotation_fixture("snapshot-resume-image-meta").await;
+        let fixture = RotationFixture::build("snapshot-resume-image-meta").await;
         let circle_id = fixture.circle_id;
         let temp = tempfile::tempdir().expect("snapshot temp dir");
         fixture
@@ -2659,7 +2659,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     // The exact readback settles the lost upload within the run, so the publication
     // completes without duplication and a re-run opens no new generation.
     {
-        let fixture = rotation_fixture("snapshot-resume-meta-complete").await;
+        let fixture = RotationFixture::build("snapshot-resume-meta-complete").await;
         let circle_id = fixture.circle_id;
         let temp = tempfile::tempdir().expect("snapshot temp dir");
         fixture.store.home.fail_exact_create_after_call(meta_create);
@@ -2707,7 +2707,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
 /// tombstone anywhere is ever collected.
 #[tokio::test]
 async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row() {
-    let fixture = rotation_fixture("audience-scoped-tombstone-gc").await;
+    let fixture = RotationFixture::build("audience-scoped-tombstone-gc").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -2810,7 +2810,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
 /// its children restamped by hand.
 #[tokio::test]
 async fn an_audience_move_restamps_the_blob_rows_it_drags() {
-    let fixture = rotation_fixture("audience-move-restamps-blob-rows").await;
+    let fixture = RotationFixture::build("audience-move-restamps-blob-rows").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -2861,7 +2861,7 @@ async fn an_audience_move_restamps_the_blob_rows_it_drags() {
 /// ciphertext, which a live row does bind, alone.
 #[tokio::test]
 async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
-    let fixture = rotation_fixture("audience-blob-reclaim").await;
+    let fixture = RotationFixture::build("audience-blob-reclaim").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -3021,7 +3021,7 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
 /// setup cycle happened to reclaim first.
 #[tokio::test]
 async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
-    let fixture = rotation_fixture("audience-blob-crash-resume").await;
+    let fixture = RotationFixture::build("audience-blob-crash-resume").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -3117,7 +3117,7 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
 /// the surviving generation's own image, intact.
 #[tokio::test]
 async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
-    let fixture = rotation_fixture("circle-snapshot-generation-reclaim").await;
+    let fixture = RotationFixture::build("circle-snapshot-generation-reclaim").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -3250,7 +3250,7 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
 
 #[tokio::test]
 async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
-    let fixture = rotation_fixture("circle-package-reclaim").await;
+    let fixture = RotationFixture::build("circle-package-reclaim").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -3321,7 +3321,7 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
 
 #[tokio::test]
 async fn circle_package_reclaim_refuses_a_replay_retained_package() {
-    let fixture = rotation_fixture("circle-package-replay-retained").await;
+    let fixture = RotationFixture::build("circle-package-replay-retained").await;
     let member_view = &fixture.member_device;
     member_view.pull().await;
 
@@ -3366,7 +3366,7 @@ async fn circle_package_reclaim_refuses_a_replay_retained_package() {
 
 #[tokio::test]
 async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement() {
-    let fixture = rotation_fixture("circle-package-seeded-ack").await;
+    let fixture = RotationFixture::build("circle-package-seeded-ack").await;
     let circle_id = fixture.circle_id;
     let member_view = &fixture.member_device;
     member_view.pull().await;
@@ -3442,7 +3442,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
     // impossible, and the single-owner requirement in the reclaim eligibility check
     // (`validate_reclaimable_circle_bootstrap_image`) is always satisfiable: deleting
     // one recipient's seed can never remove another recipient's.
-    let fixture = rotation_fixture("circle-bootstrap-two-recipients").await;
+    let fixture = RotationFixture::build("circle-bootstrap-two-recipients").await;
     let circle_id = fixture.circle_id;
     let member_view = &fixture.member_device;
     member_view.pull().await;
@@ -3530,7 +3530,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
 
 #[tokio::test]
 async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed() {
-    let fixture = rotation_fixture("circle-bootstrap-reclaim-advance").await;
+    let fixture = RotationFixture::build("circle-bootstrap-reclaim-advance").await;
     let circle_id = fixture.circle_id;
     let member_view = &fixture.member_device;
     member_view.pull().await;
@@ -3572,7 +3572,7 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed
 
 #[tokio::test]
 async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
-    let fixture = rotation_fixture("circle-bootstrap-reclaim-removed").await;
+    let fixture = RotationFixture::build("circle-bootstrap-reclaim-removed").await;
     let circle_id = fixture.circle_id;
     let member_view = &fixture.member_device;
     member_view.pull().await;
@@ -3647,7 +3647,7 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
     // piece of evidence the lost-authority arm reads — omits the identity. This proves
     // the Store-revocation trigger reaches the same roster-exclusion evidence rather
     // than a second, separate authority path.
-    let fixture = rotation_fixture("circle-bootstrap-store-revocation").await;
+    let fixture = RotationFixture::build("circle-bootstrap-store-revocation").await;
     let circle_id = fixture.circle_id;
     let member_view = &fixture.member_device;
     member_view.pull().await;
@@ -3736,7 +3736,7 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
     // Each acknowledgement reference names the control that resolves its epoch
     // key. After rotation, a pre-rotation acknowledgement remains readable through
     // that retained exact control.
-    let fixture = rotation_fixture("circle-reclaim-rotated-ack").await;
+    let fixture = RotationFixture::build("circle-reclaim-rotated-ack").await;
     let circle_id = fixture.circle_id;
     let owner_pk = keys::public_key_hex(&fixture.signer);
 

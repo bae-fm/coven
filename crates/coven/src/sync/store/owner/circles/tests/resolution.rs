@@ -30,6 +30,51 @@ struct ConflictFixture {
 }
 
 impl ConflictFixture {
+    async fn build(label: &str) -> Self {
+        let db1 = open_test_db();
+        let (store, founder, journal) = persist_merge_operation(&db1, label).await;
+        let circle_id = journal.circle_id();
+        let device1 = db1
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .expect("read local Store device id")
+            .expect("local Store device is active");
+        store
+            .bind_device(&db1, &founder)
+            .await
+            .expect("bind Circle test Store")
+            .resume_circle_operations()
+            .await
+            .expect("activate founder transition");
+
+        let db2 = open_test_db();
+        store
+            .activate_joined_device(&db1, &db2, &founder, "0000000001100-0000-device2")
+            .await
+            .expect("register the founder's second device");
+        let (_dir1, dir1) = temp_store_dir();
+        let (_dir2, dir2) = temp_store_dir();
+        let founder_pubkey = keys::public_key_hex(&founder);
+
+        let fixture = Self {
+            db1,
+            device1,
+            db2,
+            store,
+            founder,
+            founder_pubkey,
+            circle_id,
+            _dir1,
+            dir1,
+            _dir2,
+            dir2,
+        };
+        // Device 2 must materialize the founder control before it can author a
+        // concurrent successor of it.
+        fixture.pull_device2().await;
+        fixture
+    }
+
     async fn store1(&self) -> Store {
         Store::load(
             StoreDatabase::new(&self.db1),
@@ -146,56 +191,44 @@ impl ConflictFixture {
             "the resolution collapses the conflict: {circles:?}"
         );
     }
-}
 
-async fn conflict_fixture(label: &str) -> ConflictFixture {
-    let db1 = open_test_db();
-    let (store, founder, journal) = persist_merge_operation(&db1, label).await;
-    let circle_id = journal.circle_id();
-    let device1 = db1
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device id")
-        .expect("local Store device is active");
-    store
-        .bind_device(&db1, &founder)
-        .await
-        .expect("bind Circle test Store")
-        .resume_circle_operations()
-        .await
-        .expect("activate founder transition");
-
-    let db2 = open_test_db();
-    store
-        .activate_joined_device(&db1, &db2, &founder, "0000000001100-0000-device2")
-        .await
-        .expect("register the founder's second device");
-    let (_dir1, dir1) = temp_store_dir();
-    let (_dir2, dir2) = temp_store_dir();
-    let founder_pubkey = keys::public_key_hex(&founder);
-
-    let fixture = ConflictFixture {
-        db1,
-        device1,
-        db2,
-        store,
-        founder,
-        founder_pubkey,
-        circle_id,
-        _dir1,
-        dir1,
-        _dir2,
-        dir2,
-    };
-    // Device 2 must materialize the founder control before it can author a
-    // concurrent successor of it.
-    fixture.pull_device2().await;
-    fixture
+    /// Prepare and durably journal a resolution without publishing it, matching
+    /// the state left by a crash between the command and publication.
+    async fn journal_resolution(&self, chosen: &CircleControlCoord) -> CircleOperationJournal {
+        let store = self
+            .store
+            .bind_device(&self.db1, &self.founder)
+            .await
+            .expect("authorize Circle resolution");
+        let mut authority = store
+            .authorize_writer()
+            .await
+            .expect("authorize Circle writer");
+        let mut circles = authority.circles();
+        let request = circles
+            .resolution_request_for_test(
+                self.circle_id,
+                chosen,
+                self.conflict_branches_device1().await,
+            )
+            .await
+            .expect("build resolution request");
+        let journal = circles
+            .preparer()
+            .prepare_request(request)
+            .await
+            .expect("prepare resolution operation");
+        StoreDatabase::new(&self.db1)
+            .insert_circle_operation(journal.clone())
+            .await
+            .expect("journal the resolution before publication");
+        journal
+    }
 }
 
 #[tokio::test]
 async fn concurrent_successors_retain_and_surface_as_a_conflict() {
-    let fixture = conflict_fixture("resolve-surface").await;
+    let fixture = ConflictFixture::build("resolve-surface").await;
     let _ = fixture.fork().await;
 
     assert_eq!(
@@ -231,7 +264,7 @@ async fn concurrent_successors_retain_and_surface_as_a_conflict() {
 
 #[tokio::test]
 async fn resolution_collapses_the_conflict_on_every_device() {
-    let fixture = conflict_fixture("resolve-collapse").await;
+    let fixture = ConflictFixture::build("resolve-collapse").await;
     let (chosen, _losing) = fixture.fork().await;
 
     fixture
@@ -269,7 +302,7 @@ async fn resolution_collapses_the_conflict_on_every_device() {
 
 #[tokio::test]
 async fn resolving_to_another_devices_branch_merges_head_frontiers() {
-    let fixture = conflict_fixture("resolve-frontier-merge").await;
+    let fixture = ConflictFixture::build("resolve-frontier-merge").await;
     // `fork` renames on each device; device 2's stamp sorts after device 1's, so
     // device 2's metadata ("Beta") is the deterministic canonical selection.
     let (device1_branch, device2_branch) = fixture.fork().await;
@@ -321,7 +354,7 @@ async fn resolving_to_another_devices_branch_merges_head_frontiers() {
 
 #[tokio::test]
 async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
-    let fixture = conflict_fixture("delete-conflicted").await;
+    let fixture = ConflictFixture::build("delete-conflicted").await;
     let (chosen, _losing) = fixture.fork().await;
 
     // A conflicted Circle refuses deletion: the conflicting set may carry
@@ -378,7 +411,7 @@ async fn deleting_a_conflicted_circle_is_refused_until_resolved() {
 
 #[tokio::test]
 async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict() {
-    let fixture = conflict_fixture("resolve-stale").await;
+    let fixture = ConflictFixture::build("resolve-stale").await;
     let (chosen, _losing) = fixture.fork().await;
     let store = fixture
         .store
@@ -735,7 +768,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
 
 #[tokio::test]
 async fn resolving_a_nonconflicted_circle_is_refused() {
-    let fixture = conflict_fixture("resolve-nonconflicted").await;
+    let fixture = ConflictFixture::build("resolve-nonconflicted").await;
     let (chosen, _commit) = StoreDatabase::new(&fixture.db1)
         .circle_authoring_context(fixture.circle_id, &fixture.founder_pubkey)
         .await
@@ -755,7 +788,7 @@ async fn resolving_a_nonconflicted_circle_is_refused() {
 
 #[tokio::test]
 async fn non_owner_resolution_is_refused() {
-    let fixture = conflict_fixture("resolve-non-owner").await;
+    let fixture = ConflictFixture::build("resolve-non-owner").await;
 
     // A Store member who is not the Circle Owner, registered before the fork so
     // its device bootstrap does not race the concurrent conflict commits. They
@@ -834,50 +867,13 @@ async fn non_owner_resolution_is_refused() {
     );
 }
 
-/// Prepare and durably journal a resolution of the chosen branch without
-/// publishing it — the state left by a crash between the command and its
-/// publication.
-async fn journal_resolution(
-    fixture: &ConflictFixture,
-    chosen: &CircleControlCoord,
-) -> CircleOperationJournal {
-    let store = fixture
-        .store
-        .bind_device(&fixture.db1, &fixture.founder)
-        .await
-        .expect("authorize Circle resolution");
-    let mut authority = store
-        .authorize_writer()
-        .await
-        .expect("authorize Circle writer");
-    let mut circles = authority.circles();
-    let request = circles
-        .resolution_request_for_test(
-            fixture.circle_id,
-            chosen,
-            fixture.conflict_branches_device1().await,
-        )
-        .await
-        .expect("build resolution request");
-    let journal = circles
-        .preparer()
-        .prepare_request(request)
-        .await
-        .expect("prepare resolution operation");
-    StoreDatabase::new(&fixture.db1)
-        .insert_circle_operation(journal.clone())
-        .await
-        .expect("journal the resolution before publication");
-    journal
-}
-
 #[tokio::test]
 async fn resolution_resumes_idempotently_after_a_restart() {
     // A crash between journaling the command and publishing it: the durable
     // operation resumes and completes exactly once.
-    let before_publication = conflict_fixture("resolve-restart-before").await;
+    let before_publication = ConflictFixture::build("resolve-restart-before").await;
     let (chosen, _losing) = before_publication.fork().await;
-    let journal = journal_resolution(&before_publication, &chosen).await;
+    let journal = before_publication.journal_resolution(&chosen).await;
     before_publication
         .store
         .bind_device(&before_publication.db1, &before_publication.founder)
@@ -906,9 +902,9 @@ async fn resolution_resumes_idempotently_after_a_restart() {
     // 2*access + 4 exact objects (access leaves, control, control head, access
     // envelopes, then the commit and the head); failing before the final head
     // create leaves the commit published and activation not yet recorded.
-    let after_publication = conflict_fixture("resolve-restart-after").await;
+    let after_publication = ConflictFixture::build("resolve-restart-after").await;
     let (chosen, _losing) = after_publication.fork().await;
-    let journal = journal_resolution(&after_publication, &chosen).await;
+    let journal = after_publication.journal_resolution(&chosen).await;
     // The founder control and both conflicting branches are already activated;
     // the resolution must not add its activation while it is interrupted.
     let activations_before = StoreDatabase::new(&after_publication.db1)

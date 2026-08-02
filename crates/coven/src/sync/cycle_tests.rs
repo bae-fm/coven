@@ -1915,7 +1915,8 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         crate::blob::content_hash(b"AUDIO"),
     ))
     .await;
-    db.register_external_blob_for_test("note_photos", "audio1", &external_path)
+    crate::database::StoreDatabase::new(&db)
+        .register_external_blob_for_test("note_photos", "audio1", &external_path)
         .await;
     db.execute_test_sql(
         "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",

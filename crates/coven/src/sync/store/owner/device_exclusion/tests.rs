@@ -309,7 +309,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         AuthorExclusionLocatorTamper::ActivationCommit,
         AuthorExclusionLocatorTamper::ActivationHead,
     ] {
-        let (_restored_directory, mut restored) = Box::pin(open_published_exclusion_snapshot(
+        let mut snapshot = Box::pin(PublishedExclusionSnapshot::open(
             &store,
             &restore.membership_floor,
             owner_db.schema_version(),
@@ -317,6 +317,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
             target.device_id.to_string(),
         ))
         .await;
+        let restored = &mut snapshot.restored;
         restored
             .transfer_prepared_write_from_for_test(
                 &StoreDatabase::new(&peer_db),
@@ -352,7 +353,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
             .expect("tampered snapshot evidence cannot start cleanup"));
     }
 
-    let (_restored_directory, mut restored) = Box::pin(open_published_exclusion_snapshot(
+    let mut snapshot = Box::pin(PublishedExclusionSnapshot::open(
         &store,
         &restore.membership_floor,
         owner_db.schema_version(),
@@ -360,6 +361,7 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
         target.device_id.to_string(),
     ))
     .await;
+    let restored = &mut snapshot.restored;
     restored
         .transfer_prepared_write_from_for_test(&StoreDatabase::new(&peer_db), &candidate_write_id)
         .await
@@ -396,172 +398,179 @@ async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
 
 #[tokio::test]
 async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
-    Box::pin(run_device_join_bootstrap_records_exclusion_replayed_after_snapshot()).await;
-}
+    Box::pin(async {
+        let signer = UserKeypair::generate();
+        let owner_db = open_test_db();
+        let store = Arc::new(
+            Box::pin(TestStore::create(
+                &owner_db,
+                "bootstrap-author-exclusion-store",
+                signer.clone(),
+            ))
+            .await
+            .expect("create bootstrap exclusion Store"),
+        );
+        let owner_device = Box::pin(store.open_into(&owner_db))
+            .await
+            .expect("open bootstrap exclusion Store");
+        let restore = owner_device
+            .restore_membership()
+            .await
+            .expect("retain bootstrap exclusion membership authority");
+        let peer_db = open_test_db();
+        let peer_device = store
+            .activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z")
+            .await
+            .expect("activate bootstrap exclusion peer");
+        let (_candidate_temp, _candidate_store_dir, candidate_write_id) = Box::pin(
+            peer_device.prepare_blocked_transfer_candidate("bootstrap-excluded-candidate"),
+        )
+        .await;
+        let owner_device_id = owner_device.device_id.clone();
+        let target = store_database(&owner_db)
+            .activated_store_device_registration_records()
+            .await
+            .expect("list bootstrap exclusion registrations")
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .find(|reference| reference.device_id.to_string() != owner_device_id)
+            .expect("bootstrap exclusion peer registration");
+        let proposal = Box::pin(owner_device.prepare_peer_exclusion(&target)).await;
 
-async fn run_device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
-    let signer = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let store = Arc::new(
-        Box::pin(TestStore::create(
-            &owner_db,
-            "bootstrap-author-exclusion-store",
-            signer.clone(),
+        let image_dir = tempfile::tempdir().expect("bootstrap snapshot image directory");
+        let snapshot_dir = image_dir.path().to_path_buf();
+        let owner_database = store_database(&owner_db);
+        let image = owner_database
+            .capture_snapshot_image_for_test(store.root.clone(), snapshot_dir, None)
+            .await
+            .expect("create pre-exclusion snapshot");
+        let snapshot_coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+            owner_database
+                .materialized_frontier()
+                .await
+                .expect("read pre-exclusion frontier"),
+        )
+        .expect("shape pre-exclusion frontier");
+        owner_device
+            .publish_snapshot(image, snapshot_coverage.clone())
+            .await
+            .expect("publish pre-exclusion snapshot");
+        let published_snapshot = crate::database::StoreDatabase::new(&owner_db)
+            .latest_local_store_snapshot()
+            .await
+            .expect("read published pre-exclusion snapshot")
+            .expect("published pre-exclusion snapshot exists");
+        let (_peer_pull_temp, peer_pull_dir) = crate::sync::test_helpers::temp_store_dir();
+        let peer_pull = store
+            .pull_into_result(&peer_db, &peer_pull_dir)
+            .await
+            .expect("materialize pre-exclusion snapshot coverage on peer")
+            .1;
+        assert!(peer_pull.held_positions.is_empty());
+        for (device, timestamp) in [
+            (&owner_device, "2026-07-18T00:00:01Z"),
+            (&peer_device, "2026-07-18T00:00:02Z"),
+        ] {
+            let acknowledgement = device
+                .stage_acknowledgement(snapshot_coverage.clone(), timestamp.to_string())
+                .await
+                .expect("stage pre-exclusion snapshot acknowledgement");
+            let locator = acknowledgement
+                .snapshot
+                .expect("acknowledgement selects the stable snapshot candidate");
+            assert_eq!(
+                locator.author_registration,
+                published_snapshot.meta.author_registration
+            );
+            assert_eq!(locator.snapshot, published_snapshot.reference);
+            device
+                .drain_acknowledgements()
+                .await
+                .expect("activate pre-exclusion snapshot acknowledgement");
+        }
+
+        let exclusion = owner_device.activate_peer_exclusion(&proposal).await;
+        let activation = owner_device
+            .latest_local_store_position()
+            .await
+            .expect("read exclusion activation position")
+            .expect("exclusion activation position exists");
+        let activation_commit = owner_device
+            .load_commit_for_test(&activation)
+            .await
+            .expect("load exclusion activation commit");
+        assert!(activation_commit
+            .value()
+            .device_exclusion_outcomes()
+            .contains(&StoreDeviceExclusionOutcomeRef::Excluded(exclusion.clone())));
+        let replay_cut = activation_commit
+            .value()
+            .order
+            .predecessor_cut()
+            .expect("read exclusion activation predecessor");
+        let plan = owner_device
+            .prepare_device_join_bootstrap_for_test(
+                &replay_cut,
+                &activation,
+                &activation_commit.value().membership_state,
+            )
+            .await
+            .expect("prepare post-snapshot exclusion replay");
+
+        let destination = tempfile::tempdir().expect("bootstrap exclusion destination");
+        let database_path = destination.path().join("store.db");
+        let bootstrap_floor = restore.membership_floor.clone();
+        let bootstrap = Box::pin(store.prepare_snapshot_bootstrap(
+            &bootstrap_floor,
+            1,
+            &database_path,
+            &signer,
         ))
         .await
-        .expect("create bootstrap exclusion Store"),
-    );
-    let owner_device = Box::pin(store.open_into(&owner_db))
-        .await
-        .expect("open bootstrap exclusion Store");
-    let restore = owner_device
-        .restore_membership()
-        .await
-        .expect("retain bootstrap exclusion membership authority");
-    let peer_db = open_test_db();
-    let peer_device = store
-        .activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z")
-        .await
-        .expect("activate bootstrap exclusion peer");
-    let (_candidate_temp, _candidate_store_dir, candidate_write_id) =
-        Box::pin(peer_device.prepare_blocked_transfer_candidate("bootstrap-excluded-candidate"))
-            .await;
-    let owner_device_id = owner_device.device_id.clone();
-    let target = store_database(&owner_db)
-        .activated_store_device_registration_records()
-        .await
-        .expect("list bootstrap exclusion registrations")
-        .into_iter()
-        .map(|(reference, _)| reference)
-        .find(|reference| reference.device_id.to_string() != owner_device_id)
-        .expect("bootstrap exclusion peer registration");
-    let proposal = Box::pin(owner_device.prepare_peer_exclusion(&target)).await;
-
-    let image_dir = tempfile::tempdir().expect("bootstrap snapshot image directory");
-    let snapshot_dir = image_dir.path().to_path_buf();
-    let owner_database = store_database(&owner_db);
-    let image = owner_database
-        .capture_snapshot_image_for_test(store.root.clone(), snapshot_dir, None)
-        .await
-        .expect("create pre-exclusion snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
-        owner_database
-            .materialized_frontier()
+        .expect("verify pre-exclusion snapshot");
+        let mut joining_db = bootstrap
+            .install(
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::one_at_a_time(),
+                "post-snapshot-joining-device".to_string(),
+                std::sync::Arc::new(crate::clock::SystemClock),
+                &crate::sync::test_helpers::test_migrations(),
+                None,
+            )
             .await
-            .expect("read pre-exclusion frontier"),
-    )
-    .expect("shape pre-exclusion frontier");
-    owner_device
-        .publish_snapshot(image, snapshot_coverage.clone())
-        .await
-        .expect("publish pre-exclusion snapshot");
-    let published_snapshot = crate::database::StoreDatabase::new(&owner_db)
-        .latest_local_store_snapshot()
-        .await
-        .expect("read published pre-exclusion snapshot")
-        .expect("published pre-exclusion snapshot exists");
-    let (_peer_pull_temp, peer_pull_dir) = crate::sync::test_helpers::temp_store_dir();
-    let peer_pull = store
-        .pull_into_result(&peer_db, &peer_pull_dir)
-        .await
-        .expect("materialize pre-exclusion snapshot coverage on peer")
-        .1;
-    assert!(peer_pull.held_positions.is_empty());
-    for (device, timestamp) in [
-        (&owner_device, "2026-07-18T00:00:01Z"),
-        (&peer_device, "2026-07-18T00:00:02Z"),
-    ] {
-        let acknowledgement = device
-            .stage_acknowledgement(snapshot_coverage.clone(), timestamp.to_string())
-            .await
-            .expect("stage pre-exclusion snapshot acknowledgement");
-        let locator = acknowledgement
-            .snapshot
-            .expect("acknowledgement selects the stable snapshot candidate");
-        assert_eq!(
-            locator.author_registration,
-            published_snapshot.meta.author_registration
-        );
-        assert_eq!(locator.snapshot, published_snapshot.reference);
-        device
-            .drain_acknowledgements()
-            .await
-            .expect("activate pre-exclusion snapshot acknowledgement");
-    }
-
-    let exclusion = owner_device.activate_peer_exclusion(&proposal).await;
-    let activation = owner_device
-        .latest_local_store_position()
-        .await
-        .expect("read exclusion activation position")
-        .expect("exclusion activation position exists");
-    let activation_commit = owner_device
-        .load_commit_for_test(&activation)
-        .await
-        .expect("load exclusion activation commit");
-    assert!(activation_commit
-        .value()
-        .device_exclusion_outcomes()
-        .contains(&StoreDeviceExclusionOutcomeRef::Excluded(exclusion.clone())));
-    let replay_cut = activation_commit
-        .value()
-        .order
-        .predecessor_cut()
-        .expect("read exclusion activation predecessor");
-    let plan = owner_device
-        .prepare_device_join_bootstrap_for_test(
-            &replay_cut,
-            &activation,
-            &activation_commit.value().membership_state,
-        )
-        .await
-        .expect("prepare post-snapshot exclusion replay");
-
-    let destination = tempfile::tempdir().expect("bootstrap exclusion destination");
-    let database_path = destination.path().join("store.db");
-    let bootstrap_floor = restore.membership_floor.clone();
-    let bootstrap =
-        Box::pin(store.prepare_snapshot_bootstrap(&bootstrap_floor, 1, &database_path, &signer))
-            .await
-            .expect("verify pre-exclusion snapshot");
-    let mut joining_db = bootstrap
-        .install(
-            crate::sync::test_helpers::test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
-            "post-snapshot-joining-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-            &crate::sync::test_helpers::test_migrations(),
-            None,
-        )
-        .await
-        .expect("open pre-exclusion snapshot");
-    joining_db
-        .install_device_join_bootstrap_for_test(plan)
-        .await
-        .expect("replay exclusion after snapshot");
-    joining_db
-        .transfer_prepared_write_from_for_test(&StoreDatabase::new(&peer_db), &candidate_write_id)
-        .await
-        .expect("transfer prepared write");
-
-    let stored = joining_db
-        .author_exclusion_activation_evidence_for_test(&exclusion)
-        .await
-        .expect("replayed exclusion has exact activation evidence");
-    assert!(!stored.0.is_empty());
-    assert!(!stored.1.is_empty());
-    assert_eq!(
+            .expect("open pre-exclusion snapshot");
         joining_db
-            .abandon_merge_candidate_for_test(candidate_write_id.clone())
+            .install_device_join_bootstrap_for_test(plan)
             .await
-            .expect("consume replayed exclusion evidence"),
-        MergeCandidateAbandonment::Abandoned,
-    );
-    assert!(!joining_db
-        .merge_candidate_cleanup_pending_for_test(&candidate_write_id)
-        .await
-        .expect("replayed exclusion candidate cleanup completes"));
+            .expect("replay exclusion after snapshot");
+        joining_db
+            .transfer_prepared_write_from_for_test(
+                &StoreDatabase::new(&peer_db),
+                &candidate_write_id,
+            )
+            .await
+            .expect("transfer prepared write");
+
+        let stored = joining_db
+            .author_exclusion_activation_evidence_for_test(&exclusion)
+            .await
+            .expect("replayed exclusion has exact activation evidence");
+        assert!(!stored.0.is_empty());
+        assert!(!stored.1.is_empty());
+        assert_eq!(
+            joining_db
+                .abandon_merge_candidate_for_test(candidate_write_id.clone())
+                .await
+                .expect("consume replayed exclusion evidence"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+        assert!(!joining_db
+            .merge_candidate_cleanup_pending_for_test(&candidate_write_id)
+            .await
+            .expect("replayed exclusion candidate cleanup completes"));
+    })
+    .await;
 }
 
 async fn finalize_peer_exclusion_detached(
@@ -1951,33 +1960,40 @@ impl ExcludedPeer<'_> {
     }
 }
 
-async fn open_published_exclusion_snapshot<'storage>(
-    store: &'storage TestStore,
-    membership_floor: &crate::joining::MembershipFloor,
-    schema_version: u32,
-    identity: &UserKeypair,
-    device_id: String,
-) -> (
-    tempfile::TempDir,
-    crate::sync::store::RestoringStore<'storage>,
-) {
-    let directory = tempfile::tempdir().expect("restored exclusion directory");
-    let path = directory.path().join("restored.db");
-    let bootstrap = store
-        .prepare_snapshot_bootstrap(membership_floor, schema_version, &path, identity)
-        .await
-        .expect("verify author exclusion snapshot");
-    let database = bootstrap
-        .install(
-            crate::sync::test_helpers::test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
-            device_id,
-            std::sync::Arc::new(crate::clock::SystemClock),
-            &crate::sync::test_helpers::test_migrations(),
-            None,
-        )
-        .await
-        .expect("open author exclusion snapshot");
-    (directory, database)
+struct PublishedExclusionSnapshot<'storage> {
+    _directory: tempfile::TempDir,
+    restored: crate::sync::store::RestoringStore<'storage>,
+}
+
+impl<'storage> PublishedExclusionSnapshot<'storage> {
+    async fn open(
+        store: &'storage TestStore,
+        membership_floor: &crate::joining::MembershipFloor,
+        schema_version: u32,
+        identity: &UserKeypair,
+        device_id: String,
+    ) -> Self {
+        let directory = tempfile::tempdir().expect("restored exclusion directory");
+        let path = directory.path().join("restored.db");
+        let bootstrap = store
+            .prepare_snapshot_bootstrap(membership_floor, schema_version, &path, identity)
+            .await
+            .expect("verify author exclusion snapshot");
+        let restored = bootstrap
+            .install(
+                crate::sync::test_helpers::test_synced_tables(),
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::one_at_a_time(),
+                device_id,
+                std::sync::Arc::new(crate::clock::SystemClock),
+                &crate::sync::test_helpers::test_migrations(),
+                None,
+            )
+            .await
+            .expect("open author exclusion snapshot");
+        Self {
+            _directory: directory,
+            restored,
+        }
+    }
 }

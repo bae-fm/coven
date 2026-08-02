@@ -7,26 +7,6 @@ fn routing_keyring() -> MasterKeyring {
     crate::encryption::EncryptionService::from_key([7; 32]).into()
 }
 
-fn routing_id(conn: &rusqlite::Connection, table: &str, row_id: &str) -> String {
-    let database = crate::database::DatabaseTestSql::new(conn);
-    database
-        .row_routing_id([7; 32], table, row_id)
-        .expect("derive test row-routing id")
-        .to_string()
-}
-
-fn seed_active_circle(conn: &rusqlite::Connection, label: &str) -> (String, String) {
-    let database = crate::database::DatabaseTestSql::new(conn);
-    database
-        .install_test_store_root_authority("scoped-routing-root")
-        .expect("install scoped-routing Store root authority");
-    let (circle_id, control) = database.install_test_active_circle(label);
-    (
-        circle_id.to_string(),
-        serde_json::to_string(&control).expect("serialize active Circle control"),
-    )
-}
-
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -221,11 +201,12 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
         .open()
         .expect("open scoped Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, control_coord) = seed_active_circle(&authority, CIRCLE_LABEL);
-    let store_account_route = routing_id(&authority, "accounts", "store-account");
-    let circle_account_route = routing_id(&authority, "accounts", "circle-account");
-    let local_account_route = routing_id(&authority, "accounts", "local-account");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, control_coord) = authority.seed_active_circle(CIRCLE_LABEL);
+    let store_account_route = authority.scoped_routing_id("accounts", "store-account");
+    let circle_account_route = authority.scoped_routing_id("accounts", "circle-account");
+    let local_account_route = authority.scoped_routing_id("accounts", "local-account");
     drop(authority);
 
     let write_circle_id = circle_id.clone();
@@ -412,10 +393,11 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .open()
         .expect("open scoped Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
-    let store_account_route = routing_id(&authority, "accounts", "store-account");
-    let store_transaction_route = routing_id(&authority, "transactions", "store-transaction");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
+    let store_account_route = authority.scoped_routing_id("accounts", "store-account");
+    let store_transaction_route = authority.scoped_routing_id("transactions", "store-transaction");
     drop(authority);
 
     handle
@@ -673,12 +655,9 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
         .expect("open scoped Store");
 
     let unknown_circle = crate::CircleId::from_bytes([3; 16]).to_string();
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let database = crate::database::DatabaseTestSql::new(&authority);
-    database
-        .install_test_store_root_authority("scoped-routing-root")
-        .expect("install scoped-routing Store root authority");
-    let (inactive_circle, _) = database.install_test_inactive_circle("inactive-circle");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let inactive_circle = authority.seed_inactive_circle("inactive-circle");
     drop(authority);
 
     for (id, audience, expected_error) in [
@@ -694,7 +673,7 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
         ),
         (
             "inactive-circle",
-            inactive_circle.to_string(),
+            inactive_circle,
             "active local access records",
         ),
     ] {
@@ -779,16 +758,18 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         .open()
         .expect("open scoped Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
-    let local_move_account_route = routing_id(&authority, "accounts", "local-move-account");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
+    let local_move_account_route = authority.scoped_routing_id("accounts", "local-move-account");
     let local_move_transaction_route =
-        routing_id(&authority, "transactions", "local-move-transaction");
-    let store_move_account_route = routing_id(&authority, "accounts", "store-move-account");
+        authority.scoped_routing_id("transactions", "local-move-transaction");
+    let store_move_account_route = authority.scoped_routing_id("accounts", "store-move-account");
     let store_move_transaction_route =
-        routing_id(&authority, "transactions", "store-move-transaction");
-    let deleted_account_route = routing_id(&authority, "accounts", "deleted-account");
-    let deleted_transaction_route = routing_id(&authority, "transactions", "deleted-transaction");
+        authority.scoped_routing_id("transactions", "store-move-transaction");
+    let deleted_account_route = authority.scoped_routing_id("accounts", "deleted-account");
+    let deleted_transaction_route =
+        authority.scoped_routing_id("transactions", "deleted-transaction");
     drop(authority);
 
     let seed_circle_id = circle_id.clone();
@@ -1226,8 +1207,9 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
         .open()
         .expect("open scoped sibling Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
     drop(authority);
 
     handle
@@ -1331,9 +1313,10 @@ async fn every_outgoing_synced_fk_matches_its_child_audience() {
         )]);
     let handle = builder.open().expect("open cross-audience Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
-    let (other_circle_id, _other_control) = seed_active_circle(&authority, "circle-b");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
+    let (other_circle_id, _other_control) = authority.seed_active_circle("circle-b");
     drop(authority);
 
     let seeded_circle_id = circle_id.clone();
@@ -1540,9 +1523,10 @@ async fn inherited_reparenting_materializes_subtree() {
         )]);
     let handle = builder.open().expect("open inherited reparent Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
-    let (circle_b, _circle_b_control) = seed_active_circle(&authority, "circle-b");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
+    let (circle_b, _circle_b_control) = authority.seed_active_circle("circle-b");
     drop(authority);
 
     let seeded_circle_id = circle_id.clone();
@@ -1934,9 +1918,10 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
         )]);
     let handle = builder.open().expect("open scoped ancestor Store");
 
-    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
-    let (circle_id, _control) = seed_active_circle(&authority, CIRCLE_LABEL);
-    let (circle_b, _circle_b_control) = seed_active_circle(&authority, "circle-b");
+    let authority =
+        crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
+    let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
+    let (circle_b, _circle_b_control) = authority.seed_active_circle("circle-b");
     drop(authority);
 
     let seeded = handle

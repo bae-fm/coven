@@ -51,6 +51,33 @@ impl DatabaseImageTest {
         crate::database::apply_coven_schema(&self.connection).map_err(DbError::from)
     }
 
+    pub(crate) fn scoped_routing_id(&self, table: &str, row_id: &str) -> String {
+        crate::database::DatabaseTestSql::new(&self.connection)
+            .row_routing_id([7; 32], table, row_id)
+            .expect("derive test row-routing id")
+            .to_string()
+    }
+
+    pub(crate) fn seed_active_circle(&self, label: &str) -> (String, String) {
+        let database = crate::database::DatabaseTestSql::new(&self.connection);
+        database
+            .install_test_store_root_authority("scoped-routing-root")
+            .expect("install scoped-routing Store root authority");
+        let (circle_id, control) = database.install_test_active_circle(label);
+        (
+            circle_id.to_string(),
+            serde_json::to_string(&control).expect("serialize active Circle control"),
+        )
+    }
+
+    pub(crate) fn seed_inactive_circle(&self, label: &str) -> String {
+        let database = crate::database::DatabaseTestSql::new(&self.connection);
+        database
+            .install_test_store_root_authority("scoped-routing-root")
+            .expect("install scoped-routing Store root authority");
+        database.install_test_inactive_circle(label).0.to_string()
+    }
+
     pub(crate) fn coven_table_row_count(&self, table: DatabaseTestTable) -> Result<i64, DbError> {
         table_row_count(&self.connection, table)
     }

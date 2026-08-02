@@ -28,6 +28,7 @@ use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, plaintext_cipher, pubkey_hex,
     TestStore,
 };
+use crate::sync::test_owner_graph::TestOwnerGraph;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -151,29 +152,6 @@ impl<'a> TombstoneCollector<'a> {
     ) -> Result<usize, String> {
         self.collect(clock, BLOB_TOMBSTONE_GRACE).await
     }
-}
-
-async fn enqueue_local_upload(
-    db: &Database,
-    blob_id: &str,
-    bytes: &[u8],
-    source_dir: &std::path::Path,
-) {
-    db.plant_blob_row_for_test(blob_id, false, bytes).await;
-    let row = db
-        .row_blob_ref("note_photos", blob_id)
-        .await
-        .expect("load exact Local row blob reference");
-    let source_path = source_dir.join(blob_id);
-    crate::storage::StagedBlobFile::write_for_test(&source_path, bytes)
-        .await
-        .expect("write upload source");
-    let root_id = format!("note-{blob_id}");
-    db.test_sql(move |database| {
-        database.enqueue_blob_upload("notes", &root_id, &row, &source_path, false, T0)
-    })
-    .await
-    .expect("enqueue exact Local row upload");
 }
 
 /// Exact test storage holding a real two-member chain: `founder` (Owner) added
@@ -840,79 +818,81 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
     tokio::task::LocalSet::new()
         .run_until(async {
             tokio::task::spawn_local(async {
-                Box::pin(corrupt_delete_backoff_timestamp_case()).await
+                let db = open_outbox_db();
+                let store_database = StoreDatabase::new(&db);
+                let storage = Box::pin(TestStore::new()).await;
+                let corrupt = Box::pin(storage.create_exact_opaque_blob(
+                    "delete-tests",
+                    "corrupt-retry",
+                    b"corrupt",
+                ))
+                .await;
+                let healthy = Box::pin(storage.create_exact_opaque_blob(
+                    "delete-tests",
+                    "healthy-retry",
+                    b"healthy",
+                ))
+                .await;
+                let cloud = storage.home.as_ref();
+                let cipher = plaintext_cipher();
+                let kp = UserKeypair::generate();
+
+                Box::pin(db.enqueue_blob_delete_for_test(&corrupt, T0))
+                    .await
+                    .expect("enqueue corrupt exact blob deletion");
+                Box::pin(db.enqueue_blob_delete_for_test(&healthy, T0))
+                    .await
+                    .expect("enqueue healthy exact blob deletion");
+
+                // The later row carries an attempt count, so a *parseable* recent timestamp
+                // would hold it inside its backoff window. Its corruption must be found
+                // before the earlier healthy row produces a remote effect.
+                Box::pin(db.test_sql(|database| database.corrupt_delete_outbox_attempt_time(2)))
+                    .await
+                    .expect("corrupt last_attempt_at");
+
+                let clock = FixedClock(at("2024-06-01T00:00:10Z"));
+                let pending_rotation = PendingRotation::none();
+                let drain = TombstoneDrain::new(
+                    &store_database,
+                    cloud,
+                    &cipher,
+                    &pending_rotation,
+                    "lib",
+                    &kp,
+                    &clock,
+                );
+                let error = Box::pin(drain.drain())
+                    .await
+                    .expect_err("a corrupt retry timestamp fails the drain");
+                assert!(error.contains("unparseable last_attempt_at"), "{error}");
+                assert!(
+                    cloud.get(&exact_tombstone_key(&corrupt)).is_none(),
+                    "the corrupt entry produces no remote effect",
+                );
+                assert!(
+                    cloud.get(&exact_tombstone_key(&healthy)).is_none(),
+                    "the drain stops before later entries",
+                );
+                assert!(
+                    Box::pin(db.delete_outbox_attempt_for_test(1))
+                        .await
+                        .expect("query earlier delete outbox entry")
+                        .is_some(),
+                    "the earlier healthy journal row remains unchanged",
+                );
+                assert!(
+                    Box::pin(db.delete_outbox_attempt_for_test(2))
+                        .await
+                        .expect("query corrupt delete outbox entry")
+                        .is_some(),
+                    "the corrupt journal row remains unchanged",
+                );
             })
             .await
             .expect("corrupt timestamp case task completes");
         })
         .await;
-}
-
-async fn corrupt_delete_backoff_timestamp_case() {
-    let db = open_outbox_db();
-    let store_database = StoreDatabase::new(&db);
-    let storage = Box::pin(TestStore::new()).await;
-    let corrupt =
-        Box::pin(storage.create_exact_opaque_blob("delete-tests", "corrupt-retry", b"corrupt"))
-            .await;
-    let healthy =
-        Box::pin(storage.create_exact_opaque_blob("delete-tests", "healthy-retry", b"healthy"))
-            .await;
-    let cloud = storage.home.as_ref();
-    let cipher = plaintext_cipher();
-    let kp = UserKeypair::generate();
-
-    Box::pin(db.enqueue_blob_delete_for_test(&corrupt, T0))
-        .await
-        .expect("enqueue corrupt exact blob deletion");
-    Box::pin(db.enqueue_blob_delete_for_test(&healthy, T0))
-        .await
-        .expect("enqueue healthy exact blob deletion");
-
-    // The later row carries an attempt count, so a *parseable* recent timestamp
-    // would hold it inside its backoff window. Its corruption must be found
-    // before the earlier healthy row produces a remote effect.
-    Box::pin(db.test_sql(|database| database.corrupt_delete_outbox_attempt_time(2)))
-        .await
-        .expect("corrupt last_attempt_at");
-
-    let clock = FixedClock(at("2024-06-01T00:00:10Z"));
-    let pending_rotation = PendingRotation::none();
-    let drain = TombstoneDrain::new(
-        &store_database,
-        cloud,
-        &cipher,
-        &pending_rotation,
-        "lib",
-        &kp,
-        &clock,
-    );
-    let error = Box::pin(drain.drain())
-        .await
-        .expect_err("a corrupt retry timestamp fails the drain");
-    assert!(error.contains("unparseable last_attempt_at"), "{error}");
-    assert!(
-        cloud.get(&exact_tombstone_key(&corrupt)).is_none(),
-        "the corrupt entry produces no remote effect",
-    );
-    assert!(
-        cloud.get(&exact_tombstone_key(&healthy)).is_none(),
-        "the drain stops before later entries",
-    );
-    assert!(
-        Box::pin(db.delete_outbox_attempt_for_test(1))
-            .await
-            .expect("query earlier delete outbox entry")
-            .is_some(),
-        "the earlier healthy journal row remains unchanged",
-    );
-    assert!(
-        Box::pin(db.delete_outbox_attempt_for_test(2))
-            .await
-            .expect("query corrupt delete outbox entry")
-            .is_some(),
-        "the corrupt journal row remains unchanged",
-    );
 }
 
 // ----- the grace: kept before, reclaimed after -----
@@ -1831,10 +1811,18 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         CacheFill::CacheLazy,
     ));
     let sources = tempfile::tempdir().expect("upload sources");
+    let owners = TestOwnerGraph::new(
+        StoreDatabase::new(&db),
+        StoreDir::new(sources.path().join("store")),
+    );
     db.enqueue_blob_delete_for_test(&deleted, T0)
         .await
         .expect("enqueue exact blob deletion");
-    enqueue_local_upload(&db, "same-id", b"replacement", sources.path()).await;
+    db.plant_blob_row_for_test("same-id", false, b"replacement")
+        .await;
+    owners
+        .stage_pending_upload_for_test(sources.path(), "same-id", b"replacement", T0)
+        .await;
     assert_eq!(
         db.get_pending_cloud_uploads().await.unwrap().len(),
         1,
@@ -1853,7 +1841,15 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         CacheFill::CacheLazy,
     ));
     let sources = tempfile::tempdir().expect("upload sources");
-    enqueue_local_upload(&db, "same-id", b"replacement", sources.path()).await;
+    let owners = TestOwnerGraph::new(
+        StoreDatabase::new(&db),
+        StoreDir::new(sources.path().join("store")),
+    );
+    db.plant_blob_row_for_test("same-id", false, b"replacement")
+        .await;
+    owners
+        .stage_pending_upload_for_test(sources.path(), "same-id", b"replacement", T0)
+        .await;
     db.enqueue_blob_delete_for_test(&deleted, T0)
         .await
         .expect("enqueue exact blob deletion");
@@ -1875,7 +1871,15 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         CacheFill::CacheLazy,
     ));
     let sources = tempfile::tempdir().expect("upload sources");
-    enqueue_local_upload(&db, "other-id", b"other", sources.path()).await;
+    let owners = TestOwnerGraph::new(
+        StoreDatabase::new(&db),
+        StoreDir::new(sources.path().join("store")),
+    );
+    db.plant_blob_row_for_test("other-id", false, b"other")
+        .await;
+    owners
+        .stage_pending_upload_for_test(sources.path(), "other-id", b"other", T0)
+        .await;
     db.enqueue_blob_delete_for_test(&deleted, T0)
         .await
         .expect("enqueue exact blob deletion");
