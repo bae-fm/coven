@@ -5980,6 +5980,23 @@ def unreviewed_edges(
     ]
 
 
+def stale_decisions(
+    index: dict[str, Any],
+    decisions: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    current = {
+        decision_key(record["symbol"], record["signature"])
+        for record in index["callables"]
+    }
+    return [
+        decision
+        for key, decision in decisions.items()
+        if key not in current
+        and decision.get("classification") != "delete"
+        and "replaced_by" not in decision
+    ]
+
+
 def command_unclassified(_: argparse.Namespace) -> None:
     missing = unclassified(read_index(), read_decisions())
     for record in missing:
@@ -6002,16 +6019,7 @@ def command_check(_: argparse.Namespace) -> None:
     unresolved = unreviewed_edges(index, edge_decisions)
     if unresolved:
         raise RuntimeError(f"{len(unresolved)} call edges require review")
-    stale = [
-        decision
-        for key, decision in decisions.items()
-        if not any(
-            decision_key(record["symbol"], record["signature"]) == key
-            for record in index["callables"]
-        )
-        and decision.get("classification") != "delete"
-        and "replaced_by" not in decision
-    ]
+    stale = stale_decisions(index, decisions)
     if stale:
         raise RuntimeError(f"{len(stale)} ledger decisions refer to absent callables")
     current_edges = {

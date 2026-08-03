@@ -1410,6 +1410,37 @@ class SemanticIndexTests(unittest.TestCase):
         record.update(overrides)
         return record
 
+    def test_stale_decisions_index_current_callables_once(self):
+        class OnePassCallables(list):
+            iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                if self.iterations > 1:
+                    raise AssertionError("callables were scanned more than once")
+                return super().__iter__()
+
+        current = self.graph_record("sample::current")
+        callables = OnePassCallables([current])
+        decisions = {
+            ("sample::current", "fn call()"): {
+                "classification": "boundary",
+            },
+            ("sample::absent", "fn call()"): {
+                "classification": "boundary",
+            },
+            ("sample::deleted", "fn call()"): {
+                "classification": "delete",
+            },
+        }
+
+        stale = ownership_audit.stale_decisions(
+            {"callables": callables}, decisions
+        )
+
+        self.assertEqual(stale, [decisions[("sample::absent", "fn call()")]])
+        self.assertEqual(callables.iterations, 1)
+
     def test_graph_data_exposes_bottom_up_ready_stateful_queue(self):
         owner = self.graph_record(
             "sample::store::<Store>::persist",
