@@ -462,10 +462,6 @@ impl StoreKeys {
         std::sync::Arc::new(KeyringIdentityCustody { keys: self.clone() })
     }
 
-    pub(crate) fn master_key_custody(&self) -> std::sync::Arc<dyn crate::keys::MasterKeyCustody> {
-        std::sync::Arc::new(KeyringMasterKeyCustody { keys: self.clone() })
-    }
-
     pub fn get_encryption_key(&self) -> Result<Option<String>, KeyError> {
         self.keyring
             .service()?
@@ -638,30 +634,6 @@ impl DeviceIdentityCustody for KeyringIdentityCustody {
             .service()?
             .delete(&KeyringSlot::DeviceSigningKey(self.keys.store_id.clone()))
             .map(|_| ())
-    }
-}
-
-struct KeyringMasterKeyCustody {
-    keys: StoreKeys,
-}
-
-impl crate::keys::MasterKeyCustody for KeyringMasterKeyCustody {
-    fn unlock(&self) -> Result<Option<crate::encryption::MasterKeyring>, KeyError> {
-        self.keys
-            .get_encryption_key()?
-            .map(|serialized| {
-                crate::encryption::MasterKeyring::from_serialized(&serialized)
-                    .map_err(|error| KeyError::Crypto(error.to_string()))
-            })
-            .transpose()
-    }
-
-    fn persist(&self, keyring: &crate::encryption::MasterKeyring) -> Result<(), KeyError> {
-        self.keys.set_encryption_key(&keyring.to_serialized())
-    }
-
-    fn forget(&self) -> Result<(), KeyError> {
-        self.keys.delete_encryption_key()
     }
 }
 

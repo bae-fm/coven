@@ -38,13 +38,43 @@ impl KeyCustody {
         store_dir: &StoreDir,
     ) -> Arc<dyn MasterKeyCustody> {
         match self {
-            KeyCustody::Keyring => store_keys.master_key_custody(),
+            KeyCustody::Keyring => Arc::new(KeyringCustody::new(store_keys.clone())),
             KeyCustody::Passphrase(passphrase) => {
                 Arc::new(PassphraseCustody::new(passphrase, store_dir))
             }
             KeyCustody::InMemory(keyring) => Arc::new(InMemoryCustody::new(keyring)),
             KeyCustody::Custom(custody) => custody,
         }
+    }
+}
+
+struct KeyringCustody {
+    keys: StoreKeys,
+}
+
+impl KeyringCustody {
+    fn new(keys: StoreKeys) -> Self {
+        Self { keys }
+    }
+}
+
+impl MasterKeyCustody for KeyringCustody {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        self.keys
+            .get_encryption_key()?
+            .map(|serialized| {
+                MasterKeyring::from_serialized(&serialized)
+                    .map_err(|error| KeyError::Crypto(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
+        self.keys.set_encryption_key(&keyring.to_serialized())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        self.keys.delete_encryption_key()
     }
 }
 
