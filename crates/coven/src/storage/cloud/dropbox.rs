@@ -84,10 +84,6 @@ impl DropboxCloudHome {
         }
     }
 
-    fn client(&self) -> &reqwest::Client {
-        self.session.client()
-    }
-
     fn namespace_path(key: &str) -> String {
         format!("/{key}")
     }
@@ -136,11 +132,9 @@ impl DropboxCloudHome {
         let path_root = Self::path_root_header(&namespace_id);
         let response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/upload_session/start", self.content_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/upload_session/start", self.content_base)),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", r#"{"close":false}"#)
@@ -178,11 +172,9 @@ impl DropboxCloudHome {
         }));
         let response = self
             .session
-            .api_call_no_transient_retry(|token| {
+            .api_call_no_transient_retry(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/upload", self.content_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/upload", self.content_base)),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", &api_arg)
@@ -231,11 +223,9 @@ impl DropboxCloudHome {
         let api_arg = dropbox_api_arg(&serde_json::json!({"path": path}));
         let response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/download", self.content_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/download", self.content_base)),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", &api_arg)
@@ -294,11 +284,9 @@ impl DropboxCloudHome {
         let body = serde_json::json!({"path": Self::namespace_path(slot.logical_key())});
         let response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/get_metadata", self.api_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/get_metadata", self.api_base)),
                     &path_root,
                 )
                 .json(&body)
@@ -319,10 +307,9 @@ impl DropboxCloudHome {
         let share_body = serde_json::json!({ "path": self.folder_path });
         let resp = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .post(format!("{}/sharing/share_folder", self.api_base))
-                    .bearer_auth(token)
                     .json(&share_body)
             })
             .await?;
@@ -408,11 +395,9 @@ impl DropboxCloudHome {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let resp = self
                 .session
-                .api_call(|token| {
-                    let request = self
-                        .client()
+                .api_call(|oauth| {
+                    let request = oauth
                         .post(format!("{}/{endpoint}", self.api_base))
-                        .bearer_auth(token)
                         .json(&request_body);
                     match path_root {
                         Some(path_root) => Self::scoped_request(request, path_root),
@@ -467,11 +452,9 @@ impl DropboxCloudHome {
         loop {
             let resp = self
                 .session
-                .api_call(|token| {
+                .api_call(|oauth| {
                     Self::scoped_request(
-                        self.client()
-                            .post(format!("{}/{endpoint}", self.api_base))
-                            .bearer_auth(token),
+                        oauth.post(format!("{}/{endpoint}", self.api_base)),
                         &path_root,
                     )
                     .json(&request)
@@ -512,11 +495,9 @@ impl DropboxCloudHome {
         });
         let resp = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/sharing/remove_folder_member", self.api_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/sharing/remove_folder_member", self.api_base)),
                     &path_root,
                 )
                 .json(&remove_body)
@@ -646,15 +627,12 @@ impl super::PartSink for DropboxSessionSink<'_> {
             }));
             self.home
                 .session
-                .api_call_no_transient_retry(|token| {
+                .api_call_no_transient_retry(|oauth| {
                     DropboxCloudHome::scoped_request(
-                        self.home
-                            .client()
-                            .post(format!(
-                                "{}/files/upload_session/finish",
-                                self.home.content_base
-                            ))
-                            .bearer_auth(token),
+                        oauth.post(format!(
+                            "{}/files/upload_session/finish",
+                            self.home.content_base
+                        )),
                         &path_root,
                     )
                     .header("Dropbox-API-Arg", &arg)
@@ -669,15 +647,12 @@ impl super::PartSink for DropboxSessionSink<'_> {
             }));
             self.home
                 .session
-                .api_call_no_transient_retry(|token| {
+                .api_call_no_transient_retry(|oauth| {
                     DropboxCloudHome::scoped_request(
-                        self.home
-                            .client()
-                            .post(format!(
-                                "{}/files/upload_session/append_v2",
-                                self.home.content_base
-                            ))
-                            .bearer_auth(token),
+                        oauth.post(format!(
+                            "{}/files/upload_session/append_v2",
+                            self.home.content_base
+                        )),
                         &path_root,
                     )
                     .header("Dropbox-API-Arg", &arg)
@@ -722,15 +697,12 @@ impl super::PartSink for DropboxSessionSink<'_> {
         let response = self
             .home
             .session
-            .api_call_no_transient_retry(|token| {
+            .api_call_no_transient_retry(|oauth| {
                 DropboxCloudHome::scoped_request(
-                    self.home
-                        .client()
-                        .post(format!(
-                            "{}/files/upload_session/append_v2",
-                            self.home.content_base
-                        ))
-                        .bearer_auth(token),
+                    oauth.post(format!(
+                        "{}/files/upload_session/append_v2",
+                        self.home.content_base
+                    )),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", &arg)
@@ -816,11 +788,9 @@ impl OAuthRestHome for DropboxCloudHome {
         let arg = dropbox_api_arg(&serde_json::json!({ "path": Self::namespace_path(key) }));
         let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 let mut req = Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/download", self.content_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/download", self.content_base)),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", &arg);
@@ -837,11 +807,9 @@ impl OAuthRestHome for DropboxCloudHome {
         let path_root = Self::path_root_header(&namespace_id);
         let body = serde_json::json!({ "path": Self::namespace_path(key) });
         self.session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/delete_v2", self.api_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/delete_v2", self.api_base)),
                     &path_root,
                 )
                 .json(&body)
@@ -862,11 +830,9 @@ impl OAuthRestHome for DropboxCloudHome {
             Some(cur) => {
                 let body = serde_json::json!({ "cursor": cur });
                 self.session
-                    .api_call(|token| {
+                    .api_call(|oauth| {
                         Self::scoped_request(
-                            self.client()
-                                .post(format!("{}/files/list_folder/continue", self.api_base))
-                                .bearer_auth(token),
+                            oauth.post(format!("{}/files/list_folder/continue", self.api_base)),
                             &path_root,
                         )
                         .json(&body)
@@ -880,11 +846,9 @@ impl OAuthRestHome for DropboxCloudHome {
                     "limit": 2000,
                 });
                 self.session
-                    .api_call(|token| {
+                    .api_call(|oauth| {
                         Self::scoped_request(
-                            self.client()
-                                .post(format!("{}/files/list_folder", self.api_base))
-                                .bearer_auth(token),
+                            oauth.post(format!("{}/files/list_folder", self.api_base)),
                             &path_root,
                         )
                         .json(&body)
@@ -957,11 +921,9 @@ impl CloudHome for DropboxCloudHome {
         }));
         let resp = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/upload", self.content_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/upload", self.content_base)),
                     &path_root,
                 )
                 .header("Dropbox-API-Arg", &api_arg)
@@ -1022,11 +984,9 @@ impl CloudHome for DropboxCloudHome {
         let body = serde_json::json!({ "path": Self::namespace_path(key) });
         let resp = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/get_metadata", self.api_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/get_metadata", self.api_base)),
                     &path_root,
                 )
                 .json(&body)
@@ -1059,11 +1019,9 @@ impl CloudHome for DropboxCloudHome {
                     });
                     let resp = self
                         .session
-                        .api_call(|token| {
+                        .api_call(|oauth| {
                             Self::scoped_request(
-                                self.client()
-                                    .post(format!("{}/sharing/add_folder_member", self.api_base))
-                                    .bearer_auth(token),
+                                oauth.post(format!("{}/sharing/add_folder_member", self.api_base)),
                                 &path_root,
                             )
                             .json(&add_body)
@@ -1127,10 +1085,9 @@ impl ExactSlotStorage for DropboxCloudHome {
         });
         let metadata_response = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .post(format!("{}/files/get_metadata", self.api_base))
-                    .bearer_auth(token)
                     .json(&metadata_body)
             })
             .await?;
@@ -1170,11 +1127,9 @@ impl ExactSlotStorage for DropboxCloudHome {
         let path_root = Self::path_root_header(&namespace_id);
         let account_response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/users/get_current_account", self.api_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/users/get_current_account", self.api_base)),
                     &path_root,
                 )
                 .header("Content-Type", "application/json")
@@ -1318,11 +1273,9 @@ impl ExactSlotStorage for DropboxCloudHome {
         let body = serde_json::json!({"path": Self::namespace_path(slot.logical_key())});
         let response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 Self::scoped_request(
-                    self.client()
-                        .post(format!("{}/files/delete_v2", self.api_base))
-                        .bearer_auth(token),
+                    oauth.post(format!("{}/files/delete_v2", self.api_base)),
                     &path_root,
                 )
                 .json(&body)

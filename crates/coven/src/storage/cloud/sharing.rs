@@ -23,9 +23,7 @@ pub(super) async fn permission_by_email(
     let mut page_url = list_url.to_string();
     let mut page_tokens = PageTokenTracker::new("permission listing");
     loop {
-        let resp = session
-            .api_call(|token| session.client().get(&page_url).bearer_auth(token))
-            .await?;
+        let resp = session.api_call(|oauth| oauth.get(&page_url)).await?;
         let resp = ensure_ok(resp, "list permissions", NotFound::Status).await?;
         let json: serde_json::Value = ok_json(resp, "parse permissions").await?;
 
@@ -76,9 +74,7 @@ pub(super) async fn ensure_absent_by_email(
     })?;
 
     let url = delete_url(permission_id);
-    let resp = session
-        .api_call(|token| session.client().delete(&url).bearer_auth(token))
-        .await?;
+    let resp = session.api_call(|oauth| oauth.delete(&url)).await?;
     match ensure_ok(
         resp,
         &format!("revoke access for {member_id}"),

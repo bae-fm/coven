@@ -15,7 +15,6 @@ use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
 use super::oauth_session::OAuthSession;
-use super::resumable::{RangePutSink, RangePutUploader};
 use super::{
     combine_cleanup_failure, sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, RevokeOutcome,
@@ -76,10 +75,6 @@ impl OneDriveCloudHome {
         }
     }
 
-    fn client(&self) -> &reqwest::Client {
-        self.session.client()
-    }
-
     /// Build the Graph API URL for a file by encoded name within the app folder.
     fn item_path_url(&self, key: &str) -> String {
         format!(
@@ -112,12 +107,7 @@ impl OneDriveCloudHome {
         });
         let response = self
             .session
-            .api_call(|token| {
-                self.client()
-                    .post(&session_url)
-                    .bearer_auth(token)
-                    .json(&body)
-            })
+            .api_call(|oauth| oauth.post(&session_url).json(&body))
             .await?;
         let status = response.status();
         let body = http::body_text(response).await;
@@ -148,12 +138,7 @@ impl OneDriveCloudHome {
         });
         let response = match self
             .session
-            .api_call(|token| {
-                self.client()
-                    .put(self.item_path_url(key))
-                    .bearer_auth(token)
-                    .json(&body)
-            })
+            .api_call(|oauth| oauth.put(self.item_path_url(key)).json(&body))
             .await
         {
             Ok(response) => response,
@@ -185,10 +170,9 @@ impl OneDriveCloudHome {
         slot.require_logical_key_for("OneDrive")?;
         let response = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .get(self.item_path_url(slot.logical_key()))
-                    .bearer_auth(token)
                     .query(&[("$select", "id,name,parentReference,deleted,file")])
             })
             .await?;
@@ -259,8 +243,8 @@ impl OAuthRestHome for OneDriveCloudHome {
         let url = format!("{}/content", self.item_path_url(key));
         let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
-            .api_call(|token| {
-                let mut req = self.client().get(&url).bearer_auth(token);
+            .api_call(|oauth| {
+                let mut req = oauth.get(&url);
                 if let Some(ref range) = range {
                     req = req.header("Range", range);
                 }
@@ -271,9 +255,7 @@ impl OAuthRestHome for OneDriveCloudHome {
 
     async fn send_delete(&self, key: &str) -> Result<reqwest::Response, CloudHomeError> {
         let url = self.item_path_url(key);
-        self.session
-            .api_call(|token| self.client().delete(&url).bearer_auth(token))
-            .await
+        self.session.api_call(|oauth| oauth.delete(&url)).await
     }
 
     async fn send_list_page(
@@ -287,9 +269,7 @@ impl OAuthRestHome for OneDriveCloudHome {
             Some(next) => next.to_string(),
             None => format!("{}?$select=name", self.children_url()),
         };
-        self.session
-            .api_call(|token| self.client().get(&url).bearer_auth(token))
-            .await
+        self.session.api_call(|oauth| oauth.get(&url)).await
     }
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
@@ -335,8 +315,7 @@ impl OneDriveCloudHome {
         let key = full_logical_key.to_string();
         let classify =
             Box::new(move |status, response: &str| classify_write_error(status, response, &key));
-        let mut uploader = RangePutUploader::new(
-            self.client().clone(),
+        let mut uploader = self.session.range_put_uploader(
             upload_url.clone(),
             202,
             body.len(),
@@ -404,13 +383,11 @@ impl OneDriveCloudHome {
         self.verify_slot(slot).await?;
         let response = self
             .session
-            .api_call(|token| {
-                self.client()
-                    .get(format!(
-                        "{}/content",
-                        self.item_path_url(slot.logical_key())
-                    ))
-                    .bearer_auth(token)
+            .api_call(|oauth| {
+                oauth.get(format!(
+                    "{}/content",
+                    self.item_path_url(slot.logical_key())
+                ))
             })
             .await?;
         let response = ensure_ok(response, "read exact OneDrive item", NotFound::Status).await?;
@@ -427,11 +404,7 @@ impl OneDriveCloudHome {
         }
         let response = self
             .session
-            .api_call(|token| {
-                self.client()
-                    .delete(self.item_path_url(slot.logical_key()))
-                    .bearer_auth(token)
-            })
+            .api_call(|oauth| oauth.delete(self.item_path_url(slot.logical_key())))
             .await?;
         let status = response.status();
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
@@ -458,10 +431,9 @@ impl CloudHome for OneDriveCloudHome {
         let url = format!("{}/content", self.item_path_url(key));
         let resp = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .put(&url)
-                    .bearer_auth(token)
                     .header("Content-Type", "application/octet-stream")
                     .body(body.clone())
             })
@@ -489,8 +461,7 @@ impl CloudHome for OneDriveCloudHome {
         let classify =
             Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
         // OneDrive returns 202 Accepted for every non-final part.
-        Ok(Box::new(RangePutSink::new(
-            self.client().clone(),
+        Ok(Box::new(self.session.range_put_sink(
             upload_url,
             202,
             total_len,
@@ -523,10 +494,7 @@ impl CloudHome for OneDriveCloudHome {
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
         let url = self.item_path_url(key);
-        let resp = self
-            .session
-            .api_call(|token| self.client().get(&url).bearer_auth(token))
-            .await?;
+        let resp = self.session.api_call(|oauth| oauth.get(&url)).await?;
         exists_from_response(resp, &format!("exists {key}"), NotFound::Status).await
     }
 
@@ -596,7 +564,7 @@ impl CloudHome for OneDriveCloudHome {
                 });
                 let resp = self
                     .session
-                    .api_call(|token| self.client().post(&url).bearer_auth(token).json(&invite))
+                    .api_call(|oauth| oauth.post(&url).json(&invite))
                     .await?;
                 ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
                 let verified = sharing::permission_by_email(
@@ -652,10 +620,9 @@ impl ExactSlotStorage for OneDriveCloudHome {
         }
         let user_response = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .get(format!("{}/me", self.graph_api))
-                    .bearer_auth(token)
                     .query(&[("$select", "id")])
             })
             .await?;
@@ -679,13 +646,12 @@ impl ExactSlotStorage for OneDriveCloudHome {
 
         let folder_response = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .get(format!(
                         "{}/drives/{}/items/{}",
                         self.graph_api, self.drive_id, self.folder_id
                     ))
-                    .bearer_auth(token)
                     .query(&[("$select", "id,parentReference,folder")])
             })
             .await?;

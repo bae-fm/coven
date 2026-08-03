@@ -72,6 +72,36 @@ pub(crate) struct OAuthSession {
     sleeper: Sleeper,
 }
 
+/// One token-bound request construction scope. Provider code may configure the
+/// request builder it receives, but cannot extract either the session's HTTP
+/// client or its access token.
+pub(super) struct OAuthRequest<'session> {
+    client: &'session reqwest::Client,
+    token: &'session str,
+}
+
+impl OAuthRequest<'_> {
+    pub(super) fn get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.client.get(url).bearer_auth(self.token)
+    }
+
+    pub(super) fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.client.post(url).bearer_auth(self.token)
+    }
+
+    pub(super) fn put(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.client.put(url).bearer_auth(self.token)
+    }
+
+    pub(super) fn patch(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.client.patch(url).bearer_auth(self.token)
+    }
+
+    pub(super) fn delete(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        self.client.delete(url).bearer_auth(self.token)
+    }
+}
+
 impl OAuthSession {
     pub(crate) fn new(
         tokens: OAuthTokens,
@@ -89,11 +119,6 @@ impl OAuthSession {
             provider_label,
             sleeper: Arc::new(|delay| Box::pin(tokio::time::sleep(delay))),
         }
-    }
-
-    /// The shared HTTP client requests go out on.
-    pub(crate) fn client(&self) -> &reqwest::Client {
-        &self.client
     }
 
     /// The current access token, refreshing if it's expired or about to expire.
@@ -166,20 +191,26 @@ impl OAuthSession {
         build_request: &F,
     ) -> Result<reqwest::Response, CloudHomeError>
     where
-        F: Fn(&str) -> reqwest::RequestBuilder,
+        F: for<'request> Fn(OAuthRequest<'request>) -> reqwest::RequestBuilder,
     {
         let token = self.access_token().await?;
-        let resp = build_request(&token)
-            .send()
-            .await
-            .map_err(|e| CloudHomeError::Transport(format!("request failed: {e}")))?;
+        let resp = build_request(OAuthRequest {
+            client: &self.client,
+            token: &token,
+        })
+        .send()
+        .await
+        .map_err(|e| CloudHomeError::Transport(format!("request failed: {e}")))?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
             let new_token = self.refresh().await?;
-            build_request(&new_token)
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Transport(format!("retry request failed: {e}")))
+            build_request(OAuthRequest {
+                client: &self.client,
+                token: &new_token,
+            })
+            .send()
+            .await
+            .map_err(|e| CloudHomeError::Transport(format!("retry request failed: {e}")))
         } else {
             Ok(resp)
         }
@@ -195,12 +226,12 @@ impl OAuthSession {
     /// success mutates non-idempotent server state (resumable upload parts) must
     /// not come through here; see
     /// [`api_call_no_transient_retry`](Self::api_call_no_transient_retry).
-    pub(crate) async fn api_call<F>(
+    pub(super) async fn api_call<F>(
         &self,
         build_request: F,
     ) -> Result<reqwest::Response, CloudHomeError>
     where
-        F: Fn(&str) -> reqwest::RequestBuilder,
+        F: for<'request> Fn(OAuthRequest<'request>) -> reqwest::RequestBuilder,
     {
         let mut attempt = 0u32;
         loop {
@@ -228,14 +259,58 @@ impl OAuthSession {
     /// response collides with that advanced offset; the recovery is to re-run the
     /// whole upload from the source, which the blob engine does when this call's
     /// error surfaces. Still refreshes and retries once on a 401.
-    pub(crate) async fn api_call_no_transient_retry<F>(
+    pub(super) async fn api_call_no_transient_retry<F>(
         &self,
         build_request: F,
     ) -> Result<reqwest::Response, CloudHomeError>
     where
-        F: Fn(&str) -> reqwest::RequestBuilder,
+        F: for<'request> Fn(OAuthRequest<'request>) -> reqwest::RequestBuilder,
     {
         self.send_with_refresh(&build_request).await
+    }
+
+    pub(super) fn range_put_uploader(
+        &self,
+        session_url: String,
+        intermediate_status: u16,
+        total: u64,
+        part_size: usize,
+        key: String,
+        classify: super::resumable::ClassifyWrite,
+        cancellation_succeeded: super::resumable::CancellationSucceeded,
+    ) -> super::resumable::RangePutUploader {
+        super::resumable::RangePutUploader::new(
+            self.client.clone(),
+            session_url,
+            intermediate_status,
+            total,
+            part_size,
+            key,
+            classify,
+            cancellation_succeeded,
+        )
+    }
+
+    pub(super) fn range_put_sink(
+        &self,
+        session_url: String,
+        intermediate_status: u16,
+        total: u64,
+        part_size: usize,
+        key: String,
+        classify: super::resumable::ClassifyWrite,
+        cancellation_succeeded: super::resumable::CancellationSucceeded,
+    ) -> super::resumable::RangePutSink {
+        super::resumable::RangePutSink::new(
+            self.client.clone(),
+            session_url,
+            intermediate_status,
+            total,
+            part_size,
+            key,
+            classify,
+            cancellation_succeeded,
+        )
     }
 
     /// The wait before the next retry: a server-supplied `Retry-After` when
@@ -337,7 +412,7 @@ mod tests {
         let session = retry_test_session(sleeper);
 
         let resp = session
-            .api_call(|token| session.client().get(&url).bearer_auth(token))
+            .api_call(|oauth| oauth.get(&url))
             .await
             .expect("call succeeds after the 429 clears");
 
@@ -358,7 +433,7 @@ mod tests {
         let session = retry_test_session(sleeper);
 
         let resp = session
-            .api_call(|token| session.client().get(&url).bearer_auth(token))
+            .api_call(|oauth| oauth.get(&url))
             .await
             .expect("the exhausted response returns for the caller to fail on");
 
@@ -384,7 +459,7 @@ mod tests {
         let session = retry_test_session(sleeper);
 
         let resp = session
-            .api_call(|token| session.client().get(&url).bearer_auth(token))
+            .api_call(|oauth| oauth.get(&url))
             .await
             .expect("a 400 returns unchanged");
 

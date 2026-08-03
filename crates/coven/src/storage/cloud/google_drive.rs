@@ -16,7 +16,7 @@ use super::oauth_rest::{
     ListPage, OAuthRestHome, PageTokenTracker,
 };
 use super::oauth_session::OAuthSession;
-use super::resumable::{RangePutSink, RangePutUploader};
+use super::resumable::RangePutSink;
 use super::{
     sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
     CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PhysicalObjectLocator,
@@ -193,11 +193,6 @@ impl GoogleDriveCloudHome {
         }
     }
 
-    /// The Drive HTTP client (shared, owned by the session).
-    fn client(&self) -> &reqwest::Client {
-        self.session.client()
-    }
-
     /// Find a file's Google Drive ID by name within our folder.
     async fn find_file_id(&self, encoded_name: &str) -> Result<Option<String>, CloudHomeError> {
         let files = self.list_file_identities(encoded_name).await?;
@@ -215,24 +210,23 @@ impl GoogleDriveCloudHome {
 
         loop {
             let page = page_token.clone();
-            let resp = self
-                .session
-                .api_call(|token| {
-                    let mut req =
-                        supports_all_drives(self.client().get(format!("{}/files", self.drive_api)))
-                            .bearer_auth(token)
-                            .query(&[
-                                ("q", query.as_str()),
-                                ("fields", "nextPageToken,files(id,appProperties)"),
-                                ("pageSize", "1000"),
-                                ("includeItemsFromAllDrives", "true"),
-                            ]);
-                    if let Some(ref page) = page {
-                        req = req.query(&[("pageToken", page.as_str())]);
-                    }
-                    req
-                })
-                .await?;
+            let resp =
+                self.session
+                    .api_call(|oauth| {
+                        let mut req =
+                            supports_all_drives(oauth.get(format!("{}/files", self.drive_api)))
+                                .query(&[
+                                    ("q", query.as_str()),
+                                    ("fields", "nextPageToken,files(id,appProperties)"),
+                                    ("pageSize", "1000"),
+                                    ("includeItemsFromAllDrives", "true"),
+                                ]);
+                        if let Some(ref page) = page {
+                            req = req.query(&[("pageToken", page.as_str())]);
+                        }
+                        req
+                    })
+                    .await?;
             let resp = ensure_ok(resp, "list files", NotFound::Status).await?;
             let json: serde_json::Value = ok_json(resp, "parse list response").await?;
             files.extend(parse_drive_file_identities(&json)?);
@@ -255,9 +249,8 @@ impl GoogleDriveCloudHome {
         let metadata = create_file_metadata_body(encoded, &self.folder_id, &create_token);
         let resp = self
             .session
-            .api_call(|token| {
-                supports_all_drives(self.client().post(format!("{}/files", self.drive_api)))
-                    .bearer_auth(token)
+            .api_call(|oauth| {
+                supports_all_drives(oauth.post(format!("{}/files", self.drive_api)))
                     .query(&[("fields", "id")])
                     .header("Content-Type", "application/json; charset=UTF-8")
                     .body(metadata.clone())
@@ -342,15 +335,13 @@ impl GoogleDriveCloudHome {
         let query = find_created_file_query(&self.folder_id, encoded_name, create_token);
         let resp = self
             .session
-            .api_call(|token| {
-                supports_all_drives(self.client().get(format!("{}/files", self.drive_api)))
-                    .bearer_auth(token)
-                    .query(&[
-                        ("q", query.as_str()),
-                        ("fields", "files(id)"),
-                        ("pageSize", "1"),
-                        ("includeItemsFromAllDrives", "true"),
-                    ])
+            .api_call(|oauth| {
+                supports_all_drives(oauth.get(format!("{}/files", self.drive_api))).query(&[
+                    ("q", query.as_str()),
+                    ("fields", "files(id)"),
+                    ("pageSize", "1"),
+                    ("includeItemsFromAllDrives", "true"),
+                ])
             })
             .await?;
         let resp = ensure_ok(resp, "list created files", NotFound::Status).await?;
@@ -371,12 +362,11 @@ impl GoogleDriveCloudHome {
     ) -> Result<(), CloudHomeError> {
         let resp = self
             .session
-            .api_call(|token| {
-                supports_all_drives(self.client().patch(format!(
+            .api_call(|oauth| {
+                supports_all_drives(oauth.patch(format!(
                     "{}/files/{}?uploadType=media",
                     self.upload_api, file_id
                 )))
-                .bearer_auth(token)
                 .header("Content-Type", "application/octet-stream")
                 .body(body.clone())
             })
@@ -418,12 +408,8 @@ impl GoogleDriveCloudHome {
     async fn delete_created_file(&self, key: &str, file_id: &str) -> Result<(), CloudHomeError> {
         let resp = self
             .session
-            .api_call(|token| {
-                supports_all_drives(
-                    self.client()
-                        .delete(format!("{}/files/{}", self.drive_api, file_id)),
-                )
-                .bearer_auth(token)
+            .api_call(|oauth| {
+                supports_all_drives(oauth.delete(format!("{}/files/{}", self.drive_api, file_id)))
             })
             .await?;
         let status = resp.status();
@@ -439,10 +425,9 @@ impl GoogleDriveCloudHome {
     async fn generate_file_id(&self, key: &str) -> Result<String, CloudHomeError> {
         let response = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .get(format!("{}/files/generateIds", self.drive_api))
-                    .bearer_auth(token)
                     .query(&[("count", "1"), ("space", "drive"), ("type", "files")])
             })
             .await?;
@@ -473,12 +458,10 @@ impl GoogleDriveCloudHome {
     ) -> Result<DriveAppendAttemptState, CloudHomeError> {
         let response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{}", self.drive_api, attempt.file_id)),
+                    oauth.get(format!("{}/files/{}", self.drive_api, attempt.file_id)),
                 )
-                .bearer_auth(token)
                 .query(&[("fields", "id,appProperties,trashed")])
             })
             .await?;
@@ -548,13 +531,9 @@ impl GoogleDriveCloudHome {
         let file_id = self.validate_slot(slot)?;
         let response = self
             .session
-            .api_call(|token| {
-                supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{file_id}", self.drive_api)),
-                )
-                .bearer_auth(token)
-                .query(&[("fields", "id,name,parents,trashed,appProperties")])
+            .api_call(|oauth| {
+                supports_all_drives(oauth.get(format!("{}/files/{file_id}", self.drive_api)))
+                    .query(&[("fields", "id,name,parents,trashed,appProperties")])
             })
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -641,12 +620,11 @@ impl GoogleDriveCloudHome {
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let response = match self
             .session
-            .api_call(|token| {
-                supports_all_drives(self.client().post(format!(
+            .api_call(|oauth| {
+                supports_all_drives(oauth.post(format!(
                     "{}/files?uploadType=multipart&fields=id",
                     self.upload_api
                 )))
-                .bearer_auth(token)
                 .header(
                     "Content-Type",
                     format!("multipart/related; boundary={boundary}"),
@@ -689,9 +667,8 @@ impl GoogleDriveCloudHome {
         let url = format!("{}/files/{}?uploadType=resumable", self.upload_api, file_id);
         let resp = self
             .session
-            .api_call(|token| {
-                supports_all_drives(self.client().patch(&url))
-                    .bearer_auth(token)
+            .api_call(|oauth| {
+                supports_all_drives(oauth.patch(&url))
                     .header("Content-Type", "application/json; charset=UTF-8")
                     .body("{}")
             })
@@ -733,12 +710,11 @@ impl GoogleDriveCloudHome {
         });
         let response = self
             .session
-            .api_call(|token| {
-                supports_all_drives(self.client().post(format!(
+            .api_call(|oauth| {
+                supports_all_drives(oauth.post(format!(
                     "{}/files?uploadType=resumable&fields=id",
                     self.upload_api
                 )))
-                .bearer_auth(token)
                 .json(&metadata)
             })
             .await?;
@@ -954,13 +930,10 @@ impl OAuthRestHome for GoogleDriveCloudHome {
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
         let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
-            .api_call(|token| {
-                let mut req = supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{}", self.drive_api, file_id)),
-                )
-                .bearer_auth(token)
-                .query(&[("alt", "media")]);
+            .api_call(|oauth| {
+                let mut req =
+                    supports_all_drives(oauth.get(format!("{}/files/{}", self.drive_api, file_id)))
+                        .query(&[("alt", "media")]);
                 if let Some(ref range) = range {
                     req = req.header("Range", range);
                 }
@@ -977,12 +950,8 @@ impl OAuthRestHome for GoogleDriveCloudHome {
             .await?
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
         self.session
-            .api_call(|token| {
-                supports_all_drives(
-                    self.client()
-                        .delete(format!("{}/files/{}", self.drive_api, file_id)),
-                )
-                .bearer_auth(token)
+            .api_call(|oauth| {
+                supports_all_drives(oauth.delete(format!("{}/files/{}", self.drive_api, file_id)))
             })
             .await
     }
@@ -995,16 +964,14 @@ impl OAuthRestHome for GoogleDriveCloudHome {
         let query = list_file_query(&self.folder_id, prefix);
         let page = cursor.map(str::to_string);
         self.session
-            .api_call(|token| {
-                let mut req =
-                    supports_all_drives(self.client().get(format!("{}/files", self.drive_api)))
-                        .bearer_auth(token)
-                        .query(&[
-                            ("q", query.as_str()),
-                            ("fields", "nextPageToken,files(name)"),
-                            ("pageSize", "1000"),
-                            ("includeItemsFromAllDrives", "true"),
-                        ]);
+            .api_call(|oauth| {
+                let mut req = supports_all_drives(oauth.get(format!("{}/files", self.drive_api)))
+                    .query(&[
+                        ("q", query.as_str()),
+                        ("fields", "nextPageToken,files(name)"),
+                        ("pageSize", "1000"),
+                        ("includeItemsFromAllDrives", "true"),
+                    ]);
                 if let Some(ref pt) = page {
                     req = req.query(&[("pageToken", pt.as_str())]);
                 }
@@ -1069,8 +1036,7 @@ impl GoogleDriveCloudHome {
         let classify = Box::new(move |status, response: &str| {
             classify_write_error(status, response, &key, "create exact")
         });
-        let mut uploader = RangePutUploader::new(
-            self.client().clone(),
+        let mut uploader = self.session.range_put_uploader(
             session_url,
             308,
             body.len(),
@@ -1134,13 +1100,10 @@ impl GoogleDriveCloudHome {
         let file_id = self.validate_slot(slot)?.to_string();
         let response = self
             .session
-            .api_call(|token| {
-                let request = supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{file_id}", self.drive_api)),
-                )
-                .bearer_auth(token)
-                .query(&[("alt", "media")]);
+            .api_call(|oauth| {
+                let request =
+                    supports_all_drives(oauth.get(format!("{}/files/{file_id}", self.drive_api)))
+                        .query(&[("alt", "media")]);
                 match range {
                     Some(range) => request.header("Range", range),
                     None => request,
@@ -1252,8 +1215,7 @@ impl CloudHome for GoogleDriveCloudHome {
         let classify =
             Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
         // Drive returns 308 Resume Incomplete for every non-final part.
-        let inner = RangePutSink::new(
-            self.client().clone(),
+        let inner = self.session.range_put_sink(
             session_url,
             308,
             total_len,
@@ -1354,12 +1316,11 @@ impl CloudHome for GoogleDriveCloudHome {
                 });
                 let resp = self
                     .session
-                    .api_call(|token| {
-                        supports_all_drives(self.client().post(format!(
+                    .api_call(|oauth| {
+                        supports_all_drives(oauth.post(format!(
                             "{}/files/{}/permissions",
                             self.drive_api, self.folder_id
                         )))
-                        .bearer_auth(token)
                         .json(&permission)
                     })
                     .await?;
@@ -1418,12 +1379,10 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
         }
         let folder_response = self
             .session
-            .api_call(|token| {
+            .api_call(|oauth| {
                 supports_all_drives(
-                    self.client()
-                        .get(format!("{}/files/{}", self.drive_api, self.folder_id)),
+                    oauth.get(format!("{}/files/{}", self.drive_api, self.folder_id)),
                 )
-                .bearer_auth(token)
                 .query(&[("fields", "id,driveId")])
             })
             .await?;
@@ -1460,10 +1419,9 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
 
         let about_response = self
             .session
-            .api_call(|token| {
-                self.client()
+            .api_call(|oauth| {
+                oauth
                     .get(format!("{}/about", self.drive_api))
-                    .bearer_auth(token)
                     .query(&[("fields", "user(permissionId)")])
             })
             .await?;
