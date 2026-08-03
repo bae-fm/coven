@@ -28,14 +28,13 @@ ANALYZER_LOG_PATH = ARTIFACT_DIR / "rust-analyzer.log"
 DECISIONS_PATH = Path(__file__).resolve().parent / "decisions.toml"
 CACHE_DIR = ARTIFACT_DIR / "cache"
 CACHE_SCHEMA = 2
-SEMANTIC_CACHE_SCHEMA = 3
+SEMANTIC_CACHE_SCHEMA = 4
 CACHE_CHECKPOINT_INTERVAL = 100
 
 SEMANTIC_DECLARATION_KINDS = {
     "CONST",
     "ENUM",
     "EXTERN_BLOCK",
-    "IMPL",
     "MACRO_RULES",
     "MODULE",
     "STATIC",
@@ -571,6 +570,32 @@ def semantic_range_surface(
     return re.sub(rb"\s+", b" ", bytes(output)).strip()
 
 
+def enclosing_declaration_context(
+    source_file: SourceFile,
+    index: int,
+) -> str | None:
+    for ancestor_index, ancestor in ancestors(source_file, index):
+        if ancestor.kind not in {"IMPL", "TRAIT"}:
+            continue
+        body = next(
+            (
+                source_file.nodes[child]
+                for child in ancestor.children
+                if source_file.nodes[child].kind
+                in {"ASSOC_ITEM_LIST", "ITEM_LIST"}
+            ),
+            None,
+        )
+        end = ancestor.end if body is None else body.start
+        return semantic_range_surface(
+            source_file,
+            ancestor.start,
+            end,
+            [],
+        ).decode()
+    return None
+
+
 def semantic_identifiers(source: bytes) -> set[str]:
     return {
         value.decode().removeprefix("r#")
@@ -624,6 +649,8 @@ def semantic_declaration_surfaces(
                     )
                 )
             rendered = surface.decode()
+            if context := enclosing_declaration_context(source_file, index):
+                rendered = f"{context} {rendered}"
             references = {
                 source_file.text(candidate).removeprefix("r#")
                 for _, candidate in descendants(source_file, index)
@@ -723,6 +750,8 @@ def semantic_entry_source_fingerprint(
     )
     digest.update(b"\0symbol\0")
     digest.update(record["symbol"].encode())
+    digest.update(b"\0declaration-context\0")
+    digest.update((record.get("declaration_context") or "").encode())
     digest.update(b"\0callable\0")
     callable_source = source_file.data[start:end]
     digest.update(callable_source)
@@ -852,6 +881,7 @@ def semantic_callable_candidate_surfaces(
                 "signature": record["signature"],
                 "receiver": record.get("receiver_type"),
                 "cfg": record.get("cfg", []),
+                "declaration_context": record.get("declaration_context"),
             }
         )
     for candidates in surfaces.values():
@@ -2162,6 +2192,11 @@ def inventory_file(
                 "crate": crate,
                 "module": "::".join([crate, *modules]),
                 "receiver_type": owner,
+                "declaration_context": (
+                    enclosing_declaration_context(source_file, index)
+                    if named
+                    else None
+                ),
                 "enclosing_callable": index_to_symbol.get(parent_callable),
                 "semantic_parent": index_to_symbol.get(semantic_parent),
                 "binding": binding,

@@ -1209,6 +1209,112 @@ class SemanticCacheTests(unittest.TestCase):
 
         self.assertEqual(baseline, moved)
 
+    def test_unrelated_impl_header_does_not_invalidate_type_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "crates" / "sample" / "src"
+            caller_path = source_root / "caller.rs"
+            model_path = source_root / "model.rs"
+            impl_path = source_root / "implementation.rs"
+            source_root.mkdir(parents=True)
+            caller_path.write_text(
+                "fn caller(value: &Wrapper<Stable>) { same_target(); }\n"
+            )
+            model_path.write_text(
+                "struct Stable;\n"
+                "struct Wrapper<T>(T);\n"
+            )
+
+            def fingerprint(implementation: str) -> str:
+                impl_path.write_text(implementation)
+                source_files = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (caller_path, model_path, impl_path)
+                }
+                records = [
+                    record
+                    for source_file in source_files.values()
+                    for record in ownership_audit.inventory_file(source_file)
+                ]
+                caller = next(
+                    record for record in records if record["name"] == "caller"
+                )
+                return ownership_audit.semantic_entry_source_fingerprints(
+                    records,
+                    records,
+                    source_files,
+                    ownership_audit.semantic_declaration_surfaces(source_files),
+                )[caller["symbol"]]
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = fingerprint(
+                    "trait First {}\n"
+                    "impl<T> First for Wrapper<T> {}\n"
+                )
+                changed = fingerprint(
+                    "trait Second {}\n"
+                    "impl<T> Second for Wrapper<T> {}\n"
+                )
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(baseline, changed)
+
+    def test_impl_header_change_invalidates_its_method_and_callers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "crates" / "sample" / "src"
+            caller_path = source_root / "caller.rs"
+            model_path = source_root / "model.rs"
+            source_root.mkdir(parents=True)
+            caller_path.write_text(
+                "fn caller(value: &Wrapper) { value.run(); }\n"
+                "fn stable() { same_target(); }\n"
+            )
+
+            def fingerprints(trait_name: str) -> dict[str, str]:
+                model_path.write_text(
+                    "trait First {}\n"
+                    "trait Second {}\n"
+                    "struct Wrapper;\n"
+                    f"impl {trait_name} for Wrapper {{ fn run(&self) {{}} }}\n"
+                )
+                source_files = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (caller_path, model_path)
+                }
+                records = [
+                    record
+                    for source_file in source_files.values()
+                    for record in ownership_audit.inventory_file(source_file)
+                ]
+                source_fingerprints = (
+                    ownership_audit.semantic_entry_source_fingerprints(
+                        records,
+                        records,
+                        source_files,
+                        ownership_audit.semantic_declaration_surfaces(source_files),
+                    )
+                )
+                return {
+                    record["name"]: source_fingerprints[record["symbol"]]
+                    for record in records
+                }
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = fingerprints("First")
+                changed = fingerprints("Second")
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertNotEqual(baseline["run"], changed["run"])
+        self.assertNotEqual(baseline["caller"], changed["caller"])
+        self.assertEqual(baseline["stable"], changed["stable"])
+
     def test_semantic_cache_invalidates_only_the_callable_whose_body_changed(self):
         def fingerprints(root: Path, path: Path, source: str):
             source_file = ownership_audit.parse_source(path, source)
