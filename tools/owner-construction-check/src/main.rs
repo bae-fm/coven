@@ -451,7 +451,7 @@ fn check(
             Vec::new()
         },
         service_returns: if check_retained_service_returns {
-            find_service_return_violations(&files, &retained_services)
+            find_service_return_violations(&files, &retained_services, RETAINED_SERVICE_ROOT_TYPES)
         } else {
             Vec::new()
         },
@@ -871,13 +871,28 @@ fn collect_root_retained_types(
 fn find_service_return_violations(
     files: &[RustFile],
     retained_services: &BTreeSet<String>,
+    root_types: &[&str],
 ) -> Vec<ServiceReturnViolation> {
+    let returned_services = retained_services
+        .iter()
+        .filter(|service| {
+            !root_types.contains(&service.as_str())
+                && !OPERATION_SCOPED_OWNER_TYPES.contains(&service.as_str())
+                && !CAPABILITY_TYPES.contains(&service.as_str())
+                && !service.ends_with("Inner")
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut violations = BTreeSet::new();
     for file in files {
+        if is_test_source(&file.relative_path) {
+            continue;
+        }
         find_service_returns_in_items(
             &file.relative_path,
             &file.syntax.items,
             retained_services,
+            &returned_services,
             &mut violations,
         );
     }
@@ -887,44 +902,65 @@ fn find_service_return_violations(
 fn find_service_returns_in_items(
     path: &str,
     items: &[syn::Item],
-    retained_services: &BTreeSet<String>,
+    retained_owners: &BTreeSet<String>,
+    returned_services: &BTreeSet<String>,
     violations: &mut BTreeSet<ServiceReturnViolation>,
 ) {
     for item in items {
         match item {
             syn::Item::Impl(item) => {
+                if is_test_only(&item.attrs) {
+                    continue;
+                }
                 let owner = type_name(&item.self_ty).unwrap_or_else(|| "<impl>".to_string());
+                if !retained_owners.contains(&owner) {
+                    continue;
+                }
                 for impl_item in &item.items {
                     let syn::ImplItem::Fn(method) = impl_item else {
                         continue;
                     };
+                    if is_test_only(&method.attrs) {
+                        continue;
+                    }
+                    if !visibility_crosses_owner(&method.vis) {
+                        continue;
+                    }
                     record_service_returns(
                         path,
                         &owner,
                         &method.sig.ident.to_string(),
                         &method.sig.output,
                         method.sig.ident.span(),
-                        retained_services,
+                        returned_services,
                         violations,
                     );
                 }
             }
-            syn::Item::Fn(item) => record_service_returns(
-                path,
-                "<free>",
-                &item.sig.ident.to_string(),
-                &item.sig.output,
-                item.sig.ident.span(),
-                retained_services,
-                violations,
-            ),
             syn::Item::Mod(item) => {
+                if is_test_only(&item.attrs) {
+                    continue;
+                }
                 if let Some((_, items)) = &item.content {
-                    find_service_returns_in_items(path, items, retained_services, violations);
+                    find_service_returns_in_items(
+                        path,
+                        items,
+                        retained_owners,
+                        returned_services,
+                        violations,
+                    );
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn visibility_crosses_owner(visibility: &syn::Visibility) -> bool {
+    match visibility {
+        syn::Visibility::Inherited => false,
+        syn::Visibility::Restricted(restricted) => !restricted.path.is_ident("self"),
+        syn::Visibility::Public(_) => true,
     }
 }
 
@@ -1642,7 +1678,7 @@ mod tests {
             struct CovenHandle { sync: StoreSync, blobs: StoreBlobAccess }
 
             impl StoreSync {
-                fn blob_access(&self) -> Result<Option<Arc<StoreBlobAccess>>, Error> {
+                pub(crate) fn blob_access(&self) -> Result<Option<Arc<StoreBlobAccess>>, Error> {
                     todo!()
                 }
             }
@@ -1657,7 +1693,8 @@ mod tests {
         let owners = infer_owners(&declared_types);
         let retained_services =
             collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
-        let violations = find_service_return_violations(&files, &retained_services);
+        let violations =
+            find_service_return_violations(&files, &retained_services, &["CovenHandle"]);
 
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].owner, "StoreSync");
@@ -1673,6 +1710,7 @@ mod tests {
             struct StoreSync { database: Database }
             struct CovenHandle { sync: StoreSync, blobs: StoreBlobAccess }
             struct AuthorizedWrite;
+            struct Prepared;
 
             impl StoreBlobAccess {
                 fn new(database: Database) -> Self { Self { database } }
@@ -1680,6 +1718,10 @@ mod tests {
 
             impl StoreSync {
                 fn authorize(&self) -> AuthorizedWrite { AuthorizedWrite }
+            }
+
+            impl Prepared {
+                pub(crate) fn initialize(self) -> StoreBlobAccess { todo!() }
             }
             "#,
         )
@@ -1693,7 +1735,50 @@ mod tests {
         let retained_services =
             collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
 
-        assert!(find_service_return_violations(&files, &retained_services).is_empty());
+        assert!(
+            find_service_return_violations(&files, &retained_services, &["CovenHandle"]).is_empty()
+        );
+    }
+
+    #[test]
+    fn dependency_values_root_results_and_test_fixtures_are_not_child_service_leaks() {
+        let production = syn::parse_file(
+            r#"
+            struct EncryptionService;
+            struct Child { encryption: EncryptionService }
+            struct Root { child: Child }
+            struct Builder;
+
+            impl Child {
+                fn derived_encryption(&self) -> EncryptionService { EncryptionService }
+            }
+            impl Builder {
+                fn open() -> Root { todo!() }
+            }
+            "#,
+        )
+        .expect("parse production fixture");
+        let tests = syn::parse_file(
+            r#"
+            fn child_fixture() -> Child { todo!() }
+            "#,
+        )
+        .expect("parse test fixture");
+        let files = vec![
+            RustFile {
+                relative_path: "crates/coven/src/lib.rs".to_string(),
+                syntax: production,
+            },
+            RustFile {
+                relative_path: "crates/coven/tests/fixture.rs".to_string(),
+                syntax: tests,
+            },
+        ];
+        let declared_types = collect_declared_types(&files);
+        let owners = infer_owners(&declared_types);
+        let retained_services = collect_root_retained_types(&declared_types, &owners, &["Root"]);
+
+        assert!(find_service_return_violations(&files, &retained_services, &["Root"]).is_empty());
     }
 
     #[test]
