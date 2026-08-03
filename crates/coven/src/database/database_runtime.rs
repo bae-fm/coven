@@ -1,32 +1,6 @@
 use super::*;
 
 impl Database {
-    pub(crate) fn store_connection(&self) -> crate::database::StoreDatabaseConnection {
-        crate::database::StoreDatabaseConnection::new(self.connection.clone())
-    }
-
-    pub(crate) fn id_provider_ref(&self) -> crate::id_provider::IdRef {
-        self.state.ids.clone()
-    }
-
-    pub(crate) fn write_status_senders(
-        &self,
-    ) -> Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>> {
-        self.state.write_statuses.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn store_test_access(&self) -> StoreDatabaseTestAccess {
-        StoreDatabaseTestAccess {
-            pause_points: self.state.test_pause_points.clone(),
-            merge_materialization_failure: self.state.merge_materialization_failure.clone(),
-        }
-    }
-
-    pub(crate) fn store_runtime(&self) -> crate::database::StoreDatabaseRuntime {
-        self.state.store_runtime.clone()
-    }
-
     #[cfg(test)]
     #[doc(hidden)]
     pub(crate) fn arm_test_pause(
@@ -204,62 +178,32 @@ impl Database {
         })
     }
 
-    /// The host's declared synced-table set, the single owner of which tables
-    /// participate in changeset sync. Each journaled write's capture session
-    /// attaches exactly these, the register-clock seed scanned these, and the
-    /// gate/apply operate over these — so the sync layer reads the set from here
-    /// instead of carrying a separately-passed copy that could silently diverge.
+    #[cfg(test)]
     pub(crate) fn synced_tables(&self) -> &[SyncedTable] {
         &self.state.synced_tables
     }
 
-    /// The host's blob-tombstone convergence window. The tombstone GC ages each
-    /// tombstone's `deleted_at` against this to decide when a deleted blob may be
-    /// erased. Fixed for this handle's life.
-    pub(crate) fn blob_tombstone_grace(&self) -> chrono::Duration {
-        self.state.blob_tombstone_grace
-    }
-
-    /// How many blob transfers each transfer loop may run at once. Read by the
-    /// upload drain and the pin loop
-    /// ([`crate::sync::store::blob::StoreBlobCache::pin`]). Fixed for this handle's life.
-    pub(crate) fn transfer_limits(&self) -> crate::blob::TransferLimits {
-        self.state.transfer_limits
-    }
-
-    /// The gate model resolved from the final synced table set and live schema at
-    /// open. Fixed for this handle's life.
-    #[doc(hidden)]
+    #[cfg(test)]
     pub(crate) fn gates(&self) -> Arc<Gates> {
         self.state.gates.clone()
     }
 
-    /// Blob declarations resolved from the final synced table set and live schema at
-    /// open. Fixed for this handle's life.
-    #[doc(hidden)]
+    #[cfg(test)]
     pub(crate) fn blob_decls(&self) -> Arc<BlobDecls> {
         self.state.blob_decls.clone()
     }
 
-    /// The applied synced-schema version — `PRAGMA user_version` after the
-    /// migration ladder ran at open. This is the single source of the wire
-    /// `schema_version`: every outgoing changeset is stamped with it, the pull
-    /// gates compare incoming changesets and the min-floor against it, and the
-    /// snapshot meta carries it. A device cannot stamp a version it has not
-    /// migrated to. Cached because migrations run only at open, so the value is
-    /// fixed for the handle's life.
+    #[cfg(test)]
     pub(crate) fn schema_version(&self) -> u32 {
         self.state.schema_version
     }
 
-    /// Hash of the declarations and live schema shape that decide row routing
-    /// and confidentiality for this Store.
+    #[cfg(test)]
     pub(crate) fn sync_routing_hash(&self) -> ObjectHash {
         self.state.sync_routing_hash
     }
 
-    /// The shared register clock. coven's sync layer records pulled rows as its
-    /// floor and stamps envelopes off it; it is the same `Arc<Hlc>` the stamper wraps.
+    #[cfg(test)]
     pub(crate) fn hlc(&self) -> Arc<Hlc> {
         self.state.hlc.clone()
     }

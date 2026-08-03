@@ -225,9 +225,9 @@ pub(crate) use store::{
     RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
     RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
     SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotPublicationPermit,
-    StoreDatabase, StoreDatabaseConnection, StoreDatabaseRuntime, StoreReclaimJournalError,
-    StoreWritePreparation, TableSchema, ValidatedChangeset, VerifiedMergeMaterialization,
-    VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
+    StoreDatabase, StoreDatabaseRuntime, StoreReclaimJournalError, StoreWritePreparation,
+    TableSchema, ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+    WinningRow, GENERATION_ZERO,
 };
 #[cfg(test)]
 pub(crate) use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};

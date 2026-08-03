@@ -189,10 +189,10 @@ pub(crate) struct SnapshotPublicationPermit {
 }
 
 #[derive(Clone)]
-pub(crate) struct StoreDatabaseConnection(crate::database::DatabaseConnection);
+struct StoreDatabaseConnection(crate::database::DatabaseConnection);
 
 impl StoreDatabaseConnection {
-    pub(crate) fn new(connection: crate::database::DatabaseConnection) -> Self {
+    fn new(connection: crate::database::DatabaseConnection) -> Self {
         Self(connection)
     }
 
@@ -233,22 +233,25 @@ pub(crate) struct StoreDatabase {
 impl StoreDatabase {
     #[doc(hidden)]
     pub(crate) fn from_database(database: Database) -> Self {
-        let runtime = database.store_runtime();
+        let Database { connection, state } = database;
         Self {
-            connection: database.store_connection(),
-            runtime,
-            hlc: database.hlc(),
-            synced_tables: std::sync::Arc::new(database.synced_tables().to_vec()),
-            schema_version: database.schema_version(),
-            sync_routing_hash: database.sync_routing_hash(),
-            gates: database.gates(),
-            blob_decls: database.blob_decls(),
-            blob_tombstone_grace: database.blob_tombstone_grace(),
-            transfer_limits: database.transfer_limits(),
-            ids: database.id_provider_ref(),
-            write_statuses: database.write_status_senders(),
+            connection: StoreDatabaseConnection::new(connection),
+            runtime: state.store_runtime,
+            hlc: state.hlc,
+            synced_tables: state.synced_tables,
+            schema_version: state.schema_version,
+            sync_routing_hash: state.sync_routing_hash,
+            gates: state.gates,
+            blob_decls: state.blob_decls,
+            blob_tombstone_grace: state.blob_tombstone_grace,
+            transfer_limits: state.transfer_limits,
+            ids: state.ids,
+            write_statuses: state.write_statuses,
             #[cfg(test)]
-            test_access: database.store_test_access(),
+            test_access: crate::database::StoreDatabaseTestAccess {
+                pause_points: state.test_pause_points,
+                merge_materialization_failure: state.merge_materialization_failure,
+            },
         }
     }
 
