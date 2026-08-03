@@ -18,7 +18,7 @@ use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::CloudHome;
 use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
-use crate::store_security::{EstablishedStoreIdentity, StoreSecurity};
+use crate::store_security::StoreSecurity;
 use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
@@ -279,11 +279,7 @@ impl StoreSync {
         }
     }
 
-    async fn connected_command(
-        &self,
-        identity: &EstablishedStoreIdentity,
-        database: StoreDatabase,
-    ) -> Option<Result<StoreCommand, SyncError>> {
+    async fn connected_command(&self) -> Option<Result<StoreCommand, SyncError>> {
         let storage = {
             let connection = self.state.read().expect("read Store sync connection");
             match &*connection {
@@ -291,9 +287,13 @@ impl StoreSync {
                 _ => None,
             }
         }?;
+        let identity = match self.security.established_identity() {
+            Ok(identity) => identity,
+            Err(error) => return Some(Err(error.into())),
+        };
         Some(
             identity
-                .load_store(database, storage)
+                .load_store(self.database.clone(), storage)
                 .await
                 .map(StoreCommand::new)
                 .map_err(SyncError::from),
@@ -402,19 +402,15 @@ impl StoreCommand {
 
     pub(crate) async fn members(
         &self,
-        identity_public_key: &[u8],
     ) -> Result<Vec<crate::protocol::membership::MemberInfo>, crate::sync::store::MembershipOpsError>
     {
-        self.store.members(Some(identity_public_key)).await
+        self.store.members().await
     }
 
     pub(crate) async fn membership_conflict(
         &self,
-        identity_public_key: &[u8],
     ) -> Result<Option<crate::MembershipConflictInfo>, crate::sync::store::MembershipOpsError> {
-        self.store
-            .membership_conflict(Some(identity_public_key))
-            .await
+        self.store.membership_conflict().await
     }
 
     pub(crate) async fn restore_membership(
@@ -1093,14 +1089,8 @@ impl StoreSync {
             .unwrap_or_else(|| self.config())
     }
 
-    pub(crate) async fn command(
-        &self,
-        identity: &EstablishedStoreIdentity,
-    ) -> Result<StoreCommand, SyncError> {
-        if let Some(command) = self
-            .connected_command(identity, self.database.clone())
-            .await
-        {
+    pub(crate) async fn command(&self) -> Result<StoreCommand, SyncError> {
+        if let Some(command) = self.connected_command().await {
             return command;
         }
         let config = self.command_config();
@@ -1115,7 +1105,8 @@ impl StoreSync {
             )
             .await
             .map_err(SyncError::StorageSetup)?;
-        identity
+        self.security
+            .established_identity()?
             .load_store(self.database.clone(), Arc::new(storage))
             .await
             .map(StoreCommand::new)

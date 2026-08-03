@@ -217,7 +217,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         blob_storage,
         owners.local_transitions(),
     );
-    let membership = StoreMembership::new(security, sync);
+    let membership = StoreMembership::new(sync);
 
     let error = membership
         .members()

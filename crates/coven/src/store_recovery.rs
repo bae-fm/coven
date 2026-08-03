@@ -23,12 +23,7 @@ impl StoreRecovery {
             return Err(SyncError::NotConfigured);
         }
         let identity = self.security.established_identity()?;
-        let restore_membership = self
-            .sync
-            .command(&identity)
-            .await?
-            .restore_membership()
-            .await?;
+        let restore_membership = self.sync.command().await?.restore_membership().await?;
         let authority = crate::restoration::RestoreAuthority::ActivatedContinuation(
             identity
                 .export_activated_device_continuation(&self.database)

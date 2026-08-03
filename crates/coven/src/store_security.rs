@@ -14,10 +14,6 @@ pub(crate) struct EstablishedStoreIdentity {
 }
 
 impl EstablishedStoreIdentity {
-    pub(crate) fn public_key(&self) -> [u8; 32] {
-        self.keypair.public_key()
-    }
-
     pub(crate) fn public_key_hex(&self) -> String {
         crate::keys::public_key_hex(&self.keypair)
     }

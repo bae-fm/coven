@@ -309,20 +309,18 @@ impl Store {
     #[doc(hidden)]
     pub(crate) async fn members(
         &self,
-        user_pubkey: Option<&[u8]>,
     ) -> Result<Vec<crate::protocol::membership::MemberInfo>, membership::MembershipOpsError> {
         let authorization = self.authorize().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
                 error.to_string(),
             ))
         })?;
-        authorization.members(user_pubkey)
+        authorization.members(Some(&self.identity.public_key()))
     }
 
     #[doc(hidden)]
     pub(crate) async fn membership_conflict(
         &self,
-        user_pubkey: Option<&[u8]>,
     ) -> Result<
         Option<crate::protocol::membership::MembershipConflictInfo>,
         membership::MembershipOpsError,
@@ -332,7 +330,7 @@ impl Store {
                 error.to_string(),
             ))
         })?;
-        Ok(authorization.membership_conflict(user_pubkey))
+        Ok(authorization.membership_conflict(Some(&self.identity.public_key())))
     }
 
     pub(crate) async fn resolve_membership_conflict(

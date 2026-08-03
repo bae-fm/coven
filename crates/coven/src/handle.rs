@@ -201,7 +201,7 @@ impl CovenHandle {
             ConnectedBlobStorage::new(sync.clone()),
         );
         let blobs = StoreBlobs::new(database.clone(), blob_reads, sync.clone());
-        let membership = StoreMembership::new(security.clone(), sync.clone());
+        let membership = StoreMembership::new(sync.clone());
         let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
         let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());
         let circles = StoreCircles::new(

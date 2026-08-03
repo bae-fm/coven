@@ -378,7 +378,7 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
             .await
             .expect("load Store owner");
     assert!(store
-        .membership_conflict(Some(&fixture.owner.public_key()))
+        .membership_conflict()
         .await
         .expect("read membership conflict")
         .is_none());
@@ -441,7 +441,7 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
         .expect("remove the installed owner anchor");
 
     let error = store
-        .members(Some(&fixture.owner.public_key()))
+        .members()
         .await
         .expect_err("membership reads must not recreate a missing owner anchor");
     assert!(
@@ -478,7 +478,7 @@ async fn store_membership_reads_reject_tampered_founder_state() {
         .expect("tamper with the installed founder state");
 
     let error = store
-        .members(Some(&fixture.owner.public_key()))
+        .members()
         .await
         .expect_err("membership reads must validate installed founder state");
     assert!(

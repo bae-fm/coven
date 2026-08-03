@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::protocol::membership::{MemberInfo, MemberRole};
-use crate::store_security::StoreSecurity;
 use crate::store_sync::{StoreSync, SyncError};
 
 const DEVICE_EXCLUSION_CODE_PREFIX: &str = "coven:device-exclusion:";
@@ -10,15 +9,13 @@ const OWNER_PROMOTION_ACCEPTANCE_CODE_PREFIX: &str = "coven:owner-promotion-acce
 
 #[derive(Clone)]
 pub(crate) struct StoreMembership {
-    security: StoreSecurity,
     sync: StoreSync,
     mutations: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl StoreMembership {
-    pub(crate) fn new(security: StoreSecurity, sync: StoreSync) -> Self {
+    pub(crate) fn new(sync: StoreSync) -> Self {
         Self {
-            security,
             sync,
             mutations: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -28,11 +25,10 @@ impl StoreMembership {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        let identity = self.security.established_identity()?;
         self.sync
-            .command(&identity)
+            .command()
             .await?
-            .members(&identity.public_key())
+            .members()
             .await
             .map_err(SyncError::from)
     }
@@ -43,11 +39,10 @@ impl StoreMembership {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        let identity = self.security.established_identity()?;
         self.sync
-            .command(&identity)
+            .command()
             .await?
-            .membership_conflict(&identity.public_key())
+            .membership_conflict()
             .await
             .map_err(SyncError::from)
     }
