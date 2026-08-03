@@ -38,7 +38,6 @@ mod sharing;
 #[cfg(test)]
 mod test_server;
 
-pub use factory::create_cloud_home;
 pub(crate) use factory::CloudHomeFactory;
 #[cfg(feature = "oauth-providers")]
 pub(crate) use google_drive::{folder_search_query, supports_all_drives};

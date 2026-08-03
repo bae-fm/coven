@@ -116,49 +116,6 @@ enum SyncConnection {
     },
 }
 
-impl SyncConnection {
-    /// The connected cloud's sync, whether or not anything is currently driving
-    /// it. For reads and lookups that only need the connection's own facts.
-    fn cloud_sync(&self) -> Option<Arc<SyncLoopHandle>> {
-        match self {
-            Self::WithCloud { sync, .. } => Some(Arc::clone(sync)),
-            _ => None,
-        }
-    }
-
-    /// The connected cloud's sync, when something is driving it. A connection
-    /// whose loop thread has gone has nothing to carry out the work an operation
-    /// would queue, so it is not driven and every such operation refuses.
-    fn driven_sync(&self) -> Option<Arc<SyncLoopHandle>> {
-        match self {
-            Self::WithCloud { sync, driver, .. } => match driver {
-                SyncDriver::Loop => sync.is_running().then(|| Arc::clone(sync)),
-                #[cfg(any(test, feature = "test-utils"))]
-                SyncDriver::Caller => Some(Arc::clone(sync)),
-            },
-            _ => None,
-        }
-    }
-
-    fn storage(&self) -> Option<Arc<dyn SyncStorage>> {
-        match self {
-            Self::WithCloud { storage, .. } => Some(Arc::clone(storage)),
-            _ => None,
-        }
-    }
-
-    fn is_connected(&self) -> bool {
-        !matches!(self, Self::Disconnected)
-    }
-
-    fn stop(self) -> Result<(), SyncError> {
-        if let Self::WithCloud { sync, .. } = self {
-            sync.stop().map_err(SyncError::Loop)?;
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct StoreSync {
     config_provider: ConfigProvider,
@@ -171,10 +128,13 @@ pub(crate) struct StoreSync {
     open_guard: Arc<StoreOpenGuard>,
     blob_chunking: BlobChunking,
     local_blob_access: LocalStoreBlobAccess,
+    read_only_blob_storage: crate::store_blobs::ReadOnlyBlobStorage,
     local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
-    connection: Arc<RwLock<SyncConnection>>,
+    state: Arc<RwLock<SyncConnection>>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+    #[cfg(test)]
+    stopped_loops: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl StoreSync {
@@ -190,6 +150,7 @@ impl StoreSync {
         open_guard: Arc<StoreOpenGuard>,
         blob_chunking: BlobChunking,
         local_blob_access: LocalStoreBlobAccess,
+        read_only_blob_storage: crate::store_blobs::ReadOnlyBlobStorage,
         local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
     ) -> Self {
         Self {
@@ -203,32 +164,34 @@ impl StoreSync {
             open_guard,
             blob_chunking,
             local_blob_access,
+            read_only_blob_storage,
             local_blob_transitions,
-            connection: Arc::new(RwLock::new(SyncConnection::Disconnected)),
+            state: Arc::new(RwLock::new(SyncConnection::Disconnected)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            #[cfg(test)]
+            stopped_loops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    fn config(&self) -> Config {
-        (self.config_provider)()
-    }
-
-    fn cloud_sync(&self) -> Option<Arc<SyncLoopHandle>> {
-        self.connection.read().unwrap().cloud_sync()
-    }
-
-    fn driven_sync(&self) -> Option<Arc<SyncLoopHandle>> {
-        self.connection.read().unwrap().driven_sync()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cloud_sync_for_test(&self) -> Option<Arc<SyncLoopHandle>> {
-        self.cloud_sync()
-    }
-
-    fn storage(&self) -> Option<Arc<dyn SyncStorage>> {
-        self.connection.read().unwrap().storage()
+    pub(crate) async fn blob_access(&self) -> Result<StoreBlobAccess, BlobCacheError> {
+        let storage = {
+            let connection = self.state.read().expect("read Store sync connection");
+            match &*connection {
+                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
+                _ => None,
+            }
+        };
+        match storage {
+            Some(storage) => Ok(StoreBlobAccess::remote(
+                self.local_blob_access.connect(storage),
+            )),
+            None => self
+                .read_only_blob_storage
+                .access(self.local_blob_access.clone())
+                .await
+                .map_err(Into::into),
+        }
     }
 
     fn install_cloud(
@@ -237,7 +200,7 @@ impl StoreSync {
         storage: Arc<dyn SyncStorage>,
         driver: SyncDriver,
     ) {
-        *self.connection.write().unwrap() = SyncConnection::WithCloud {
+        *self.state.write().expect("write Store sync connection") = SyncConnection::WithCloud {
             sync,
             storage,
             driver,
@@ -245,14 +208,435 @@ impl StoreSync {
     }
 
     fn install_without_cloud(&self) {
-        *self.connection.write().unwrap() = SyncConnection::WithoutCloud;
+        *self.state.write().expect("write Store sync connection") = SyncConnection::WithoutCloud;
     }
 
-    fn take_connection(&self) -> SyncConnection {
-        std::mem::replace(
-            &mut *self.connection.write().unwrap(),
+    fn stop_current(&self) -> Result<bool, SyncError> {
+        let previous = std::mem::replace(
+            &mut *self.state.write().expect("write Store sync connection"),
             SyncConnection::Disconnected,
+        );
+        let was_connected = !matches!(previous, SyncConnection::Disconnected);
+        if let SyncConnection::WithCloud { sync, .. } = previous {
+            sync.stop().map_err(SyncError::Loop)?;
+            #[cfg(test)]
+            self.stopped_loops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(was_connected)
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        !matches!(
+            &*self.state.read().expect("read Store sync connection"),
+            SyncConnection::Disconnected
         )
+    }
+
+    pub(crate) fn trigger(&self) {
+        match self.connected() {
+            Some(connection) => connection.trigger(),
+            None => debug!("sync_now: no cloud connection; sync wake ignored"),
+        }
+    }
+
+    pub(crate) fn is_syncing(&self) -> bool {
+        self.connected()
+            .is_some_and(|connection| connection.is_running())
+    }
+
+    fn has_cloud(&self) -> bool {
+        matches!(
+            &*self.state.read().expect("read Store sync connection"),
+            SyncConnection::WithCloud { .. }
+        )
+    }
+
+    fn connected(&self) -> Option<ConnectedSyncOperation> {
+        let connection = self.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, .. } => Some(ConnectedSyncOperation {
+                loop_handle: Arc::clone(sync),
+            }),
+            _ => None,
+        }
+    }
+
+    fn active(&self) -> Option<ActiveSyncOperation> {
+        let connection = self.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, driver, .. } => {
+                let driven = match driver {
+                    SyncDriver::Loop => sync.is_running(),
+                    #[cfg(any(test, feature = "test-utils"))]
+                    SyncDriver::Caller => true,
+                };
+                driven.then(|| ActiveSyncOperation {
+                    loop_handle: Arc::clone(sync),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    async fn connected_command(
+        &self,
+        identity: &EstablishedStoreIdentity,
+        database: StoreDatabase,
+    ) -> Option<Result<StoreCommand, SyncError>> {
+        let storage = {
+            let connection = self.state.read().expect("read Store sync connection");
+            match &*connection {
+                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
+                _ => None,
+            }
+        }?;
+        Some(
+            identity
+                .load_store(database, storage)
+                .await
+                .map(StoreCommand::new)
+                .map_err(SyncError::from),
+        )
+    }
+
+    #[cfg(test)]
+    fn loop_uses_connected_storage(&self) -> bool {
+        let connection = self.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, storage, .. } => sync.uses_storage_for_test(storage),
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    fn stopped_loop_count(&self) -> u64 {
+        self.stopped_loops.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn stop_loop(&self) -> Result<(), SyncError> {
+        let connection = self.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, .. } => sync.stop().map_err(SyncError::Loop),
+            _ => Err(SyncError::LoopNotRunning),
+        }
+    }
+}
+
+struct ConnectedSyncOperation {
+    loop_handle: Arc<SyncLoopHandle>,
+}
+
+impl ConnectedSyncOperation {
+    fn trigger(&self) {
+        self.loop_handle.trigger();
+    }
+
+    fn is_running(&self) -> bool {
+        self.loop_handle.is_running()
+    }
+
+    fn config(&self) -> Config {
+        self.loop_handle.config().clone()
+    }
+
+    fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.loop_handle.blob_path_scheme()
+    }
+
+    fn uploader(&self) -> String {
+        self.loop_handle.self_uploader()
+    }
+
+    fn host_write_blob_staging(
+        &self,
+        store_dir: crate::store_dir::StoreDir,
+    ) -> crate::sync::store::HostWriteBlobStaging {
+        self.loop_handle
+            .host_write_blob_staging(tokio::runtime::Handle::current(), store_dir)
+    }
+
+    #[cfg(test)]
+    fn uses_store_dir(&self, store_dir: &crate::store_dir::StoreDir) -> bool {
+        self.loop_handle.uses_store_dir_for_test(store_dir)
+    }
+
+    #[cfg(test)]
+    fn adopt_key_rotation(&self, encryption: EncryptionService) -> Result<(), SyncError> {
+        self.loop_handle
+            .adopt_key_rotation_for_test(encryption)
+            .map(|_| ())
+            .map_err(SyncError::from)
+    }
+
+    #[cfg(test)]
+    fn encryption_generation(&self) -> Option<u64> {
+        self.loop_handle.encryption_generation_for_test()
+    }
+
+    #[cfg(test)]
+    fn open_sealed_blob(
+        &self,
+        bytes: &[u8],
+        context: &[u8],
+    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), StorageError> {
+        self.loop_handle
+            .open_sealed_blob_for_test(bytes, context)
+            .map_err(StorageError::Storage)
+    }
+}
+
+struct ActiveSyncOperation {
+    loop_handle: Arc<SyncLoopHandle>,
+}
+
+pub(crate) struct StoreCommand {
+    store: Store,
+}
+
+impl StoreCommand {
+    fn new(store: Store) -> Self {
+        Self { store }
+    }
+
+    pub(crate) async fn members(
+        &self,
+        identity_public_key: &[u8],
+    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, crate::sync::store::MembershipOpsError>
+    {
+        self.store.members(Some(identity_public_key)).await
+    }
+
+    pub(crate) async fn membership_conflict(
+        &self,
+        identity_public_key: &[u8],
+    ) -> Result<Option<crate::MembershipConflictInfo>, crate::sync::store::MembershipOpsError> {
+        self.store
+            .membership_conflict(Some(identity_public_key))
+            .await
+    }
+
+    pub(crate) async fn restore_membership(
+        &self,
+    ) -> Result<
+        crate::sync::store::owner::StoreRestoreMembership,
+        crate::sync::store::MembershipOpsError,
+    > {
+        self.store.restore_membership().await
+    }
+}
+
+impl ActiveSyncOperation {
+    async fn make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        pin: bool,
+    ) -> Result<(), MakeRemoteError> {
+        self.loop_handle.make_remote(root_table, root_id, pin).await
+    }
+
+    async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), MakeRemoteError> {
+        self.loop_handle
+            .cancel_make_remote(root_table, root_id)
+            .await
+    }
+
+    async fn make_local(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        dest: &HashMap<String, PathBuf>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), MakeLocalError> {
+        self.loop_handle
+            .make_local(root_table, root_id, dest, cancel)
+            .await
+    }
+
+    async fn drain_uploads(&self) -> Result<crate::blob::upload::DrainOutcome, DbError> {
+        self.loop_handle.drain_uploads().await
+    }
+
+    async fn discard_blocked_write(
+        &self,
+        write_id: crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, crate::sync::store::StoreError> {
+        self.loop_handle.discard_blocked_write(write_id).await
+    }
+
+    fn membership(self) -> ActiveMembershipSync {
+        ActiveMembershipSync {
+            loop_handle: self.loop_handle,
+        }
+    }
+
+    fn circles(self) -> Result<ActiveCircleSync, crate::CircleError> {
+        if !self.loop_handle.is_running() {
+            return Err(crate::CircleError::LoopNotRunning);
+        }
+        Ok(ActiveCircleSync {
+            loop_handle: self.loop_handle,
+        })
+    }
+
+    async fn begin_device_join_bundle(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOfferBundle, crate::sync::store::DeviceJoinTransportError> {
+        self.loop_handle
+            .begin_device_join_bundle(member_pubkey)
+            .await
+    }
+
+    async fn drive_device_join(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        policy: crate::DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinDriveOutcome, crate::sync::store::DeviceJoinTransportError> {
+        self.loop_handle
+            .drive_device_join(bundle, policy, access_administrator, timing)
+            .await
+    }
+
+    async fn cancel_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::sync::store::DeviceJoinTransportError>
+    {
+        self.loop_handle
+            .cancel_device_join_transport(bundle, timing)
+            .await
+    }
+
+    async fn abandon_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+    ) -> Result<crate::DeviceJoinAbandonment, crate::sync::store::DeviceJoinTransportError> {
+        self.loop_handle.abandon_device_join_transport(bundle).await
+    }
+
+    async fn begin_device_join(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOffer, crate::DeviceJoinError> {
+        self.loop_handle.begin_device_join(member_pubkey).await
+    }
+
+    async fn abandon_device_join(
+        &self,
+        offer: crate::DeviceJoinOffer,
+    ) -> Result<crate::DeviceJoinAbandonment, crate::DeviceJoinError> {
+        self.loop_handle.abandon_device_join(offer).await
+    }
+
+    async fn authorize_device_provider_access(
+        &self,
+        request: crate::DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+    ) -> Result<crate::DeviceProviderAdmissionApproval, crate::DeviceJoinError> {
+        self.loop_handle
+            .authorize_device_provider_access(request, access_administrator)
+            .await
+    }
+
+    async fn accept_device_registration(
+        &self,
+        request: crate::DeviceRegistrationRequest,
+    ) -> Result<crate::ProvisionalDeviceBootstrap, crate::DeviceJoinError> {
+        self.loop_handle.accept_device_registration(request).await
+    }
+
+    async fn publish_device_provider_challenge(
+        &self,
+        bootstrap: crate::ProvisionalDeviceBootstrap,
+    ) -> Result<crate::ProviderReadyDeviceBootstrap, crate::DeviceJoinError> {
+        self.loop_handle
+            .publish_device_provider_challenge(bootstrap)
+            .await
+    }
+
+    async fn complete_device_provider_admission(
+        &self,
+        readiness: crate::DeviceJoinReadiness,
+    ) -> Result<crate::DeviceProviderAdmissionCompletion, crate::DeviceJoinError> {
+        self.loop_handle
+            .complete_device_provider_admission(readiness)
+            .await
+    }
+
+    async fn finalize_device_join(
+        &self,
+        completion: crate::DeviceProviderAdmissionCompletion,
+    ) -> Result<crate::DeviceJoinActivation, crate::DeviceJoinError> {
+        self.loop_handle.finalize_device_join(completion).await
+    }
+
+    async fn cancel_device_join(
+        &self,
+        attempt: crate::DeviceJoinAttemptRef,
+    ) -> Result<crate::DeviceJoinCancellation, crate::DeviceJoinError> {
+        self.loop_handle.cancel_device_join(attempt).await
+    }
+
+    async fn close_device_provider_admission(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+    ) -> Result<crate::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        self.loop_handle
+            .close_device_provider_admission(cancellation)
+            .await
+    }
+
+    async fn revoke_device_provider_admission_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        self.loop_handle
+            .revoke_device_provider_admission_writes(cancellation, executor)
+            .await
+    }
+
+    async fn revoke_joining_device_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::JoinerJoinTerminal, crate::DeviceJoinError> {
+        self.loop_handle
+            .revoke_joining_device_writes(cancellation, executor)
+            .await
+    }
+
+    async fn activate_device_join_cleanup(
+        &self,
+        receipt: crate::DeviceJoinCleanupReceipt,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::DeviceJoinError> {
+        self.loop_handle.activate_device_join_cleanup(receipt).await
+    }
+
+    async fn complete_owner_device_join_cleanup(
+        &self,
+        activation: crate::DeviceJoinCleanupActivation,
+    ) -> Result<(), crate::DeviceJoinError> {
+        self.loop_handle
+            .complete_owner_device_join_cleanup(activation)
+            .await
+            .map(|_| ())
+    }
+}
+
+impl StoreSync {
+    fn config(&self) -> Config {
+        (self.config_provider)()
     }
 
     async fn build_connection(
@@ -363,8 +747,7 @@ impl StoreSync {
             crate::storage::cloud::setup::require_exact_slot_capabilities_config(&config)
                 .map_err(SyncError::StorageSetup)?;
         }
-        let previous = self.take_connection();
-        previous.stop()?;
+        self.stop_current()?;
         self.build_connection(config, cloudkit_ops).await
     }
 
@@ -401,8 +784,7 @@ impl StoreSync {
             config.cloud_home.provider.clone(),
         )
         .map_err(SyncError::StorageSetup)?;
-        let previous = self.take_connection();
-        previous.stop()?;
+        self.stop_current()?;
         let routing_encryption = self
             .security
             .routing_encryption(self.database.has_scoped_graph())?;
@@ -485,7 +867,7 @@ impl StoreSync {
 
     pub(crate) async fn start(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        if !self.connection.read().unwrap().is_connected() {
+        if !self.is_connected() {
             debug!("start_sync: no provider connected; nothing to start");
             return Ok(());
         }
@@ -493,11 +875,13 @@ impl StoreSync {
     }
 
     pub(crate) fn stop(&self) {
-        let connection = self.take_connection();
-        let was_connected = connection.is_connected();
-        if let Err(stop_error) = connection.stop() {
-            error!("stop_sync failed: {stop_error}");
-        }
+        let was_connected = match self.stop_current() {
+            Ok(was_connected) => was_connected,
+            Err(stop_error) => {
+                error!("stop_sync failed: {stop_error}");
+                false
+            }
+        };
         if was_connected {
             self.install_without_cloud();
         } else {
@@ -506,26 +890,10 @@ impl StoreSync {
     }
 
     pub(crate) fn disconnect(&self) {
-        let connection = self.take_connection();
-        if let Err(stop_error) = connection.stop() {
+        if let Err(stop_error) = self.stop_current() {
             error!("disconnect_sync failed to stop sync: {stop_error}");
         }
         info!("store sync disconnected");
-    }
-
-    pub(crate) fn trigger(&self) {
-        match self.cloud_sync() {
-            Some(sync_loop) => sync_loop.trigger(),
-            None => debug!("sync_now: no cloud connection; sync wake ignored"),
-        }
-    }
-
-    pub(crate) fn is_syncing(&self) -> bool {
-        self.cloud_sync().is_some_and(|handle| handle.is_running())
-    }
-
-    pub(crate) fn is_connected(&self) -> bool {
-        self.connection.read().unwrap().is_connected()
     }
 
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<SyncLoopStatus> {
@@ -536,8 +904,8 @@ impl StoreSync {
         &self,
     ) -> Option<crate::sync::store::HostWriteBlobStaging> {
         Some(
-            self.cloud_sync()?
-                .host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir.clone()),
+            self.connected()?
+                .host_write_blob_staging(self.store_dir.clone()),
         )
     }
 
@@ -628,42 +996,9 @@ impl StoreSync {
             })
     }
 
-    async fn blob_storage(&self) -> Result<Option<Arc<dyn SyncStorage>>, BlobCacheError> {
-        if let Some(storage) = self.storage() {
-            return Ok(Some(storage));
-        }
-        let config = self.config();
-        if config.cloud_home.provider.is_none() {
-            return Ok(None);
-        }
-        let storage = self
-            .security
-            .create_sync_storage(
-                &config,
-                None,
-                self.clock.clone(),
-                self.cloudkit_ops.clone(),
-                self.blob_chunking,
-            )
-            .await?;
-        Ok(Some(Arc::new(storage)))
-    }
-
-    pub(crate) async fn blob_access(&self) -> Result<StoreBlobAccess, BlobCacheError> {
-        match self.blob_storage().await? {
-            Some(storage) => Ok(StoreBlobAccess::remote(
-                self.local_blob_access.connect(storage),
-            )),
-            None => Ok(StoreBlobAccess::local(self.local_blob_access.clone())),
-        }
-    }
-
     pub(crate) fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let (scheme, uploader) = match self.cloud_sync() {
-            Some(sync_loop) => (
-                sync_loop.blob_path_scheme(),
-                Some(sync_loop.self_uploader()),
-            ),
+        let (scheme, uploader) = match self.connected() {
+            Some(connection) => (connection.blob_path_scheme(), Some(connection.uploader())),
             None => {
                 let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
                 let uploader = self
@@ -691,8 +1026,10 @@ impl StoreSync {
         root_id: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        let sync_loop = self.driven_sync().ok_or(MakeRemoteError::SyncNotReady)?;
-        sync_loop.make_remote(root_table, root_id, pin).await?;
+        self.active()
+            .ok_or(MakeRemoteError::SyncNotReady)?
+            .make_remote(root_table, root_id, pin)
+            .await?;
         self.trigger();
         Ok(())
     }
@@ -702,8 +1039,10 @@ impl StoreSync {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        let sync_loop = self.driven_sync().ok_or(MakeRemoteError::SyncNotReady)?;
-        sync_loop.cancel_make_remote(root_table, root_id).await?;
+        self.active()
+            .ok_or(MakeRemoteError::SyncNotReady)?
+            .cancel_make_remote(root_table, root_id)
+            .await?;
         self.trigger();
         Ok(())
     }
@@ -715,8 +1054,8 @@ impl StoreSync {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
-        let sync_loop = self.driven_sync().ok_or(MakeLocalError::SyncNotReady)?;
-        sync_loop
+        self.active()
+            .ok_or(MakeLocalError::SyncNotReady)?
             .make_local(root_table, root_id, dest, cancel)
             .await?;
         self.trigger();
@@ -726,7 +1065,7 @@ impl StoreSync {
     pub(crate) async fn drain_uploads(
         &self,
     ) -> Result<crate::blob::upload::DrainOutcome, SyncError> {
-        self.driven_sync()
+        self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .drain_uploads()
             .await
@@ -737,7 +1076,7 @@ impl StoreSync {
         &self,
         write_id: crate::WriteId,
     ) -> Result<Vec<crate::WriteId>, SyncError> {
-        self.driven_sync()
+        self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .discard_blocked_write(write_id)
             .await
@@ -745,71 +1084,120 @@ impl StoreSync {
     }
 
     pub(crate) fn is_command_configured(&self) -> bool {
-        self.cloud_sync().is_some() || self.config().cloud_home.provider.is_some()
+        self.has_cloud() || self.config().cloud_home.provider.is_some()
     }
 
     pub(crate) fn command_config(&self) -> Config {
-        self.cloud_sync()
-            .map(|handle| handle.config().clone())
+        self.connected()
+            .map(|connection| connection.config())
             .unwrap_or_else(|| self.config())
     }
 
-    pub(crate) async fn store_for_command(
+    pub(crate) async fn command(
         &self,
         identity: &EstablishedStoreIdentity,
-    ) -> Result<Store, SyncError> {
-        let config = self.command_config();
-        let storage = match self.storage() {
-            Some(storage) => storage,
-            None => {
-                let storage = self
-                    .security
-                    .create_sync_storage(
-                        &config,
-                        None,
-                        self.clock.clone(),
-                        self.cloudkit_ops.clone(),
-                        self.blob_chunking,
-                    )
-                    .await
-                    .map_err(SyncError::StorageSetup)?;
-                Arc::new(storage)
-            }
-        };
-        identity
-            .load_store(self.database.clone(), storage)
+    ) -> Result<StoreCommand, SyncError> {
+        if let Some(command) = self
+            .connected_command(identity, self.database.clone())
             .await
+        {
+            return command;
+        }
+        let config = self.command_config();
+        let storage = self
+            .security
+            .create_sync_storage(
+                &config,
+                None,
+                self.clock.clone(),
+                self.cloudkit_ops.clone(),
+                self.blob_chunking,
+            )
+            .await
+            .map_err(SyncError::StorageSetup)?;
+        identity
+            .load_store(self.database.clone(), Arc::new(storage))
+            .await
+            .map(StoreCommand::new)
             .map_err(SyncError::from)
     }
 
     #[cfg(test)]
     pub(crate) fn loop_uses_connected_storage_for_test(&self) -> bool {
-        match (self.storage(), self.cloud_sync()) {
-            (Some(storage), Some(sync_loop)) => sync_loop.uses_storage_for_test(&storage),
-            _ => false,
-        }
+        self.loop_uses_connected_storage()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stopped_loop_count_for_test(&self) -> u64 {
+        self.stopped_loop_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_loop_for_test(&self) -> Result<(), SyncError> {
+        self.stop_loop()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connected_store_id_for_test(&self) -> Option<String> {
+        Some(self.connected()?.config().store_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connected_uses_store_dir_for_test(
+        &self,
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> bool {
+        self.connected()
+            .is_some_and(|connection| connection.uses_store_dir(store_dir))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connected_blob_path_scheme_for_test(&self) -> Option<BlobPathScheme> {
+        Some(self.connected()?.blob_path_scheme())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adopt_key_rotation_for_test(
+        &self,
+        encryption: EncryptionService,
+    ) -> Result<(), SyncError> {
+        self.connected()
+            .ok_or(SyncError::LoopNotRunning)?
+            .adopt_key_rotation(encryption)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
+        self.connected()?.encryption_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_sealed_blob_for_test(
+        &self,
+        bytes: &[u8],
+        context: &[u8],
+    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), StorageError> {
+        self.connected()
+            .ok_or_else(|| StorageError::Storage("sync connection is not installed".to_string()))?
+            .open_sealed_blob(bytes, context)
     }
 
     #[cfg(test)]
     pub(crate) fn has_remote_storage_for_test(&self) -> bool {
-        self.storage().is_some()
+        self.has_cloud()
     }
 
     pub(crate) fn active_membership(&self) -> Result<ActiveMembershipSync, SyncError> {
-        Ok(ActiveMembershipSync {
-            loop_handle: self.driven_sync().ok_or(SyncError::LoopNotRunning)?,
-        })
+        Ok(self.active().ok_or(SyncError::LoopNotRunning)?.membership())
     }
 
     /// Circle *writes* are dispatched to the loop thread and executed there, so
     /// this is the one capability that needs the thread itself rather than a
     /// driven connection — and it says which of the two is missing.
     pub(crate) fn active_circles(&self) -> Result<ActiveCircleSync, crate::CircleError> {
-        let sync = self.cloud_sync().ok_or(crate::CircleError::NotConfigured)?;
-        if !sync.is_running() {
-            return Err(crate::CircleError::LoopNotRunning);
-        }
-        Ok(ActiveCircleSync { loop_handle: sync })
+        self.active()
+            .ok_or(crate::CircleError::NotConfigured)?
+            .circles()
     }
 
     pub(crate) async fn begin_device_join_bundle(
@@ -817,7 +1205,7 @@ impl StoreSync {
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOfferBundle, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .begin_device_join_bundle(member_pubkey)
             .await?)
@@ -831,7 +1219,7 @@ impl StoreSync {
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .drive_device_join(bundle, policy, access_administrator, timing)
             .await?)
@@ -843,7 +1231,7 @@ impl StoreSync {
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_join_transport(bundle, timing)
             .await?)
@@ -854,7 +1242,7 @@ impl StoreSync {
         bundle: &crate::DeviceJoinOfferBundle,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .abandon_device_join_transport(bundle)
             .await?)
@@ -865,7 +1253,7 @@ impl StoreSync {
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .begin_device_join(member_pubkey)
             .await?)
@@ -876,7 +1264,7 @@ impl StoreSync {
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .abandon_device_join(offer)
             .await?)
@@ -888,7 +1276,7 @@ impl StoreSync {
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .authorize_device_provider_access(request, access_administrator)
             .await?)
@@ -899,7 +1287,7 @@ impl StoreSync {
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .accept_device_registration(request)
             .await?)
@@ -910,7 +1298,7 @@ impl StoreSync {
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .publish_device_provider_challenge(bootstrap)
             .await?)
@@ -921,7 +1309,7 @@ impl StoreSync {
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .complete_device_provider_admission(readiness)
             .await?)
@@ -932,7 +1320,7 @@ impl StoreSync {
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_device_join(completion)
             .await?)
@@ -943,7 +1331,7 @@ impl StoreSync {
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_join(attempt)
             .await?)
@@ -954,7 +1342,7 @@ impl StoreSync {
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .close_device_provider_admission(cancellation)
             .await?)
@@ -966,7 +1354,7 @@ impl StoreSync {
         executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .revoke_device_provider_admission_writes(cancellation, executor)
             .await?)
@@ -978,7 +1366,7 @@ impl StoreSync {
         executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .revoke_joining_device_writes(cancellation, executor)
             .await?)
@@ -989,7 +1377,7 @@ impl StoreSync {
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
         Ok(self
-            .driven_sync()
+            .active()
             .ok_or(SyncError::LoopNotRunning)?
             .activate_device_join_cleanup(receipt)
             .await?)
@@ -999,7 +1387,7 @@ impl StoreSync {
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        self.driven_sync()
+        self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .complete_owner_device_join_cleanup(activation)
             .await?;

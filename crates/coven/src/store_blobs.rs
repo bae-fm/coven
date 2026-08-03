@@ -42,7 +42,7 @@ impl ReadOnlyBlobStorage {
         (self.config_provider)()
     }
 
-    async fn access(
+    pub(crate) async fn access(
         &self,
         local: LocalStoreBlobAccess,
     ) -> Result<StoreBlobAccess, StorageSetupError> {

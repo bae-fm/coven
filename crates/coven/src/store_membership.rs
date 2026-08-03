@@ -30,9 +30,9 @@ impl StoreMembership {
         }
         let identity = self.security.established_identity()?;
         self.sync
-            .store_for_command(&identity)
+            .command(&identity)
             .await?
-            .members(Some(&identity.public_key()))
+            .members(&identity.public_key())
             .await
             .map_err(SyncError::from)
     }
@@ -45,9 +45,9 @@ impl StoreMembership {
         }
         let identity = self.security.established_identity()?;
         self.sync
-            .store_for_command(&identity)
+            .command(&identity)
             .await?
-            .membership_conflict(Some(&identity.public_key()))
+            .membership_conflict(&identity.public_key())
             .await
             .map_err(SyncError::from)
     }

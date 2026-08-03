@@ -167,6 +167,13 @@ impl CovenHandle {
         let local_blob_access =
             LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), blob_cache.clone());
         let local_blob_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
+        let blob_storage = crate::store_blobs::ReadOnlyBlobStorage::new(
+            config_provider.clone(),
+            security.clone(),
+            clock.clone(),
+            cloudkit_ops.clone(),
+            blob_chunking,
+        );
         let sync = StoreSync::new(
             config_provider,
             security.clone(),
@@ -178,6 +185,7 @@ impl CovenHandle {
             open_guard,
             blob_chunking,
             local_blob_access.clone(),
+            blob_storage,
             local_blob_transitions,
         );
         let rows = StoreRows::new(
@@ -188,7 +196,7 @@ impl CovenHandle {
             sync.clone(),
         );
         let blob_reads = StoreBlobReads::new(
-            local_blob_access,
+            local_blob_access.clone(),
             blob_cache,
             ConnectedBlobStorage::new(sync.clone()),
         );
@@ -2016,15 +2024,11 @@ mod tests {
                     )
                     .await
                     .expect("connect over the injected test home without a loop");
-                let sync = handle
-                    .sync
-                    .cloud_sync_for_test()
-                    .expect("the cloud connection is installed");
-                assert!(
-                    !sync.is_running(),
-                    "the connect started no loop thread, so none can drain the queue",
-                );
                 assert!(!handle.is_syncing());
+                assert!(matches!(
+                    handle.circles().create("caller-driven circle").await,
+                    Err(crate::CircleError::LoopNotRunning)
+                ));
 
                 let plaintext = b"caller-driven-cover-art".to_vec();
                 handle
@@ -3168,29 +3172,18 @@ mod tests {
                         .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
                         .await
                         .expect("first connect over injected home");
-                    let first_loop = handle
-                        .sync
-                        .cloud_sync_for_test()
-                        .expect("first loop installed");
-                    assert!(first_loop.is_running(), "first loop starts running");
+                    let stopped_before = handle.sync.stopped_loop_count_for_test();
+                    assert!(handle.is_syncing());
 
                     handle
                         .connect_sync_with_test_home(home, CloudCipher::Plaintext)
                         .await
                         .expect("second connect over injected home");
-                    let replacement_loop = handle
-                        .sync
-                        .cloud_sync_for_test()
-                        .expect("replacement loop installed");
-
-                    assert!(
-                        !first_loop.is_running(),
-                        "reconnect must stop the old loop before installing a replacement",
+                    assert_eq!(
+                        handle.sync.stopped_loop_count_for_test(),
+                        stopped_before + 1,
                     );
-                    assert!(
-                        replacement_loop.is_running(),
-                        "reconnect leaves the replacement loop running",
-                    );
+                    assert!(handle.is_syncing());
                 })
                 .await
                 .expect("sync reconnect test task");
@@ -3244,9 +3237,10 @@ mod tests {
                         )
                         .await
                         .expect("connect over injected home");
-                    let loop_handle = handle.sync.cloud_sync_for_test().expect("loop installed");
-
-                    loop_handle.stop().expect("stop installed loop");
+                    handle
+                        .sync
+                        .stop_loop_for_test()
+                        .expect("stop installed loop");
 
                     let make_remote = handle.make_remote("notes", "note-1", false).await;
                     assert!(matches!(make_remote, Err(MakeRemoteError::SyncNotReady)));
@@ -3318,11 +3312,6 @@ mod tests {
                         )
                         .await
                         .expect("connect encrypted injected home");
-                    let loop_handle = handle
-                        .sync
-                        .cloud_sync_for_test()
-                        .expect("sync loop installed");
-
                     {
                         let mut next_config = live_config
                             .write()
@@ -3332,20 +3321,24 @@ mod tests {
                         next_config.cloud_home.storage = HomeStorage::Browsable;
                     }
 
-                    assert_eq!(loop_handle.config().store_id, "lib-test");
-                    assert!(loop_handle.uses_store_dir_for_test(&store_dir));
+                    assert_eq!(
+                        handle.sync.connected_store_id_for_test().as_deref(),
+                        Some("lib-test")
+                    );
+                    assert!(handle.sync.connected_uses_store_dir_for_test(&store_dir));
                     assert!(matches!(
-                        loop_handle.blob_path_scheme(),
-                        BlobPathScheme::Hashed
+                        handle.sync.connected_blob_path_scheme_for_test(),
+                        Some(BlobPathScheme::Hashed)
                     ));
 
                     let rotated = EncryptionService::from_key([7u8; 32])
                         .with_appended_generation(2, [8u8; 32])
                         .expect("append generation");
-                    loop_handle
+                    handle
+                        .sync
                         .adopt_key_rotation_for_test(rotated)
                         .expect("adopt encrypted generation");
-                    assert_eq!(loop_handle.encryption_generation_for_test(), Some(2));
+                    assert_eq!(handle.sync.encryption_generation_for_test(), Some(2));
 
                     let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
                     let blob = handle
@@ -3376,13 +3369,15 @@ mod tests {
                         .with_appended_generation(2, [8u8; 32])
                         .expect("append expected generation")
                         .seal_key_fingerprint();
-                    let (fingerprint, opened) = loop_handle
+                    let (fingerprint, opened) = handle
+                        .sync
                         .open_sealed_blob_for_test(&stored, &aad_context("lib-test"))
                         .expect("open with the installed session binding");
                     assert_eq!(fingerprint, expected_fingerprint);
                     assert_eq!(opened, plaintext);
                     assert!(
-                        loop_handle
+                        handle
+                            .sync
                             .open_sealed_blob_for_test(&stored, &aad_context("next-lib"))
                             .is_err(),
                         "a later config must not change the installed session's store binding",

@@ -25,7 +25,7 @@ impl StoreRecovery {
         let identity = self.security.established_identity()?;
         let restore_membership = self
             .sync
-            .store_for_command(&identity)
+            .command(&identity)
             .await?
             .restore_membership()
             .await?;

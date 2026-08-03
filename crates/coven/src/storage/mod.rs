@@ -44,10 +44,10 @@ pub async fn fetch_account_email(
     result.map_err(|error| crate::oauth::OAuthError::AccountFetch(error.to_string()))
 }
 pub use cloud::{
-    create_cloud_home, write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome,
-    CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, ObjectSlot,
-    PartSink, PhysicalObjectLocator, UploadProgress,
+    write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectStream,
+    CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, ObjectSlot, PartSink,
+    PhysicalObjectLocator, UploadProgress,
 };
 mod local_file;
 pub(crate) use local_file::{

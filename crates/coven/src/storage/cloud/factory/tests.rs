@@ -166,6 +166,31 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
 }
 
 #[tokio::test]
+async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
+    let mut config = Config::with_defaults(
+        "s3-config-error".to_string(),
+        "device-1".to_string(),
+        StoreDir::new("unused-store-dir"),
+        "S3 Store".to_string(),
+    );
+    config.cloud_home.provider = Some(CloudProvider::S3);
+    config.cloud_home.s3_bucket = None;
+    let factory = CloudHomeFactory::new(
+        StoreKeys::bind(config.store_id.clone()),
+        crate::oauth::OAuthClients::empty(),
+    );
+    let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+
+    let error = match factory.create(&config, clock, None).await {
+        Ok(_) => panic!("a provider with no bucket must not build a cloud home"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, CloudHomeError::Configuration(_)));
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
 async fn neither_owner_nor_zone_builds_a_private_home() {
     let config = cloudkit_config(None);
     let key_service = StoreKeys::bind(config.store_id.clone());

@@ -128,17 +128,27 @@ fn store_sync(
     let database = StoreDatabase::from_database(database);
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
+    let security = store_security(keys, master_keys, identity);
+    let clock: ClockRef = Arc::new(SystemClock);
+    let blob_storage = crate::store_blobs::ReadOnlyBlobStorage::new(
+        config_provider.clone(),
+        security.clone(),
+        clock.clone(),
+        None,
+        BlobChunking::DEFAULT,
+    );
     StoreSync::new(
         config_provider,
-        store_security(keys, master_keys, identity),
+        security,
         database,
         store_dir.clone(),
-        Arc::new(SystemClock),
+        clock,
         None,
         None,
         StoreOpenGuard::acquire_for_test(store_dir),
         BlobChunking::DEFAULT,
         owners.local_access(),
+        blob_storage,
         owners.local_transitions(),
     )
 }
@@ -184,17 +194,27 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let database = StoreDatabase::from_database(crate::sync::test_helpers::open_test_db());
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
+    let config_provider: ConfigProvider = Arc::new(move || config.clone());
+    let clock: ClockRef = Arc::new(SystemClock);
+    let blob_storage = crate::store_blobs::ReadOnlyBlobStorage::new(
+        config_provider.clone(),
+        security.clone(),
+        clock.clone(),
+        None,
+        BlobChunking::DEFAULT,
+    );
     let sync = StoreSync::new(
-        Arc::new(move || config.clone()),
+        config_provider,
         security.clone(),
         database,
         store_dir.clone(),
-        Arc::new(SystemClock),
+        clock,
         None,
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
         BlobChunking::DEFAULT,
         owners.local_access(),
+        blob_storage,
         owners.local_transitions(),
     );
     let membership = StoreMembership::new(security, sync);
@@ -274,7 +294,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     )
     .await
     .expect("install active loop");
-    let active_loop = sync.cloud_sync().expect("active loop");
+    assert!(sync.is_syncing());
 
     {
         let mut config = config.write().expect("write config");
@@ -292,7 +312,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
             provider: CloudProvider::S3,
         })
     ));
-    assert!(active_loop.is_running());
+    assert!(sync.is_syncing());
     assert!(sync.loop_uses_connected_storage_for_test());
 
     let error = connect_test_home(
@@ -308,7 +328,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
             provider: CloudProvider::S3,
         })
     ));
-    assert!(active_loop.is_running());
+    assert!(sync.is_syncing());
     assert!(sync.loop_uses_connected_storage_for_test());
 }
 
@@ -335,14 +355,12 @@ async fn test_home_replacement_stops_the_previous_loop() {
     connect_test_home(sync.clone(), home.clone(), CloudCipher::Plaintext)
         .await
         .expect("first test home starts");
-    let first_loop = sync.cloud_sync().expect("first loop installed");
+    let stopped_before = sync.stopped_loop_count_for_test();
     connect_test_home(sync.clone(), home, CloudCipher::Plaintext)
         .await
         .expect("replacement test home starts");
-    let replacement = sync.cloud_sync().expect("replacement loop installed");
-
-    assert!(!first_loop.is_running());
-    assert!(replacement.is_running());
+    assert_eq!(sync.stopped_loop_count_for_test(), stopped_before + 1);
+    assert!(sync.is_syncing());
 }
 
 #[tokio::test]
@@ -385,7 +403,7 @@ async fn failed_restart_leaves_no_stale_connection() {
         .await
         .expect_err("invalid configured provider fails restart");
     assert!(error.to_string().contains("failed to build cloud home"));
-    assert!(sync.cloud_sync().is_none());
+    assert!(!sync.is_connected());
     assert!(!sync.has_remote_storage_for_test());
 }
 
@@ -424,7 +442,7 @@ async fn connect_rejects_a_missing_device_identity() {
         .await
         .expect_err("missing device identity must fail the connect");
     assert!(matches!(error, SyncError::Key(KeyError::NoDeviceIdentity)));
-    assert!(sync.cloud_sync().is_none());
+    assert!(!sync.is_connected());
     assert!(!sync.has_remote_storage_for_test());
 }
 
@@ -483,7 +501,7 @@ async fn foreign_founder_installs_no_connection() {
         error,
         SyncError::Init(crate::sync::cycle::InitSyncError::StoreProtocolRoot(_))
     ));
-    assert!(sync.cloud_sync().is_none());
+    assert!(!sync.is_connected());
     assert!(!sync.has_remote_storage_for_test());
     assert_eq!(
         database
@@ -496,6 +514,7 @@ async fn foreign_founder_installs_no_connection() {
 
 #[test]
 fn cipher_resolution_reads_current_custody_each_time() {
+    test_keyring::install();
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let store_id = "sync-resolve-cipher-fresh";
     let store_keys = StoreKeys::bind(store_id.to_string());

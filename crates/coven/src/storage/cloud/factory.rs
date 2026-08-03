@@ -1,16 +1,5 @@
 use super::{cloudkit, CloudHome, CloudHomeError};
 
-pub async fn create_cloud_home(
-    config: &crate::config::Config,
-    key_service: &crate::keys::StoreKeys,
-    oauth_clients: &crate::oauth::OAuthClients,
-    clock: crate::clock::ClockRef,
-) -> Result<Box<dyn CloudHome>, CloudHomeError> {
-    CloudHomeFactory::new(key_service.clone(), oauth_clients.clone())
-        .create(config, clock, None)
-        .await
-}
-
 #[derive(Clone)]
 pub(crate) struct CloudHomeFactory {
     key_service: crate::keys::StoreKeys,

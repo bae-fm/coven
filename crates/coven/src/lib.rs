@@ -132,15 +132,14 @@ pub use storage::CloudCipher;
 #[cfg(any(test, feature = "test-utils"))]
 pub use storage::InMemoryCloudHome;
 pub use storage::{
-    create_cloud_home, write_cloud_object_stream, AwsPrincipal, BlobBody, BoxPartSink,
-    CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment,
-    CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion,
-    CloudKitScope, CloudKitShare, CloudKitShareAcceptance, CloudKitSharePermission,
-    CloudObjectStream, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage,
-    GoogleDriveCorpus, ObjectSlot, PartSink, PhysicalObjectLocator, ProviderDeviceBinding,
-    ProviderPrincipalId, ResolvedProviderBinding, S3CloudHome, S3EndpointBinding,
-    StoreProviderBinding, UploadProgress,
+    write_cloud_object_stream, AwsPrincipal, BlobBody, BoxPartSink, CloudAccessOutcome,
+    CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps,
+    CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
+    CloudKitShare, CloudKitShareAcceptance, CloudKitSharePermission, CloudObjectStream,
+    CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, GoogleDriveCorpus, ObjectSlot,
+    PartSink, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
+    ResolvedProviderBinding, S3CloudHome, S3EndpointBinding, StoreProviderBinding, UploadProgress,
 };
 pub use store_dir::{StoreDir, StoreLayout};
 pub use sync::{
