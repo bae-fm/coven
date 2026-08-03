@@ -869,14 +869,14 @@ mod test_device {
         pub(crate) fn sign_reclaim_receipt_for_test(
             &self,
             store_root_hash: crate::protocol::store_commit::ObjectHash,
-            authorization: crate::sync::store::ReclaimAuthorizationRef,
+            authorization: crate::protocol::reclaim::ReclaimAuthorizationRef,
             provider_admin_state: crate::protocol::circle_control::StoreMembershipStateRef,
             provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
         ) -> Result<
-            crate::sync::store::ReclaimReceipt,
+            crate::protocol::reclaim::ReclaimReceipt,
             crate::protocol::store_commit::StoreProtocolError,
         > {
-            crate::sync::store::ReclaimReceipt::signed(
+            crate::protocol::reclaim::ReclaimReceipt::signed(
                 store_root_hash,
                 authorization,
                 provider_admin_state,

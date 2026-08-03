@@ -36,10 +36,11 @@ pub(crate) struct LoadedDeviceJoinCleanupActivation {
 /// device's stream, or another generation cannot describe this object. A member
 /// inside the Circle re-walks the stream itself before authorizing any delete.
 pub(super) fn validate_circle_snapshot_activated_reclaim_target(
-    target: &super::store_reclaim::ReclaimTarget,
-    activation: &super::store_reclaim::CircleSnapshotStreamActivation<'_>,
+    target: &crate::protocol::reclaim::ReclaimTarget,
+    activation: &crate::protocol::reclaim::CircleSnapshotStreamActivation<'_>,
 ) -> Result<(), RegistrationLoadError> {
-    let super::store_reclaim::ReclaimTarget::CircleSnapshotImage(snapshot_image) = target else {
+    let crate::protocol::reclaim::ReclaimTarget::CircleSnapshotImage(snapshot_image) = target
+    else {
         return Err(RegistrationLoadError::Invalid(
             "reclaim target is not published by a Circle snapshot stream".to_string(),
         ));

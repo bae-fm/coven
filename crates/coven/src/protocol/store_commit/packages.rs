@@ -681,10 +681,10 @@ impl StoreCommitOperations {
 pub enum StoreCommitBody {
     Operations(StoreCommitOperations),
     ReclaimAuthorization {
-        authorization: Box<crate::sync::store::ReclaimAuthorizationRef>,
+        authorization: Box<crate::protocol::reclaim::ReclaimAuthorizationRef>,
     },
     ReclaimReceipt {
-        receipt: Box<crate::sync::store::ReclaimReceiptRef>,
+        receipt: Box<crate::protocol::reclaim::ReclaimReceiptRef>,
     },
     OwnerPromotionRequest {
         request: Box<OwnerPromotionRequest>,

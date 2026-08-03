@@ -242,7 +242,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
 
     pub(crate) async fn load_reclaim_authorization(
         &mut self,
-        reference: &crate::sync::store::ReclaimAuthorizationRef,
+        reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<
         crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
         crate::storage::StoreObjectError,

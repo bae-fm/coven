@@ -5,6 +5,11 @@ use super::verified_history::registration::{
     registration_attempt_error, RegistrationLoadError,
 };
 use crate::protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
+use crate::protocol::reclaim::{
+    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
+    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
+    ReclaimEvidence, ReclaimReceipt, ReclaimReceiptRef,
+};
 use crate::protocol::remote_object;
 use crate::protocol::store_commit::*;
 use crate::protocol::store_commit::{
@@ -25,11 +30,6 @@ use crate::storage::{
     ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use crate::sync::store::StoreError;
-use crate::sync::store::{
-    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
-    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimReceipt, ReclaimReceiptRef,
-};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod membership;

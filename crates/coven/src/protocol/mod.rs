@@ -5,6 +5,7 @@ pub(crate) mod circle_control;
 pub(crate) mod circle_roster;
 pub(crate) mod membership;
 pub(crate) mod provider;
+pub(crate) mod reclaim;
 pub(crate) mod remote_object;
 pub(crate) mod store_commit;
 pub(crate) mod wrapped_store_key;

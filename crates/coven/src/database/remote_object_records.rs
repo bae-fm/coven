@@ -312,25 +312,25 @@ pub(crate) fn record_reclaimed_store_package_on(
     if remote_exists {
         let remote = load_remote_object_on(conn, object_id)?;
         match reclaimed.authorization().target() {
-            crate::sync::store::ReclaimTarget::StorePackage(target) => {
+            crate::protocol::reclaim::ReclaimTarget::StorePackage(target) => {
                 remote.validate_reclaimable_store_package(&target.package, &target.activation)
             }
-            crate::sync::store::ReclaimTarget::CirclePackage(target) => {
+            crate::protocol::reclaim::ReclaimTarget::CirclePackage(target) => {
                 remote.validate_reclaimable_circle_package(&target.package, &target.activation)
             }
-            crate::sync::store::ReclaimTarget::CircleBootstrapImage(target) => remote
+            crate::protocol::reclaim::ReclaimTarget::CircleBootstrapImage(target) => remote
                 .validate_reclaimable_circle_bootstrap_image(
                     &target.coverage.bootstrap.image,
                     &target.coverage.activation_commit,
                 ),
-            crate::sync::store::ReclaimTarget::CircleSnapshotImage(target) => {
+            crate::protocol::reclaim::ReclaimTarget::CircleSnapshotImage(target) => {
                 let root = required_store_root_authority_on(conn)?;
                 let owner = target
                     .snapshot_owner(root.store_root_hash)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }
-            crate::sync::store::ReclaimTarget::AudienceBlob(target) => {
+            crate::protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
                 remote.validate_reclaimable_stored_blob(&target.blob)
             }
         }

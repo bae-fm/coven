@@ -29,8 +29,8 @@ use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store::owner::pull::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::device_join;
 use super::verification::DeviceStateResolver;
-use super::{device_join, reclaim as store_reclaim};
 
 pub(super) mod join_validation;
 mod membership;
@@ -199,10 +199,10 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     /// Circle does not hold; the Owner re-reads them before authorizing any delete.
     fn validate_package_bound_reclaim_target(
         &self,
-        target: &store_reclaim::ReclaimTarget,
-        activation: &store_reclaim::PackageBlobBindingActivation<'_>,
+        target: &crate::protocol::reclaim::ReclaimTarget,
+        activation: &crate::protocol::reclaim::PackageBlobBindingActivation<'_>,
     ) -> Result<(), RegistrationLoadError> {
-        let store_reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
+        let crate::protocol::reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
             return Err(RegistrationLoadError::Invalid(
                 "reclaim target is not published by a package binding".to_string(),
             ));
@@ -218,10 +218,10 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 )
             })?;
         let names_package = match activation.package {
-            store_reclaim::AudienceBlobBindingPackage::Store(package) => {
+            crate::protocol::reclaim::AudienceBlobBindingPackage::Store(package) => {
                 activating.verified.value().store_package() == Some(package)
             }
-            store_reclaim::AudienceBlobBindingPackage::Circle(package) => activating
+            crate::protocol::reclaim::AudienceBlobBindingPackage::Circle(package) => activating
                 .verified
                 .value()
                 .circle_packages()
@@ -245,7 +245,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     /// exact object the evidence authorizes deleting.
     fn validate_commit_activated_reclaim_target(
         &self,
-        target: &store_reclaim::ReclaimTarget,
+        target: &crate::protocol::reclaim::ReclaimTarget,
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<(), RegistrationLoadError> {
         let expected = activating_commit.clone();
@@ -259,15 +259,15 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 )
             })?;
         let names_target = match target {
-            store_reclaim::ReclaimTarget::StorePackage(store) => {
+            crate::protocol::reclaim::ReclaimTarget::StorePackage(store) => {
                 activation.verified.value().store_package() == Some(&store.package)
             }
-            store_reclaim::ReclaimTarget::CirclePackage(circle) => activation
+            crate::protocol::reclaim::ReclaimTarget::CirclePackage(circle) => activation
                 .verified
                 .value()
                 .circle_packages()
                 .contains(&circle.package),
-            store_reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
+            crate::protocol::reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
                 .verified
                 .value()
                 .circle_controls()
@@ -276,8 +276,8 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 .any(|access| {
                     access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)
                 }),
-            store_reclaim::ReclaimTarget::CircleSnapshotImage(_)
-            | store_reclaim::ReclaimTarget::AudienceBlob(_) => {
+            crate::protocol::reclaim::ReclaimTarget::CircleSnapshotImage(_)
+            | crate::protocol::reclaim::ReclaimTarget::AudienceBlob(_) => {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim target claims a Store commit activation it is not published by"
                         .to_string(),
@@ -3064,7 +3064,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn load_reclaim_authorization(
         &self,
-        reference: &super::super::ReclaimAuthorizationRef,
+        reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<super::verification::VerifiedReclaimAuthorization, StoreObjectError> {
         self.commit_verifier
             .load_reclaim_authorization(reference)
@@ -3073,7 +3073,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn load_reclaim_receipt(
         &self,
-        reference: &super::super::ReclaimReceiptRef,
+        reference: &crate::protocol::reclaim::ReclaimReceiptRef,
     ) -> Result<super::verification::VerifiedReclaimReceipt, StoreObjectError> {
         self.commit_verifier.load_reclaim_receipt(reference).await
     }
@@ -4350,13 +4350,13 @@ impl<'a> MergeHistoryVerifier<'a> {
             // which authority published the target.
             let target = evidence.claim.target();
             match target.activation() {
-                store_reclaim::ReclaimActivation::Commit(activating_commit) => {
+                crate::protocol::reclaim::ReclaimActivation::Commit(activating_commit) => {
                     accepted.validate_commit_activated_reclaim_target(&target, activating_commit)
                 }
-                store_reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
+                crate::protocol::reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
                     validate_circle_snapshot_activated_reclaim_target(&target, &activation)
                 }
-                store_reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
+                crate::protocol::reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
                     accepted.validate_package_bound_reclaim_target(&target, &activation)
                 }
             }?;

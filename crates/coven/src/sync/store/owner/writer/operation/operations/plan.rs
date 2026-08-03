@@ -17,8 +17,8 @@ pub(crate) enum StoreOperationBatch {
     CleanupReceipt(super::device_join::DeviceJoinCleanupReceiptRef),
     DeviceExclusionProposal(super::store_commit::RetainedStoreDeviceExclusionProposal),
     DeviceExclusionOutcome(super::store_commit::RetainedStoreDeviceExclusionOutcome),
-    ReclaimAuthorization(Box<super::store_reclaim::ReclaimAuthorizationRef>),
-    ReclaimReceipt(Box<super::store_reclaim::ReclaimReceiptRef>),
+    ReclaimAuthorization(Box<crate::protocol::reclaim::ReclaimAuthorizationRef>),
+    ReclaimReceipt(Box<crate::protocol::reclaim::ReclaimReceiptRef>),
     OwnerPromotionRequest(super::store_commit::OwnerPromotionRequest),
     MergeMembershipActivation {
         transition: super::membership::MergeMembershipHeadTransition,
@@ -542,10 +542,10 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn sign_reclaim_receipt(
         &self,
-        authorization: crate::sync::store::owner::writer::reclaim::ReclaimAuthorizationRef,
+        authorization: crate::protocol::reclaim::ReclaimAuthorizationRef,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
-    ) -> Result<crate::sync::store::owner::writer::reclaim::ReclaimReceipt, StoreError> {
-        crate::sync::store::owner::writer::reclaim::ReclaimReceipt::signed(
+    ) -> Result<crate::protocol::reclaim::ReclaimReceipt, StoreError> {
+        crate::protocol::reclaim::ReclaimReceipt::signed(
             self.root.store_root_hash,
             authorization,
             self.membership_state.clone(),

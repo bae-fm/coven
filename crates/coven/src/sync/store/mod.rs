@@ -96,16 +96,9 @@ pub(crate) use owner::pull::{
 pub(crate) use owner::pull::{
     HeldStorePosition, PullError, StorePullError, StorePullResult, VerifiedStoreDeviceHead,
 };
-#[cfg(test)]
-pub(crate) use owner::reclaim::StorePackageReclaimTarget;
+pub(crate) use owner::reclaim::StoreReclaimError;
 #[cfg(test)]
 pub(crate) use owner::reclaim::StoreReclaimResult;
-pub(crate) use owner::reclaim::{
-    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
-    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
-    StoreReclaimError,
-};
 pub(crate) use owner::snapshot::SnapshotCut;
 #[doc(hidden)]
 pub(crate) use owner::snapshot::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};

@@ -464,7 +464,7 @@ impl StoreDatabase {
     pub(crate) async fn mark_store_reclaim_target_absent(
         &self,
         expected: DurableStoreReclaimOperation,
-        target: crate::sync::store::ReclaimTarget,
+        target: crate::protocol::reclaim::ReclaimTarget,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let DurableStoreReclaimOperation::Authorized {
             authorization,

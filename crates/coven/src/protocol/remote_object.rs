@@ -244,7 +244,7 @@ impl RemoteObjectRecord {
     }
 
     pub(crate) fn candidate_activated_reclaim_evidence(
-        reference: crate::sync::store::ReclaimEvidenceRef,
+        reference: crate::protocol::reclaim::ReclaimEvidenceRef,
         canonical_signed_bytes: Vec<u8>,
         stored_bytes: Vec<u8>,
         owner: StoreBatchCommitRef,
@@ -261,7 +261,7 @@ impl RemoteObjectRecord {
     }
 
     pub(crate) fn candidate_activated_reclaim_authorization(
-        reference: crate::sync::store::ReclaimAuthorizationRef,
+        reference: crate::protocol::reclaim::ReclaimAuthorizationRef,
         canonical_signed_bytes: Vec<u8>,
         stored_bytes: Vec<u8>,
         owner: StoreBatchCommitRef,
@@ -278,7 +278,7 @@ impl RemoteObjectRecord {
     }
 
     pub(crate) fn candidate_activated_reclaim_receipt(
-        reference: crate::sync::store::ReclaimReceiptRef,
+        reference: crate::protocol::reclaim::ReclaimReceiptRef,
         canonical_signed_bytes: Vec<u8>,
         stored_bytes: Vec<u8>,
         owner: StoreBatchCommitRef,
@@ -3326,13 +3326,13 @@ pub(crate) enum RetainedAuthorityObjectDomain {
         reference: super::store_commit::StoreDeviceExclusionOutcomeRef,
     },
     ReclaimEvidence {
-        reference: crate::sync::store::ReclaimEvidenceRef,
+        reference: crate::protocol::reclaim::ReclaimEvidenceRef,
     },
     ReclaimAuthorization {
-        reference: crate::sync::store::ReclaimAuthorizationRef,
+        reference: crate::protocol::reclaim::ReclaimAuthorizationRef,
     },
     ReclaimReceipt {
-        reference: crate::sync::store::ReclaimReceiptRef,
+        reference: crate::protocol::reclaim::ReclaimReceiptRef,
     },
     CircleAccessLeaf {
         family: CandidateFamilyId,
@@ -3485,7 +3485,7 @@ fn validate_retained_authority_identity(
             }
         }
         RetainedAuthorityObjectDomain::ReclaimEvidence { reference } => {
-            let value: crate::sync::store::ReclaimEvidence =
+            let value: crate::protocol::reclaim::ReclaimEvidence =
                 serde_json::from_slice(canonical_semantic_bytes)
                     .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
             reference
@@ -3496,7 +3496,7 @@ fn validate_retained_authority_identity(
             }
         }
         RetainedAuthorityObjectDomain::ReclaimAuthorization { reference } => {
-            let value: crate::sync::store::ReclaimAuthorization =
+            let value: crate::protocol::reclaim::ReclaimAuthorization =
                 serde_json::from_slice(canonical_semantic_bytes)
                     .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
             reference
@@ -3507,7 +3507,7 @@ fn validate_retained_authority_identity(
             }
         }
         RetainedAuthorityObjectDomain::ReclaimReceipt { reference } => {
-            let value: crate::sync::store::ReclaimReceipt =
+            let value: crate::protocol::reclaim::ReclaimReceipt =
                 serde_json::from_slice(canonical_semantic_bytes)
                     .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
             reference

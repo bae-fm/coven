@@ -2,17 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::reclaim::{
+    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
+    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
+    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
+};
 use crate::protocol::remote_object::{
     CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
 };
 use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
 use crate::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-};
-use crate::sync::store::{
-    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
-    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
 };
 use crate::sync::PreparedStoreOperationCommit;
 use crate::sync::StoreError;
