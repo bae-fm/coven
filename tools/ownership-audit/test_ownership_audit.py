@@ -697,6 +697,105 @@ status = "verified"
             [helper],
         )
 
+    def test_receivers_and_receiver_constructors_are_code_dispositions(self):
+        method = {
+            "symbol": "sample::<Store>::read",
+            "signature": "fn read(&self)",
+            "kind": "method",
+            "receiver_type": "Store",
+            "receiver_constructor": False,
+            "parameters": [{"name": "self", "type": "&self"}],
+            "test_entry": False,
+        }
+        constructor = {
+            "symbol": "sample::<Store>::new",
+            "signature": "fn new() -> Store",
+            "kind": "associated",
+            "receiver_type": "Store",
+            "receiver_constructor": True,
+            "parameters": [],
+            "test_entry": False,
+        }
+        free = {
+            "symbol": "sample::read",
+            "signature": "fn read()",
+            "kind": "free",
+            "receiver_type": None,
+            "receiver_constructor": False,
+            "parameters": [],
+            "test_entry": False,
+        }
+
+        self.assertEqual(
+            ownership_audit.unclassified(
+                {"callables": [method, constructor, free]},
+                {},
+            ),
+            [free],
+        )
+
+    def test_unresolved_call_requires_an_exact_reviewed_edge_decision(self):
+        record = {
+            "symbol": "sample::map",
+            "signature": "fn map(convert: impl FnOnce(u64) -> u64)",
+            "call_hierarchy": "resolved",
+            "call_hierarchy_views": {"library-default": "resolved"},
+            "unresolved_calls": [
+                {
+                    "text": "convert(value)",
+                    "resolution": "callable-parameter",
+                    "dynamic_dispatch_candidates": ["external-caller-supplied"],
+                }
+            ],
+        }
+        index = {"callables": [record]}
+
+        evidence = ownership_audit.unresolved_edge_evidence(index)
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(
+            ownership_audit.unreviewed_edges(index, {}),
+            evidence,
+        )
+
+        decision = {
+            **evidence[0],
+            "reason": "The callback is supplied by the caller and invoked once.",
+            "status": "reviewed",
+        }
+        reviewed = {ownership_audit.edge_decision_key(decision): decision}
+        self.assertEqual(ownership_audit.unreviewed_edges(index, reviewed), [])
+
+        record["unresolved_calls"][0]["dynamic_dispatch_candidates"] = [
+            "sample::convert"
+        ]
+        self.assertEqual(len(ownership_audit.unreviewed_edges(index, reviewed)), 1)
+
+    def test_unavailable_call_hierarchy_requires_a_reviewed_disposition(self):
+        record = {
+            "symbol": "sample::platform_only",
+            "signature": "fn platform_only()",
+            "call_hierarchy": "unavailable",
+            "call_hierarchy_views": {"library-default": "unavailable"},
+            "unresolved_calls": [],
+        }
+        evidence = ownership_audit.unresolved_edge_evidence(
+            {"callables": [record]}
+        )
+
+        self.assertEqual(
+            evidence,
+            [
+                {
+                    "caller": "sample::platform_only",
+                    "signature": "fn platform_only()",
+                    "kind": "call-hierarchy",
+                    "expression": "<call-hierarchy>",
+                    "resolution": "unavailable",
+                    "candidates": ["library-default:unavailable"],
+                }
+            ],
+        )
+
 
 class SemanticCacheTests(unittest.TestCase):
     def test_semantic_workspace_cache_only_globally_tracks_analyzer_inputs(self):

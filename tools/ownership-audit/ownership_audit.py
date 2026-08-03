@@ -5647,6 +5647,38 @@ def read_decisions() -> dict[tuple[str, str], dict[str, Any]]:
     return decisions
 
 
+def edge_decision_key(
+    decision: dict[str, Any],
+) -> tuple[str, str, str, str, str, tuple[str, ...]]:
+    return (
+        decision["caller"],
+        normalized_signature(decision["signature"]),
+        decision["kind"],
+        decision["expression"],
+        decision["resolution"],
+        tuple(sorted(decision.get("candidates", []))),
+    )
+
+
+def read_edge_decisions(
+) -> dict[tuple[str, str, str, str, str, tuple[str, ...]], dict[str, Any]]:
+    if not DECISIONS_PATH.exists():
+        return {}
+    data = parse_decisions(DECISIONS_PATH.read_text())
+    decisions: dict[
+        tuple[str, str, str, str, str, tuple[str, ...]], dict[str, Any]
+    ] = {}
+    for decision in data.get("edge_decision", []):
+        key = edge_decision_key(decision)
+        if key in decisions:
+            raise RuntimeError(
+                f"duplicate edge decision: {decision['caller']} "
+                f"{decision['expression']}"
+            )
+        decisions[key] = decision
+    return decisions
+
+
 def normalized_signature(signature: str) -> str:
     value = re.sub(r"\s+", " ", signature).strip()
     function = re.search(r"\bfn\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*", value)
@@ -5684,16 +5716,20 @@ def decision_key(symbol: str, signature: str) -> tuple[str, str]:
     return symbol, normalized_signature(signature)
 
 
-def parse_decisions(source: str) -> dict[str, list[dict[str, str]]]:
-    decisions: list[dict[str, str]] = []
-    current: dict[str, str] | None = None
+def parse_decisions(source: str) -> dict[str, list[dict[str, Any]]]:
+    sections: dict[str, list[dict[str, Any]]] = {
+        "decision": [],
+        "edge_decision": [],
+    }
+    current: dict[str, Any] | None = None
     for line_number, raw_line in enumerate(source.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if line == "[[decision]]":
+        section = re.fullmatch(r"\[\[(decision|edge_decision)\]\]", line)
+        if section is not None:
             current = {}
-            decisions.append(current)
+            sections[section.group(1)].append(current)
             continue
         if current is None or "=" not in line:
             raise ValueError(f"invalid decision ledger line {line_number}: {raw_line}")
@@ -5706,10 +5742,16 @@ def parse_decisions(source: str) -> dict[str, list[dict[str, str]]]:
             raise ValueError(
                 f"invalid decision value on line {line_number}: {raw_value}"
             ) from error
-        if not isinstance(value, str):
-            raise ValueError(f"decision value on line {line_number} must be a string")
+        if not isinstance(value, str) and not (
+            isinstance(value, list)
+            and all(isinstance(item, str) for item in value)
+        ):
+            raise ValueError(
+                f"decision value on line {line_number} must be a string "
+                "or a list of strings"
+            )
         current[key] = value
-    return {"decision": decisions}
+    return sections
 
 
 def select_symbols(index: dict[str, Any], query: str) -> list[dict[str, Any]]:
@@ -5881,7 +5923,60 @@ def unclassified(
         for record in index["callables"]
         if record.get("kind") not in {"closure", "async-block"}
         and not record.get("test_entry", False)
+        and not has_receiver(record)
+        and not record_is_receiver_constructor(record)
         and decision_key(record["symbol"], record["signature"]) not in decisions
+    ]
+
+
+def unresolved_edge_evidence(index: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence: dict[
+        tuple[str, str, str, str, str, tuple[str, ...]], dict[str, Any]
+    ] = {}
+    for record in index["callables"]:
+        hierarchy = record.get("call_hierarchy")
+        if hierarchy not in {"resolved", "enclosing-resolved"}:
+            item = {
+                "caller": record["symbol"],
+                "signature": record["signature"],
+                "kind": "call-hierarchy",
+                "expression": "<call-hierarchy>",
+                "resolution": hierarchy,
+                "candidates": sorted(
+                    f"{view}:{state}"
+                    for view, state in record.get(
+                        "call_hierarchy_views", {}
+                    ).items()
+                ),
+            }
+            evidence[edge_decision_key(item)] = item
+        for call in record.get("unresolved_calls", []):
+            item = {
+                "caller": record["symbol"],
+                "signature": record["signature"],
+                "kind": "call",
+                "expression": call["text"],
+                "resolution": call["resolution"],
+                "candidates": sorted(call["dynamic_dispatch_candidates"]),
+            }
+            evidence[edge_decision_key(item)] = item
+    return list(evidence.values())
+
+
+def unreviewed_edges(
+    index: dict[str, Any],
+    decisions: dict[
+        tuple[str, str, str, str, str, tuple[str, ...]], dict[str, Any]
+    ],
+) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in unresolved_edge_evidence(index)
+        if (
+            (decision := decisions.get(edge_decision_key(item))) is None
+            or decision.get("status") != "reviewed"
+            or not decision.get("reason")
+        )
     ]
 
 
@@ -5903,15 +5998,10 @@ def command_check(_: argparse.Namespace) -> None:
     missing = unclassified(index, decisions)
     if missing:
         raise RuntimeError(f"{len(missing)} callables have no durable disposition")
-    unresolved = [
-        record
-        for record in index["callables"]
-        if record.get("call_hierarchy")
-        not in {"resolved", "enclosing-resolved"}
-        or record["unresolved_calls"]
-    ]
+    edge_decisions = read_edge_decisions()
+    unresolved = unreviewed_edges(index, edge_decisions)
     if unresolved:
-        raise RuntimeError(f"{len(unresolved)} callables have unresolved call edges")
+        raise RuntimeError(f"{len(unresolved)} call edges require review")
     stale = [
         decision
         for key, decision in decisions.items()
@@ -5924,6 +6014,18 @@ def command_check(_: argparse.Namespace) -> None:
     ]
     if stale:
         raise RuntimeError(f"{len(stale)} ledger decisions refer to absent callables")
+    current_edges = {
+        edge_decision_key(item) for item in unresolved_edge_evidence(index)
+    }
+    stale_edges = [
+        decision
+        for key, decision in edge_decisions.items()
+        if key not in current_edges
+    ]
+    if stale_edges:
+        raise RuntimeError(
+            f"{len(stale_edges)} edge decisions refer to absent call evidence"
+        )
     print(f"verified {len(index['callables'])} callable dispositions")
 
 
