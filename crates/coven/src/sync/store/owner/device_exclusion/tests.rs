@@ -183,47 +183,47 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
 
 #[tokio::test]
 async fn remaining_device_freezes_and_acknowledges_before_owner_exclusion() {
-    Box::pin(run_remaining_device_exclusion()).await;
-}
-
-async fn run_remaining_device_exclusion() {
-    let signer = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let store = Arc::new(
-        Box::pin(TestStore::create(
+    Box::pin(async {
+        let signer = UserKeypair::generate();
+        let owner_db = open_test_db();
+        let store = Arc::new(
+            Box::pin(TestStore::create(
+                &owner_db,
+                "device-exclusion-two-device-store",
+                signer.clone(),
+            ))
+            .await
+            .expect("create two-device exclusion Store"),
+        );
+        let owner_device = Box::pin(store.open_into(&owner_db))
+            .await
+            .expect("open two-device exclusion Store");
+        let peer_db = open_test_db();
+        Box::pin(store.activate_joined_device(
             &owner_db,
-            "device-exclusion-two-device-store",
-            signer.clone(),
+            &peer_db,
+            &signer,
+            "2026-07-18T00:00:00Z",
         ))
-        .await
-        .expect("create two-device exclusion Store"),
-    );
-    let owner_device = Box::pin(store.open_into(&owner_db))
-        .await
-        .expect("open two-device exclusion Store");
-    let peer_db = open_test_db();
-    Box::pin(store.activate_joined_device(&owner_db, &peer_db, &signer, "2026-07-18T00:00:00Z"))
         .await
         .expect("activate peer Store device");
 
-    let local_device_id = owner_device.device_id.clone();
-    let target = store_database(&owner_db)
-        .activated_store_device_registration_records()
-        .await
-        .expect("list active Store registrations")
-        .into_iter()
-        .map(|(reference, _)| reference)
-        .find(|reference| reference.device_id.to_string() != local_device_id)
-        .expect("peer Store registration");
-    finalize_peer_exclusion_detached(owner_device, &target).await;
+        let local_device_id = owner_device.device_id.clone();
+        let target = store_database(&owner_db)
+            .activated_store_device_registration_records()
+            .await
+            .expect("list active Store registrations")
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .find(|reference| reference.device_id.to_string() != local_device_id)
+            .expect("peer Store registration");
+        finalize_peer_exclusion_detached(owner_device, &target).await;
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn snapshot_preserves_author_exclusion_activation_evidence() {
-    run_snapshot_preserves_author_exclusion_activation_evidence().await;
-}
-
-async fn run_snapshot_preserves_author_exclusion_activation_evidence() {
     let signer = UserKeypair::generate();
     let owner_db = open_test_db();
     let store = Arc::new(

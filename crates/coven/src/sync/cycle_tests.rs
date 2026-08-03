@@ -1053,119 +1053,116 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            tokio::task::spawn_local(
-                run_pending_upload_does_not_hold_back_a_gated_true_changeset(),
-            )
-            .await
-            .expect("pending-upload gate orchestration");
-        })
-        .await;
-}
+            tokio::task::spawn_local(async {
+                let keypair = UserKeypair::generate();
+                let blob_decl =
+                    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
+                let db = open_test_db_with_blob(blob_decl.clone());
+                let storage = Arc::new(cycle_test_store(&db, &keypair).await);
+                let (_tmp, ld) = temp_store_dir();
+                let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
+                    EncryptionService::from_key([5u8; 32]),
+                )));
+                let hlc = Arc::new(Hlc::new(
+                    "M".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ));
 
-async fn run_pending_upload_does_not_hold_back_a_gated_true_changeset() {
-    let keypair = UserKeypair::generate();
-    let blob_decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
-    let db = open_test_db_with_blob(blob_decl.clone());
-    let storage = Arc::new(cycle_test_store(&db, &keypair).await);
-    let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([5u8; 32]),
-    )));
-    let hlc = Arc::new(Hlc::new(
-        "M".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    ));
+                storage
+                    .retain_store_packages_for_assertion(&db, b"existing-pending-upload-snapshot")
+                    .await;
+                let peer = UserKeypair::generate();
+                storage
+                    .invite_member(
+                        &db,
+                        &keypair,
+                        &Hlc::new(
+                            "M".to_string(),
+                            std::sync::Arc::new(crate::clock::SystemClock),
+                        ),
+                        &pubkey_hex(&peer),
+                        None,
+                        crate::protocol::membership::MemberRole::Member,
+                        &EncryptionService::from_key([42; 32]),
+                        "Test Store",
+                    )
+                    .await
+                    .expect("invite exact pending-upload peer");
+                let db_b = open_test_db_with_blob(blob_decl);
+                let peer_device = storage
+                    .activate_joined_device(&db, &db_b, &peer, T0)
+                    .await
+                    .expect("activate exact joined test device");
+                let device_id = db
+                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                    .await
+                    .expect("read exact pending-upload device")
+                    .expect("exact pending-upload device exists");
+                run_cycle_in_task(
+                    Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
+                    db.clone(),
+                    Arc::clone(&enc),
+                    keypair.clone(),
+                    Arc::clone(&hlc),
+                    ld.clone(),
+                    device_id.clone(),
+                )
+                .await
+                .expect("settle exact pending-upload peer activation");
 
-    storage
-        .retain_store_packages_for_assertion(&db, b"existing-pending-upload-snapshot")
-        .await;
-    let peer = UserKeypair::generate();
-    storage
-        .invite_member(
-            &db,
-            &keypair,
-            &Hlc::new(
-                "M".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &pubkey_hex(&peer),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact pending-upload peer");
-    let db_b = open_test_db_with_blob(blob_decl);
-    let peer_device = storage
-        .activate_joined_device(&db, &db_b, &peer, T0)
-        .await
-        .expect("activate exact joined test device");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read exact pending-upload device")
-        .expect("exact pending-upload device exists");
-    run_cycle_in_task(
-        Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        Arc::clone(&hlc),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("settle exact pending-upload peer activation");
+                // A slow/stuck upload for some OTHER unit is pending the whole time.
+                db.seed_stuck_blob_upload_for_test(T0)
+                    .await
+                    .expect("seed exact pending upload");
 
-    // A slow/stuck upload for some OTHER unit is pending the whole time.
-    db.seed_stuck_blob_upload_for_test(T0)
-        .await
-        .expect("seed exact pending upload");
-
-    // One shareable note (its blobs are up → gate on) and one still-private note
-    // (its blobs aren't up yet → gate off; the host hasn't flipped it).
-    db.execute_test_host_write(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                // One shareable note (its blobs are up → gate on) and one still-private note
+                // (its blobs aren't up yet → gate off; the host hasn't flipped it).
+                db.execute_test_host_write(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('pub', 'Shareable', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
-    )
-    .await;
-    db.execute_test_host_write(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                )
+                .await;
+                db.execute_test_host_write(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('priv', 'NotYet', NULL, 0, '0000000002000-0000-M', '2026-01-01')",
-    )
-    .await;
+                )
+                .await;
 
-    // The changeset pushes despite the pending upload — no global deferral.
-    run_cycle_in_task(
-        Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        Arc::clone(&hlc),
-        ld.clone(),
-        device_id,
-    )
-    .await
-    .expect("publish gated-true write beside pending upload");
+                // The changeset pushes despite the pending upload — no global deferral.
+                run_cycle_in_task(
+                    Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
+                    db.clone(),
+                    Arc::clone(&enc),
+                    keypair.clone(),
+                    Arc::clone(&hlc),
+                    ld.clone(),
+                    device_id,
+                )
+                .await
+                .expect("publish gated-true write beside pending upload");
 
-    // The activated peer pulls: it gets the shareable row, never the gated-false one.
-    peer_device
-        .pull_store(&ld)
-        .await
-        .expect("pull exact pending-upload peer");
-    assert_eq!(
-        db_b.query_test_text("SELECT title FROM notes WHERE id = 'pub'")
-            .await,
-        "Shareable",
-        "the shareable note reaches the peer",
-    );
-    assert!(
+                // The activated peer pulls: it gets the shareable row, never the gated-false one.
+                peer_device
+                    .pull_store(&ld)
+                    .await
+                    .expect("pull exact pending-upload peer");
+                assert_eq!(
+                    db_b.query_test_text("SELECT title FROM notes WHERE id = 'pub'")
+                        .await,
+                    "Shareable",
+                    "the shareable note reaches the peer",
+                );
+                assert!(
         !db_b
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'priv'")
             .await,
         "a gated-false row is still withheld — that is what holds a not-yet-uploaded unit",
     );
+            })
+            .await
+            .expect("pending-upload gate orchestration");
+        })
+        .await;
 }
 
 /// A gated-false row is withheld until its gate flips on, then it propagates: the
@@ -1176,125 +1173,124 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            tokio::task::spawn_local(run_gated_false_row_propagates_once_its_gate_flips())
+            tokio::task::spawn_local(async {
+                let keypair = UserKeypair::generate();
+                let blob_decl =
+                    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
+                let db = open_test_db_with_blob(blob_decl.clone());
+                let storage = Arc::new(cycle_test_store(&db, &keypair).await);
+                let (_tmp, ld) = temp_store_dir();
+                let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
+                    EncryptionService::from_key([8u8; 32]),
+                )));
+                let hlc = Arc::new(Hlc::new(
+                    "M".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ));
+                let peer = UserKeypair::generate();
+                storage
+                    .invite_member(
+                        &db,
+                        &keypair,
+                        &Hlc::new(
+                            "M".to_string(),
+                            std::sync::Arc::new(crate::clock::SystemClock),
+                        ),
+                        &pubkey_hex(&peer),
+                        None,
+                        crate::protocol::membership::MemberRole::Member,
+                        &EncryptionService::from_key([42; 32]),
+                        "Test Store",
+                    )
+                    .await
+                    .expect("invite exact gate-flip peer");
+                let db_b = open_test_db_with_blob(blob_decl);
+                let peer_device = storage
+                    .activate_joined_device(&db, &db_b, &peer, T0)
+                    .await
+                    .expect("activate exact joined test device");
+                let device_id = db
+                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                    .await
+                    .expect("read exact gate-flip device")
+                    .expect("exact gate-flip device exists");
+                run_cycle_in_task(
+                    Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
+                    db.clone(),
+                    Arc::clone(&enc),
+                    keypair.clone(),
+                    Arc::clone(&hlc),
+                    ld.clone(),
+                    device_id.clone(),
+                )
                 .await
-                .expect("gate-flip propagation orchestration");
-        })
-        .await;
-}
+                .expect("settle exact gate-flip peer activation");
 
-async fn run_gated_false_row_propagates_once_its_gate_flips() {
-    let keypair = UserKeypair::generate();
-    let blob_decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
-    let db = open_test_db_with_blob(blob_decl.clone());
-    let storage = Arc::new(cycle_test_store(&db, &keypair).await);
-    let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([8u8; 32]),
-    )));
-    let hlc = Arc::new(Hlc::new(
-        "M".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    ));
-    let peer = UserKeypair::generate();
-    storage
-        .invite_member(
-            &db,
-            &keypair,
-            &Hlc::new(
-                "M".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &pubkey_hex(&peer),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact gate-flip peer");
-    let db_b = open_test_db_with_blob(blob_decl);
-    let peer_device = storage
-        .activate_joined_device(&db, &db_b, &peer, T0)
-        .await
-        .expect("activate exact joined test device");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read exact gate-flip device")
-        .expect("exact gate-flip device exists");
-    run_cycle_in_task(
-        Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        Arc::clone(&hlc),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("settle exact gate-flip peer activation");
-
-    // A note whose blobs aren't up yet: gate off.
-    db.execute_test_host_write(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                // A note whose blobs aren't up yet: gate off.
+                db.execute_test_host_write(
+                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album Title', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
-    )
-    .await;
-    run_cycle_in_task(
-        Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        Arc::clone(&hlc),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("publish gated-false Store write");
+                )
+                .await;
+                run_cycle_in_task(
+                    Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
+                    db.clone(),
+                    Arc::clone(&enc),
+                    keypair.clone(),
+                    Arc::clone(&hlc),
+                    ld.clone(),
+                    device_id.clone(),
+                )
+                .await
+                .expect("publish gated-false Store write");
 
-    peer_device
-        .pull_store(&ld)
-        .await
-        .expect("pull gated-false Store state");
-    assert!(
-        !db_b
-            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
-            .await,
-        "a gated-false row must not reach a peer",
-    );
+                peer_device
+                    .pull_store(&ld)
+                    .await
+                    .expect("pull gated-false Store state");
+                assert!(
+                    !db_b
+                        .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+                        .await,
+                    "a gated-false row must not reach a peer",
+                );
 
-    // The blobs land; the host flips the gate on. The next cycle re-emits the
-    // now-shareable row.
-    db.execute_test_host_write(
+                // The blobs land; the host flips the gate on. The next cycle re-emits the
+                // now-shareable row.
+                db.execute_test_host_write(
         "UPDATE notes SET shared = 1, _updated_at = '0000000003000-0000-M' WHERE id = 'n1'",
     )
     .await;
-    run_cycle_in_task(
-        Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        Arc::clone(&hlc),
-        ld.clone(),
-        device_id,
-    )
-    .await
-    .expect("publish gate-flip Store write");
+                run_cycle_in_task(
+                    Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
+                    db.clone(),
+                    Arc::clone(&enc),
+                    keypair.clone(),
+                    Arc::clone(&hlc),
+                    ld.clone(),
+                    device_id,
+                )
+                .await
+                .expect("publish gate-flip Store write");
 
-    // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
-    // re-emits it at seq 1. Re-pull from empty positions to pick it up wherever it
-    // landed.
-    peer_device
-        .pull_store(&ld)
-        .await
-        .expect("pull gate-flip Store state");
-    assert_eq!(
-        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
-            .await,
-        "Album Title",
-        "once its gate flips on, the row reaches the peer",
-    );
+                // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
+                // re-emits it at seq 1. Re-pull from empty positions to pick it up wherever it
+                // landed.
+                peer_device
+                    .pull_store(&ld)
+                    .await
+                    .expect("pull gate-flip Store state");
+                assert_eq!(
+                    db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+                        .await,
+                    "Album Title",
+                    "once its gate flips on, the row reaches the peer",
+                );
+            })
+            .await
+            .expect("gate-flip propagation orchestration");
+        })
+        .await;
 }
 
 /// The snapshot is the second propagation channel and runs the same row-level
@@ -4944,147 +4940,146 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
 /// publishes another, and both packages remain available for its later pull.
 #[tokio::test]
 async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
-    Box::pin(run_cycle_preserves_packages_until_every_device_covers_the_snapshot()).await;
-}
+    Box::pin(async {
+        let owner = UserKeypair::generate();
+        let owner_db = open_test_db();
+        let storage = cycle_test_store(&owner_db, &owner).await;
+        let owner_device = storage
+            .founder_device()
+            .await
+            .expect("retain Owner Store device");
+        let (_tmp, ld) = temp_store_dir();
+        let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+            [12u8; 32],
+        )));
+        let hlc = Hlc::new(
+            "owner".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+        );
 
-async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(&owner_db, &owner).await;
-    let owner_device = storage
-        .founder_device()
-        .await
-        .expect("retain Owner Store device");
-    let (_tmp, ld) = temp_store_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [12u8; 32],
-    )));
-    let hlc = Hlc::new(
-        "owner".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
-
-    let source = open_test_db();
-    let first_changeset = source
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        let source = open_test_db();
+        let first_changeset = source
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('a1', 'Title Alpha', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
-        ])
-        .await;
-    storage
-        .publish_changeset("owner", 1, &first_changeset, SCHEMA_VERSION)
-        .await
-        .expect("publish first exact Store changeset");
-
-    let behind = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &Hlc::new(
-                "owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &pubkey_hex(&behind),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &EncryptionService::from_key([42; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact behind Member identity");
-    let behind_db = open_test_db();
-    let behind_store = storage
-        .activate_joined_device(&owner_db, &behind_db, &behind, T0)
-        .await
-        .expect("activate exact joined test device");
-    behind_store
-        .pull_store(&ld)
-        .await
-        .expect("pull initial behind Member Store state");
-
-    let behind_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
-        crate::database::StoreDatabase::new(&behind_db)
-            .materialized_frontier()
+            ])
+            .await;
+        storage
+            .publish_changeset("owner", 1, &first_changeset, SCHEMA_VERSION)
             .await
-            .expect("read behind device frontier"),
-    )
-    .expect("validate behind device frontier");
-    behind_store
-        .stage_acknowledgement(behind_frontier, T0.to_string())
-        .await
-        .expect("stage behind device acknowledgement");
-    behind_store
-        .drain_acknowledgements()
-        .await
-        .expect("publish behind device acknowledgement");
+            .expect("publish first exact Store changeset");
 
-    let second_changeset = source
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('a2', 'Title Beta', NULL, 1, '0000000002000-0000-A', '2026-01-01')",
-        ])
-        .await;
-    let second_sequence = owner_device
-        .latest_local_store_position()
-        .await
-        .expect("read owner Store position after registration activation")
-        .expect("registration activation advances the owner Store stream")
-        .coord
-        .sequence()
-        .checked_add(1)
-        .expect("owner Store sequence remains representable");
-    storage
-        .publish_changeset("owner", second_sequence, &second_changeset, SCHEMA_VERSION)
-        .await
-        .expect("publish second exact Store changeset after registration activation");
-
-    drop(source);
-    tokio::spawn(async move {
-        let (owner_registration, registration) = crate::database::StoreDatabase::new(&owner_db)
-            .local_blob_write_authority()
+        let behind = UserKeypair::generate();
+        storage
+            .invite_member(
+                &owner_db,
+                &owner,
+                &Hlc::new(
+                    "owner".to_string(),
+                    std::sync::Arc::new(crate::clock::SystemClock),
+                ),
+                &pubkey_hex(&behind),
+                None,
+                crate::protocol::membership::MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Test Store",
+            )
             .await
-            .expect("read owner announcement authority");
-        let owner_stream = registration
-            .store_announcement_activation(&owner_registration)
-            .expect("derive owner Store announcement activation")
-            .author_stream_id()
-            .to_string();
-        let second_sequence = owner_device
-            .latest_local_store_position()
+            .expect("invite exact behind Member identity");
+        let behind_db = open_test_db();
+        let behind_store = storage
+            .activate_joined_device(&owner_db, &behind_db, &behind, T0)
             .await
-            .expect("read published owner Store position")
-            .expect("second owner Store commit is materialized")
-            .coord
-            .sequence();
-        run_cycle_m(&storage, &owner_db, &enc, &owner, &hlc, &ld).await;
-
-        assert!(
-            storage
-                .store_package_exists(&owner_db, &owner_stream, 1)
-                .await,
-            "reclamation keeps the earlier package while an active device is behind",
-        );
-        assert!(
-            storage
-                .store_package_exists(&owner_db, &owner_stream, second_sequence)
-                .await,
-            "reclamation keeps the package the behind device still needs",
-        );
-
+            .expect("activate exact joined test device");
         behind_store
             .pull_store(&ld)
             .await
-            .expect("pull retained changeset into behind Member Store");
-        assert!(
-            behind_db
-                .test_row_exists("SELECT 1 FROM notes WHERE id = 'a2'")
-                .await,
-            "the behind device pulls the retained changeset",
-        );
+            .expect("pull initial behind Member Store state");
+
+        let behind_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+            crate::database::StoreDatabase::new(&behind_db)
+                .materialized_frontier()
+                .await
+                .expect("read behind device frontier"),
+        )
+        .expect("validate behind device frontier");
+        behind_store
+            .stage_acknowledgement(behind_frontier, T0.to_string())
+            .await
+            .expect("stage behind device acknowledgement");
+        behind_store
+            .drain_acknowledgements()
+            .await
+            .expect("publish behind device acknowledgement");
+
+        let second_changeset = source
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('a2', 'Title Beta', NULL, 1, '0000000002000-0000-A', '2026-01-01')",
+            ])
+            .await;
+        let second_sequence = owner_device
+            .latest_local_store_position()
+            .await
+            .expect("read owner Store position after registration activation")
+            .expect("registration activation advances the owner Store stream")
+            .coord
+            .sequence()
+            .checked_add(1)
+            .expect("owner Store sequence remains representable");
+        storage
+            .publish_changeset("owner", second_sequence, &second_changeset, SCHEMA_VERSION)
+            .await
+            .expect("publish second exact Store changeset after registration activation");
+
+        drop(source);
+        tokio::spawn(async move {
+            let (owner_registration, registration) = crate::database::StoreDatabase::new(&owner_db)
+                .local_blob_write_authority()
+                .await
+                .expect("read owner announcement authority");
+            let owner_stream = registration
+                .store_announcement_activation(&owner_registration)
+                .expect("derive owner Store announcement activation")
+                .author_stream_id()
+                .to_string();
+            let second_sequence = owner_device
+                .latest_local_store_position()
+                .await
+                .expect("read published owner Store position")
+                .expect("second owner Store commit is materialized")
+                .coord
+                .sequence();
+            run_cycle_m(&storage, &owner_db, &enc, &owner, &hlc, &ld).await;
+
+            assert!(
+                storage
+                    .store_package_exists(&owner_db, &owner_stream, 1)
+                    .await,
+                "reclamation keeps the earlier package while an active device is behind",
+            );
+            assert!(
+                storage
+                    .store_package_exists(&owner_db, &owner_stream, second_sequence)
+                    .await,
+                "reclamation keeps the package the behind device still needs",
+            );
+
+            behind_store
+                .pull_store(&ld)
+                .await
+                .expect("pull retained changeset into behind Member Store");
+            assert!(
+                behind_db
+                    .test_row_exists("SELECT 1 FROM notes WHERE id = 'a2'")
+                    .await,
+                "the behind device pulls the retained changeset",
+            );
+        })
+        .await
+        .expect("snapshot coverage reclamation cycle task");
     })
-    .await
-    .expect("snapshot coverage reclamation cycle task");
+    .await;
 }
 
 /// A registered Member publishes rows but cannot author a catalog snapshot.

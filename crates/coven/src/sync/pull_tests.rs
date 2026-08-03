@@ -4621,234 +4621,230 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
 /// Distinct browsable blob rows write distinct immutable cloud objects.
 #[tokio::test]
 async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
-    tokio::spawn(run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys())
-        .await
-        .expect("distinct browsable blob orchestration task");
-}
+    tokio::spawn(async {
+        // A browsable home: readable keys, objects stored in the clear (the two are one
+        // choice), so the test reads the cloud object back as plaintext.
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = cloud_test_storage(
+            std::sync::Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "test-lib",
+            keypair.clone(),
+        );
+        let old_bytes = b"OLD-COVER-BYTES";
+        let new_bytes = b"NEW-COVER-BYTES";
 
-async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
-    // A browsable home: readable keys, objects stored in the clear (the two are one
-    // choice), so the test reads the cloud object back as plaintext.
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
-    let old_bytes = b"OLD-COVER-BYTES";
-    let new_bytes = b"NEW-COVER-BYTES";
-
-    let db1 = open_test_db_with_blob(readable_photo_decl());
-    let tables = test_synced_tables_with_blob(readable_photo_decl());
-    let (_t1, ld1) = temp_store_dir();
-    ld1.store_local("p1cover", old_bytes).await;
-    let outgoing = db1
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        let db1 = open_test_db_with_blob(readable_photo_decl());
+        let tables = test_synced_tables_with_blob(readable_photo_decl());
+        let (_t1, ld1) = temp_store_dir();
+        ld1.store_local("p1cover", old_bytes).await;
+        let outgoing = db1
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos \
+                &format!(
+                    "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
-                old_bytes.len(),
-                crate::blob::content_hash(old_bytes),
-            ),
-        ])
-        .await;
-    storage
-        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
-        .await;
-    let old_key = db1.row_blob_object_key("note_photos", "p1cover").await;
-    assert_eq!(
-        home.get(&old_key).as_deref(),
-        Some(old_bytes.as_slice()),
-        "the first push puts the cover at the key its path names",
-    );
+                    old_bytes.len(),
+                    crate::blob::content_hash(old_bytes),
+                ),
+            ])
+            .await;
+        storage
+            .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+            .await;
+        let old_key = db1.row_blob_object_key("note_photos", "p1cover").await;
+        assert_eq!(
+            home.get(&old_key).as_deref(),
+            Some(old_bytes.as_slice()),
+            "the first push puts the cover at the key its path names",
+        );
 
-    // Device B takes the cover before the replacement, so it is a peer holding the
-    // replaced blob when the new one arrives.
-    let db2 = open_test_db_with_blob(readable_photo_decl());
-    let (_t2, ld2) = temp_store_dir();
-    db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        // Device B takes the cover before the replacement, so it is a peer holding the
+        // replaced blob when the new one arrives.
+        let db2 = open_test_db_with_blob(readable_photo_decl());
+        let (_t2, ld2) = temp_store_dir();
+        db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
-    // Add another blob whose readable path names it.
-    ld1.store_local("p2cover", new_bytes).await;
-    let outgoing = db1
-        .capture_test_changeset(&[&format!(
-            "INSERT INTO note_photos \
+        // Add another blob whose readable path names it.
+        ld1.store_local("p2cover", new_bytes).await;
+        let outgoing = db1
+            .capture_test_changeset(&[&format!(
+                "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
-            new_bytes.len(),
-            crate::blob::content_hash(new_bytes),
-        )])
-        .await;
-    storage
-        .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
-        .await;
-    let new_key = db1.row_blob_object_key("note_photos", "p2cover").await;
+                new_bytes.len(),
+                crate::blob::content_hash(new_bytes),
+            )])
+            .await;
+        storage
+            .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+            .await;
+        let new_key = db1.row_blob_object_key("note_photos", "p2cover").await;
 
-    assert_eq!(
-        home.get(&new_key).as_deref(),
-        Some(new_bytes.as_slice()),
-        "the second blob writes its own cloud object",
-    );
-    assert_eq!(
-        home.get(&old_key).as_deref(),
-        Some(old_bytes.as_slice()),
-        "the first blob's object is untouched",
-    );
+        assert_eq!(
+            home.get(&new_key).as_deref(),
+            Some(new_bytes.as_slice()),
+            "the second blob writes its own cloud object",
+        );
+        assert_eq!(
+            home.get(&old_key).as_deref(),
+            Some(old_bytes.as_slice()),
+            "the first blob's object is untouched",
+        );
 
-    // Device B pulls the replacement. Its download verifies the object against the new
-    // row's content hash, so an object holding the replaced bytes would fail the pull.
-    let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        // Device B pulls the replacement. Its download verifies the object against the new
+        // row's content hash, so an object holding the replaced bytes would fail the pull.
+        let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
-    assert!(
-        !result.asset_downloads_failed,
-        "device B downloads blobs matching their row hashes",
-    );
-    assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(exact_cache_path(
-        &ld2,
-        &db2.exact_row_blob_ref("note_photos", "p2cover").await,
-    ))
-    .expect("device B cached the replacement cover");
-    assert_eq!(
-        cached,
-        new_bytes.as_slice(),
-        "device B serves the second blob's bytes",
-    );
+        assert!(
+            !result.asset_downloads_failed,
+            "device B downloads blobs matching their row hashes",
+        );
+        assert_eq!(result.changesets_applied, 1);
+        let cached = std::fs::read(exact_cache_path(
+            &ld2,
+            &db2.exact_row_blob_ref("note_photos", "p2cover").await,
+        ))
+        .expect("device B cached the replacement cover");
+        assert_eq!(
+            cached,
+            new_bytes.as_slice(),
+            "device B serves the second blob's bytes",
+        );
+    })
+    .await
+    .expect("distinct browsable blob orchestration task");
 }
 
 /// Sequential replacements write separate immutable objects.
 #[tokio::test]
 async fn plain_scheme_two_replacements_write_two_objects() {
-    tokio::spawn(run_plain_scheme_two_replacements_write_two_objects())
-        .await
-        .expect("sequential browsable blob replacement orchestration task");
-}
+    tokio::spawn(async {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = cloud_test_storage(
+            std::sync::Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "test-lib",
+            keypair.clone(),
+        );
+        let tables = test_synced_tables_with_blob(replaceable_photo_decl());
 
-async fn run_plain_scheme_two_replacements_write_two_objects() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
-    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
+        let original = b"ORIGINAL-COVER";
+        let from_a = b"COVER-FROM-A";
+        let from_b = b"COVER-FROM-B-BYTES";
 
-    let original = b"ORIGINAL-COVER";
-    let from_a = b"COVER-FROM-A";
-    let from_b = b"COVER-FROM-B-BYTES";
-
-    // The source publishes the original cover.
-    let db_a = open_test_db_with_blob(replaceable_photo_decl());
-    let (_ta, ld_a) = temp_store_dir();
-    ld_a.store_local("p0cover", original).await;
-    let outgoing = db_a
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        // The source publishes the original cover.
+        let db_a = open_test_db_with_blob(replaceable_photo_decl());
+        let (_ta, ld_a) = temp_store_dir();
+        ld_a.store_local("p0cover", original).await;
+        let outgoing = db_a
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos \
+                &format!(
+                    "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at) \
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p0cover.jpg', 'p0cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
-                original.len(),
-                crate::blob::content_hash(original),
-            ),
-        ])
-        .await;
-    storage
-        .publish_test_cycle(&db_a, &tables, outgoing, 0, &keypair, &ld_a)
-        .await;
+                    original.len(),
+                    crate::blob::content_hash(original),
+                ),
+            ])
+            .await;
+        storage
+            .publish_test_cycle(&db_a, &tables, outgoing, 0, &keypair, &ld_a)
+            .await;
 
-    // Each replacement uses a fresh blob id and readable path.
-    ld_a.store_local("pAcover", from_a).await;
-    let outgoing_a = db_a
-        .capture_test_changeset(&[&format!(
-            "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
+        // Each replacement uses a fresh blob id and readable path.
+        ld_a.store_local("pAcover", from_a).await;
+        let outgoing_a = db_a
+            .capture_test_changeset(&[&format!(
+                "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
-            from_a.len(),
-            crate::blob::content_hash(from_a),
-        )])
-        .await;
-    storage
-        .publish_test_cycle(&db_a, &tables, outgoing_a, 1, &keypair, &ld_a)
-        .await;
-    let from_a_key = db_a.row_blob_object_key("note_photos", "ph1").await;
+                from_a.len(),
+                crate::blob::content_hash(from_a),
+            )])
+            .await;
+        storage
+            .publish_test_cycle(&db_a, &tables, outgoing_a, 1, &keypair, &ld_a)
+            .await;
+        let from_a_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
-    ld_a.store_local("pBcover", from_b).await;
-    let outgoing_b = db_a
-        .capture_test_changeset(&[&format!(
-            "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
+        ld_a.store_local("pBcover", from_b).await;
+        let outgoing_b = db_a
+            .capture_test_changeset(&[&format!(
+                "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000003000-0000-dev2' WHERE id = 'ph1'",
-            from_b.len(),
-            crate::blob::content_hash(from_b),
-        )])
-        .await;
-    storage
-        .publish_test_cycle(&db_a, &tables, outgoing_b, 2, &keypair, &ld_a)
-        .await;
-    let from_b_key = db_a.row_blob_object_key("note_photos", "ph1").await;
+                from_b.len(),
+                crate::blob::content_hash(from_b),
+            )])
+            .await;
+        storage
+            .publish_test_cycle(&db_a, &tables, outgoing_b, 2, &keypair, &ld_a)
+            .await;
+        let from_b_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
-    // Neither replacement overwrote the other: both objects stand, each holding the bytes
-    // of the blob its key names. Under a key that did not name its blob, these two writes
-    // would have been one object, and its bytes would be whichever device the bucket saw
-    // last — not necessarily the device the row's conflict resolved to.
-    assert_eq!(
-        home.get(&from_a_key).as_deref(),
-        Some(from_a.as_slice()),
-        "the first replacement is at its own key",
-    );
-    assert_eq!(
-        home.get(&from_b_key).as_deref(),
-        Some(from_b.as_slice()),
-        "the second replacement is at its own key",
-    );
+        // Neither replacement overwrote the other: both objects stand, each holding the bytes
+        // of the blob its key names. Under a key that did not name its blob, these two writes
+        // would have been one object, and its bytes would be whichever device the bucket saw
+        // last — not necessarily the device the row's conflict resolved to.
+        assert_eq!(
+            home.get(&from_a_key).as_deref(),
+            Some(from_a.as_slice()),
+            "the first replacement is at its own key",
+        );
+        assert_eq!(
+            home.get(&from_b_key).as_deref(),
+            Some(from_b.as_slice()),
+            "the second replacement is at its own key",
+        );
 
-    // A peer pulls every changeset and serves the latest object.
-    let db_c = open_test_db_with_blob(replaceable_photo_decl());
-    let (_tc, ld_c) = temp_store_dir();
-    let (_updated, result) = db_c.pull_exact_store_into(&db_a, &storage, &ld_c).await;
-    assert!(
-        !result.asset_downloads_failed,
-        "every row the third device applies names an object that holds its bytes",
-    );
-    assert_eq!(
-        result.changesets_applied, 3,
-        "the original and both replacements all apply",
-    );
+        // A peer pulls every changeset and serves the latest object.
+        let db_c = open_test_db_with_blob(replaceable_photo_decl());
+        let (_tc, ld_c) = temp_store_dir();
+        let (_updated, result) = db_c.pull_exact_store_into(&db_a, &storage, &ld_c).await;
+        assert!(
+            !result.asset_downloads_failed,
+            "every row the third device applies names an object that holds its bytes",
+        );
+        assert_eq!(
+            result.changesets_applied, 3,
+            "the original and both replacements all apply",
+        );
 
-    let winner: String = db_c
-        .test_sql(|conn| {
-            conn.query_row(
-                "SELECT blob_id FROM note_photos WHERE id = 'ph1'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .map_err(crate::database::DbError::from)
-        })
-        .await
-        .expect("the cover row");
-    assert_eq!(winner, "pBcover");
-    let expected = from_b.as_slice();
-    let cached = std::fs::read(exact_cache_path(
-        &ld_c,
-        &db_c.exact_row_blob_ref("note_photos", "ph1").await,
-    ))
-    .expect("the third device cached the cover its row names");
-    assert_eq!(
-        cached, expected,
-        "the latest row names the second replacement's bytes",
-    );
+        let winner: String = db_c
+            .test_sql(|conn| {
+                conn.query_row(
+                    "SELECT blob_id FROM note_photos WHERE id = 'ph1'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("the cover row");
+        assert_eq!(winner, "pBcover");
+        let expected = from_b.as_slice();
+        let cached = std::fs::read(exact_cache_path(
+            &ld_c,
+            &db_c.exact_row_blob_ref("note_photos", "ph1").await,
+        ))
+        .expect("the third device cached the cover its row names");
+        assert_eq!(
+            cached, expected,
+            "the latest row names the second replacement's bytes",
+        );
+    })
+    .await
+    .expect("sequential browsable blob replacement orchestration task");
 }
 
 /// A device replaying two blob-bearing changesets can fetch each immutable object.
@@ -5098,116 +5094,114 @@ fn replaceable_photo_decl() -> BlobDecl {
 /// blob and pushes; B pulls again and must serve the new bytes and drop the old.
 #[tokio::test]
 async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
-    tokio::spawn(run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key())
-        .await
-        .expect("browsable blob repointing orchestration task");
-}
+    tokio::spawn(async {
+        // A browsable home: readable keys, objects stored in the clear (the two are one
+        // choice), so the test reads the cloud object back as plaintext.
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = cloud_test_storage(
+            std::sync::Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "test-lib",
+            keypair.clone(),
+        );
+        let old_bytes = b"OLD-COVER-BYTES";
+        let new_bytes = b"NEW-COVER-BYTES";
 
-async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
-    // A browsable home: readable keys, objects stored in the clear (the two are one
-    // choice), so the test reads the cloud object back as plaintext.
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
-    let old_bytes = b"OLD-COVER-BYTES";
-    let new_bytes = b"NEW-COVER-BYTES";
-
-    let db1 = open_test_db_with_blob(replaceable_photo_decl());
-    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
-    let (_t1, ld1) = temp_store_dir();
-    ld1.store_local("p1cover", old_bytes).await;
-    let outgoing = db1
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        let db1 = open_test_db_with_blob(replaceable_photo_decl());
+        let tables = test_synced_tables_with_blob(replaceable_photo_decl());
+        let (_t1, ld1) = temp_store_dir();
+        ld1.store_local("p1cover", old_bytes).await;
+        let outgoing = db1
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            &format!(
-                "INSERT INTO note_photos \
+                &format!(
+                    "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at) \
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', 'p1cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
-                old_bytes.len(),
-                crate::blob::content_hash(old_bytes),
-            ),
-        ])
-        .await;
-    storage
-        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
-        .await;
-    let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
-    assert_eq!(
-        home.get(&old_key).as_deref(),
-        Some(old_bytes.as_slice()),
-        "the first push puts the cover at the key its path names",
-    );
+                    old_bytes.len(),
+                    crate::blob::content_hash(old_bytes),
+                ),
+            ])
+            .await;
+        storage
+            .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+            .await;
+        let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
+        assert_eq!(
+            home.get(&old_key).as_deref(),
+            Some(old_bytes.as_slice()),
+            "the first push puts the cover at the key its path names",
+        );
 
-    // Device B takes the cover before the replacement, so it is a peer holding the
-    // replaced blob when the new one arrives.
-    let db2 = open_test_db_with_blob(replaceable_photo_decl());
-    let (_t2, ld2) = temp_store_dir();
-    db2.pull_exact_store_into(&db1, &storage, &ld2).await;
-    let old_cache_path =
-        exact_cache_path(&ld2, &db2.exact_row_blob_ref("note_photos", "ph1").await);
+        // Device B takes the cover before the replacement, so it is a peer holding the
+        // replaced blob when the new one arrives.
+        let db2 = open_test_db_with_blob(replaceable_photo_decl());
+        let (_t2, ld2) = temp_store_dir();
+        db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        let old_cache_path =
+            exact_cache_path(&ld2, &db2.exact_row_blob_ref("note_photos", "ph1").await);
 
-    // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
-    // moves with it because it names the blob. The replaced blob's local copy goes away.
-    ld1.store_local("p2cover", new_bytes).await;
-    ld1.remove_local_blob("photos", "p1cover")
-        .await
-        .expect("drop the replaced blob's local copy");
-    let outgoing = db1
-        .capture_test_changeset(&[&format!(
-            "UPDATE note_photos SET blob_id = 'p2cover', cloud_path = 'n1/cover-p2cover.jpg', \
+        // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
+        // moves with it because it names the blob. The replaced blob's local copy goes away.
+        ld1.store_local("p2cover", new_bytes).await;
+        ld1.remove_local_blob("photos", "p1cover")
+            .await
+            .expect("drop the replaced blob's local copy");
+        let outgoing = db1
+            .capture_test_changeset(&[&format!(
+                "UPDATE note_photos SET blob_id = 'p2cover', cloud_path = 'n1/cover-p2cover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
-            new_bytes.len(),
-            crate::blob::content_hash(new_bytes),
-        )])
-        .await;
-    storage
-        .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
-        .await;
-    let new_key = db1.row_blob_object_key("note_photos", "ph1").await;
+                new_bytes.len(),
+                crate::blob::content_hash(new_bytes),
+            )])
+            .await;
+        storage
+            .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+            .await;
+        let new_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
-    assert_eq!(
-        home.get(&new_key).as_deref(),
-        Some(new_bytes.as_slice()),
-        "the repointed row's blob writes its own cloud object",
-    );
-    assert_eq!(
-        home.get(&old_key).as_deref(),
-        Some(old_bytes.as_slice()),
-        "the replaced blob's object is not overwritten — it is tombstoned and stands until \
+        assert_eq!(
+            home.get(&new_key).as_deref(),
+            Some(new_bytes.as_slice()),
+            "the repointed row's blob writes its own cloud object",
+        );
+        assert_eq!(
+            home.get(&old_key).as_deref(),
+            Some(old_bytes.as_slice()),
+            "the replaced blob's object is not overwritten — it is tombstoned and stands until \
          the GC collects it",
-    );
+        );
 
-    // Device B pulls the repointing. Its download verifies the object against the new
-    // row's content hash, so serving it the replaced bytes would fail the pull outright.
-    let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        // Device B pulls the repointing. Its download verifies the object against the new
+        // row's content hash, so serving it the replaced bytes would fail the pull outright.
+        let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
 
-    assert!(
-        !result.asset_downloads_failed,
-        "device B must download a cover matching the row's hash",
-    );
-    assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(exact_cache_path(
-        &ld2,
-        &db2.exact_row_blob_ref("note_photos", "ph1").await,
-    ))
-    .expect("device B cached the replacement cover");
-    assert_eq!(
-        cached,
-        new_bytes.as_slice(),
-        "device B serves the replacement bytes, not the cover it replaced",
-    );
-    assert!(
-        !old_cache_path.exists(),
-        "device B drops its cached copy of the blob the row no longer points at",
-    );
+        assert!(
+            !result.asset_downloads_failed,
+            "device B must download a cover matching the row's hash",
+        );
+        assert_eq!(result.changesets_applied, 1);
+        let cached = std::fs::read(exact_cache_path(
+            &ld2,
+            &db2.exact_row_blob_ref("note_photos", "ph1").await,
+        ))
+        .expect("device B cached the replacement cover");
+        assert_eq!(
+            cached,
+            new_bytes.as_slice(),
+            "device B serves the replacement bytes, not the cover it replaced",
+        );
+        assert!(
+            !old_cache_path.exists(),
+            "device B drops its cached copy of the blob the row no longer points at",
+        );
+    })
+    .await
+    .expect("browsable blob repointing orchestration task");
 }
 
 /// Repointing a row at a new blob while HOLDING its cloud path is the shape the rule

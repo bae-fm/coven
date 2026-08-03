@@ -1275,7 +1275,8 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
     }
 }
 
-async fn every_outgoing_synced_fk_matches_its_child_audience() {
+#[tokio::test]
+async fn validates_every_outgoing_synced_fk_audience() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
@@ -1473,11 +1474,7 @@ async fn every_outgoing_synced_fk_matches_its_child_audience() {
 }
 
 #[tokio::test]
-async fn validates_every_outgoing_synced_fk_audience() {
-    every_outgoing_synced_fk_matches_its_child_audience().await;
-}
-
-async fn inherited_reparenting_materializes_subtree() {
+async fn reparenting_an_inherited_row_materializes_its_subtree() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
@@ -1875,11 +1872,7 @@ async fn inherited_reparenting_materializes_subtree() {
 }
 
 #[tokio::test]
-async fn reparenting_an_inherited_row_materializes_its_subtree() {
-    inherited_reparenting_materializes_subtree().await;
-}
-
-async fn non_local_scoped_descendant_keeps_store_ancestor() {
+async fn scoped_descendant_keeps_store_ancestor() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
     let config = Config::with_defaults(
@@ -2307,9 +2300,4 @@ async fn non_local_scoped_descendant_keeps_store_ancestor() {
             id
         ));
     }
-}
-
-#[tokio::test]
-async fn scoped_descendant_keeps_store_ancestor() {
-    non_local_scoped_descendant_keeps_store_ancestor().await;
 }
