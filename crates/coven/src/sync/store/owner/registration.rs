@@ -65,7 +65,10 @@ mod tests {
         let authority = store.founder_recovery_authority().await;
         let database = crate::database::StoreDatabase::new(&db);
         let registration = loaded
-            .recover_owner_device_for_test(&authority)
+            .owner_recovery_for_test()
+            .await
+            .expect("authorize Owner recovery Store")
+            .recover_owner_device(&authority)
             .await
             .expect("recover Owner device");
         let loaded = store
@@ -93,8 +96,9 @@ mod tests {
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
         let database = crate::database::StoreDatabase::new(&db);
+        let initialized_db = open_test_db();
         let store = TestStore::create(
-            &db,
+            &initialized_db,
             "registration-missing-root-storage",
             UserKeypair::generate(),
             crate::sync::test_helpers::test_cloud_home(),
@@ -102,12 +106,16 @@ mod tests {
         .await
         .expect("create registration failure test Store");
 
-        assert!(matches!(
-            super::super::RegistrationOutbox::new(database, &store)
-                .drain()
-                .await,
-            Err(StoreRegistrationError::ExactRootAuthorityMissing)
-        ));
+        let result = super::super::RegistrationOutbox::new(database, &store)
+            .drain()
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(StoreRegistrationError::ExactRootAuthorityMissing)
+            ),
+            "unexpected registration outbox result: {result:?}",
+        );
     }
 
     #[tokio::test]
@@ -140,7 +148,10 @@ mod tests {
         let authority = store.founder_recovery_authority().await;
         let database = crate::database::StoreDatabase::new(&db);
         let registration = loaded
-            .recover_owner_device_for_test(&authority)
+            .owner_recovery_for_test()
+            .await
+            .expect("authorize Owner recovery Store")
+            .recover_owner_device(&authority)
             .await
             .expect("recover Owner device");
 
@@ -235,12 +246,13 @@ mod tests {
                 .expect("load recovery Store");
             let authority = store.founder_recovery_authority().await;
             let database = crate::database::StoreDatabase::new(&db);
+            let mut recovery = loaded
+                .owner_recovery_for_test()
+                .await
+                .expect("authorize Owner recovery Store");
             home.fail_exact_create_before_call(failed_call);
             assert!(
-                loaded
-                    .recover_owner_device_for_test(&authority)
-                    .await
-                    .is_err(),
+                recovery.recover_owner_device(&authority).await.is_err(),
                 "failure before exact create {failed_call} interrupts recovery",
             );
 
@@ -284,8 +296,8 @@ mod tests {
                 None
             };
 
-            loaded
-                .recover_owner_device_for_test(&authority)
+            recovery
+                .recover_owner_device(&authority)
                 .await
                 .expect("retry completes absent recovery suffix");
             assert_eq!(

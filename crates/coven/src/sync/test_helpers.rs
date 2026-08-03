@@ -1100,11 +1100,10 @@ mod test_device {
             self.store.restore_membership().await
         }
 
-        pub(crate) async fn recover_owner_device_for_test(
+        pub(crate) async fn owner_recovery_for_test(
             &self,
-            authority: &crate::restoration::OwnerRecoveryAuthority,
-        ) -> Result<crate::protocol::store_commit::StoreDeviceRegistrationRef, String> {
-            self.store.recover_owner_device_for_test(authority).await
+        ) -> Result<crate::sync::store::RestoringStore<'_>, String> {
+            self.store.owner_recovery_for_test().await
         }
 
         pub(crate) async fn begin_device_join(
@@ -2214,16 +2213,98 @@ mod test_device {
             observer: Option<&dyn crate::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
-            let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
+            self.run_cycle_with(&crate::clock::SystemClock, None, store_dir, observer)
+                .await
+        }
+
+        pub(crate) async fn run_cycle_with(
+            &self,
+            clock: &dyn crate::clock::Clock,
+            security: Option<&crate::store_security::StoreSecurity>,
+            store_dir: &StoreDir,
+            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+        ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
+        {
+            self.run_cycle_with_storage(
+                self.store.clone(),
+                self.storage.clone(),
+                clock,
+                security,
+                store_dir,
+                observer,
+            )
+            .await
+        }
+
+        pub(crate) async fn run_cycle_with_interceptor<I>(
+            &self,
+            clock: &dyn crate::clock::Clock,
+            security: Option<&crate::store_security::StoreSecurity>,
+            store_dir: &StoreDir,
+            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+            interceptor: I,
+        ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
+        where
+            I: super::StorageInterceptor + 'static,
+        {
+            let storage = std::sync::Arc::new(super::InterceptedStorage::new(
+                self.storage.clone(),
+                interceptor,
+            ));
+            let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
+            let store = std::sync::Arc::new(self.store.with_test_storage(store_storage));
+            self.run_cycle_with_storage(store, storage, clock, security, store_dir, observer)
+                .await
+        }
+
+        async fn run_cycle_with_storage<S>(
+            &self,
+            store: std::sync::Arc<crate::sync::store::Store>,
+            storage: std::sync::Arc<S>,
+            clock: &dyn crate::clock::Clock,
+            security: Option<&crate::store_security::StoreSecurity>,
+            store_dir: &StoreDir,
+            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+        ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
+        where
+            S: crate::sync::cycle::SyncCycleStorage + 'static,
+        {
+            let local_blob_access = crate::sync::test_owner_graph::local_blob_access(
                 self.db.clone(),
                 store_dir.clone(),
-            )
-            .prepare_sync(self.storage.clone(), self.identity.clone())
-            .await
-            .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
+            );
+            let components = crate::sync::cycle::SyncComponents::from_retained_test_device(
+                store,
+                self.db.clone(),
+                local_blob_access,
+                storage,
+                self.storage.store_id().to_string(),
+                self.device_id.clone(),
+            );
             components
-                .run_cycle(&crate::clock::SystemClock, None, store_dir, observer)
+                .run_cycle(clock, security, store_dir, observer)
                 .await
+        }
+
+        pub(crate) fn current_encryption_for_test(
+            &self,
+        ) -> Option<crate::encryption::EncryptionService> {
+            self.storage.current_encryption()
+        }
+
+        pub(crate) fn mark_rotation_committed_for_test(
+            &self,
+            generation: u64,
+        ) -> Result<(), String> {
+            self.storage.mark_rotation_committed_for_test(generation)
+        }
+
+        pub(crate) fn pending_rotation_generation_for_test(&self) -> Option<u64> {
+            self.storage.pending_rotation_generation_for_test()
+        }
+
+        pub(crate) fn clear_rotation_gate_for_test(&self) {
+            self.storage.clear_rotation_gate_for_test();
         }
 
         pub(crate) async fn create_circle(
@@ -3022,6 +3103,17 @@ impl TestStore {
         self.write_blob_tombstone(key, bytes).await
     }
 
+    /// Plants a typed tombstone through the exact plaintext Store layout while
+    /// bypassing the signing drain, so deletion tests can exercise rejected
+    /// signatures and Store identities.
+    pub(crate) async fn plant_tombstone(&self, tombstone: &crate::blob::delete::BlobTombstoneJson) {
+        let key = exact_tombstone_key(&tombstone.stored);
+        let bytes = serde_json::to_vec(tombstone).expect("serialize tombstone");
+        self.plant_tombstone_bytes(&key, bytes)
+            .await
+            .expect("plant tombstone");
+    }
+
     pub(crate) fn fail_exact_delete_on_call(&self, call: usize) {
         self.home.fail_exact_delete_on_call(call);
     }
@@ -3405,6 +3497,24 @@ impl TestStore {
             )),
             crate::storage::BlobPathScheme::Hashed,
         ))
+        .await
+    }
+
+    pub(crate) async fn create_encrypted(
+        db: &Database,
+        store_id: &str,
+        signer: UserKeypair,
+        home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        encryption: crate::encryption::EncryptionService,
+    ) -> Result<Arc<Self>, String> {
+        Self::create_with_protection(
+            db,
+            store_id,
+            signer,
+            home,
+            crate::storage::CloudCipher::Encrypted(encryption),
+            crate::storage::BlobPathScheme::Hashed,
+        )
         .await
     }
 
@@ -4724,6 +4834,75 @@ pub(crate) trait StorageInterceptor: Send + Sync {
     }
 }
 
+#[cfg(test)]
+#[async_trait::async_trait]
+impl<T> StorageInterceptor for std::sync::Arc<T>
+where
+    T: StorageInterceptor + ?Sized,
+{
+    async fn before_protocol_create(
+        &self,
+        prepared: &crate::storage::PreparedExactObject,
+    ) -> Result<(), crate::storage::StorageError> {
+        (**self).before_protocol_create(prepared).await
+    }
+
+    async fn before_protocol_read(
+        &self,
+        read: ProtocolRead,
+        semantic_prefix: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        (**self).before_protocol_read(read, semantic_prefix).await
+    }
+
+    async fn before_blob_allocate(&self) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_allocate().await
+    }
+
+    async fn before_blob_prepare(&self) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_prepare().await
+    }
+
+    async fn before_blob_create(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_create(blob).await
+    }
+
+    async fn before_blob_stage(&self) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_stage().await
+    }
+
+    async fn before_blob_tombstone_read(
+        &self,
+        key: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_tombstone_read(key).await
+    }
+
+    async fn before_blob_tombstone_write(
+        &self,
+        key: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_tombstone_write(key).await
+    }
+
+    async fn before_blob_tombstone_exists(
+        &self,
+        key: &str,
+    ) -> Result<TombstoneExistsInterception, crate::storage::StorageError> {
+        (**self).before_blob_tombstone_exists(key).await
+    }
+
+    async fn before_blob_tombstone_delete(
+        &self,
+        key: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        (**self).before_blob_tombstone_delete(key).await
+    }
+}
+
 /// A [`SyncStorage`] that forwards every call to `inner`, giving `interceptor`
 /// its chance first.
 #[cfg(test)]
@@ -4733,6 +4912,92 @@ where
 {
     inner: S,
     interceptor: I,
+}
+
+#[cfg(test)]
+impl<S, I> crate::storage::CloudCipherAccess for InterceptedStorage<S, I>
+where
+    S: std::ops::Deref + Send + Sync,
+    S::Target: crate::storage::CloudCipherAccess,
+    I: StorageInterceptor,
+{
+    fn snapshot(&self) -> crate::storage::CloudCipher {
+        self.inner.snapshot()
+    }
+
+    fn merge_key_rotation(
+        &self,
+        new_encryption: &crate::encryption::EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError> {
+        self.inner.merge_key_rotation(new_encryption, custody)
+    }
+}
+
+#[cfg(test)]
+impl<S, I> crate::storage::CloudRotationAccess for InterceptedStorage<S, I>
+where
+    S: std::ops::Deref + Send + Sync,
+    S::Target: crate::storage::CloudRotationAccess,
+    I: StorageInterceptor,
+{
+    fn mark_candidate(
+        &self,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        self.inner.mark_candidate(generation, mutation)
+    }
+
+    fn mark_committed_mutation(
+        &self,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        self.inner.mark_committed_mutation(generation, mutation)
+    }
+
+    fn remove_candidate(
+        &self,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        self.inner.remove_candidate(generation, mutation)
+    }
+
+    fn replace_candidate_mutation(
+        &self,
+        generation: u64,
+        previous: crate::protocol::store_commit::ObjectHash,
+        replacement: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<(), String> {
+        self.inner
+            .replace_candidate_mutation(generation, previous, replacement)
+    }
+
+    fn gate(&self) -> Option<crate::storage::RotationGate> {
+        self.inner.gate()
+    }
+
+    fn install_durable_gate(&self, gate: Option<crate::storage::RotationGate>) {
+        self.inner.install_durable_gate(gate);
+    }
+
+    fn check(
+        &self,
+        cipher: &crate::storage::CloudCipher,
+    ) -> Result<(), crate::storage::RotationPending> {
+        self.inner.check(cipher)
+    }
+}
+
+#[cfg(test)]
+impl<S, I> crate::sync::cycle::SyncCycleStorage for InterceptedStorage<S, I>
+where
+    S: std::ops::Deref + Send + Sync,
+    S::Target: crate::sync::cycle::SyncCycleStorage,
+    I: StorageInterceptor,
+{
 }
 
 #[cfg(test)]

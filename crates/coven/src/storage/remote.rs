@@ -122,6 +122,7 @@ impl CloudCipherState {
         matches!(self.mode, CloudCipherMode::Plaintext)
     }
 
+    #[cfg(test)]
     pub(crate) fn encryption(&self) -> Option<EncryptionService> {
         match &self.mode {
             CloudCipherMode::Encrypted(encryption) => Some(encryption.read().unwrap().clone()),
@@ -1231,6 +1232,7 @@ impl CloudSyncStorage {
         self.cipher.is_plaintext()
     }
 
+    #[cfg(test)]
     pub(crate) fn current_encryption(&self) -> Option<EncryptionService> {
         self.cipher.encryption()
     }
@@ -1257,6 +1259,11 @@ impl CloudSyncStorage {
     #[cfg(test)]
     pub(crate) fn pending_rotation_generation_for_test(&self) -> Option<u64> {
         self.pending_rotation.pending_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_rotation_gate_for_test(&self) {
+        self.pending_rotation.install_durable_gate(None);
     }
 
     pub(crate) async fn restore_pending_rotation(

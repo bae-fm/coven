@@ -199,19 +199,6 @@ async fn storage_with_chain(
     (storage, founder, member)
 }
 
-/// Write a tombstone object straight into the cloud at its key, bypassing the
-/// signing drain — so a test can plant a forged or store-mismatched tombstone
-/// the GC must reject. Mirrors how `drain_tombstones` lays the object out
-/// (plaintext cipher → verbatim bytes, empty suffix).
-async fn plant_tombstone(storage: &TestStore, tombstone: &BlobTombstoneJson) {
-    let key = exact_tombstone_key(&tombstone.stored);
-    let bytes = serde_json::to_vec(tombstone).expect("serialize tombstone");
-    storage
-        .plant_tombstone_bytes(&key, bytes)
-        .await
-        .expect("plant");
-}
-
 async fn tombstone_exists(storage: &TestStore, key: &str) -> bool {
     storage
         .blob_tombstone_exists(key)
@@ -459,7 +446,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
         "2024-06-01T00:00:00+00:00".to_string(),
         &kp,
     );
-    plant_tombstone(&storage, &original).await;
+    storage.plant_tombstone(&original).await;
     let original_bytes = storage
         .stored_tombstone_bytes(&tombstone_key)
         .expect("original tombstone");
@@ -869,7 +856,7 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -934,7 +921,7 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -996,7 +983,7 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
     for stored in [replaced.clone(), live.clone()] {
         let tombstone =
             BlobTombstoneJson::signed("test-lib", stored, deleted_at.to_string(), &member);
-        plant_tombstone(&storage, &tombstone).await;
+        storage.plant_tombstone(&tombstone).await;
     }
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
@@ -1057,7 +1044,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -1142,7 +1129,7 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -1215,7 +1202,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
     for stored in [mine.clone(), foreign.clone()] {
         let tombstone =
             BlobTombstoneJson::signed("test-lib", stored, deleted_at.to_string(), &member);
-        plant_tombstone(&storage, &tombstone).await;
+        storage.plant_tombstone(&tombstone).await;
     }
     let collector = TombstoneCollector::load(
         StoreDatabase::new(&member_db),
@@ -1287,7 +1274,7 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", foreign.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector = TombstoneCollector::load(
         StoreDatabase::new(&member_db),
         &storage,
@@ -1342,7 +1329,7 @@ async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     // The cloud home removes the tombstone in GC's re-check window.
     let racing_storage = InterceptedStorage::new(
@@ -1393,7 +1380,7 @@ async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -1435,7 +1422,7 @@ async fn a_configured_one_hour_grace_is_honored() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -1502,7 +1489,7 @@ async fn tombstone_by_a_non_member_is_ignored() {
         tombstone.verify("test-lib"),
         "the forged tombstone is self-consistently signed (only authorization rejects it)",
     );
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
             .await
@@ -1573,7 +1560,7 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
         "the forged tombstone is self-consistently signed (only owner-anchored \
          authorization rejects it)",
     );
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     // Opening this exact Store under the established owner refuses the forged root
     // before a cycle can load membership or run GC.
@@ -1638,7 +1625,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
         deleted_at.to_string(),
         &attacker,
     );
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     let joining_db = open_test_db();
     let result = storage
@@ -1684,7 +1671,7 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
         !tombstone.verify("test-lib"),
         "the tampered tombstone does not verify",
     );
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
@@ -1729,7 +1716,7 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
         tombstone.verify("other-lib") && !tombstone.verify("test-lib"),
         "the tombstone verifies only under the store it was signed for",
     );
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
@@ -1874,7 +1861,7 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", old.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     db.insert_local_blob_row_for_test(
         "note-blob-key",
@@ -2040,7 +2027,7 @@ async fn old_tombstone_reclaims_only_the_exact_replaced_object() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", old.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
@@ -2076,7 +2063,7 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", stored.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
     storage.fail_exact_delete_on_call(1);
     let collector =
         TombstoneCollector::for_founder(StoreDatabase::new(&db), &storage, &cipher, "test-lib")
@@ -2129,7 +2116,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone =
         BlobTombstoneJson::signed("test-lib", old.clone(), deleted_at.to_string(), &member);
-    plant_tombstone(&storage, &tombstone).await;
+    storage.plant_tombstone(&tombstone).await;
 
     // First GC past the grace: the blob delete succeeds, but the tombstone delete
     // fails (injected). The blob is reclaimed; the tombstone is left behind.

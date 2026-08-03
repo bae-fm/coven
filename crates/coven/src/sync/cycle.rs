@@ -14,8 +14,6 @@ use crate::blob::upload::DrainOutcome;
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::database::DbError;
-#[cfg(test)]
-use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 
 use super::status::DeviceActivity;
@@ -205,61 +203,6 @@ pub(crate) struct DeferredLocalBlobDrop {
     pub plaintext_hash: crate::protocol::store_commit::ObjectHash,
     pub locator_hash: crate::protocol::store_commit::ObjectHash,
     pub disposition: DeferredLocalBlobDisposition,
-}
-
-/// Run a single sync cycle: drain pending local changes + gate + push, pull,
-/// bookkeeping, snapshot.
-///
-/// All connection access goes through `db`. Local writes are published from the
-/// durable pending-changeset journal; the pull's apply is a plain connection
-/// write that is never journaled, so applied rows are never republished as this
-/// device's own changes.
-/// Loads/persists all cycle state (local_seq, positions, staging, snapshots) through
-/// `db`'s bookkeeping API rather than keeping mutable state across calls.
-#[cfg(test)]
-pub(crate) async fn run_single_sync_cycle(
-    storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-    device_id: &str,
-    clock: &dyn crate::clock::Clock,
-    db: &crate::database::Database,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &dyn CloudRotationAccess,
-    user_keypair: &UserKeypair,
-    security: Option<&crate::store_security::StoreSecurity>,
-    store_dir: &StoreDir,
-    manage_tombstones: bool,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<SyncCycleResult, SyncCycleFailure> {
-    let store_database = crate::database::StoreDatabase::new(db);
-    let store = Store::load(store_database.clone(), storage, user_keypair.clone())
-        .await
-        .map_err(|error| SyncCycleFailure::operation("load local Store", error))?;
-    let authorization = store
-        .authorize_writer()
-        .await
-        .map_err(|error| SyncCycleFailure::operation("authorize local Store writer", error))?;
-    let blob_cache =
-        super::store::blob::StoreBlobCache::new(store_database.clone(), store_dir.clone());
-    let local_blob_access = super::store::blob::LocalStoreBlobAccess::new(
-        store_database,
-        store_dir.clone(),
-        blob_cache,
-    );
-    AuthorizedSyncCycle {
-        device_id,
-        clock,
-        cipher,
-        pending_rotation,
-        security,
-        routing_encryption: None,
-        store_dir,
-        local_blob_access: &local_blob_access,
-        manage_tombstones,
-        observer,
-        authorization,
-    }
-    .run()
-    .await
 }
 
 struct PreparedCycle {
@@ -602,6 +545,17 @@ pub(crate) enum StoreInitialization {
     },
 }
 
+/// One connected Store representation used by an entire sync cycle.
+///
+/// Transport, at-rest protection, and pending key rotation come from one object
+/// so callers cannot assemble a cycle from unrelated storage sessions.
+pub(crate) trait SyncCycleStorage:
+    SyncStorage + CloudCipherAccess + CloudRotationAccess
+{
+}
+
+impl SyncCycleStorage for CloudSyncStorage {}
+
 /// A sync session whose local and cloud representation has been validated
 /// before Store creation or opening can perform protocol work.
 pub(crate) struct PreparedSyncComponents {
@@ -670,7 +624,8 @@ impl PreparedSyncComponents {
     }
 
     pub(crate) async fn initialize(self) -> Result<SyncComponents, InitSyncError> {
-        let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
+        let storage: std::sync::Arc<dyn SyncCycleStorage> = self.storage;
+        let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
         let initialized = match self.initialization {
             StoreInitialization::CreateStore => {
                 Store::create(
@@ -707,7 +662,7 @@ impl PreparedSyncComponents {
             store: std::sync::Arc::new(initialized.store),
             database: self.database,
             local_blob_access: self.local_blob_access,
-            storage: self.storage,
+            storage,
             store_id: self.store_id,
             device_id: initialized.device_id,
             routing_encryption: self.routing_encryption,
@@ -724,7 +679,7 @@ pub(crate) struct SyncComponents {
     store: std::sync::Arc<Store>,
     database: crate::database::StoreDatabase,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
-    storage: std::sync::Arc<CloudSyncStorage>,
+    storage: std::sync::Arc<dyn SyncCycleStorage>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
     /// other's.
@@ -734,6 +689,30 @@ pub(crate) struct SyncComponents {
 }
 
 impl SyncComponents {
+    #[cfg(test)]
+    pub(crate) fn from_retained_test_device<S>(
+        store: std::sync::Arc<Store>,
+        database: crate::database::StoreDatabase,
+        local_blob_access: super::store::blob::LocalStoreBlobAccess,
+        storage: std::sync::Arc<S>,
+        store_id: String,
+        device_id: String,
+    ) -> Self
+    where
+        S: SyncCycleStorage + 'static,
+    {
+        let storage: std::sync::Arc<dyn SyncCycleStorage> = storage;
+        Self {
+            store,
+            database,
+            local_blob_access,
+            store_id,
+            storage,
+            device_id,
+            routing_encryption: None,
+        }
+    }
+
     pub(crate) async fn probe_storage(&self) -> Result<(), crate::storage::StorageError> {
         self.storage.probe_provider().await
     }
@@ -997,7 +976,10 @@ impl SyncComponents {
     }
 
     pub(crate) fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
-        self.storage.current_encryption()
+        match self.storage.snapshot() {
+            crate::storage::CloudCipher::Encrypted(encryption) => Some(encryption),
+            crate::storage::CloudCipher::Plaintext => None,
+        }
     }
 
     pub(crate) fn self_uploader(&self) -> String {

@@ -11,7 +11,7 @@
 //! (`resume_drain_promptly`) are covered in `blob::transition_tests`.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use crate::blob::{CacheFill, Provenance};
 use crate::clock::{FixedClock, SystemClock};
@@ -22,9 +22,9 @@ use crate::keys::UserKeypair;
 use crate::protocol::store_commit::SnapshotMeta;
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::storage::SyncStorage;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
+use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreDir;
-use crate::sync::cycle::{self, run_single_sync_cycle};
+use crate::sync::cycle;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::test_helpers::*;
 
@@ -113,48 +113,24 @@ async fn cycle_test_store(
 }
 
 /// Run one sync cycle for device "M" with no cloud home (no outbox drain).
-async fn run_cycle_m(
-    storage: &Arc<TestStore>,
-    db: &Database,
-    cipher: &RwLock<CloudCipher>,
-    keypair: &UserKeypair,
-    ld: &StoreDir,
-) {
-    storage.open_into(db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+async fn run_cycle_m(storage: &Arc<TestStore>, db: &Database, ld: &StoreDir) {
+    storage
+        .open_into(db)
         .await
-        .expect("read exact test Store device id")
-        .expect("exact test Store has a local device id");
-    run_single_sync_cycle(
-        storage.clone(),
-        &device_id,
-        &SystemClock,
-        db,
-        cipher,
-        &PendingRotation::none(),
-        keypair,
-        None,
-        ld,
-        false,
-        None,
-    )
-    .await
-    .expect("cycle");
+        .expect("open exact test Store")
+        .run_cycle(ld, None)
+        .await
+        .expect("cycle");
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_cycle_in_task(
     storage: Arc<CycleStorageInterceptor>,
-    db: Database,
-    cipher: Arc<RwLock<CloudCipher>>,
-    keypair: UserKeypair,
+    device: TestDevice,
     store_dir: StoreDir,
-    device_id: String,
 ) -> Result<(), cycle::SyncCycleFailure> {
     tokio::spawn(async move {
         storage
-            .run_sync_cycle(&device_id, &db, cipher.as_ref(), &keypair, &store_dir)
+            .run_sync_cycle(&device, &store_dir)
             .await
             .map(|_| ())
     })
@@ -169,7 +145,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let storage = Arc::new(
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
-    storage.open_into(&db).await.expect("open exact test Store");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
     let stored = storage
         .create_exact_opaque_blob("photos", "maintenance", b"maintenance")
         .await;
@@ -178,21 +154,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
         .expect("queue exact maintenance tombstone");
     storage.arm_provider_write_failures();
     let (_temp, store_dir) = temp_store_dir();
-    let cipher = RwLock::new(CloudCipher::Plaintext);
-    let result = run_single_sync_cycle(
-        storage.clone(),
-        "M",
-        &SystemClock,
-        &db,
-        &cipher,
-        &PendingRotation::none(),
-        &keypair,
-        None,
-        &store_dir,
-        true,
-        None,
-    )
-    .await;
+    let result = device.run_cycle(&store_dir, None).await;
     let error = result.expect_err("tombstone publication failure fails the cycle");
     assert!(error.contains("drain queued blob tombstones"), "{error}");
     assert_eq!(
@@ -1007,10 +969,6 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                         .await,
                 );
                 let (_tmp, ld) = temp_store_dir();
-                let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-                    EncryptionService::from_key([5u8; 32]),
-                )));
-
                 storage
                     .retain_store_packages_for_assertion(&db, b"existing-pending-upload-snapshot")
                     .await;
@@ -1032,18 +990,14 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                     .activate_joined_device(&db, &db_b, &peer, T0)
                     .await
                     .expect("activate exact joined test device");
-                let device_id = db
-                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                let device = storage
+                    .open_into(&db)
                     .await
-                    .expect("read exact pending-upload device")
-                    .expect("exact pending-upload device exists");
+                    .expect("bind exact pending-upload device");
                 run_cycle_in_task(
                     Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-                    db.clone(),
-                    Arc::clone(&enc),
-                    keypair.clone(),
+                    device.clone(),
                     ld.clone(),
-                    device_id.clone(),
                 )
                 .await
                 .expect("settle exact pending-upload peer activation");
@@ -1069,11 +1023,8 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                 // The changeset pushes despite the pending upload — no global deferral.
                 run_cycle_in_task(
                     Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-                    db.clone(),
-                    Arc::clone(&enc),
-                    keypair.clone(),
+                    device,
                     ld.clone(),
-                    device_id,
                 )
                 .await
                 .expect("publish gated-true write beside pending upload");
@@ -1120,9 +1071,6 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                         .await,
                 );
                 let (_tmp, ld) = temp_store_dir();
-                let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-                    EncryptionService::from_key([8u8; 32]),
-                )));
                 let peer = UserKeypair::generate();
                 storage
                     .invite_member(
@@ -1141,18 +1089,14 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                     .activate_joined_device(&db, &db_b, &peer, T0)
                     .await
                     .expect("activate exact joined test device");
-                let device_id = db
-                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                let device = storage
+                    .open_into(&db)
                     .await
-                    .expect("read exact gate-flip device")
-                    .expect("exact gate-flip device exists");
+                    .expect("bind exact gate-flip device");
                 run_cycle_in_task(
                     Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-                    db.clone(),
-                    Arc::clone(&enc),
-                    keypair.clone(),
+                    device.clone(),
                     ld.clone(),
-                    device_id.clone(),
                 )
                 .await
                 .expect("settle exact gate-flip peer activation");
@@ -1165,11 +1109,8 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                 .await;
                 run_cycle_in_task(
                     Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-                    db.clone(),
-                    Arc::clone(&enc),
-                    keypair.clone(),
+                    device.clone(),
                     ld.clone(),
-                    device_id.clone(),
                 )
                 .await
                 .expect("publish gated-false Store write");
@@ -1193,11 +1134,8 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     .await;
                 run_cycle_in_task(
                     Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-                    db.clone(),
-                    Arc::clone(&enc),
-                    keypair.clone(),
+                    device,
                     ld.clone(),
-                    device_id,
                 )
                 .await
                 .expect("publish gate-flip Store write");
@@ -1237,10 +1175,6 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     let storage =
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, ld) = temp_store_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [9u8; 32],
-    )));
-
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
     db.set_protocol_state("local_seq", "1")
         .await
@@ -1249,7 +1183,7 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
         .await
         .expect("seed exact pending upload");
 
-    run_cycle_m(&storage, &db, &enc, &keypair, &ld).await;
+    run_cycle_m(&storage, &db, &ld).await;
     assert!(
         db.latest_store_snapshot_meta().await.is_some(),
         "the snapshot must publish even while an upload is pending — the gate, not a \
@@ -1276,10 +1210,6 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let storage =
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, ld) = temp_store_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [11u8; 32],
-    )));
-
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
@@ -1298,7 +1228,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     // still reach the cloud through the snapshot, which reads them from the db.
     let _ = db.capture_test_changeset(&[]).await;
 
-    run_cycle_m(&storage, &db, &enc, &keypair, &ld).await;
+    run_cycle_m(&storage, &db, &ld).await;
 
     let stored = db
         .stored_blob_for_row("note_photos", "cover1")
@@ -1329,10 +1259,6 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([12u8; 32]),
-    )));
-
     db.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
@@ -1354,24 +1280,12 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .await
         .expect("load exact Store restore membership");
 
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
     let cycle_storage = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
     )));
-    let failed = run_cycle_in_task(
-        Arc::clone(&cycle_storage),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id,
-    )
-    .await
-    .expect_err("snapshot publish should fail when a referenced blob cannot upload");
+    let failed = run_cycle_in_task(Arc::clone(&cycle_storage), device.clone(), ld.clone())
+        .await
+        .expect_err("snapshot publish should fail when a referenced blob cannot upload");
 
     assert_eq!(
         failed.to_string(),
@@ -1427,18 +1341,10 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
          WHERE id = 'cover1'",
     )
     .await;
-    let retry_device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read retry Store device")
-        .expect("retry Store device exists");
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair,
+        device,
         ld.clone(),
-        retry_device_id,
     )
     .await
     .expect("retry exact snapshot publication");
@@ -1529,9 +1435,6 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
     let (_tmp, store_dir) = temp_store_dir();
-    let cipher = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([24u8; 32]),
-    )));
     db.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
          VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
@@ -1547,26 +1450,14 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         .await
         .expect("store host-provided snapshot blob");
     assert_eq!(db.pending_write_count().await, 0);
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_prepare(Arc::clone(
         &storage,
     )));
 
-    let error = run_cycle_in_task(
-        Arc::clone(&interceptor),
-        db.clone(),
-        cipher,
-        keypair,
-        store_dir.clone(),
-        device_id,
-    )
-    .await
-    .expect_err("snapshot blob preparation fails after sealing its spool");
+    let error = run_cycle_in_task(Arc::clone(&interceptor), device, store_dir.clone())
+        .await
+        .expect_err("snapshot blob preparation fails after sealing its spool");
 
     assert!(
         error.to_string().contains("unexpected blob prepare call 1"),
@@ -1647,27 +1538,13 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
         .await
         .expect("store cleanup source blob");
-    storage.open_into(&db).await.expect("open cleanup Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read cleanup device")
-        .expect("cleanup device exists");
+    let device = storage.open_into(&db).await.expect("open cleanup Store");
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
     )));
-    run_cycle_in_task(
-        interceptor,
-        db.clone(),
-        Arc::new(RwLock::new(CloudCipher::Encrypted(
-            EncryptionService::from_key([12u8; 32]),
-        ))),
-        keypair.clone(),
-        store_dir,
-        device_id,
-    )
-    .await
-    .expect_err("retain cleanup spool after rejected blob create");
+    run_cycle_in_task(interceptor, device, store_dir)
+        .await
+        .expect_err("retain cleanup spool after rejected blob create");
     let pending = store_database(&db)
         .outbound_snapshot_publication()
         .await
@@ -1751,31 +1628,17 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "assets", "blob-shared", b"shared")
         .await
         .expect("store shared snapshot blob");
-    storage
+    let device = storage
         .open_into(&db)
         .await
         .expect("open shared blob Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read shared blob device")
-        .expect("shared blob device exists");
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_create_on(
         Arc::clone(&storage),
         2,
     ));
-    run_cycle_in_task(
-        Arc::clone(&interceptor),
-        db.clone(),
-        Arc::new(RwLock::new(CloudCipher::Encrypted(
-            EncryptionService::from_key([12u8; 32]),
-        ))),
-        keypair,
-        store_dir,
-        device_id,
-    )
-    .await
-    .expect("publish coalesced shared snapshot blob");
+    run_cycle_in_task(Arc::clone(&interceptor), device, store_dir)
+        .await
+        .expect("publish coalesced shared snapshot blob");
     assert_eq!(interceptor.rejected_blobs().len(), 1);
     let (bindings, objects) = db
         .test_sql(|database| {
@@ -1829,29 +1692,14 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",
     )
     .await;
-    storage.open_into(&db).await.expect("open user blob Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read user blob device")
-        .expect("user blob device exists");
+    let device = storage.open_into(&db).await.expect("open user blob Store");
+    let device_id = device.device_id.clone();
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
     )));
-    let cipher = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([12u8; 32]),
-    )));
-
-    let error = run_cycle_in_task(
-        Arc::clone(&interceptor),
-        db.clone(),
-        Arc::clone(&cipher),
-        keypair.clone(),
-        store_dir.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect_err("snapshot rejects a local-only user blob");
+    let error = run_cycle_in_task(Arc::clone(&interceptor), device.clone(), store_dir.clone())
+        .await
+        .expect_err("snapshot rejects a local-only user blob");
     assert_eq!(interceptor.blob_write_calls(), (0, 0, 0));
     assert!(
         error.to_string().contains(
@@ -1924,16 +1772,9 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         .await
         .expect("remove external source before exact-binding retry");
 
-    run_cycle_in_task(
-        Arc::clone(&interceptor),
-        db.clone(),
-        cipher,
-        keypair,
-        store_dir,
-        device_id,
-    )
-    .await
-    .expect("publish snapshot from existing exact user blob");
+    run_cycle_in_task(Arc::clone(&interceptor), device, store_dir)
+        .await
+        .expect("publish snapshot from existing exact user blob");
     let (_, prepare_calls, create_calls) = interceptor.blob_write_calls();
     assert_eq!((prepare_calls, create_calls), (0, 0));
     assert!(interceptor.rejected_blobs().is_empty());
@@ -2566,9 +2407,7 @@ use crate::storage::StorageError;
 /// cycle.
 struct CycleStorageInterceptor {
     inner: Arc<TestStore>,
-    storage: Arc<
-        crate::sync::test_helpers::InterceptedStorage<Arc<TestStore>, CycleStorageInterception>,
-    >,
+    interceptor: Arc<CycleStorageInterception>,
 }
 
 enum CycleStorageInterception {
@@ -2663,24 +2502,17 @@ impl CycleStorageInterceptor {
 
     fn new(inner: Arc<TestStore>, interceptor: CycleStorageInterception) -> Self {
         Self {
-            storage: Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-                Arc::clone(&inner),
-                interceptor,
-            )),
             inner,
+            interceptor: Arc::new(interceptor),
         }
     }
 
     fn rejected_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
-        self.storage.interceptor().rejected_blobs()
+        self.interceptor.rejected_blobs()
     }
 
     fn blob_write_calls(&self) -> (usize, usize, usize) {
-        self.storage.interceptor().blob_write_calls()
-    }
-
-    async fn open_into(&self, database: &Database) -> Result<(), String> {
-        self.inner.open_into(database).await.map(drop)
+        self.interceptor.blob_write_calls()
     }
 
     async fn activate_joined_device(
@@ -2697,26 +2529,18 @@ impl CycleStorageInterceptor {
 
     async fn run_sync_cycle(
         &self,
-        device_id: &str,
-        database: &Database,
-        cipher: &RwLock<CloudCipher>,
-        identity: &UserKeypair,
+        device: &TestDevice,
         store_dir: &StoreDir,
     ) -> Result<cycle::SyncCycleResult, cycle::SyncCycleFailure> {
-        run_single_sync_cycle(
-            self.storage.clone(),
-            device_id,
-            &SystemClock,
-            database,
-            cipher,
-            &PendingRotation::none(),
-            identity,
-            None,
-            store_dir,
-            false,
-            None,
-        )
-        .await
+        device
+            .run_cycle_with_interceptor(
+                &SystemClock,
+                None,
+                store_dir,
+                None,
+                self.interceptor.clone(),
+            )
+            .await
     }
 }
 
@@ -2884,10 +2708,6 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
             tokio::task::spawn_local(async {
                 let keypair = UserKeypair::generate();
                 let (_tmp, ld) = temp_store_dir();
-                let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-                    [4u8; 32],
-                )));
-
                 // A peer A has published one changeset (an insert of note 'a1') to shared
                 // storage, so M's cycle has something to fetch — the await we inject at.
                 let producer_db = open_test_db();
@@ -2911,7 +2731,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                 // M's database. The injector runs this INSERT into M at the package-read
                 // await, mid-pull.
                 let db_m = open_test_db();
-                inner
+                let device_m = inner
                     .activate_joined_device(&producer_db, &db_m, &keypair, T0)
                     .await
                     .expect("activate exact joined test device");
@@ -2946,7 +2766,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
                 drop(a_src);
                 drop(producer_db);
                 tokio::spawn(async move {
-                    let cycle = InterceptedCycle::new(&storage, &db_m, &enc, &keypair, &ld);
+                    let cycle = InterceptedCycle::new(&storage, device_m, &ld);
                     // Cycle 1: M pulls A's changeset; the host write fires mid-pull.
                     cycle.run().await;
 
@@ -3003,10 +2823,6 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
 async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([6u8; 32]),
-    )));
-
     // Peer A publishes a changeset; M pulls and applies it in cycle 1.
     let producer_db = open_test_db();
     let storage = Arc::new(
@@ -3026,11 +2842,6 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .activate_joined_device(&producer_db, &db_m, &keypair, T0)
         .await
         .expect("activate exact joined test device");
-    let device_id = db_m
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read M Store device")
-        .expect("M Store device exists");
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
     let a_src = open_test_db();
     let a_cs = a_src
@@ -3053,16 +2864,9 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .await
         .expect("publish exact Store changeset");
 
-    run_cycle_in_task(
-        Arc::clone(&cycle_storage),
-        db_m.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("M's pull cycle succeeds");
+    run_cycle_in_task(Arc::clone(&cycle_storage), device_m.clone(), ld.clone())
+        .await
+        .expect("M's pull cycle succeeds");
     assert_eq!(
         db_m.query_test_text("SELECT title FROM notes WHERE id = 'a1'")
             .await,
@@ -3076,16 +2880,9 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .latest_local_store_position()
         .await
         .expect("read local Store position before the empty cycle");
-    run_cycle_in_task(
-        cycle_storage,
-        db_m.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("M's empty cycle succeeds");
+    run_cycle_in_task(cycle_storage, device_m.clone(), ld.clone())
+        .await
+        .expect("M's empty cycle succeeds");
     let after = device_m
         .latest_local_store_position()
         .await
@@ -3113,9 +2910,6 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([8u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3139,22 +2933,14 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         .await
         .expect("store host-provided blob");
 
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
     let reject_blob_create = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
     )));
     let failed = match run_cycle_in_task(
         Arc::clone(&reject_blob_create),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device.clone(),
         ld.clone(),
-        device_id.clone(),
     )
     .await
     {
@@ -3188,11 +2974,8 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
 
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect("host blob retry cycle succeeds");
@@ -3216,9 +2999,6 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
 async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([24u8; 32]),
-    )));
     let blob_decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
         .with_id_column("blob_id");
     let db = open_test_db_with_blob(blob_decl.clone());
@@ -3228,11 +3008,10 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     storage
         .retain_store_packages_for_assertion(&db, b"each-host-write-blob-facts")
         .await;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let device = storage
+        .open_into(&db)
         .await
-        .expect("read package writer device")
-        .expect("package writer device exists");
+        .expect("bind package writer device");
     db.execute_test_host_write(&format!(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01'); \
@@ -3262,11 +3041,8 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
         Arc::new(CycleStorageInterceptor::reject_ack_create(Arc::clone(
             &storage,
         ))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect_err("acknowledgement create stops the cycle before package reclamation");
@@ -3326,9 +3102,6 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
     // The live cipher is generation 1; the cloud has committed generation 2.
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([8u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3361,30 +3134,13 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .write_id
         .clone();
 
-    let pending_rotation = PendingRotation::none();
-    pending_rotation.mark_committed(2).unwrap();
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
+    device.mark_rotation_committed_for_test(2).unwrap();
 
-    run_single_sync_cycle(
-        storage.clone(),
-        "M",
-        &SystemClock,
-        &db,
-        enc.as_ref(),
-        &pending_rotation,
-        &keypair,
-        None,
-        &ld,
-        false,
-        None,
-    )
-    .await
-    .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
+    device
+        .run_cycle(&ld, None)
+        .await
+        .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
 
     assert!(
         db.pending_write_count().await > 0,
@@ -3428,15 +3184,13 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         "the pending Store write retains its exact local blob source",
     );
 
-    // Adoption clears the pause (a fresh, unmarked rotation gate); the first cycle
-    // after publishes the queued changeset and uploads its blob.
+    // Adoption clears the retained gate; the first cycle after publishes the
+    // queued changeset and uploads its blob.
+    device.clear_rotation_gate_for_test();
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect("first cycle after adoption succeeds");
@@ -3500,9 +3254,6 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([9u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3534,30 +3285,13 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     .await
     .expect("queue the host-provided make_remote intent");
 
-    let pending_rotation = PendingRotation::none();
-    pending_rotation.mark_committed(2).unwrap();
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
+    device.mark_rotation_committed_for_test(2).unwrap();
 
-    run_single_sync_cycle(
-        storage.clone(),
-        "M",
-        &SystemClock,
-        &db,
-        enc.as_ref(),
-        &pending_rotation,
-        &keypair,
-        None,
-        &ld,
-        false,
-        None,
-    )
-    .await
-    .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
+    device
+        .run_cycle(&ld, None)
+        .await
+        .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
 
     assert_eq!(
         db.query_test_text("SELECT CAST(shared AS TEXT) FROM notes WHERE id = 'n1'")
@@ -3577,13 +3311,11 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     );
 
     // Adoption clears the pause; the first cycle after completes the intent.
+    device.clear_rotation_gate_for_test();
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect("first cycle after adoption succeeds");
@@ -3609,9 +3341,6 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
 async fn ready_make_remote_provider_transport_is_offline() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [23u8; 32],
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3644,23 +3373,12 @@ async fn ready_make_remote_provider_transport_is_offline() {
     .await
     .expect("queue make_remote intent");
     fail_exact_create_on(&storage, 1);
-    storage.open_into(&db).await.expect("open exact test Store");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
 
-    let failed = run_single_sync_cycle(
-        storage.clone(),
-        "M",
-        &SystemClock,
-        &db,
-        &enc,
-        &PendingRotation::none(),
-        &keypair,
-        None,
-        &ld,
-        false,
-        None,
-    )
-    .await
-    .expect_err("provider transport prevents make_remote completion");
+    let failed = device
+        .run_cycle(&ld, None)
+        .await
+        .expect_err("provider transport prevents make_remote completion");
 
     assert!(
         failed.contains("forced failure before exact create call 1"),
@@ -3676,9 +3394,6 @@ async fn ready_make_remote_provider_transport_is_offline() {
 async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([18u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3711,23 +3426,15 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         .await
         .expect("store second host-provided blob");
 
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
     let reject_second_blob = Arc::new(CycleStorageInterceptor::reject_blob_create_on(
         Arc::clone(&storage),
         2,
     ));
     let failed = match run_cycle_in_task(
         Arc::clone(&reject_second_blob),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device.clone(),
         ld.clone(),
-        device_id.clone(),
     )
     .await
     {
@@ -3758,11 +3465,8 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect("two-blob retry cycle succeeds");
@@ -3804,9 +3508,6 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([19u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3818,11 +3519,10 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     storage
         .retain_store_packages_for_assertion(&db, b"already-uploaded-host-blob")
         .await;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let device = storage
+        .open_into(&db)
         .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+        .expect("bind local Store device");
     let pass_through = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -3839,16 +3539,9 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .await
         .expect("store the first publication's host-provided blob");
 
-    run_cycle_in_task(
-        Arc::clone(&pass_through),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("first host blob cycle succeeds");
+    run_cycle_in_task(Arc::clone(&pass_through), device.clone(), ld.clone())
+        .await
+        .expect("first host blob cycle succeeds");
     let stream_id = db.local_store_stream_id().await;
     assert!(crate::database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, 1)
@@ -3883,16 +3576,9 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let reject_blob_create = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
     )));
-    run_cycle_in_task(
-        Arc::clone(&reject_blob_create),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id,
-    )
-    .await
-    .expect("already-uploaded host blob cycle succeeds");
+    run_cycle_in_task(Arc::clone(&reject_blob_create), device, ld.clone())
+        .await
+        .expect("already-uploaded host blob cycle succeeds");
     assert!(crate::database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, 2)
         .await
@@ -3917,9 +3603,6 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
 async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([20u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -3929,11 +3612,11 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let device = storage
+        .open_into(&db)
         .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+        .expect("bind local Store device");
+    let device_id = device.device_id.clone();
     storage
         .retain_store_packages_for_assertion(&db, b"fresh-push-retry")
         .await;
@@ -3968,16 +3651,9 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .clone();
 
     fail_exact_create_on(&storage, 1);
-    let error = run_cycle_in_task(
-        Arc::clone(&cycle_storage),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect_err("the first Store package append fails");
+    let error = run_cycle_in_task(Arc::clone(&cycle_storage), device.clone(), ld.clone())
+        .await
+        .expect_err("the first Store package append fails");
     assert_eq!(
         error.to_string(),
         "publish Store write: storage operation failed: InMemoryCloudHome: forced failure before exact create call 1",
@@ -4000,16 +3676,9 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the local copy remains until the changeset is published"
     );
 
-    run_cycle_in_task(
-        cycle_storage,
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect("prepared Store write retry succeeds");
+    run_cycle_in_task(cycle_storage, device, ld.clone())
+        .await
+        .expect("prepared Store write retry succeeds");
     let status = crate::database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
@@ -4072,9 +3741,6 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
     let storage =
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, ld) = temp_store_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [21u8; 32],
-    )));
     storage
         .retain_store_packages_for_assertion(&db, b"push-cycle-head-timestamp")
         .await;
@@ -4093,7 +3759,7 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         .expect("push-timestamp write is pending")
         .write_id;
 
-    run_cycle_m(&storage, &db, &enc, &keypair, &ld).await;
+    run_cycle_m(&storage, &db, &ld).await;
     let published = match crate::database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
@@ -4119,16 +3785,12 @@ async fn snapshot_cycle_writes_rfc3339_metadata_timestamp() {
     let storage =
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, ld) = temp_store_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [22u8; 32],
-    )));
-
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
     db.set_protocol_state("local_seq", "1")
         .await
         .expect("seed local_seq");
 
-    run_cycle_m(&storage, &db, &enc, &keypair, &ld).await;
+    run_cycle_m(&storage, &db, &ld).await;
     let snapshot = db
         .latest_store_snapshot_meta()
         .await
@@ -4242,10 +3904,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .expect("invite unregistered member to hold back package reclamation");
 
         let (_temp, store_dir) = temp_store_dir();
-        let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-            [24u8; 32],
-        )));
-        run_cycle_m(&storage, &db, &cipher, &owner, &store_dir).await;
+        run_cycle_m(&storage, &db, &store_dir).await;
 
         assert_eq!(
             store_database(&db)
@@ -4317,37 +3976,14 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .await
             .expect("publish one Store commit after snapshot");
 
-        storage
-            .open_into(&db)
-            .await
-            .expect("open timed snapshot Store");
-        let device_id = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .expect("read timed snapshot device")
-            .expect("timed snapshot device exists");
         let (_temp, store_dir) = temp_store_dir();
-        let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-            [25u8; 32],
-        )));
         let now = chrono::DateTime::parse_from_rfc3339("2024-01-02T01:00:00Z")
             .expect("parse timed snapshot clock")
             .with_timezone(&chrono::Utc);
-        run_single_sync_cycle(
-            storage.clone(),
-            &device_id,
-            &FixedClock(now),
-            &db,
-            &cipher,
-            &PendingRotation::none(),
-            &owner,
-            None,
-            &store_dir,
-            false,
-            None,
-        )
-        .await
-        .expect("run timed snapshot cycle");
+        snapshot_device
+            .run_cycle_with(&FixedClock(now), None, &store_dir, None)
+            .await
+            .expect("run timed snapshot cycle");
 
         assert_eq!(
             store_database(&db)
@@ -4374,17 +4010,13 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([23u8; 32]),
-    )));
     storage
         .retain_store_packages_for_assertion(&db, b"prepared-retry-head-timestamp")
         .await;
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let device = storage
+        .open_into(&db)
         .await
-        .expect("read prepared-retry device")
-        .expect("prepared-retry device exists");
+        .expect("bind prepared-retry device");
 
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -4397,11 +4029,8 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     fail_exact_create_on(&storage, 1);
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device.clone(),
         ld.clone(),
-        device_id.clone(),
     )
     .await
     .expect_err("the first Store package append fails");
@@ -4417,11 +4046,8 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     // The next cycle retries the prepared write.
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        enc,
-        keypair,
+        device,
         ld,
-        device_id,
     )
     .await
     .expect("retry prepared Store write");
@@ -4437,9 +4063,6 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
 async fn missing_user_blob_blocks_prepared_write_before_publish() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([10u8; 32]),
-    )));
     let db = open_test_db_with_blob(BlobDecl::new(
         "audio",
         Provenance::UserProvided,
@@ -4448,12 +4071,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     let storage = Arc::new(
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
     let planted = storage
         .create_exact_opaque_blob("audio", "audio1", b"AUDIO")
@@ -4473,16 +4091,9 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     .await;
 
     fail_exact_create_on(&storage, 1);
-    run_cycle_in_task(
-        Arc::clone(&cycle_storage),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await
-    .expect_err("the first Store package append fails");
+    run_cycle_in_task(Arc::clone(&cycle_storage), device.clone(), ld.clone())
+        .await
+        .expect_err("the first Store package append fails");
     let first_write_id = crate::database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
@@ -4498,15 +4109,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .delete_blob_object(&planted)
         .await
         .expect("delete exact user-provided blob");
-    let retry = run_cycle_in_task(
-        Arc::clone(&cycle_storage),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id.clone(),
-    )
-    .await;
+    let retry = run_cycle_in_task(Arc::clone(&cycle_storage), device.clone(), ld.clone()).await;
     let err = match retry {
         Err(err) => err,
         Ok(_) => panic!("prepared write must recheck the remote user-provided blob"),
@@ -4552,16 +4155,9 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     let _restored = storage
         .create_exact_opaque_blob("audio", "audio1", b"AUDIO")
         .await;
-    run_cycle_in_task(
-        cycle_storage,
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
-        ld.clone(),
-        device_id,
-    )
-    .await
-    .expect("restored missing user blob cycle succeeds");
+    run_cycle_in_task(cycle_storage, device, ld.clone())
+        .await
+        .expect("restored missing user blob cycle succeeds");
     assert_eq!(
         crate::database::StoreDatabase::new(&db)
             .write_status(&blocked_write_id)
@@ -4577,9 +4173,6 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
 async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([9u8; 32]),
-    )));
     let db = open_test_db();
     let storage = Arc::new(
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
@@ -4604,19 +4197,11 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     db.test_sql(|database| database.install_outbound_preparation_failure_trigger())
         .await
         .expect("install Store preparation fault");
-    storage.open_into(&db).await.expect("open exact test Store");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read exact preparation-failure device")
-        .expect("exact preparation-failure device exists");
+    let device = storage.open_into(&db).await.expect("open exact test Store");
     let failed = run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device.clone(),
         ld.clone(),
-        device_id.clone(),
     )
     .await
     .expect_err("outgoing preparation should fail");
@@ -4645,11 +4230,8 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     .expect("remove Store preparation fault");
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect("retry outgoing preparation");
@@ -4676,48 +4258,26 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
 
 struct InterceptedCycle<'a> {
     storage: &'a CycleStorageInterceptor,
-    database: &'a Database,
-    cipher: &'a RwLock<CloudCipher>,
-    identity: &'a UserKeypair,
+    device: TestDevice,
     store_dir: &'a StoreDir,
 }
 
 impl<'a> InterceptedCycle<'a> {
     fn new(
         storage: &'a CycleStorageInterceptor,
-        database: &'a Database,
-        cipher: &'a RwLock<CloudCipher>,
-        identity: &'a UserKeypair,
+        device: TestDevice,
         store_dir: &'a StoreDir,
     ) -> Self {
         Self {
             storage,
-            database,
-            cipher,
-            identity,
+            device,
             store_dir,
         }
     }
 
     async fn run(&self) {
         self.storage
-            .open_into(self.database)
-            .await
-            .expect("open exact test Store");
-        let device_id = self
-            .database
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .expect("read exact test device id")
-            .expect("exact test device id exists");
-        self.storage
-            .run_sync_cycle(
-                &device_id,
-                self.database,
-                self.cipher,
-                self.identity,
-                self.store_dir,
-            )
+            .run_sync_cycle(&self.device, self.store_dir)
             .await
             .expect("cycle");
     }
@@ -4745,9 +4305,6 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .await,
     );
     let (_tmp, ld) = temp_store_dir();
-    let enc = Arc::new(RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::from_key([11u8; 32]),
-    )));
 
     // Peer A's changeset 1 (a shareable note).
     let a_src = open_test_db();
@@ -4765,18 +4322,14 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
     let stream_id = published_stream.to_string();
 
     // M's cycle pulls A->1, acks A->1, snapshots covering A->1, then reclaims.
-    let device_id = db_m
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let device = storage
+        .open_into(&db_m)
         .await
-        .expect("read local Store device")
-        .expect("local Store device exists");
+        .expect("bind retained-replay Store device");
     run_cycle_in_task(
         Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage))),
-        db_m.clone(),
-        Arc::clone(&enc),
-        keypair.clone(),
+        device,
         ld.clone(),
-        device_id,
     )
     .await
     .expect("retained-replay cycle succeeds");
@@ -4848,10 +4401,6 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .await
             .expect("retain Owner Store device");
         let (_tmp, ld) = temp_store_dir();
-        let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-            [12u8; 32],
-        )));
-
         let source = open_test_db();
         let first_changeset = source
             .capture_test_changeset(&[
@@ -4942,7 +4491,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
                 .expect("second owner Store commit is materialized")
                 .coord
                 .sequence();
-            run_cycle_m(&storage, &owner_db, &enc, &owner, &ld).await;
+            run_cycle_m(&storage, &owner_db, &ld).await;
 
             assert!(
                 storage
@@ -5006,11 +4555,10 @@ async fn member_device_does_not_create_a_snapshot() {
         .expect("invite exact Member identity");
 
     let member_db = open_test_db();
-    storage
+    let member_device = storage
         .activate_joined_device(&owner_db, &member_db, &member, T0)
         .await
         .expect("activate exact joined test device");
-    let encryption = Arc::new(RwLock::new(CloudCipher::Encrypted(encryption)));
     member_db
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -5018,22 +4566,10 @@ async fn member_device_does_not_create_a_snapshot() {
         )
         .await;
 
-    let member_device_id = member_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
-        .await
-        .expect("read Member Store device")
-        .expect("Member Store device exists");
     let member_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
-    run_cycle_in_task(
-        member_storage,
-        member_db.clone(),
-        Arc::clone(&encryption),
-        member.clone(),
-        ld.clone(),
-        member_device_id,
-    )
-    .await
-    .expect("Member Store cycle succeeds");
+    run_cycle_in_task(member_storage, member_device, ld.clone())
+        .await
+        .expect("Member Store cycle succeeds");
 
     assert!(
         storage.local_store_package_exists(&member_db, 1).await,
@@ -6230,17 +5766,13 @@ async fn owner_device_creates_a_snapshot() {
     let db = open_test_db();
     let storage = cycle_test_store(&db, &owner, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, ld) = temp_store_dir();
-    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [6u8; 32],
-    )));
-
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
 
-    run_cycle_m(&storage, &db, &cipher, &owner, &ld).await;
+    run_cycle_m(&storage, &db, &ld).await;
 
     assert!(
         db.latest_store_snapshot_meta().await.is_some(),

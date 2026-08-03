@@ -202,7 +202,7 @@ mod upload_tests;
 // The coven-owned make-Remote / make-Local transition tests: multi-device
 // make_remote + make_local through the real cycle, cancel both directions, the
 // drain's completion flip, durable cancellation, crash-idempotency at each commit
-// boundary, and a round-trip. Uses a `watch` cancel signal + `run_single_sync_cycle`,
+// boundary, and a round-trip. Uses a `watch` cancel signal and retained test devices,
 // See [`transition`].
 #[cfg(test)]
 mod transition_tests;

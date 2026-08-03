@@ -94,6 +94,17 @@ impl BlobDownload {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn with_test_storage(&self, storage: Arc<dyn SyncStorage>) -> Self {
+        Self::new(
+            self.database.clone(),
+            storage,
+            self.identity.clone(),
+            self.device_id.clone(),
+            self.root.clone(),
+        )
+    }
+
     pub(crate) fn device_join_transport(
         &self,
     ) -> super::device_join_transport::StoreDeviceJoinTransport<'_> {
@@ -384,19 +395,12 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) async fn recover_owner_device_for_test(
-        &self,
-        authority: &crate::restoration::OwnerRecoveryAuthority,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceRegistrationRef, String> {
-        let mut restoring = self
+    pub(crate) async fn owner_recovery_for_test(&self) -> Result<RestoringStore<'_>, String> {
+        Ok(self
             .authorize()
             .await
             .map_err(|error| error.to_string())?
-            .bind_restore_for_test();
-        restoring
-            .recover_owner_device(authority)
-            .await
-            .map_err(|error| error.to_string())
+            .bind_restore_for_test())
     }
 
     pub(crate) async fn authorize_writer(

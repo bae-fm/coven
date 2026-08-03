@@ -10,12 +10,9 @@
 
 use std::sync::Arc;
 
-use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::MemberRole;
-use crate::storage::{CloudCipher, PendingRotation};
-use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
@@ -756,11 +753,10 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     )
     .await
     .expect("create exact Store before installing protocol_state fault");
-    let device_id = db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+    let device = storage
+        .open_into(&db)
         .await
-        .expect("read exact local device id")
-        .expect("founder device registration is active");
+        .expect("bind the founder device before installing protocol_state fault");
     db.test_sql(|database| database.install_protocol_state_insert_failure_trigger())
         .await
         .expect("install protocol_state fault");
@@ -775,23 +771,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     .await;
 
     let (_t, ld) = temp_store_dir();
-    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [42; 32],
-    )));
-    let result = run_single_sync_cycle(
-        storage.clone(),
-        &device_id,
-        &SystemClock,
-        &db,
-        &encryption,
-        &PendingRotation::none(),
-        &keypair,
-        None,
-        &ld,
-        false,
-        None,
-    )
-    .await;
+    let result = device.run_cycle(&ld, None).await;
 
     assert!(
         result.is_err(),
