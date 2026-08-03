@@ -696,21 +696,6 @@ impl PendingRotation {
         }
         Ok(())
     }
-
-    pub(crate) async fn restore_from(
-        &self,
-        database: &crate::database::StoreDatabase,
-    ) -> Result<(), crate::database::DbError> {
-        if let Some(value) = database.get_protocol_state(ROTATION_GATE_STATE_KEY).await? {
-            let gate: RotationGate = serde_json::from_str(&value).map_err(|error| {
-                crate::database::DbError::Message(format!(
-                    "persisted rotation gate is invalid: {error}"
-                ))
-            })?;
-            self.install_durable_gate(Some(gate));
-        }
-        Ok(())
-    }
 }
 
 impl CloudRotationAccess for PendingRotation {
@@ -1264,13 +1249,6 @@ impl CloudSyncStorage {
     #[cfg(test)]
     pub(crate) fn clear_rotation_gate_for_test(&self) {
         self.pending_rotation.install_durable_gate(None);
-    }
-
-    pub(crate) async fn restore_pending_rotation(
-        &self,
-        database: &crate::database::StoreDatabase,
-    ) -> Result<(), crate::database::DbError> {
-        self.pending_rotation.restore_from(database).await
     }
 
     fn cipher(&self) -> CloudCipher {

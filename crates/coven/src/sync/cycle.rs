@@ -605,10 +605,11 @@ impl PreparedSyncComponents {
         // protocol work, so malformed local rotation state cannot accompany new
         // remote state from a failed initialization.
         if !cipher_is_plaintext {
-            storage
-                .restore_pending_rotation(&database)
+            let gate = database
+                .load_rotation_gate()
                 .await
                 .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
+            storage.install_durable_gate(gate);
         }
 
         let store_id = storage.store_id().to_string();

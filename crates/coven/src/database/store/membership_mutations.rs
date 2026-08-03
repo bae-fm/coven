@@ -10,6 +10,16 @@ use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 impl StoreDatabase {
+    pub(crate) async fn load_rotation_gate(
+        &self,
+    ) -> Result<Option<crate::storage::RotationGate>, DbError> {
+        self.connection
+            .call(|connection| {
+                Self::load_rotation_gate_on(connection).map(|gate| gate.map(|(_, gate)| gate))
+            })
+            .await
+    }
+
     pub(crate) async fn outbound_membership_mutation(
         &self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
@@ -226,10 +236,10 @@ impl StoreDatabase {
     }
 
     fn load_rotation_gate_on(
-        tx: &rusqlite::Transaction<'_>,
+        connection: &rusqlite::Connection,
     ) -> Result<Option<(String, crate::storage::RotationGate)>, DbError> {
         let key = crate::storage::ROTATION_GATE_STATE_KEY;
-        crate::database::get_protocol_state_on(tx, key)?
+        crate::database::get_protocol_state_on(connection, key)?
             .map(|encoded| {
                 let gate = serde_json::from_str::<crate::storage::RotationGate>(&encoded)
                     .map_err(|error| DbError::Message(format!("parse rotation gate: {error}")))?;
