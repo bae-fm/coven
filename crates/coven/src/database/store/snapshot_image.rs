@@ -724,52 +724,45 @@ impl StoreDatabase {
     ) -> Result<CreatedSnapshot, DbError> {
         let blob_decls = self.blob_decls();
         let gates = self.gates();
-        let retained = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |connection| {
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                let mut retained = retained.lock().map_err(|_| {
-                    DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
+        self.with_retained_merge_materializations(move |connection, retained| {
+            let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+            let replay = retained.replay_projection_on(
+                &transaction,
+                &root,
+                &blob_decls,
+                &gates,
+                &tables,
+                Some(&routing_key),
+                &std::collections::BTreeSet::new(),
+                Some(&cutoff),
+                false,
+                crate::sync::LocalStoreMembership::Current,
+            )?;
+            transaction.rollback().map_err(DbError::from)?;
+            let replay_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+                Self::materialized_frontier_on(&replay, None)?,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            if replay_frontier != cutoff {
+                return Err(DbError::Message(
+                    "Circle close cutoff is not an exact retained Store frontier".to_string(),
+                ));
+            }
+            let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
+            SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                .and_then(|image| {
+                    image.capture(
+                        &replay,
+                        &root,
+                        &store_dir,
+                        &tables,
+                        Some(&routing_encryption),
+                        &crate::protocol::circle::Audience::Circle(circle_id),
                     )
-                })?;
-                let replay = retained.replay_projection_on(
-                    &transaction,
-                    &root,
-                    &blob_decls,
-                    &gates,
-                    &tables,
-                    Some(&routing_key),
-                    &std::collections::BTreeSet::new(),
-                    Some(&cutoff),
-                    false,
-                    crate::sync::LocalStoreMembership::Current,
-                )?;
-                transaction.rollback().map_err(DbError::from)?;
-                let replay_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
-                    Self::materialized_frontier_on(&replay, None)?,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?;
-                if replay_frontier != cutoff {
-                    return Err(DbError::Message(
-                        "Circle close cutoff is not an exact retained Store frontier".to_string(),
-                    ));
-                }
-                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
-                SnapshotDatabaseImage::prepare_snapshot(&store_dir)
-                    .and_then(|image| {
-                        image.capture(
-                            &replay,
-                            &root,
-                            &store_dir,
-                            &tables,
-                            Some(&routing_encryption),
-                            &crate::protocol::circle::Audience::Circle(circle_id),
-                        )
-                    })
-                    .map_err(snapshot_image_db_error)
-            })
-            .await
+                })
+                .map_err(snapshot_image_db_error)
+        })
+        .await
     }
 }
 

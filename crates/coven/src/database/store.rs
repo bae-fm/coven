@@ -469,10 +469,27 @@ impl StoreDatabase {
         }
     }
 
-    pub(super) fn retained_merge_materialization_cache(
-        &self,
-    ) -> std::sync::Arc<std::sync::Mutex<RetainedMergeMaterializationCache>> {
-        self.runtime.retained_merge_materializations.clone()
+    async fn with_retained_merge_materializations<F, R>(&self, operation: F) -> Result<R, DbError>
+    where
+        F: FnOnce(
+                &rusqlite::Connection,
+                &mut RetainedMergeMaterializationCache,
+            ) -> Result<R, DbError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        let retained = self.runtime.retained_merge_materializations.clone();
+        self.connection
+            .call(move |connection| {
+                let mut retained = retained.lock().map_err(|_| {
+                    DbError::Message(
+                        "retained Merge materialization cache lock is poisoned".to_string(),
+                    )
+                })?;
+                operation(connection, &mut retained)
+            })
+            .await
     }
 
     pub(crate) async fn begin_store_creation_attempt(

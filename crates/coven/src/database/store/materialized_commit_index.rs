@@ -27,17 +27,10 @@ impl StoreDatabase {
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let cache = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |conn| {
-                let mut cache = cache.lock().map_err(|_| {
-                    DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
-                    )
-                })?;
-                cache.replay_inputs_on(conn, &root)
-            })
-            .await
+        self.with_retained_merge_materializations(move |conn, cache| {
+            cache.replay_inputs_on(conn, &root)
+        })
+        .await
     }
 
     pub(crate) async fn retained_merge_materialization_refs(
@@ -76,17 +69,10 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let cache = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |conn| {
-                let mut cache = cache.lock().map_err(|_| {
-                    DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
-                    )
-                })?;
-                cache.replay_inputs_with_verified_commits_on(conn, &root, &verified)
-            })
-            .await
+        self.with_retained_merge_materializations(move |conn, cache| {
+            cache.replay_inputs_with_verified_commits_on(conn, &root, &verified)
+        })
+        .await
     }
 
     pub(crate) async fn retained_merge_materialization(
@@ -94,26 +80,19 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let cache = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |conn| {
-                let mut cache = cache.lock().map_err(|_| {
+        self.with_retained_merge_materializations(move |conn, cache| {
+            cache
+                .replay_inputs_on(conn, &root)?
+                .into_iter()
+                .find(|materialization| materialization.commit_ref() == &reference)
+                .ok_or_else(|| {
                     DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
+                        "retained Merge materialization is absent at its exact coordinate"
+                            .to_string(),
                     )
-                })?;
-                cache
-                    .replay_inputs_on(conn, &root)?
-                    .into_iter()
-                    .find(|materialization| materialization.commit_ref() == &reference)
-                    .ok_or_else(|| {
-                        DbError::Message(
-                            "retained Merge materialization is absent at its exact coordinate"
-                                .to_string(),
-                        )
-                    })
-            })
-            .await
+                })
+        })
+        .await
     }
 
     pub(crate) async fn retained_merge_history_frontier(
@@ -122,39 +101,28 @@ impl StoreDatabase {
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<crate::protocol::store_commit::OpenedRetainedMergeHistorySummary>, DbError>
     {
-        let cache = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |conn| {
-                let retained = {
-                    let mut cache = cache.lock().map_err(|_| {
-                        DbError::Message(
-                            "retained Merge materialization cache lock is poisoned".to_string(),
-                        )
-                    })?;
-                    cache.replay_inputs_on(conn, &root)?
-                };
-                references
-                    .iter()
-                    .map(|reference| {
-                        match retained
-                            .iter()
-                            .find(|materialization| materialization.commit_ref() == reference)
-                        {
-                            Some(materialization) => {
-                                Self::open_retained_merge_history_checkpoint_on(
-                                    conn,
-                                    reference,
-                                    materialization,
-                                )
-                            }
-                            None => Self::load_retained_merge_history_checkpoint_on(
-                                conn, &root, reference,
-                            ),
+        self.with_retained_merge_materializations(move |conn, cache| {
+            let retained = { cache.replay_inputs_on(conn, &root)? };
+            references
+                .iter()
+                .map(|reference| {
+                    match retained
+                        .iter()
+                        .find(|materialization| materialization.commit_ref() == reference)
+                    {
+                        Some(materialization) => Self::open_retained_merge_history_checkpoint_on(
+                            conn,
+                            reference,
+                            materialization,
+                        ),
+                        None => {
+                            Self::load_retained_merge_history_checkpoint_on(conn, &root, reference)
                         }
-                    })
-                    .collect()
-            })
-            .await
+                    }
+                })
+                .collect()
+        })
+        .await
     }
 
     pub(crate) async fn exact_materialized_ref(

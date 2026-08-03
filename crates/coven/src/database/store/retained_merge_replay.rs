@@ -846,18 +846,11 @@ impl StoreDatabase {
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        let cache = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |conn| {
-                let mut cache = cache.lock().map_err(|_| {
-                    DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
-                    )
-                })?;
-                cache.replay_inputs_on(conn, &root)?;
-                cache.circle_replay_epoch_index_on(conn)
-            })
-            .await
+        self.with_retained_merge_materializations(move |conn, cache| {
+            cache.replay_inputs_on(conn, &root)?;
+            cache.circle_replay_epoch_index_on(conn)
+        })
+        .await
     }
 
     pub(crate) fn record_circle_bootstrap_coverage_on(

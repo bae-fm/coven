@@ -48,10 +48,8 @@ impl StoreDatabase {
             .to_vec();
         #[cfg(test)]
         let materialization_failure = self.merge_materialization_failure_injection();
-        let retained_cache = self.retained_merge_materialization_cache();
         let applied = self
-            .connection
-            .call(move |conn| {
+            .with_retained_merge_materializations(move |conn, retained_cache| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let materialized_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(&tx, None)?,
@@ -83,11 +81,6 @@ impl StoreDatabase {
                     applied.outcome,
                     crate::sync::ApplyOutcome::Applied(_)
                 ) {
-                    let mut retained_cache = retained_cache.lock().map_err(|_| {
-                        DbError::Message(
-                            "retained Merge materialization cache lock is poisoned".to_string(),
-                        )
-                    })?;
                     let mut transaction_cache = retained_cache.clone();
                     let retained = applied.retained.take().ok_or_else(|| {
                         DbError::Message(

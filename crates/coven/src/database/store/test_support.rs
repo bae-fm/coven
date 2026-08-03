@@ -440,16 +440,9 @@ impl StoreDatabase {
         let blob_decls = self.blob_decls();
         let gates = self.gates();
         let tables = self.synced_tables().to_vec();
-        let retained_merge_materializations = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |connection| {
+        self.with_retained_merge_materializations(
+            move |connection, retained_merge_materializations| {
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                let mut retained_merge_materializations =
-                    retained_merge_materializations.lock().map_err(|_| {
-                        DbError::Message(
-                            "retained Merge materialization cache lock is poisoned".to_string(),
-                        )
-                    })?;
                 let retained = retained_merge_materializations.replay_projection_on(
                     &transaction,
                     &root,
@@ -504,8 +497,9 @@ impl StoreDatabase {
                     sabotaged_count,
                     sabotaged_late_count,
                 ))
-            })
-            .await
+            },
+        )
+        .await
     }
 
     pub(crate) async fn circle_bootstrap_coverage_count_for_test(

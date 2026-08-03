@@ -590,25 +590,18 @@ impl StoreDatabase {
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
     ) -> Result<Option<crate::sync::CirclePackageAccess>, DbError> {
-        let retained = self.retained_merge_materialization_cache();
-        self.connection
-            .call(move |conn| {
-                let mut retained = retained.lock().map_err(|_| {
-                    DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
-                    )
-                })?;
-                retained.replay_inputs_on(conn, &root)?;
-                let Some(activation) =
-                    retained.verified_circle_activation_on(conn, circle_id, &expected_control)?
-                else {
-                    return Ok(None);
-                };
-                activation
-                    .package_access()
-                    .map_err(|error| DbError::Message(error.to_string()))
-            })
-            .await
+        self.with_retained_merge_materializations(move |conn, retained| {
+            retained.replay_inputs_on(conn, &root)?;
+            let Some(activation) =
+                retained.verified_circle_activation_on(conn, circle_id, &expected_control)?
+            else {
+                return Ok(None);
+            };
+            activation
+                .package_access()
+                .map_err(|error| DbError::Message(error.to_string()))
+        })
+        .await
     }
 
     pub(crate) async fn circle_historical_package_keyring(
