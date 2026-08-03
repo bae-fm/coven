@@ -3,7 +3,7 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 
-use super::{publication_error, remove_snapshot_spool, SnapshotError};
+use super::{remove_snapshot_spool, SnapshotError};
 
 /// One exclusive Store-or-Circle snapshot publication operation.
 ///
@@ -35,7 +35,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
             .database
             .outbound_snapshot_publication()
             .await
-            .map_err(publication_error)?
+            .map_err(SnapshotError::from)?
         else {
             return Ok(None);
         };
@@ -60,7 +60,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                 .database
                 .activated_store_device_registration(uploader.clone())
                 .await
-                .map_err(publication_error)?;
+                .map_err(SnapshotError::from)?;
             let authority = crate::storage::BlobWriteAuthority::new(&registration);
             if let Some(spool_path) = &prepared.spool_path {
                 self.storage
@@ -115,7 +115,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
         self.database
             .complete_snapshot_publication(pending.reference)
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         self.drain_spool_cleanup().await?;
         Ok(pending.meta.value)
     }
@@ -145,7 +145,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
         self.database
             .complete_circle_snapshot_publication(pending.reference)
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         self.drain_spool_cleanup().await?;
         Ok(pending.meta.value)
     }
@@ -155,7 +155,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
             .database
             .snapshot_blob_spool_cleanup_paths()
             .await
-            .map_err(publication_error)?
+            .map_err(SnapshotError::from)?
         {
             remove_snapshot_spool(&path, false)
                 .await
@@ -163,7 +163,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
             self.database
                 .complete_snapshot_blob_spool_cleanup(&path)
                 .await
-                .map_err(publication_error)?;
+                .map_err(SnapshotError::from)?;
         }
         Ok(())
     }

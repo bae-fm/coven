@@ -19,3 +19,35 @@ pub(crate) struct PreparedPartitionBlob {
     pub(crate) spool_path: Option<std::path::PathBuf>,
     pub(crate) uploaded_verified: bool,
 }
+
+impl PreparedPartitionBlob {
+    pub(crate) fn merge_exact_duplicate(
+        &mut self,
+        duplicate: Self,
+    ) -> Result<(), super::StoreError> {
+        if self.audience != duplicate.audience || self.stored != duplicate.stored {
+            return Err(super::StoreError::InvalidOutbound(format!(
+                "prepared blob object {} has conflicting exact references",
+                crate::protocol::remote_object::remote_object_id(self.stored.object())
+            )));
+        }
+        self.spool_path = match (&self.spool_path, duplicate.spool_path) {
+            (Some(left), Some(right)) if left != &right => {
+                return Err(super::StoreError::InvalidOutbound(format!(
+                    "prepared blob object {} has conflicting spool paths",
+                    crate::protocol::remote_object::remote_object_id(self.stored.object())
+                )));
+            }
+            (Some(left), _) => Some(left.clone()),
+            (None, right) => right,
+        };
+        self.uploaded_verified |= duplicate.uploaded_verified;
+        if !self.uploaded_verified && self.spool_path.is_none() {
+            return Err(super::StoreError::InvalidOutbound(format!(
+                "prepared blob object {} awaiting upload has no local spool",
+                crate::protocol::remote_object::remote_object_id(self.stored.object())
+            )));
+        }
+        Ok(())
+    }
+}

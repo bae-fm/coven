@@ -263,7 +263,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::writer::AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let storage = self.storage;
-        super::writer::authorize(
+        super::writer::AuthorizedWriterOperation::from_parts(
             database,
             self,
             storage,
@@ -1943,9 +1943,9 @@ impl AuthorizedStoreHistory<'_> {
             .database
             .store_device_state_for_order(&commit.order)
             .await?;
-        let (authorized_predecessor, recovery_author) =
-            pull::predecessor_with_recovery_author(predecessor_state, &commit, &registrations)
-                .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+        let (authorized_predecessor, recovery_author) = predecessor_state
+            .preactivate_recovery_author(&commit, &registrations)
+            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
         let device_operations =
             crate::protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                 &commit,

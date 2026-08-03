@@ -1,7 +1,7 @@
 use super::{
-    decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
-    exact_owned_remote, InviteError, MembershipMutationPlan, MembershipMutationProgress,
-    ReplacementWrappedKey, RevokeMembershipPublication, RevokeMutationPlan,
+    decode_membership_mutation, exact_owned_remote, InviteError, MembershipMutationPlan,
+    MembershipMutationProgress, ReplacementWrappedKey, RevokeMembershipPublication,
+    RevokeMutationPlan,
 };
 use crate::encryption::{self, EncryptionService};
 use crate::keys;
@@ -286,10 +286,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .await?;
                 let plan = Box::pin(self.build_revoke_mutation(stream_id)).await?;
                 plan.validate_closed_shape()?;
-                let encoded =
-                    encode_membership_mutation(&MembershipMutationPlan::Revoke(plan.clone()))?;
+                let encoded = MembershipMutationPlan::Revoke(plan.clone()).encode()?;
                 let progress = MembershipMutationProgress::Pending;
-                let progress_bytes = encode_membership_progress(&progress)?;
+                let progress_bytes = progress.encode()?;
                 let pending_generation =
                     EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
                         .map_err(|error| {
@@ -555,11 +554,10 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         candidate.clone(),
                         crate::sync::store::operations::StoreMembershipJournalCompletion::RotationMutation {
                         intent_hash: persistence.intent_hash(),
-                        progress_bytes: encode_membership_progress(
-                            &MembershipMutationProgress::RevokeActivated {
-                                candidate: Some(candidate.reference.clone()),
-                            },
-                        )?,
+                        progress_bytes: MembershipMutationProgress::RevokeActivated {
+                            candidate: Some(candidate.reference.clone()),
+                        }
+                        .encode()?,
                         generation: keyring.current_generation(),
                         remote_objects: current_remotes.clone(),
                     },
@@ -625,9 +623,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                             candidate: candidate.clone(),
                             publication: publication.clone(),
                         };
-                        let plan_bytes = encode_membership_mutation(
-                            &MembershipMutationPlan::Revoke(plan.clone()),
-                        )?;
+                        let plan_bytes = MembershipMutationPlan::Revoke(plan.clone()).encode()?;
                         let (previous_intent_hash, replacement_intent_hash) = persistence
                             .adopt_candidate_head(
                                 plan_bytes,

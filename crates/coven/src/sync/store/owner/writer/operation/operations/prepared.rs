@@ -65,9 +65,11 @@ impl PreparedStoreOperationCommit {
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;
-        validate_prepared_transition(transition)
+        transition
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        validate_prepared_publication(publication)
+        publication
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
@@ -118,9 +120,11 @@ impl PreparedStoreOperationCommit {
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;
-        validate_prepared_transition(transition)
+        transition
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        validate_prepared_publication(publication)
+        publication
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
@@ -179,9 +183,11 @@ impl PreparedStoreOperationCommit {
     ) -> Result<Vec<super::remote_object::RemoteObjectRecord>, StoreError> {
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;
-        validate_prepared_transition(transition)
+        transition
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        validate_prepared_publication(publication)
+        publication
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         if self.commit.control()
             != Some(&StoreControl {
@@ -468,7 +474,8 @@ impl PreparedStoreOperationCommit {
         resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
         identity_signer: &UserKeypair,
     ) -> Result<(), StoreError> {
-        validate_prepared_publication(publication)
+        publication
+            .validate()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let reference = self.common.reference.clone();
         let commit = self.common.commit.clone();

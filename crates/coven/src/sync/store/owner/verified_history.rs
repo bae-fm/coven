@@ -1162,9 +1162,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         registrations: &[ActivatedStoreDeviceRegistration],
         device_operations: VerifiedStoreDeviceOperations,
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
-        let (authorized_predecessor, recovery_author) =
-            predecessor_with_recovery_author(predecessor_state, commit, registrations)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let (authorized_predecessor, recovery_author) = predecessor_state
+            .preactivate_recovery_author(commit, registrations)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
         let owner_recovery = self
             .commit_verifier
             .verify_owner_recovery_activation(commit)
@@ -4595,12 +4595,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                 &accepted_frontier,
             ))
             .await?;
-            let (authorized_predecessor, recovery_author) = predecessor_with_recovery_author(
-                predecessor_state.clone(),
-                &commit,
-                &registrations,
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let (authorized_predecessor, recovery_author) = predecessor_state
+                .clone()
+                .preactivate_recovery_author(&commit, &registrations)
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
             if !device_state_has_active_registration(
                 &authorized_predecessor,
                 &commit.author_registration,

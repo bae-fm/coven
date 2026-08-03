@@ -13,7 +13,6 @@ use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinI
 use crate::storage::{ExactObjectRef, PreparedExactObject, SyncStorage};
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 
-use super::membership_mutation::{validate_prepared_publication, validate_prepared_transition};
 use crate::sync::store::membership::InviteError;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -27,6 +26,14 @@ pub(super) enum MembershipMutationPlan {
     Invite(InviteMutationPlan),
     Revoke(RevokeMutationPlan),
     Resolve(ResolveMutationPlan),
+}
+
+impl MembershipMutationPlan {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, InviteError> {
+        serde_json::to_vec(self).map_err(|error| {
+            InviteError::InvalidDurableMutation(format!("serialize plan: {error}"))
+        })
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -113,7 +120,7 @@ impl RevokeMutationPlan {
 
     pub(super) fn validate_closed_shape(&self) -> Result<(), InviteError> {
         let publication = self.publication.publication();
-        validate_prepared_publication(publication)?;
+        publication.validate()?;
         let (desired_member, desired_email) = match &self.desired_access {
             CloudAccessState::Absent {
                 member_pubkey,
@@ -190,7 +197,7 @@ impl RevokeMutationPlan {
                 candidate,
                 ..
             } => {
-                validate_prepared_transition(transition)?;
+                transition.validate()?;
                 candidate
                     .validate_closed_shape()
                     .map_err(InviteError::InvalidDurableMutation)?;
@@ -325,8 +332,8 @@ impl ResolveMutationPlan {
     }
 
     pub(super) fn validate_closed_shape(&self) -> Result<(), InviteError> {
-        validate_prepared_transition(&self.transition)?;
-        validate_prepared_publication(&self.publication)?;
+        self.transition.validate()?;
+        self.publication.validate()?;
         if !self.resolution.verify_signature()
             || self.reference
                 != self
@@ -401,6 +408,39 @@ pub(crate) struct PreparedMembershipPublication {
     pub(crate) head_object: PreparedExactObject,
 }
 
+impl PreparedMembershipPublication {
+    pub(crate) fn validate(&self) -> Result<(), InviteError> {
+        PreparedMembershipTransition {
+            entry: self.entry.clone(),
+            entry_ref: self.entry_ref.clone(),
+            entry_object: self.entry_object.clone(),
+            transition: membership::MergeMembershipHeadTransition {
+                body: self.head.body.clone(),
+                head_slot: self.head_ref.object.slot().clone(),
+            },
+        }
+        .validate()?;
+        let coord = self.entry.coord();
+        if self.entry_ref.coord != coord
+            || self.entry_ref.object != *self.entry_object.reference()
+            || self.head.body.entry != self.entry_ref
+            || self.head.entry_coord() != coord
+            || self.head_ref.coord != coord
+            || self.head_ref.head_hash != self.head.head_hash()
+            || self.head_ref.object != *self.head_object.reference()
+            || self.head_object.stored_bytes()
+                != serde_json::to_vec(&self.head)
+                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?
+        {
+            return Err(InviteError::InvalidDurableMutation(
+                "prepared membership publication does not bind one exact entry and head"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedMembershipTransition {
@@ -408,6 +448,59 @@ pub(crate) struct PreparedMembershipTransition {
     pub(crate) entry_ref: MembershipEntryRef,
     pub(crate) entry_object: PreparedExactObject,
     pub(crate) transition: MergeMembershipHeadTransition,
+}
+
+impl PreparedMembershipTransition {
+    pub(crate) fn validate(&self) -> Result<(), InviteError> {
+        let coord = self.entry.coord();
+        let entry_bytes = serde_json::to_vec(&self.entry)
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+        let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
+            InviteError::InvalidDurableMutation("membership sequence is exhausted".to_string())
+        })?;
+        let entry_key = format!(
+            "{}.json",
+            crate::protocol::store_commit::membership_entry_semantic_prefix(
+                &coord.author_pubkey,
+                &coord.author_owner_grant,
+                coord.stream_id,
+                coord.seq,
+                coord.entry_hash,
+            )
+        );
+        let head_key = format!(
+            "{}.json",
+            crate::protocol::store_commit::membership_head_slot_prefix(
+                &coord.author_pubkey,
+                &coord.author_owner_grant,
+                coord.stream_id,
+                coord.seq,
+            )
+        );
+        let successor_key = format!(
+            "{}.json",
+            crate::protocol::store_commit::membership_head_slot_prefix(
+                &coord.author_pubkey,
+                &coord.author_owner_grant,
+                coord.stream_id,
+                next_sequence,
+            )
+        );
+        if self.entry_ref.coord != self.entry.coord()
+            || self.entry_ref.object != *self.entry_object.reference()
+            || self.entry_object.stored_bytes() != entry_bytes
+            || self.entry_ref.object.slot().logical_key() != entry_key
+            || self.transition.body.entry != self.entry_ref
+            || self.transition.body.resolutions != self.entry.resolution_dependencies
+            || self.transition.head_slot.logical_key() != head_key
+            || self.transition.body.successor.next_slot.logical_key() != successor_key
+        {
+            return Err(InviteError::InvalidDurableMutation(
+                "prepared membership transition does not bind its exact entry".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -436,6 +529,14 @@ pub(super) enum MembershipMutationProgress {
     ResolutionActivated {
         candidate: StoreBatchCommitRef,
     },
+}
+
+impl MembershipMutationProgress {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, InviteError> {
+        serde_json::to_vec(self).map_err(|error| {
+            InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
+        })
+    }
 }
 
 pub(super) struct MutationPersistence {
@@ -489,9 +590,7 @@ impl MutationPersistence {
         self.database
             .record_direct_revoke_activation(
                 self.intent_hash,
-                encode_membership_progress(&MembershipMutationProgress::RevokeActivated {
-                    candidate: None,
-                })?,
+                MembershipMutationProgress::RevokeActivated { candidate: None }.encode()?,
                 generation,
             )
             .await?;
@@ -572,7 +671,7 @@ impl MutationPersistence {
                 candidate.reference.clone(),
                 candidate_objects,
                 retained,
-                encode_membership_progress(&progress)?,
+                progress.encode()?,
                 nonactivation,
             )
             .await?;
@@ -664,7 +763,7 @@ impl MutationPersistence {
                 plan.candidate.reference.clone(),
                 candidate_objects,
                 retained,
-                encode_membership_progress(&progress)?,
+                progress.encode()?,
                 nonactivation,
             )
             .await?;
@@ -698,21 +797,6 @@ impl MutationPersistence {
             .await?;
         Ok(())
     }
-}
-
-pub(super) fn encode_membership_mutation(
-    plan: &MembershipMutationPlan,
-) -> Result<Vec<u8>, InviteError> {
-    serde_json::to_vec(plan)
-        .map_err(|error| InviteError::InvalidDurableMutation(format!("serialize plan: {error}")))
-}
-
-pub(super) fn encode_membership_progress(
-    progress: &MembershipMutationProgress,
-) -> Result<Vec<u8>, InviteError> {
-    serde_json::to_vec(progress).map_err(|error| {
-        InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
-    })
 }
 
 pub(super) fn decode_membership_mutation(

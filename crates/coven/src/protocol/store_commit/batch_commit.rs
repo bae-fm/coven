@@ -111,6 +111,53 @@ impl StoreBatchCommit {
         })
     }
 
+    pub(crate) fn retained_operation_objects(
+        &self,
+    ) -> Result<Vec<ExactObjectRef>, StoreProtocolError> {
+        let objects = self
+            .acknowledgement()
+            .map(|reference| reference.object.clone())
+            .into_iter()
+            .chain(
+                self.circle_acknowledgements()
+                    .iter()
+                    .map(|reference| reference.object.clone()),
+            )
+            .chain(
+                self.device_exclusion_proposals()
+                    .iter()
+                    .map(|reference| reference.object.clone()),
+            )
+            .chain(
+                self.device_exclusion_outcomes()
+                    .iter()
+                    .map(|reference| reference.object().clone()),
+            )
+            .chain(
+                self.reclaim_authorization()
+                    .into_iter()
+                    .flat_map(|reference| {
+                        [reference.evidence.object.clone(), reference.object.clone()]
+                    }),
+            )
+            .chain(
+                self.reclaim_receipt()
+                    .map(|reference| reference.object.clone()),
+            )
+            .collect::<Vec<_>>();
+        if objects
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != objects.len()
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store operation publication repeats a retained authority object".to_string(),
+            ));
+        }
+        Ok(objects)
+    }
+
     pub fn abandoned_candidates(&self) -> &[CandidateCleanupManifest] {
         match &self.body {
             StoreCommitBody::AbandonCandidates { manifests } => manifests,

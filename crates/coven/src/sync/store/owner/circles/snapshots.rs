@@ -10,9 +10,7 @@ use crate::KeyFingerprint;
 use tracing::warn;
 
 use crate::database::{verify_circle_bootstrap_image, CreatedSnapshot};
-use crate::sync::store::owner::snapshot::{
-    coverage_dominates, publication_error, SnapshotCut, SnapshotError,
-};
+use crate::sync::store::owner::snapshot::{coverage_dominates, SnapshotCut, SnapshotError};
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
@@ -142,7 +140,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .database
             .circle_acknowledgement_publication_inputs()
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         if inputs.is_empty() {
             return Ok(());
         }
@@ -162,7 +160,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 .database
                 .outbound_circle_snapshot_publication(input.circle_id)
                 .await
-                .map_err(publication_error)?
+                .map_err(SnapshotError::from)?
             {
                 let publication = self.writer.snapshot_publication().await;
                 match publication.resume_circle(pending).await {
@@ -185,7 +183,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 .database
                 .latest_local_circle_snapshot(input.circle_id)
                 .await
-                .map_err(publication_error)?
+                .map_err(SnapshotError::from)?
             {
                 if !self
                     .circle_snapshot_is_stable(input.circle_id, &previous.cut)
@@ -328,7 +326,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let previous = database
             .latest_local_circle_snapshot(circle_id)
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         // Generation zero occupies a deterministic slot a reader can compute (there
         // is no registration snapshot anchor for a per-Circle stream); later
         // generations occupy the predecessor's create-once successor slot.
@@ -417,11 +415,11 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 Vec::new(),
             )
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         let pending = database
             .outbound_circle_snapshot_publication(circle_id)
             .await
-            .map_err(publication_error)?
+            .map_err(SnapshotError::from)?
             .ok_or_else(|| {
                 SnapshotError::PublicationState(
                     "staged Circle snapshot publication row is absent".to_string(),
@@ -524,7 +522,7 @@ impl CircleSnapshotWriter<'_, '_> {
             .database
             .circle_acknowledgement_publication_inputs()
             .await
-            .map_err(publication_error)?
+            .map_err(SnapshotError::from)?
             .into_iter()
             .next()
             .ok_or_else(|| {

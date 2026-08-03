@@ -95,6 +95,12 @@ impl From<crate::database::SnapshotImageOperationError<SnapshotError>> for Snaps
     }
 }
 
+impl From<crate::database::DbError> for SnapshotError {
+    fn from(error: crate::database::DbError) -> Self {
+        Self::PublicationState(error.to_string())
+    }
+}
+
 /// SHA-256 of a snapshot DB image, hex-encoded for durable bootstrap state.
 fn snapshot_db_hash(db_image: &[u8]) -> String {
     hex::encode(Sha256::digest(db_image))

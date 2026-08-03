@@ -11,8 +11,7 @@ use crate::protocol::store_commit::{
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 use crate::sync::store::owner::writer::{
-    validate_prepared_publication, validate_prepared_transition, PreparedMembershipPublication,
-    PreparedMembershipTransition,
+    PreparedMembershipPublication, PreparedMembershipTransition,
 };
 
 use super::authority::target_key;
@@ -195,7 +194,7 @@ fn transition_matches_acceptance(
     let entry = &transition.entry;
     let expected_replacements =
         std::collections::BTreeSet::from([acceptance.request.member_grant.clone()]);
-    validate_prepared_transition(transition).is_ok()
+    transition.validate().is_ok()
         && transition.transition.body.author_registration
             == acceptance.request.promoter_registration
         && transition.transition.body.resolutions == entry.resolution_dependencies
@@ -298,7 +297,7 @@ fn finalization_receipt_matches_acceptance(
             entry_object: publication.entry_object.clone(),
             transition: transition.clone(),
         };
-        validate_prepared_publication(publication).is_ok()
+        publication.validate().is_ok()
             && transition_matches_acceptance(&prepared_transition, wrapped_key, acceptance)
             && merge_candidate_matches_finalization(candidate, &prepared_transition, acceptance)
             && prepared_transition
@@ -512,7 +511,7 @@ impl OwnerPromotionJournal {
                     && wrapped_key_matches_acceptance(wrapped_key, acceptance)
                     && transition_matches_acceptance(transition, &wrapped_key.reference, acceptance)
                     && merge_candidate_matches_finalization(candidate, transition, acceptance)
-                    && validate_prepared_publication(publication).is_ok()
+                    && publication.validate().is_ok()
                     && transition.entry == publication.entry
                     && transition.entry_ref == publication.entry_ref
                     && transition

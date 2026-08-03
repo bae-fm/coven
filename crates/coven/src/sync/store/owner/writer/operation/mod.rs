@@ -15,7 +15,6 @@ use crate::protocol::wrapped_store_key::{
 use crate::storage as store_objects;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError};
 use crate::sync::store::membership::InviteError;
-use crate::sync::store::operations::blocked_status;
 use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
 use std::sync::Arc;
 
@@ -34,53 +33,10 @@ pub(super) use blob_preparation::close_prepared_packages;
 pub(crate) use blob_preparation::prepare_partition_blob_locator;
 
 use membership_mutation_journal::{
-    decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
-    exact_owned_remote, InviteMutationPlan, MembershipMutationPlan, MembershipMutationProgress,
-    MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan, RevokeMembershipPublication,
-    RevokeMutationPlan,
+    decode_membership_mutation, exact_owned_remote, InviteMutationPlan, MembershipMutationPlan,
+    MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan,
+    RevokeMembershipPublication, RevokeMutationPlan,
 };
-
-pub(super) struct LocalStoreWriter<'store> {
-    identity: &'store UserKeypair,
-    registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
-    device_signer: UserKeypair,
-}
-
-impl<'store> LocalStoreWriter<'store> {
-    fn from_verified_parts(
-        identity: &'store UserKeypair,
-        registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
-        device_signer: UserKeypair,
-    ) -> Self {
-        Self {
-            identity,
-            registration,
-            device_signer,
-        }
-    }
-
-    fn registration_ref(&self) -> &crate::protocol::store_commit::StoreDeviceRegistrationRef {
-        self.registration.reference()
-    }
-
-    fn registration(&self) -> &crate::protocol::store_commit::StoreDeviceRegistration {
-        self.registration.value()
-    }
-
-    fn referenced_registration(
-        &self,
-    ) -> &crate::protocol::store_commit::ReferencedStoreDeviceRegistration {
-        &self.registration
-    }
-}
-
-pub(crate) struct AuthorizedWriterOperation<'storage> {
-    database: StoreDatabase,
-    history: AuthorizedStoreHistory<'storage>,
-    storage: &'storage Arc<dyn SyncStorage>,
-    membership: crate::protocol::membership::MembershipChain,
-    writer: LocalStoreWriter<'storage>,
-}
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
     authorship: crate::database::store::OwnStreamAuthorship,
@@ -241,24 +197,6 @@ enum AuthorizationRefreshError {
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
         self.history.membership_objects()
-    }
-
-    pub(super) fn from_parts(
-        database: StoreDatabase,
-        history: AuthorizedStoreHistory<'storage>,
-        storage: &'storage Arc<dyn SyncStorage>,
-        membership: crate::protocol::membership::MembershipChain,
-        identity: &'storage UserKeypair,
-        registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
-        device_signer: UserKeypair,
-    ) -> Self {
-        Self {
-            database,
-            history,
-            storage,
-            membership,
-            writer: LocalStoreWriter::from_verified_parts(identity, registration, device_signer),
-        }
     }
 
     pub(crate) fn store_root(&self) -> &crate::protocol::store_commit::StoreRootRef {
@@ -880,21 +818,19 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         },
                         wrapped_key,
                     };
-                    let encoded = encode_membership_mutation(&MembershipMutationPlan::Invite(
-                        plan.clone(),
-                    ))?;
+                    let encoded = MembershipMutationPlan::Invite(plan.clone()).encode()?;
                     let progress = MembershipMutationProgress::Pending;
                     let intent_hash = database
                         .stage_membership_mutation(
                             encoded,
-                            encode_membership_progress(&progress)?,
+                            progress.encode()?,
                             None,
                         )
                         .await?;
                     (plan, progress, intent_hash)
                 }
                 };
-        membership_mutation::validate_prepared_publication(&plan.publication)?;
+        plan.publication.validate()?;
         let mut validated_chain = chain.with_exact_entry(&plan.publication.entry)?;
         let author = self
             .verify_membership_publication_author(&plan.publication)
@@ -1416,13 +1352,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 let plan = self
                     .build_resolution_mutation(&membership, conflict_hash, selection, created_at)
                     .await?;
-                let bytes =
-                    encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
+                let bytes = MembershipMutationPlan::Resolve(plan.clone()).encode()?;
                 let progress = MembershipMutationProgress::Pending;
                 let intent_hash = database
                     .stage_membership_candidate_mutation(
                         bytes,
-                        encode_membership_progress(&progress)?,
+                        progress.encode()?,
                         plan.remote_objects()?,
                         None,
                     )
@@ -1529,11 +1464,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     plan.candidate.clone(),
                     operations::StoreMembershipJournalCompletion::Mutation {
                         intent_hash: persistence.intent_hash(),
-                        progress_bytes: encode_membership_progress(
-                            &MembershipMutationProgress::ResolutionActivated {
-                                candidate: plan.candidate.reference.clone(),
-                            },
-                        )?,
+                        progress_bytes: MembershipMutationProgress::ResolutionActivated {
+                            candidate: plan.candidate.reference.clone(),
+                        }
+                        .encode()?,
                         remote_objects: current_remotes.clone(),
                     },
                 )
@@ -1556,8 +1490,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     plan.candidate = replacement;
                     let replacement_remotes = plan.remote_objects()?;
                     let replacement_head = plan.candidate.head_ref();
-                    let bytes =
-                        encode_membership_mutation(&MembershipMutationPlan::Resolve(plan.clone()))?;
+                    let bytes = MembershipMutationPlan::Resolve(plan.clone()).encode()?;
                     persistence
                         .adopt_candidate_head(
                             bytes,
@@ -2043,7 +1976,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             head_ref,
             head_object,
         };
-        membership_mutation::validate_prepared_publication(&publication)?;
+        publication.validate()?;
         Ok(publication)
     }
 
@@ -2052,7 +1985,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         transition: &PreparedMembershipTransition,
         wraps: &[PreparedWrappedStoreKey],
     ) -> Result<(), InviteError> {
-        membership_mutation::validate_prepared_transition(transition)?;
+        transition.validate()?;
         let expected_wraps: Vec<&WrappedStoreKeyRef> = match &transition.entry.change {
             MembershipChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
             MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.iter().collect(),
@@ -2103,8 +2036,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         candidate: Box<operations::PreparedStoreOperationCommit>,
         completion: operations::StoreMembershipJournalCompletion,
     ) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
-        membership_mutation::validate_prepared_transition(transition)?;
-        membership_mutation::validate_prepared_publication(publication)?;
+        transition.validate()?;
+        publication.validate()?;
         candidate
             .validate_closed_shape()
             .map_err(InviteError::InvalidDurableMutation)?;
@@ -2348,8 +2281,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<operations::StoreMembershipJournalCompletion>,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
-        let retained_operation_objects =
-            operations::retained_store_operation_objects(&candidate.commit)?;
+        let retained_operation_objects = candidate
+            .commit
+            .retained_operation_objects()
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let head = candidate.head.clone();
         let prepared_head = candidate.prepared_head.clone();
         let history_summary = candidate.history_summary.clone();
@@ -3027,7 +2962,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 Ok(false) => return Ok(published),
                 Ok(true) => {}
                 Err(error) => {
-                    if let Some(block) = blocked_status(&error) {
+                    if let Some(block) = error.write_block() {
                         database.block_write_if_unresolved(&write_id, block).await?;
                     }
                     return Err(error);

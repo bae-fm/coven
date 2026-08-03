@@ -7,9 +7,7 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::sync::store::operations::{
-    blocked_status, next_store_sequence, successor_store_sequence,
-};
+use crate::sync::store::operations::{next_store_sequence, successor_store_sequence};
 use crate::sync::store::StoreError;
 use crate::StoreDir;
 
@@ -341,7 +339,7 @@ impl AuthorizedWriterOperation<'_> {
         let preparation = match preparation {
             Ok(preparation) => preparation,
             Err(error) => {
-                if let Some(block) = blocked_status(&error) {
+                if let Some(block) = error.write_block() {
                     database
                     .block_write_if_unresolved(&write_id, block)
                     .await

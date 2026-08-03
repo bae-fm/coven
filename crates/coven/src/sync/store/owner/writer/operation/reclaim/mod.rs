@@ -1036,11 +1036,13 @@ impl From<super::pull::CommitCoverageError> for StoreReclaimError {
     }
 }
 
-fn reclaim_pull_error(error: super::pull::StorePullError) -> StoreReclaimError {
-    match error {
-        super::pull::StorePullError::Object(error) => StoreReclaimError::Object(error),
-        super::pull::StorePullError::Storage(error) => StoreReclaimError::Storage(error),
-        error => StoreReclaimError::Authorization(error.to_string()),
+impl From<super::pull::StorePullError> for StoreReclaimError {
+    fn from(error: super::pull::StorePullError) -> Self {
+        match error {
+            super::pull::StorePullError::Object(error) => Self::Object(error),
+            super::pull::StorePullError::Storage(error) => Self::Storage(error),
+            error => Self::Authorization(error.to_string()),
+        }
     }
 }
 
@@ -1097,7 +1099,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 .history()
                 .store_package_targets(&snapshot.snapshot.meta.coverage)
                 .await
-                .map_err(reclaim_pull_error)?
+                .map_err(StoreReclaimError::from)?
                 .into_iter()
                 .map(|(commit, package)| (commit, package, snapshot.clone()))
                 .collect::<Vec<_>>(),
@@ -1186,7 +1188,7 @@ impl AuthorizedReclaim<'_, '_> {
             .history()
             .circle_package_targets(circle_id, &frontier)
             .await
-            .map_err(reclaim_pull_error)?;
+            .map_err(StoreReclaimError::from)?;
         for (commit, package) in targets {
             // `permits` is the same predicate the pull path applies; a package it
             // accepts is live history. A package whose control it cannot resolve, or
@@ -1270,7 +1272,7 @@ impl AuthorizedReclaim<'_, '_> {
                     .history()
                     .load_ref(owner)
                     .await
-                    .map_err(reclaim_pull_error)?;
+                    .map_err(StoreReclaimError::from)?;
                 if let Some(package) =
                     audience_blob_binding_package(commit.value(), blob.locator().audience())
                 {
@@ -1399,7 +1401,7 @@ impl AuthorizedReclaim<'_, '_> {
                 .history()
                 .circle_package_targets(circle_id, &selected.meta.bootstrap.coverage)
                 .await
-                .map_err(reclaim_pull_error)?;
+                .map_err(StoreReclaimError::from)?;
             for (commit, package) in targets {
                 if database
                     .circle_package_is_retained_for_replay(
@@ -1800,7 +1802,7 @@ impl AuthorizedReclaim<'_, '_> {
             .history()
             .load_ref(commit_ref)
             .await
-            .map_err(reclaim_pull_error)?;
+            .map_err(StoreReclaimError::from)?;
         let commit_value = verified_commit.value();
         let author = verified_commit.author();
         if commit_value.reclaim_authorization() != Some(authorization) {
@@ -1832,7 +1834,7 @@ impl AuthorizedReclaim<'_, '_> {
         self.history()
             .verify_currently_materialized(commit)
             .await
-            .map_err(reclaim_pull_error)
+            .map_err(StoreReclaimError::from)
     }
 }
 
@@ -1860,7 +1862,7 @@ impl AuthorizedReclaim<'_, '_> {
                     .history()
                     .load_ref(&claim.target.activation)
                     .await
-                    .map_err(reclaim_pull_error)?;
+                    .map_err(StoreReclaimError::from)?;
                 Ok(ReclaimTarget::StorePackage(
                     self.verify_store_package_reclaim_claim(&activation, claim)
                         .await?,
@@ -1871,7 +1873,7 @@ impl AuthorizedReclaim<'_, '_> {
                     .history()
                     .load_ref(&claim.target().activation)
                     .await
-                    .map_err(reclaim_pull_error)?;
+                    .map_err(StoreReclaimError::from)?;
                 Ok(ReclaimTarget::CirclePackage(
                     self.verify_circle_package_reclaim_claim(&activation, claim)
                         .await?,
@@ -1890,7 +1892,7 @@ impl AuthorizedReclaim<'_, '_> {
                     .history()
                     .load_ref(&claim.target.activation)
                     .await
-                    .map_err(reclaim_pull_error)?;
+                    .map_err(StoreReclaimError::from)?;
                 Ok(ReclaimTarget::AudienceBlob(
                     self.verify_audience_blob_reclaim_claim(&activation, claim)
                         .await?,
@@ -2358,7 +2360,7 @@ impl AuthorizedReclaim<'_, '_> {
         let activation = history
             .load_ref(&claim.target.coverage.activation_commit)
             .await
-            .map_err(reclaim_pull_error)?;
+            .map_err(StoreReclaimError::from)?;
         if !activation
             .value()
             .circle_controls()

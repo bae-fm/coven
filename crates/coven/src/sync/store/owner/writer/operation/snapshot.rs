@@ -226,7 +226,7 @@ impl super::AuthorizedWriterOperation<'_> {
         if let Some(pending) = database
             .outbound_snapshot_publication()
             .await
-            .map_err(publication_error)?
+            .map_err(SnapshotError::from)?
         {
             return publication.publish_store(pending).await;
         }
@@ -242,7 +242,7 @@ impl super::AuthorizedWriterOperation<'_> {
         let (devices, resolved_devices) = database
             .store_device_state_for_history_cut(&history_cut)
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(SnapshotError::PublicationState(
@@ -275,7 +275,7 @@ impl super::AuthorizedWriterOperation<'_> {
         let previous = database
             .latest_local_store_snapshot()
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         let (generation, predecessor, current_slot) = match previous {
             Some(previous) => (
                 previous
@@ -386,11 +386,11 @@ impl super::AuthorizedWriterOperation<'_> {
                 snapshot_blobs,
             )
             .await
-            .map_err(publication_error)?;
+            .map_err(SnapshotError::from)?;
         let pending = database
             .outbound_snapshot_publication()
             .await
-            .map_err(publication_error)?
+            .map_err(SnapshotError::from)?
             .ok_or_else(|| {
                 SnapshotError::PublicationState(
                     "staged snapshot publication row is absent".to_string(),
@@ -428,7 +428,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 let access = database
                     .circle_publication_context(circle_id, control.coordinate().clone())
                     .await
-                    .map_err(publication_error)?;
+                    .map_err(SnapshotError::from)?;
                 let key_fingerprint = access.key_fingerprint();
                 let encryption = access.into_encryption();
                 (
@@ -639,10 +639,6 @@ pub(crate) fn select_maximal_store_snapshot(
     });
     candidates.sort_by_key(|snapshot| snapshot.reference.snapshot_hash);
     candidates.pop()
-}
-
-pub(crate) fn publication_error(error: crate::database::DbError) -> SnapshotError {
-    SnapshotError::PublicationState(error.to_string())
 }
 
 pub(crate) fn coverage_dominates(left: &CommitFrontier, right: &CommitFrontier) -> bool {

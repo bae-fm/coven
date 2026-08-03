@@ -660,12 +660,18 @@ pub(super) fn close_prepared_blobs(
     ),
     StoreError,
 > {
-    let mut exact_blobs = std::collections::BTreeMap::new();
+    let mut exact_blobs = std::collections::BTreeMap::<
+        (
+            crate::blob::locator::RemoteAudience,
+            crate::protocol::store_commit::ObjectHash,
+        ),
+        PreparedPartitionBlob,
+    >::new();
     for blob in blobs {
         let object_id = remote_object::remote_object_id(blob.stored.object());
         let key = (blob.audience.clone(), object_id);
         if let Some(existing) = exact_blobs.get_mut(&key) {
-            merge_identical_prepared_blob(existing, blob)?;
+            existing.merge_exact_duplicate(blob)?;
         } else {
             exact_blobs.insert(key, blob);
         }
@@ -690,36 +696,6 @@ pub(super) fn close_prepared_blobs(
         remote_objects.push(remote);
     }
     Ok((remote_objects, indexed_blobs))
-}
-
-fn merge_identical_prepared_blob(
-    existing: &mut PreparedPartitionBlob,
-    duplicate: PreparedPartitionBlob,
-) -> Result<(), StoreError> {
-    if existing.audience != duplicate.audience || existing.stored != duplicate.stored {
-        return Err(StoreError::InvalidOutbound(format!(
-            "prepared blob object {} has conflicting exact references",
-            remote_object::remote_object_id(existing.stored.object())
-        )));
-    }
-    existing.spool_path = match (&existing.spool_path, duplicate.spool_path) {
-        (Some(left), Some(right)) if left != &right => {
-            return Err(StoreError::InvalidOutbound(format!(
-                "prepared blob object {} has conflicting spool paths",
-                remote_object::remote_object_id(existing.stored.object())
-            )));
-        }
-        (Some(left), _) => Some(left.clone()),
-        (None, right) => right,
-    };
-    existing.uploaded_verified |= duplicate.uploaded_verified;
-    if !existing.uploaded_verified && existing.spool_path.is_none() {
-        return Err(StoreError::InvalidOutbound(format!(
-            "prepared blob object {} awaiting upload has no local spool",
-            remote_object::remote_object_id(existing.stored.object())
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

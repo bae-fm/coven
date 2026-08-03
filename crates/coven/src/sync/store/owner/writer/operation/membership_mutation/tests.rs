@@ -2,8 +2,6 @@ use crate::keys::{self, UserKeypair};
 use crate::protocol::membership::MemberRole;
 use crate::protocol::store_commit::ObjectHash;
 
-use super::{validate_prepared_publication, validate_prepared_transition};
-
 #[tokio::test]
 async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     let db = crate::sync::test_helpers::open_test_db();
@@ -46,14 +44,14 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
         .prepare_membership_transition(&chain, entry)
         .await
         .expect("prepare membership transition");
-    validate_prepared_transition(&prepared).expect("validate prepared transition");
+    prepared.validate().expect("validate prepared transition");
 
     let mut redirected_head = prepared.clone();
     redirected_head.transition.head_slot = crate::storage::cloud::ObjectSlot::logical(
         "store-v1/tests/redirected-membership-head.json".to_string(),
     )
     .expect("valid redirected head slot");
-    assert!(validate_prepared_transition(&redirected_head).is_err());
+    assert!(redirected_head.validate().is_err());
 
     let mut redirected_successor = prepared.clone();
     redirected_successor.transition.body.successor.next_slot =
@@ -61,7 +59,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
             "store-v1/tests/redirected-membership-successor.json".to_string(),
         )
         .expect("valid redirected successor slot");
-    assert!(validate_prepared_transition(&redirected_successor).is_err());
+    assert!(redirected_successor.validate().is_err());
 
     let mut substituted_entry = prepared.clone();
     let substituted_bytes = b"substituted exact membership entry".to_vec();
@@ -75,7 +73,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
             .expect("prepare substituted membership entry object");
     substituted_entry.entry_ref.object = substituted_ref.clone();
     substituted_entry.transition.body.entry.object = substituted_ref;
-    assert!(validate_prepared_transition(&substituted_entry).is_err());
+    assert!(substituted_entry.validate().is_err());
 
     let mut substituted_head = writer
         .finish_membership_transition(
@@ -94,5 +92,5 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
         crate::storage::PreparedExactObject::new(substituted_ref.clone(), substituted_bytes)
             .expect("prepare substituted membership head object");
     substituted_head.head_ref.object = substituted_ref;
-    assert!(validate_prepared_publication(&substituted_head).is_err());
+    assert!(substituted_head.validate().is_err());
 }

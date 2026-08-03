@@ -49,29 +49,6 @@ pub(crate) fn commit_predecessor_references(commit: &StoreBatchCommit) -> Vec<St
         .collect()
 }
 
-pub(crate) fn predecessor_with_recovery_author(
-    mut predecessor: ResolvedStoreDeviceState,
-    commit: &StoreBatchCommit,
-    registrations: &[ActivatedStoreDeviceRegistration],
-) -> Result<(ResolvedStoreDeviceState, Option<StoreDeviceRegistrationRef>), StoreProtocolError> {
-    if commit.device_registrations().len() != registrations.len() {
-        return Err(StoreProtocolError::Malformed(
-            "verified registrations do not cover every activation".to_string(),
-        ));
-    }
-    for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
-        registration.verify_reference(activated)?;
-        if activated.registration == commit.author_registration {
-            if let Some(cursor) = registration.recovery_cursor()? {
-                predecessor = predecessor
-                    .activate_registration(activated.registration.clone(), Some(cursor))?;
-                return Ok((predecessor, Some(activated.registration.clone())));
-            }
-        }
-    }
-    Ok((predecessor, None))
-}
-
 pub(crate) fn verified_merge_predecessor_state(
     genesis: &ResolvedStoreDeviceState,
     states: &BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>,

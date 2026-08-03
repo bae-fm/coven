@@ -105,6 +105,74 @@ pub enum StoreError {
     CirclePublicationBlocked(crate::protocol::circle::CirclePublicationBlocked),
 }
 
+impl StoreError {
+    pub(crate) fn write_block(&self) -> Option<crate::WriteBlock> {
+        match self {
+            Self::Database(_)
+            | Self::BlobStorage { .. }
+            // Nothing was persisted and the caller re-runs the operation, so this
+            // blocks no writer.
+            | Self::ActivationConflict
+            | Self::CandidateCleanup(_) => None,
+            Self::MergeAnnouncementOccupied { .. }
+            | Self::SequenceExhausted { .. }
+            | Self::AuthorExcluded { .. } => Some(crate::WriteBlock::InvalidProtocolState {
+                reason: self.to_string(),
+            }),
+            Self::CirclePublicationBlocked(
+                crate::protocol::circle::CirclePublicationBlocked::RotationRequired {
+                    circle_id,
+                    removed_members,
+                },
+            ) => Some(crate::WriteBlock::RotationRequired {
+                circle_id: *circle_id,
+                removed_members: removed_members.clone(),
+            }),
+            Self::Object(StoreObjectError::Storage(_)) => None,
+            Self::MissingBlob { namespace, id } => Some(crate::WriteBlock::MissingBlob {
+                namespace: namespace.clone(),
+                id: id.clone(),
+            }),
+            Self::LocalUserBlob { namespace, id } => Some(crate::WriteBlock::LocalUserBlob {
+                namespace: namespace.clone(),
+                id: id.clone(),
+            }),
+            Self::MissingState { key } => Some(crate::WriteBlock::InvalidProtocolState {
+                reason: format!("Store protocol state {key:?} is absent"),
+            }),
+            Self::InvalidState { key, reason } => Some(crate::WriteBlock::InvalidProtocolState {
+                reason: format!("Store protocol state {key:?} is invalid: {reason}"),
+            }),
+            Self::InvalidOutbound(_) | Self::Object(_) => {
+                Some(crate::WriteBlock::InvalidPackage {
+                    reason: self.to_string(),
+                })
+            }
+            Self::Preparation(StorePreparationError::LocalUserBlob { namespace, id }) => {
+                Some(crate::WriteBlock::LocalUserBlob {
+                    namespace: namespace.clone(),
+                    id: id.clone(),
+                })
+            }
+            Self::Preparation(StorePreparationError::MissingPreparedBlob { namespace, id }) => {
+                Some(crate::WriteBlock::MissingBlob {
+                    namespace: namespace.clone(),
+                    id: id.clone(),
+                })
+            }
+            Self::Preparation(StorePreparationError::Gate(_))
+            | Self::Preparation(StorePreparationError::AssetScan(_))
+            | Self::Preparation(StorePreparationError::Database(_)) => {
+                Some(crate::WriteBlock::InvalidPackage {
+                    reason: self.to_string(),
+                })
+            }
+            Self::Preparation(StorePreparationError::AssetUpload(_))
+            | Self::Preparation(StorePreparationError::Storage { .. }) => None,
+        }
+    }
+}
+
 impl From<crate::database::DbError> for StoreError {
     fn from(error: crate::database::DbError) -> Self {
         Self::Database(error.into_message())

@@ -1266,6 +1266,29 @@ impl ResolvedStoreDeviceState {
         Self::from_parts(self.devices.clone(), recovery)
     }
 
+    pub(crate) fn preactivate_recovery_author(
+        mut self,
+        commit: &StoreBatchCommit,
+        registrations: &[ActivatedStoreDeviceRegistration],
+    ) -> Result<(Self, Option<StoreDeviceRegistrationRef>), StoreProtocolError> {
+        if commit.device_registrations().len() != registrations.len() {
+            return Err(StoreProtocolError::Malformed(
+                "verified registrations do not cover every activation".to_string(),
+            ));
+        }
+        for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
+            registration.verify_reference(activated)?;
+            if activated.registration == commit.author_registration {
+                if let Some(cursor) = registration.recovery_cursor()? {
+                    self =
+                        self.activate_registration(activated.registration.clone(), Some(cursor))?;
+                    return Ok((self, Some(activated.registration.clone())));
+                }
+            }
+        }
+        Ok((self, None))
+    }
+
     pub(crate) fn apply_verified_lifecycle(
         mut self,
         commit: &StoreBatchCommit,

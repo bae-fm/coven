@@ -670,9 +670,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             predecessor_membership,
             &predecessor_state,
         )?;
-        let (authorized_predecessor, recovery_author) =
-            predecessor_with_recovery_author(predecessor_state, commit, &candidate.registrations)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+        let (authorized_predecessor, recovery_author) = predecessor_state
+            .preactivate_recovery_author(commit, &candidate.registrations)
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
         let owner_recovery = self
             .history
             .verify_pull_owner_recovery_activation(commit)

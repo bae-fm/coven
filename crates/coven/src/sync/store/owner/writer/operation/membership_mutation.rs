@@ -1,18 +1,15 @@
 //! Store membership operations authorized by a retained local writer.
 
-mod publication;
 mod removal;
 
 use crate::sync::store::membership::InviteError;
 
-pub(crate) use publication::{validate_prepared_publication, validate_prepared_transition};
 pub(super) use removal::AuthorizedMembershipRevocation;
 
 use super::{
-    decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
-    exact_owned_remote, MembershipMutationPlan, MembershipMutationProgress,
-    PreparedMembershipPublication, PreparedMembershipTransition, ReplacementWrappedKey,
-    RevokeMembershipPublication, RevokeMutationPlan,
+    decode_membership_mutation, exact_owned_remote, MembershipMutationPlan,
+    MembershipMutationProgress, ReplacementWrappedKey, RevokeMembershipPublication,
+    RevokeMutationPlan,
 };
 
 pub(super) fn validate_revoke_rotation_adoption(
