@@ -86,7 +86,7 @@ impl StoreDatabase {
             };
             let control = authoring.control.coord.clone();
             let epoch_id = authoring.control.value.epoch_id();
-            let access = Self::circle_publication_context_on(conn, circle_id, &control)?;
+            let access = super::circle_publication_context_on(conn, circle_id, &control)?;
             let key_fingerprint = access.key_fingerprint();
             let epoch_encryption = access.into_encryption();
             let seeded_from = Self::circle_bootstrap_coverage_ref_on(conn, circle_id)?;

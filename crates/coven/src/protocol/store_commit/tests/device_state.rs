@@ -358,7 +358,7 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
     };
     let authority = StoreDeviceRegistrationActivation::Recovery {
         recovery_id,
-        node: recovery_node,
+        node: recovery_node.clone(),
     };
     let device_signer = fixture
         .registration
@@ -381,18 +381,39 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
         &device_signer,
     )
     .expect("sign registration activation commit");
-    let activated_value = ActivatedStoreDeviceRegistration::verified(
-        ReferencedStoreDeviceRegistration::verified(
-            activated.registration.clone(),
-            replacement_registration.clone(),
-        )
-        .expect("verify exact replacement registration"),
-        authority.clone(),
+    let referenced_registration = ReferencedStoreDeviceRegistration::verified(
+        activated.registration.clone(),
+        replacement_registration.clone(),
     )
-    .expect("verify replacement activation");
+    .expect("verify exact replacement registration");
+    let activated_value =
+        ActivatedStoreDeviceRegistration::verified(referenced_registration.clone(), authority)
+            .expect("verify replacement activation");
     activated_value
         .verify_reference(&activated)
         .expect("verify exact replacement activation reference");
+    assert_eq!(
+        activated_value
+            .recovery_cursor()
+            .expect("derive exact recovery cursor"),
+        Some(OwnerRecoveryCursor {
+            owner_grant: fixture.root.descriptor.founder_grant.clone(),
+            position: OwnerRecoveryPosition::At {
+                node: recovery_node.clone(),
+            },
+        })
+    );
+    let mut wrong_node = recovery_node;
+    wrong_node.owner_grant = MembershipGrantId(ObjectHash::digest(b"wrong recovery owner grant"));
+    let mismatched = ActivatedStoreDeviceRegistration::verified(
+        referenced_registration,
+        StoreDeviceRegistrationActivation::Recovery {
+            recovery_id,
+            node: wrong_node,
+        },
+    )
+    .expect("recovery activation still names the exact recovery slot");
+    assert!(mismatched.recovery_cursor().is_err());
     let input = vec![activated_value];
     let retained = RetainedStoreDeviceRegistrationActivations::from_verified(
         &fixture.root_ref,

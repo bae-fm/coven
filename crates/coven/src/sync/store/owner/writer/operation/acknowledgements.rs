@@ -1,6 +1,6 @@
 use super::snapshot;
 use super::*;
-use crate::protocol::store_commit::{ack_slot_prefix, DeviceStreamAnchor, StoreAck, SuccessorLink};
+use crate::protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
 use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
@@ -21,17 +21,6 @@ pub(crate) enum StoreAckError {
 impl From<crate::database::DbError> for StoreAckError {
     fn from(error: crate::database::DbError) -> Self {
         Self::Database(error.into_message())
-    }
-}
-
-fn acknowledgement_first_slot(
-    registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-) -> Result<&crate::storage::cloud::ObjectSlot, StoreAckError> {
-    match &registration.acknowledgements {
-        DeviceStreamAnchor::StoreAcknowledgements { first_slot } => Ok(first_slot),
-        _ => Err(StoreAckError::InvalidOutbound(
-            "local Store registration has no acknowledgement stream anchor".to_string(),
-        )),
     }
 }
 
@@ -107,7 +96,7 @@ impl AuthorizedWriterOperation<'_> {
                 Some(previous.reference.object),
                 previous.successor_slot,
             ),
-            None => (1, None, acknowledgement_first_slot(&registration)?.clone()),
+            None => (1, None, registration.acknowledgements.first_slot().clone()),
         };
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,

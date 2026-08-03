@@ -1,8 +1,7 @@
 use super::{
-    chain_with_exact_entry, decode_membership_mutation, encode_membership_mutation,
-    encode_membership_progress, exact_owned_remote, InviteError, MembershipMutationPlan,
-    MembershipMutationProgress, ReplacementWrappedKey, RevokeMembershipPublication,
-    RevokeMutationPlan,
+    decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
+    exact_owned_remote, InviteError, MembershipMutationPlan, MembershipMutationProgress,
+    ReplacementWrappedKey, RevokeMembershipPublication, RevokeMutationPlan,
 };
 use crate::encryption::{self, EncryptionService};
 use crate::keys;
@@ -334,7 +333,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 "removal carries invitation progress".to_string(),
             ));
         }
-        let mut validated_chain = chain_with_exact_entry(chain, plan.publication.entry())?;
+        let mut validated_chain = chain.with_exact_entry(plan.publication.entry())?;
         if let MembershipMutationProgress::RevokeActivated { candidate } = &progress {
             let (expected, publication) = match &plan.publication {
                 RevokeMembershipPublication::Direct { publication } => (None, publication),

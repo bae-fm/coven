@@ -10,9 +10,10 @@ pub(super) use operation::membership_mutation::{
 pub(super) use operation::membership_mutation_journal::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
+pub(super) use operation::prepare_partition_blob_locator;
 pub(crate) use operation::AuthorizedWriterOperation;
 pub(super) use operation::StoreWriterAuthorizationError;
-pub(crate) use operation::{blob_preparation, operations, reclaim, snapshot};
+pub(crate) use operation::{operations, reclaim, snapshot};
 
 #[derive(Clone, Copy)]
 pub(super) struct SnapshotHistoryConstruction;

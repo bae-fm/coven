@@ -75,25 +75,23 @@ pub enum SnapshotError {
     },
 }
 
-fn finish_database_image_operation<T>(
-    image: SnapshotDatabaseImage,
-    outcome: Result<T, SnapshotError>,
-) -> Result<T, SnapshotError> {
-    let cleanup = image.discard();
-    match (outcome, cleanup) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(cause), Ok(())) => Err(cause),
-        (Ok(_), Err(crate::database::SnapshotImageError::Cleanup { path, cleanup })) => {
-            Err(SnapshotError::StagedDatabaseCleanup { path, cleanup })
-        }
-        (Err(cause), Err(crate::database::SnapshotImageError::Cleanup { path, cleanup })) => {
-            Err(SnapshotError::StagedDatabaseCleanupAfterFailure {
+impl From<crate::database::SnapshotImageOperationError<SnapshotError>> for SnapshotError {
+    fn from(error: crate::database::SnapshotImageOperationError<SnapshotError>) -> Self {
+        match error {
+            crate::database::SnapshotImageOperationError::Operation(cause) => cause,
+            crate::database::SnapshotImageOperationError::Cleanup { path, cleanup } => {
+                Self::StagedDatabaseCleanup { path, cleanup }
+            }
+            crate::database::SnapshotImageOperationError::CleanupAfterFailure {
+                path,
+                cleanup,
+                cause,
+            } => Self::StagedDatabaseCleanupAfterFailure {
                 path,
                 cleanup,
                 cause: Box::new(cause),
-            })
+            },
         }
-        (_, Err(error)) => Err(SnapshotError::Image(error)),
     }
 }
 
@@ -351,10 +349,9 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                     let query_path = bound_path.with_extension("restore-select.db");
                     let query_image = SnapshotDatabaseImage::prepare(query_path)?;
                     if let Err(error) = std::fs::copy(&bound_path, query_image.path()) {
-                        return finish_database_image_operation(
-                            query_image,
-                            Err(SnapshotError::Io(error)),
-                        );
+                        return query_image
+                            .finish_operation(Err(SnapshotError::Io(error)))
+                            .map_err(SnapshotError::from);
                     }
                     let query_path = query_image.path().to_path_buf();
                     let staged = async {
@@ -384,7 +381,9 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                         .await
                     }
                     .await;
-                    finish_database_image_operation(query_image, staged)?
+                    query_image
+                        .finish_operation(staged)
+                        .map_err(SnapshotError::from)?
                 }
                 None => Vec::new(),
             };
@@ -433,7 +432,9 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 debug_assert_eq!(committed_path, bound_path);
                 Ok(database)
             }
-            Err(cause) => finish_database_image_operation(database_image, Err(cause)),
+            Err(cause) => database_image
+                .finish_operation(Err(cause))
+                .map_err(SnapshotError::from),
         }
     }
 }

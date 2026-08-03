@@ -15,10 +15,11 @@ use tracing::{info, warn};
 use super::SnapshotHistoryConstruction;
 #[cfg(test)]
 use crate::keys::UserKeypair;
+#[cfg(test)]
+use crate::protocol::store_commit::StoreSnapshotRef;
 use crate::protocol::store_commit::{
-    snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, DeviceStreamAnchor,
-    ObjectHash, SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut,
-    StoreRootRef, StoreSnapshotRef, StoreSnapshotState,
+    snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
+    SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
@@ -289,7 +290,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 Some(previous.reference),
                 previous.successor_slot,
             ),
-            None => (0, None, snapshot_first_slot(&registration)?.clone()),
+            None => (0, None, registration.snapshots.first_slot().clone()),
         };
 
         let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
@@ -450,7 +451,7 @@ impl super::AuthorizedWriterOperation<'_> {
             )));
         }
         if captured.fact.blob.provenance == crate::blob::Provenance::UserProvided {
-            let locator = super::blob_preparation::prepare_partition_blob_locator(
+            let locator = super::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
                 &protection,
@@ -596,13 +597,14 @@ impl super::AuthorizedWriterOperation<'_> {
         reference: &StoreSnapshotRef,
         bytes: &[u8],
     ) -> Result<SnapshotMeta, SnapshotError> {
-        verify_store_snapshot_bytes(
+        SnapshotMeta::parse_stream_entry_at(
+            bytes,
             self.store_root(),
             self.writer.registration_ref(),
             self.writer.registration(),
             reference,
-            bytes,
         )
+        .map_err(|error| SnapshotError::Parse(error.to_string()))
     }
 }
 
@@ -623,51 +625,6 @@ async fn remove_snapshot_spool(
         }
     }
     crate::atomic_file::sync_parent_dir(path).await
-}
-
-fn snapshot_first_slot(
-    registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-) -> Result<&crate::storage::cloud::ObjectSlot, SnapshotError> {
-    match &registration.snapshots {
-        DeviceStreamAnchor::StoreSnapshots { first_slot } => Ok(first_slot),
-        _ => Err(SnapshotError::PublicationState(
-            "local Store registration has no snapshot stream anchor".to_string(),
-        )),
-    }
-}
-
-pub(crate) fn verify_store_snapshot_bytes(
-    root: &StoreRootRef,
-    registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-    reference: &StoreSnapshotRef,
-    bytes: &[u8],
-) -> Result<SnapshotMeta, SnapshotError> {
-    let meta = SnapshotMeta::parse_at(bytes, root.store_root_hash, reference, registration)
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-    let expected_predecessor = meta.predecessor.clone();
-    let next_generation = reference
-        .generation
-        .checked_add(1)
-        .ok_or_else(|| SnapshotError::Parse("Store snapshot generation overflow".to_string()))?;
-    let activation = registration
-        .store_snapshot_activation(registration_ref)
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?
-        .activation_id();
-    if meta.author_registration != *registration_ref
-        || meta.successor.activation != activation
-        || meta.successor.predecessor != expected_predecessor
-        || meta.successor.next_slot.logical_key()
-            != format!(
-                "{}.json",
-                snapshot_slot_prefix(&registration.device_id.to_string(), next_generation)
-            )
-    {
-        return Err(SnapshotError::Parse(
-            "Store snapshot metadata is outside its activated exact stream".to_string(),
-        ));
-    }
-    Ok(meta)
 }
 
 pub(crate) fn select_maximal_store_snapshot(

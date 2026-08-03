@@ -410,6 +410,36 @@ impl SnapshotMeta {
         }
         Ok(meta)
     }
+
+    pub(crate) fn parse_stream_entry_at(
+        bytes: &[u8],
+        expected_store_root: &StoreRootRef,
+        expected_registration: &StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        expected: &StoreSnapshotRef,
+    ) -> Result<Self, StoreProtocolError> {
+        let meta = Self::parse_at(bytes, expected_store_root.store_root_hash, expected, author)?;
+        let next_generation = expected.generation.checked_add(1).ok_or_else(|| {
+            StoreProtocolError::Malformed("Store snapshot generation overflow".to_string())
+        })?;
+        let activation = author
+            .store_snapshot_activation(expected_registration)?
+            .activation_id();
+        if meta.author_registration != *expected_registration
+            || meta.successor.activation != activation
+            || meta.successor.predecessor != meta.predecessor
+            || meta.successor.next_slot.logical_key()
+                != format!(
+                    "{}.json",
+                    snapshot_slot_prefix(&author.device_id.to_string(), next_generation)
+                )
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store snapshot metadata is outside its activated exact stream".to_string(),
+            ));
+        }
+        Ok(meta)
+    }
 }
 
 fn validate_snapshot_generation(

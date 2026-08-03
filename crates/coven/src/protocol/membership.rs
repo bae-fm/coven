@@ -491,6 +491,8 @@ pub enum MembershipError {
         grant: MembershipGrantId,
         seq: u64,
     },
+    #[error("membership entry at {coord:?} differs from the expected exact entry")]
+    ExactEntryMismatch { coord: Box<MembershipCoord> },
     #[error("membership entry {index} has predecessor {actual:?}, expected {expected:?}")]
     BrokenStreamLink {
         index: usize,
@@ -1761,6 +1763,27 @@ impl MembershipChain {
             return Err(error);
         }
         Ok(())
+    }
+
+    pub(crate) fn with_exact_entry(
+        &self,
+        entry: &MembershipEntry,
+    ) -> Result<Self, MembershipError> {
+        let coord = entry.coord();
+        if let Some((_, stored)) = self
+            .entries_with_coords()
+            .find(|(stored_coord, _)| **stored_coord == coord)
+        {
+            if stored != entry {
+                return Err(MembershipError::ExactEntryMismatch {
+                    coord: Box::new(coord),
+                });
+            }
+            return Ok(self.clone());
+        }
+        let mut chain = self.clone();
+        chain.add_entry_at(coord, entry.clone())?;
+        Ok(chain)
     }
 
     pub(crate) fn can_write_now(&self, pubkey: &str) -> bool {

@@ -444,6 +444,50 @@ impl ActivatedStoreDeviceRegistration {
     pub(crate) fn activation(&self) -> &StoreDeviceRegistrationActivation {
         &self.activation
     }
+
+    pub(crate) fn recovery_cursor(
+        &self,
+    ) -> Result<Option<OwnerRecoveryCursor>, StoreProtocolError> {
+        match (&self.registration.value().origin, &self.activation) {
+            (
+                StoreDeviceRegistrationOrigin::Recovery {
+                    recovery_id,
+                    recovery_slot,
+                    owner_grant,
+                },
+                StoreDeviceRegistrationActivation::Recovery {
+                    recovery_id: activated_recovery_id,
+                    node,
+                },
+            ) if recovery_id == activated_recovery_id
+                && recovery_slot == node.object.slot()
+                && owner_grant == &node.owner_grant =>
+            {
+                Ok(Some(OwnerRecoveryCursor {
+                    owner_grant: owner_grant.clone(),
+                    position: OwnerRecoveryPosition::At { node: node.clone() },
+                }))
+            }
+            (
+                StoreDeviceRegistrationOrigin::Join {
+                    attempt_id,
+                    outcome_slot,
+                    ..
+                },
+                StoreDeviceRegistrationActivation::Join {
+                    attempt_id: activated_attempt_id,
+                    outcome,
+                },
+            ) if attempt_id == activated_attempt_id && outcome_slot == outcome.slot() => Ok(None),
+            (
+                StoreDeviceRegistrationOrigin::Founder { .. },
+                StoreDeviceRegistrationActivation::Founder { .. },
+            ) => Ok(None),
+            _ => Err(StoreProtocolError::Malformed(
+                "registration origin differs from its exact activation authority".to_string(),
+            )),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for ActivatedStoreDeviceRegistration {

@@ -268,7 +268,7 @@ impl StoreDatabase {
                         .activate_store_operation_remote_objects(&reference, &object_ids)?;
                 }
                 if !registrations.is_empty() {
-                    StoreDatabase::record_activated_store_device_registrations_on(
+                    super::record_activated_store_device_registrations_on(
                         &tx,
                         verified_commit.value(),
                         &registrations,
@@ -331,7 +331,7 @@ impl StoreDatabase {
                     tx.commit().map_err(DbError::from)?;
                     return Ok(());
                 }
-                StoreDatabase::record_activated_store_device_registrations_on(
+                super::record_activated_store_device_registrations_on(
                     &tx,
                     verified_commit.value(),
                     &registrations,
@@ -459,7 +459,7 @@ impl StoreDatabase {
                     continue;
                 }
                 let commit = prepared.commit.value();
-                crate::database::StoreDatabase::record_activated_store_device_registrations_on(
+                super::record_activated_store_device_registrations_on(
                     &tx,
                     commit,
                     &prepared.registrations,
@@ -503,11 +503,7 @@ impl StoreDatabase {
                 let root = required_store_root_authority_on(&tx)?;
                 let registrations = vec![registration];
                 let commit = verified_commit.value();
-                crate::database::StoreDatabase::record_activated_store_device_registrations_on(
-                    &tx,
-                    commit,
-                    &registrations,
-                )?;
+                super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
                 MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
                     &root,
                     &verified_commit,

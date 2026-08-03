@@ -49,51 +49,6 @@ pub(crate) fn commit_predecessor_references(commit: &StoreBatchCommit) -> Vec<St
         .collect()
 }
 
-pub(crate) fn registration_recovery_cursor(
-    origin: &StoreDeviceRegistrationOrigin,
-    activation: &super::store_commit::StoreDeviceRegistrationActivation,
-) -> Result<Option<super::store_commit::OwnerRecoveryCursor>, StoreProtocolError> {
-    match (origin, activation) {
-        (
-            StoreDeviceRegistrationOrigin::Recovery {
-                recovery_id,
-                recovery_slot,
-                owner_grant,
-            },
-            StoreDeviceRegistrationActivation::Recovery {
-                recovery_id: activated_recovery_id,
-                node,
-            },
-        ) if recovery_id == activated_recovery_id
-            && recovery_slot == node.object.slot()
-            && owner_grant == &node.owner_grant =>
-        {
-            Ok(Some(OwnerRecoveryCursor {
-                owner_grant: owner_grant.clone(),
-                position: OwnerRecoveryPosition::At { node: node.clone() },
-            }))
-        }
-        (
-            StoreDeviceRegistrationOrigin::Join {
-                attempt_id,
-                outcome_slot,
-                ..
-            },
-            StoreDeviceRegistrationActivation::Join {
-                attempt_id: activated_attempt_id,
-                outcome,
-            },
-        ) if attempt_id == activated_attempt_id && outcome_slot == outcome.slot() => Ok(None),
-        (
-            StoreDeviceRegistrationOrigin::Founder { .. },
-            StoreDeviceRegistrationActivation::Founder { .. },
-        ) => Ok(None),
-        _ => Err(StoreProtocolError::Malformed(
-            "registration origin differs from its exact activation authority".to_string(),
-        )),
-    }
-}
-
 pub(crate) fn predecessor_with_recovery_author(
     mut predecessor: ResolvedStoreDeviceState,
     commit: &StoreBatchCommit,
@@ -107,10 +62,7 @@ pub(crate) fn predecessor_with_recovery_author(
     for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
         registration.verify_reference(activated)?;
         if activated.registration == commit.author_registration {
-            if let Some(cursor) = registration_recovery_cursor(
-                &registration.value().origin,
-                registration.activation(),
-            )? {
+            if let Some(cursor) = registration.recovery_cursor()? {
                 predecessor = predecessor
                     .activate_registration(activated.registration.clone(), Some(cursor))?;
                 return Ok((predecessor, Some(activated.registration.clone())));
@@ -118,39 +70,6 @@ pub(crate) fn predecessor_with_recovery_author(
         }
     }
     Ok((predecessor, None))
-}
-
-pub(crate) fn apply_verified_device_lifecycle(
-    mut state: ResolvedStoreDeviceState,
-    commit: &StoreBatchCommit,
-    registrations: &[ActivatedStoreDeviceRegistration],
-    preactivated: Option<&StoreDeviceRegistrationRef>,
-    owner_recovery: Option<(
-        super::membership::MembershipGrantId,
-        super::store_commit::OwnerRecoveryActivationId,
-    )>,
-) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
-    if commit.device_registrations().len() != registrations.len() {
-        return Err(StoreProtocolError::Malformed(
-            "verified registrations do not cover every activation".to_string(),
-        ));
-    }
-    for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
-        registration.verify_reference(activated)?;
-        if preactivated != Some(&activated.registration) {
-            state = state.activate_registration(
-                activated.registration.clone(),
-                registration_recovery_cursor(
-                    &registration.value().origin,
-                    registration.activation(),
-                )?,
-            )?;
-        }
-    }
-    if let Some((grant_id, activation)) = owner_recovery {
-        state = state.activate_owner_recovery(grant_id, activation)?;
-    }
-    Ok(state)
 }
 
 pub(crate) fn verified_merge_predecessor_state(

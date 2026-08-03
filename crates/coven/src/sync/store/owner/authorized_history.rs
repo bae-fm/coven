@@ -1954,8 +1954,7 @@ impl AuthorizedStoreHistory<'_> {
         let state_after = device_operations
             .apply_to(authorized_predecessor, &commit.device_state)
             .and_then(|state| {
-                pull::apply_verified_device_lifecycle(
-                    state,
+                state.apply_verified_lifecycle(
                     &commit,
                     &registrations,
                     recovery_author.as_ref(),

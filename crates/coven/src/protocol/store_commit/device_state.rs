@@ -1266,6 +1266,33 @@ impl ResolvedStoreDeviceState {
         Self::from_parts(self.devices.clone(), recovery)
     }
 
+    pub(crate) fn apply_verified_lifecycle(
+        mut self,
+        commit: &StoreBatchCommit,
+        registrations: &[ActivatedStoreDeviceRegistration],
+        preactivated: Option<&StoreDeviceRegistrationRef>,
+        owner_recovery: Option<(MembershipGrantId, OwnerRecoveryActivationId)>,
+    ) -> Result<Self, StoreProtocolError> {
+        if commit.device_registrations().len() != registrations.len() {
+            return Err(StoreProtocolError::Malformed(
+                "verified registrations do not cover every activation".to_string(),
+            ));
+        }
+        for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
+            registration.verify_reference(activated)?;
+            if preactivated != Some(&activated.registration) {
+                self = self.activate_registration(
+                    activated.registration.clone(),
+                    registration.recovery_cursor()?,
+                )?;
+            }
+        }
+        if let Some((grant_id, activation)) = owner_recovery {
+            self = self.activate_owner_recovery(grant_id, activation)?;
+        }
+        Ok(self)
+    }
+
     pub fn propose_exclusion(
         &self,
         reference: StoreDeviceExclusionProposalRef,

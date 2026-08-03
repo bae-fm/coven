@@ -1664,11 +1664,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         let mut changeset_max = None;
         let mut returned_changes = Vec::new();
         let mut package_reported_fk_violation = false;
-        crate::database::StoreDatabase::record_activated_store_device_registrations_on(
-            conn,
-            commit,
-            &registrations,
-        )?;
+        super::record_activated_store_device_registrations_on(conn, commit, &registrations)?;
         for bootstrap in circle_activations.bootstraps() {
             crate::database::install_circle_bootstrap_remote_objects_on(
                 conn, commit_ref, bootstrap,

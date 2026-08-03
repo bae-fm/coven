@@ -1,6 +1,6 @@
 use super::*;
 use crate::database::Database;
-use crate::protocol::store_commit::{OpenedRetainedMergeHistorySummary, OwnerRecoveryNodeRef};
+use crate::protocol::store_commit::OpenedRetainedMergeHistorySummary;
 use crate::sync::store::owner::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
@@ -1225,57 +1225,6 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             }
         }
     }
-}
-
-#[test]
-fn recovery_cursor_requires_the_exact_origin_activation_pair() {
-    let recovery_id = crate::protocol::store_commit::DeviceRecoveryId::from_hash(
-        ObjectHash::digest(b"recovery cursor id"),
-    );
-    let owner_grant = crate::protocol::causal_grants::MembershipGrantId(ObjectHash::digest(
-        b"recovery cursor owner grant",
-    ));
-    let recovery_slot = crate::storage::cloud::ObjectSlot::opaque(
-        "store-v1/test/recovery.json".to_string(),
-        "recovery-cursor-slot".to_string(),
-    )
-    .expect("construct recovery cursor slot");
-    let node = OwnerRecoveryNodeRef {
-        owner_pubkey: "recovery-owner".to_string(),
-        owner_grant: owner_grant.clone(),
-        sequence: 1,
-        node_hash: ObjectHash::digest(b"recovery cursor node"),
-        object: ExactObjectRef::new(
-            recovery_slot.clone(),
-            1,
-            ObjectHash::digest(b"recovery cursor bytes"),
-        ),
-    };
-    let origin = StoreDeviceRegistrationOrigin::Recovery {
-        recovery_id,
-        recovery_slot,
-        owner_grant: owner_grant.clone(),
-    };
-    let activation = StoreDeviceRegistrationActivation::Recovery {
-        recovery_id,
-        node: node.clone(),
-    };
-
-    assert_eq!(
-        registration_recovery_cursor(&origin, &activation).expect("derive exact recovery cursor"),
-        Some(OwnerRecoveryCursor {
-            owner_grant,
-            position: OwnerRecoveryPosition::At { node: node.clone() },
-        })
-    );
-
-    let wrong_activation = StoreDeviceRegistrationActivation::Recovery {
-        recovery_id: crate::protocol::store_commit::DeviceRecoveryId::from_hash(
-            ObjectHash::digest(b"another recovery cursor id"),
-        ),
-        node,
-    };
-    assert!(registration_recovery_cursor(&origin, &wrong_activation).is_err());
 }
 
 #[tokio::test]

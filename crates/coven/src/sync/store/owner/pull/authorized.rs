@@ -680,8 +680,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let state_after = device_operations
             .apply_to(authorized_predecessor.clone(), &commit.device_state)
             .and_then(|state| {
-                apply_verified_device_lifecycle(
-                    state,
+                state.apply_verified_lifecycle(
                     commit,
                     &candidate.registrations,
                     recovery_author.as_ref(),

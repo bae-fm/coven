@@ -22,13 +22,16 @@ use std::sync::Arc;
 mod abandonment;
 pub(crate) mod acknowledgements;
 mod blob_lifecycle;
-pub(crate) mod blob_preparation;
+mod blob_preparation;
 pub(super) mod membership_mutation;
 pub(super) mod membership_mutation_journal;
 pub(crate) mod operations;
 mod preparation;
 pub(crate) mod reclaim;
 pub(crate) mod snapshot;
+
+pub(super) use blob_preparation::close_prepared_packages;
+pub(crate) use blob_preparation::prepare_partition_blob_locator;
 
 use membership_mutation_journal::{
     decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
@@ -892,8 +895,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 }
                 };
         membership_mutation::validate_prepared_publication(&plan.publication)?;
-        let mut validated_chain =
-            membership_mutation::chain_with_exact_entry(&chain, &plan.publication.entry)?;
+        let mut validated_chain = chain.with_exact_entry(&plan.publication.entry)?;
         let author = self
             .verify_membership_publication_author(&plan.publication)
             .await?;

@@ -425,9 +425,7 @@ impl StoreDatabase {
         expected_control: crate::protocol::circle::CircleControlCoord,
     ) -> Result<crate::sync::CirclePackageAccess, DbError> {
         self.connection
-            .call(move |conn| {
-                Self::circle_publication_context_on(conn, circle_id, &expected_control)
-            })
+            .call(move |conn| circle_publication_context_on(conn, circle_id, &expected_control))
             .await
     }
 
@@ -474,57 +472,59 @@ impl StoreDatabase {
             })
             .await
     }
+}
 
-    pub(super) fn circle_publication_context_on(
-        conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::CirclePackageAccess, DbError> {
-        // An exclusion blocks publication until this device's bootstrap coverage
-        // records the exact successor commit that excluded it. The gate derives
-        // clear from that coverage; no reset flag is mutated.
-        let exclusion: Option<(String, String)> = conn
-            .query_row(
-                "SELECT close_id, activating_commit FROM circle_close_exclusions
+pub(super) fn circle_publication_context_on(
+    conn: &Connection,
+    circle_id: crate::protocol::circle::CircleId,
+    expected_control: &crate::protocol::circle::CircleControlCoord,
+) -> Result<crate::sync::CirclePackageAccess, DbError> {
+    // An exclusion blocks publication until this device's bootstrap coverage
+    // records the exact successor commit that excluded it. The gate derives
+    // clear from that coverage; no reset flag is mutated.
+    let exclusion: Option<(String, String)> = conn
+        .query_row(
+            "SELECT close_id, activating_commit FROM circle_close_exclusions
                  WHERE circle_id = ?1",
+            [circle_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    if let Some((close_id, activating_commit)) = exclusion {
+        let coverage_commit: Option<String> = conn
+            .query_row(
+                "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
                 [circle_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()
             .map_err(DbError::from)?;
-        if let Some((close_id, activating_commit)) = exclusion {
-            let coverage_commit: Option<String> = conn
-                .query_row(
-                    "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                    [circle_id.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            if coverage_commit.as_deref() != Some(activating_commit.as_str()) {
-                let close_id = serde_json::from_str(&close_id).map_err(|error| {
-                    DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
-                })?;
-                return Err(DbError::ExcludedDeviceMustReset {
-                    circle_id,
-                    close_id,
-                });
-            }
-        }
-        let state = Self::circle_current_state_on(conn, circle_id)?
-            .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
-        if state.is_deleted() {
-            return Err(DbError::Message(format!("Circle {circle_id} is deleted")));
-        }
-        let access = state
-            .package_access(expected_control)
-            .map_err(|error| DbError::Message(error.to_string()))?
-            .ok_or_else(|| {
-                DbError::Message(format!("Circle {circle_id} has no active publication key"))
+        if coverage_commit.as_deref() != Some(activating_commit.as_str()) {
+            let close_id = serde_json::from_str(&close_id).map_err(|error| {
+                DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
             })?;
-        Ok(access)
+            return Err(DbError::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
+            });
+        }
     }
+    let state = StoreDatabase::circle_current_state_on(conn, circle_id)?
+        .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
+    if state.is_deleted() {
+        return Err(DbError::Message(format!("Circle {circle_id} is deleted")));
+    }
+    let access = state
+        .package_access(expected_control)
+        .map_err(|error| DbError::Message(error.to_string()))?
+        .ok_or_else(|| {
+            DbError::Message(format!("Circle {circle_id} has no active publication key"))
+        })?;
+    Ok(access)
+}
 
+impl StoreDatabase {
     /// Record this device's own exclusion from a Circle epoch close, derived from
     /// the verified successor outcome at materialization. The row is keyed by
     /// Circle: a later close for the same Circle supersedes it. It is never

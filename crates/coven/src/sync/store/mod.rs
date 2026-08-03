@@ -106,7 +106,7 @@ pub(crate) use owner::reclaim::{
     ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
     StoreReclaimError,
 };
-pub(crate) use owner::snapshot::{verify_store_snapshot_bytes, SnapshotCut};
+pub(crate) use owner::snapshot::SnapshotCut;
 #[doc(hidden)]
 pub(crate) use owner::snapshot::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 #[cfg(test)]

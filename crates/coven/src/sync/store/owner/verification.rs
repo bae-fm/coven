@@ -1261,12 +1261,12 @@ impl<'a> StoreCommitVerifier<'a> {
                 &prefix,
                 reference.snapshot_hash,
                 move |bytes| {
-                    super::writer::snapshot::verify_store_snapshot_bytes(
+                    SnapshotMeta::parse_stream_entry_at(
+                        bytes,
                         &expected_root,
                         &expected_registration_ref,
                         &expected_registration,
                         &expected_reference,
-                        bytes,
                     )
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
                 },
@@ -1324,12 +1324,12 @@ impl<'a> StoreCommitVerifier<'a> {
                         snapshot_hash: semantic_hash,
                         object: expected_object,
                     };
-                    let meta = super::writer::snapshot::verify_store_snapshot_bytes(
+                    let meta = SnapshotMeta::parse_stream_entry_at(
+                        &bytes,
                         &expected_root,
                         &expected_registration_ref,
                         &expected_registration,
                         &reference,
-                        &bytes,
                     )
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
                     Ok((reference, meta))

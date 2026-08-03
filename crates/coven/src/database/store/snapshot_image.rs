@@ -56,6 +56,20 @@ pub enum SnapshotImageError {
     },
 }
 
+#[derive(Debug)]
+pub(crate) enum SnapshotImageOperationError<E> {
+    Operation(E),
+    Cleanup {
+        path: PathBuf,
+        cleanup: String,
+    },
+    CleanupAfterFailure {
+        path: PathBuf,
+        cleanup: String,
+        cause: E,
+    },
+}
+
 /// One uncommitted SQLite image and its sidecar files.
 ///
 /// The path remains armed until the operation commits or consumes the image.
@@ -204,33 +218,46 @@ impl SnapshotDatabaseImage {
     }
 
     pub(crate) fn finish<T>(
-        mut self,
+        self,
         outcome: Result<T, SnapshotImageError>,
     ) -> Result<T, SnapshotImageError> {
-        let cleanup = self.remove_files();
-        self.armed = false;
-        match (outcome, cleanup) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(cause), Ok(())) => Err(cause),
-            (Ok(_), Err(cleanup)) => Err(SnapshotImageError::Cleanup {
-                path: self.path.clone(),
-                cleanup: cleanup.to_string(),
-            }),
-            (Err(cause), Err(cleanup)) => Err(SnapshotImageError::CleanupAfterFailure {
-                path: self.path.clone(),
-                cleanup: cleanup.to_string(),
+        match self.finish_operation(outcome) {
+            Ok(value) => Ok(value),
+            Err(SnapshotImageOperationError::Operation(cause)) => Err(cause),
+            Err(SnapshotImageOperationError::Cleanup { path, cleanup }) => {
+                Err(SnapshotImageError::Cleanup { path, cleanup })
+            }
+            Err(SnapshotImageOperationError::CleanupAfterFailure {
+                path,
+                cleanup,
+                cause,
+            }) => Err(SnapshotImageError::CleanupAfterFailure {
+                path,
+                cleanup,
                 cause: Box::new(cause),
             }),
         }
     }
 
-    pub(crate) fn discard(mut self) -> Result<(), SnapshotImageError> {
+    pub(crate) fn finish_operation<T, E>(
+        mut self,
+        outcome: Result<T, E>,
+    ) -> Result<T, SnapshotImageOperationError<E>> {
         let cleanup = self.remove_files();
         self.armed = false;
-        cleanup.map_err(|cleanup| SnapshotImageError::Cleanup {
-            path: self.path.clone(),
-            cleanup: cleanup.to_string(),
-        })
+        match (outcome, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(cause), Ok(())) => Err(SnapshotImageOperationError::Operation(cause)),
+            (Ok(_), Err(cleanup)) => Err(SnapshotImageOperationError::Cleanup {
+                path: self.path.clone(),
+                cleanup: cleanup.to_string(),
+            }),
+            (Err(cause), Err(cleanup)) => Err(SnapshotImageOperationError::CleanupAfterFailure {
+                path: self.path.clone(),
+                cleanup: cleanup.to_string(),
+                cause,
+            }),
+        }
     }
 
     pub(crate) fn commit(mut self) -> PathBuf {

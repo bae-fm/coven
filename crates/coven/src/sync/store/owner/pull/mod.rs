@@ -12,14 +12,12 @@ use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
-    OwnerRecoveryCursor, OwnerRecoveryPosition, ResolvedStoreDeviceState,
-    RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
+    StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
-use crate::protocol::{circle, membership, remote_object, store_commit};
+use crate::protocol::{circle, remote_object, store_commit};
 use crate::storage::StoreObjectError;
 use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
 use crate::sync::store::circle_controls::activation::{

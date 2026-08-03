@@ -1,4 +1,4 @@
-use super::blob_preparation::close_prepared_packages;
+use super::close_prepared_packages;
 use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use crate::protocol::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,

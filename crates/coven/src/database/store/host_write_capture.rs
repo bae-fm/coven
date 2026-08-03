@@ -65,7 +65,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
     ) -> Result<crate::sync::CirclePackageAccess, DbError> {
-        StoreDatabase::circle_publication_context_on(self.transaction, circle_id, expected_control)
+        super::circle_publication_context_on(self.transaction, circle_id, expected_control)
     }
 
     pub(crate) fn circle_blob_opening_key(

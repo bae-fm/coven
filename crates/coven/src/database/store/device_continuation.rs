@@ -150,12 +150,12 @@ impl StoreDatabase {
         match (&continuation.latest_snapshot, &latest_snapshot) {
             (None, None) => {}
             (Some(expected), Some((reference, meta))) if expected == reference => {
-                let verified = crate::sync::verify_store_snapshot_bytes(
+                let verified = SnapshotMeta::parse_stream_entry_at(
+                    &meta.to_bytes(),
                     &root,
                     &continuation.registration,
                     &registration,
                     reference,
-                    &meta.to_bytes(),
                 )
                 .map_err(|error| DbError::Message(error.to_string()))?;
                 if verified != *meta {

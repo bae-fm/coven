@@ -15,27 +15,6 @@ use super::{
     RevokeMembershipPublication, RevokeMutationPlan,
 };
 
-pub(super) fn chain_with_exact_entry(
-    chain: &crate::protocol::membership::MembershipChain,
-    entry: &crate::protocol::membership::MembershipEntry,
-) -> Result<crate::protocol::membership::MembershipChain, InviteError> {
-    let coord = entry.coord();
-    if let Some((_, stored)) = chain
-        .entries_with_coords()
-        .find(|(stored_coord, _)| **stored_coord == coord)
-    {
-        if stored != entry {
-            return Err(InviteError::InvalidDurableMutation(format!(
-                "committed entry at {coord:?} differs from the durable plan"
-            )));
-        }
-        return Ok(chain.clone());
-    }
-    let mut validated = chain.clone();
-    validated.add_entry_at(coord, entry.clone())?;
-    Ok(validated)
-}
-
 pub(super) fn validate_revoke_rotation_adoption(
     row: crate::database::DurableMembershipMutation,
     adopted_generation: u64,

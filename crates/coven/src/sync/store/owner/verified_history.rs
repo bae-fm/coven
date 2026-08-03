@@ -1172,8 +1172,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         device_operations
             .apply_to(authorized_predecessor, &commit.device_state)
             .and_then(|state| {
-                apply_verified_device_lifecycle(
-                    state,
+                state.apply_verified_lifecycle(
                     commit,
                     registrations,
                     recovery_author.as_ref(),
@@ -4663,14 +4662,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             let state = operations
                 .apply_to(authorized_predecessor, &commit.device_state)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
-            let state = apply_verified_device_lifecycle(
-                state,
-                &commit,
-                &registrations,
-                recovery_author.as_ref(),
-                owner_recovery,
-            )
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let state = state
+                .apply_verified_lifecycle(
+                    &commit,
+                    &registrations,
+                    recovery_author.as_ref(),
+                    owner_recovery,
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?;
             let predecessor_histories = commit_predecessor_references(&commit)
                 .iter()
                 .map(|predecessor| {

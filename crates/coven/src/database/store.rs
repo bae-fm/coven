@@ -8,6 +8,7 @@ mod circle_acknowledgements;
 mod circle_controls;
 mod circle_operation_discard;
 mod circle_operations;
+use circle_operations::circle_publication_context_on;
 mod circle_snapshot_publication;
 mod device_continuation;
 mod device_exclusion;
@@ -22,6 +23,7 @@ mod local_blob_cleanup;
 mod materialization;
 pub(super) mod materialization_models;
 mod materialized_commit_index;
+use materialized_commit_index::record_activated_store_device_registrations_on;
 mod membership_mutations;
 mod merge_materialization_transaction;
 mod owner_promotion;
@@ -103,7 +105,7 @@ pub(crate) use retained_replay::{
 };
 pub(crate) use snapshot_image::{
     verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience, SnapshotDatabaseImage,
-    SnapshotImageError,
+    SnapshotImageError, SnapshotImageOperationError,
 };
 use store_device_state::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
