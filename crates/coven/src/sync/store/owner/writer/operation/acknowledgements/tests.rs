@@ -57,68 +57,71 @@ struct LosingAckFixture {
     losing: crate::sync::store::operations::PreparedStoreOperationCommit,
 }
 
-async fn losing_ack_fixture(path: &Path) -> LosingAckFixture {
-    let home = InMemoryCloudHome::new();
-    let signer = UserKeypair::generate();
-    let storage = storage(&home, &signer);
-    let db = open(path, "ack-loser-device");
-    let device = Box::pin(initialize(&db, &storage, &signer)).await;
-    Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
-        .await
-        .expect("stage exact acknowledgement");
-    let outbound = store_database(&db)
-        .oldest_outbound_store_ack()
-        .await
-        .unwrap()
-        .expect("staged acknowledgement exists");
-    let losing = Box::pin(device.prepare_acknowledgement_candidate_for_test(&outbound)).await;
-    let mut writer = device
-        .authorize_writer()
-        .await
-        .expect("authorize competing acknowledgement writer");
-    let competing_plan = writer
-        .prepare_plan()
-        .await
-        .expect("prepare competing Store operation");
-    let grant_id = crate::protocol::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
-    let grant_prefix =
-        crate::protocol::store_commit::provider_access_grant_semantic_prefix(&grant_id);
-    let grant_bytes = b"competing provider grant";
-    let grant = crate::protocol::provider::StoreMemberProviderAccessGrantRef {
-        grant_id,
-        grant_hash: crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
-        object: crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(format!("{grant_prefix}.json"))
-                .expect("valid provider grant slot"),
-            grant_bytes.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
-        ),
-    };
-    let competing = writer
-        .prepare_candidate(
-            competing_plan,
-            crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant),
-        )
-        .await
-        .expect("prepare competing candidate");
-    assert_ne!(competing.reference, losing.reference);
-    let (_, competing_head) = competing.publication_for_test();
-    storage
-        .create_protocol_object(&competing.prepared)
-        .await
-        .expect("publish competing commit");
-    storage
-        .create_protocol_object(competing_head)
-        .await
-        .expect("publish competing head");
-    LosingAckFixture {
-        home,
-        signer,
-        storage,
-        db,
-        device,
-        outbound,
-        losing,
+impl LosingAckFixture {
+    async fn create(path: &Path) -> Self {
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let db = open(path, "ack-loser-device");
+        let device = Box::pin(initialize(&db, &storage, &signer)).await;
+        Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
+            .await
+            .expect("stage exact acknowledgement");
+        let outbound = store_database(&db)
+            .oldest_outbound_store_ack()
+            .await
+            .unwrap()
+            .expect("staged acknowledgement exists");
+        let losing = Box::pin(device.prepare_acknowledgement_candidate_for_test(&outbound)).await;
+        let mut writer = device
+            .authorize_writer()
+            .await
+            .expect("authorize competing acknowledgement writer");
+        let competing_plan = writer
+            .prepare_plan()
+            .await
+            .expect("prepare competing Store operation");
+        let grant_id =
+            crate::protocol::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
+        let grant_prefix =
+            crate::protocol::store_commit::provider_access_grant_semantic_prefix(&grant_id);
+        let grant_bytes = b"competing provider grant";
+        let grant = crate::protocol::provider::StoreMemberProviderAccessGrantRef {
+            grant_id,
+            grant_hash: crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
+            object: crate::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(format!("{grant_prefix}.json"))
+                    .expect("valid provider grant slot"),
+                grant_bytes.len() as u64,
+                crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
+            ),
+        };
+        let competing = writer
+            .prepare_candidate(
+                competing_plan,
+                crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant),
+            )
+            .await
+            .expect("prepare competing candidate");
+        assert_ne!(competing.reference, losing.reference);
+        let (_, competing_head) = competing.publication_for_test();
+        storage
+            .create_protocol_object(&competing.prepared)
+            .await
+            .expect("publish competing commit");
+        storage
+            .create_protocol_object(competing_head)
+            .await
+            .expect("publish competing head");
+        Self {
+            home,
+            signer,
+            storage,
+            db,
+            device,
+            outbound,
+            losing,
+        }
     }
 }
 
@@ -569,7 +572,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
         device,
         outbound,
         losing,
-    } = Box::pin(losing_ack_fixture(Path::new(":memory:"))).await;
+    } = Box::pin(LosingAckFixture::create(Path::new(":memory:"))).await;
 
     assert_eq!(
         device
@@ -631,7 +634,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
         device,
         outbound,
         losing,
-    } = Box::pin(losing_ack_fixture(&path)).await;
+    } = Box::pin(LosingAckFixture::create(&path)).await;
     home.fail_exact_delete_on_call(1);
 
     assert!(device.drain_acknowledgements_exact().await.is_err());
@@ -684,7 +687,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             device,
             outbound,
             losing,
-        } = Box::pin(losing_ack_fixture(Path::new(":memory:"))).await;
+        } = Box::pin(LosingAckFixture::create(Path::new(":memory:"))).await;
         home.fail_exact_delete_on_call(1);
         assert!(Box::pin(device.drain_acknowledgements_exact())
             .await

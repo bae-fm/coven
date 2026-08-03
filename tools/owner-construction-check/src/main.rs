@@ -27,6 +27,9 @@ const CAPABILITY_TYPES: &[&str] = &[
 // operations with that capability.
 const NON_OWNER_TYPES: &[&str] = &["Config"];
 
+const RETAINED_SERVICE_ROOT_TYPES: &[&str] =
+    &["CovenHandle", "CovenReadHandle", "Database", "DatabaseCore"];
+
 const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
         "crates/coven/src/database/database_open.rs",
@@ -69,6 +72,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven/src/joining/facade_tests.rs",
         "FacadeFixture",
         "build",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/writer/operation/acknowledgements/tests.rs",
+        "LosingAckFixture",
+        "create",
     ),
     (
         "crates/coven/src/sync/store/owner/writer/operation/reclaim/tests.rs",
@@ -265,27 +273,45 @@ struct DatabaseBoundaryViolation {
     kind: String,
 }
 
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct ServiceReturnViolation {
+    path: String,
+    line: usize,
+    owner: String,
+    method: String,
+    returned: String,
+}
+
 struct CheckResult {
     owner_construction: Vec<Violation>,
     database_boundary: Vec<DatabaseBoundaryViolation>,
+    service_returns: Vec<ServiceReturnViolation>,
 }
 
 fn main() {
-    let mut arguments = std::env::args_os().skip(1).peekable();
-    let database_boundary = arguments
-        .next_if(|argument| argument == "--database-boundary")
-        .is_some();
-    let root = arguments
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    if arguments.next().is_some() {
-        eprintln!("usage: owner-construction-check [--database-boundary] [root]");
-        std::process::exit(2);
+    let mut database_boundary = false;
+    let mut retained_service_returns = false;
+    let mut root = None;
+    for argument in std::env::args_os().skip(1) {
+        if argument == "--database-boundary" {
+            database_boundary = true;
+        } else if argument == "--retained-service-returns" {
+            retained_service_returns = true;
+        } else if root.is_none() {
+            root = Some(PathBuf::from(argument));
+        } else {
+            eprintln!(
+                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [root]"
+            );
+            std::process::exit(2);
+        }
     }
-    match check(&root, database_boundary) {
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    match check(&root, database_boundary, retained_service_returns) {
         Ok(result)
-            if result.owner_construction.is_empty() && result.database_boundary.is_empty() => {}
+            if result.owner_construction.is_empty()
+                && result.database_boundary.is_empty()
+                && result.service_returns.is_empty() => {}
         Ok(result) => {
             for violation in &result.owner_construction {
                 eprintln!(
@@ -299,6 +325,16 @@ fn main() {
                     violation.path, violation.line, violation.kind
                 );
             }
+            for violation in &result.service_returns {
+                eprintln!(
+                    "{}:{}: {}::{} returns retained service {}",
+                    violation.path,
+                    violation.line,
+                    violation.owner,
+                    violation.method,
+                    violation.returned
+                );
+            }
             if !result.owner_construction.is_empty() {
                 eprintln!(
                     "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
@@ -307,6 +343,11 @@ fn main() {
             if !result.database_boundary.is_empty() {
                 eprintln!(
                     "database operations retain SQLite state and expose domain methods; move raw SQLite and SQL under crates/coven/src/database"
+                );
+            }
+            if !result.service_returns.is_empty() {
+                eprintln!(
+                    "composition-root services use their retained children; owners do not return those children to callers"
                 );
             }
             std::process::exit(1);
@@ -318,16 +359,32 @@ fn main() {
     }
 }
 
-fn check(root: &Path, check_database_boundary: bool) -> Result<CheckResult, String> {
+fn check(
+    root: &Path,
+    check_database_boundary: bool,
+    check_retained_service_returns: bool,
+) -> Result<CheckResult, String> {
     let files = rust_files(root)?;
     let structs = collect_structs(&files);
     let owners = infer_owners(&structs);
     let constructors = collect_constructors(&files, &owners);
     let free_constructors = collect_free_constructors(&files, &owners);
+    let declared_types = collect_declared_types(&files);
+    let service_owners = infer_owners(&declared_types);
+    let retained_services = collect_root_retained_types(
+        &declared_types,
+        &service_owners,
+        RETAINED_SERVICE_ROOT_TYPES,
+    );
     Ok(CheckResult {
         owner_construction: find_violations(&files, &owners, &constructors, &free_constructors),
         database_boundary: if check_database_boundary {
             find_database_boundary_violations(&files)
+        } else {
+            Vec::new()
+        },
+        service_returns: if check_retained_service_returns {
+            find_service_return_violations(&files, &retained_services)
         } else {
             Vec::new()
         },
@@ -641,6 +698,193 @@ fn collect_structs_from_item(item: &syn::Item, structs: &mut BTreeMap<String, St
             }
         }
         _ => {}
+    }
+}
+
+fn collect_declared_types(files: &[RustFile]) -> BTreeMap<String, StructInfo> {
+    let mut types = BTreeMap::new();
+    for file in files {
+        for item in &file.syntax.items {
+            collect_declared_types_from_item(item, &mut types);
+        }
+    }
+    types
+}
+
+fn collect_declared_types_from_item(item: &syn::Item, types: &mut BTreeMap<String, StructInfo>) {
+    let (name, field_types) = match item {
+        syn::Item::Struct(item) => {
+            let mut names = TypeNames::default();
+            for field in &item.fields {
+                names.visit_type(&field.ty);
+            }
+            (Some(item.ident.to_string()), names.names)
+        }
+        syn::Item::Enum(item) => {
+            let mut names = TypeNames::default();
+            for variant in &item.variants {
+                for field in &variant.fields {
+                    names.visit_type(&field.ty);
+                }
+            }
+            (Some(item.ident.to_string()), names.names)
+        }
+        syn::Item::Type(item) => {
+            let mut names = TypeNames::default();
+            names.visit_type(&item.ty);
+            (Some(item.ident.to_string()), names.names)
+        }
+        syn::Item::Trait(item) => (Some(item.ident.to_string()), BTreeSet::new()),
+        syn::Item::Union(item) => {
+            let mut names = TypeNames::default();
+            for field in &item.fields.named {
+                names.visit_type(&field.ty);
+            }
+            (Some(item.ident.to_string()), names.names)
+        }
+        syn::Item::Mod(item) => {
+            if let Some((_, items)) = &item.content {
+                for item in items {
+                    collect_declared_types_from_item(item, types);
+                }
+            }
+            return;
+        }
+        _ => return,
+    };
+    let Some(name) = name else {
+        return;
+    };
+    types
+        .entry(name)
+        .or_insert_with(|| StructInfo {
+            field_types: BTreeSet::new(),
+        })
+        .field_types
+        .extend(field_types);
+}
+
+fn collect_root_retained_types(
+    types: &BTreeMap<String, StructInfo>,
+    owners: &BTreeSet<String>,
+    roots: &[&str],
+) -> BTreeSet<String> {
+    let mut retained = roots
+        .iter()
+        .filter(|root| types.contains_key(**root))
+        .map(|root| (*root).to_string())
+        .collect::<BTreeSet<_>>();
+    let mut pending = retained.iter().cloned().collect::<Vec<_>>();
+    while let Some(owner) = pending.pop() {
+        let Some(info) = types.get(&owner) else {
+            continue;
+        };
+        for child in &info.field_types {
+            let is_retained_capability =
+                owners.contains(child) || CAPABILITY_TYPES.contains(&child.as_str());
+            if types.contains_key(child) && is_retained_capability && retained.insert(child.clone())
+            {
+                pending.push(child.clone());
+            }
+        }
+    }
+    retained
+}
+
+fn find_service_return_violations(
+    files: &[RustFile],
+    retained_services: &BTreeSet<String>,
+) -> Vec<ServiceReturnViolation> {
+    let mut violations = BTreeSet::new();
+    for file in files {
+        find_service_returns_in_items(
+            &file.relative_path,
+            &file.syntax.items,
+            retained_services,
+            &mut violations,
+        );
+    }
+    violations.into_iter().collect()
+}
+
+fn find_service_returns_in_items(
+    path: &str,
+    items: &[syn::Item],
+    retained_services: &BTreeSet<String>,
+    violations: &mut BTreeSet<ServiceReturnViolation>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(item) => {
+                let owner = type_name(&item.self_ty).unwrap_or_else(|| "<impl>".to_string());
+                for impl_item in &item.items {
+                    let syn::ImplItem::Fn(method) = impl_item else {
+                        continue;
+                    };
+                    record_service_returns(
+                        path,
+                        &owner,
+                        &method.sig.ident.to_string(),
+                        &method.sig.output,
+                        method.sig.ident.span(),
+                        retained_services,
+                        violations,
+                    );
+                }
+            }
+            syn::Item::Fn(item) => record_service_returns(
+                path,
+                "<free>",
+                &item.sig.ident.to_string(),
+                &item.sig.output,
+                item.sig.ident.span(),
+                retained_services,
+                violations,
+            ),
+            syn::Item::Mod(item) => {
+                if let Some((_, items)) = &item.content {
+                    find_service_returns_in_items(path, items, retained_services, violations);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn record_service_returns(
+    path: &str,
+    owner: &str,
+    method: &str,
+    output: &syn::ReturnType,
+    span: Span,
+    retained_services: &BTreeSet<String>,
+    violations: &mut BTreeSet<ServiceReturnViolation>,
+) {
+    let syn::ReturnType::Type(_, output) = output else {
+        return;
+    };
+    let mut names = TypeNames::default();
+    names.visit_type(output);
+    if names.names.contains("Self") {
+        names.names.insert(owner.to_string());
+    }
+    for returned in names.names.intersection(retained_services) {
+        if returned == owner
+            || COMPOSITION_ROOTS
+                .iter()
+                .any(|(root_path, root_owner, root_method)| {
+                    path == *root_path && owner == *root_owner && method == *root_method
+                })
+        {
+            continue;
+        }
+        violations.insert(ServiceReturnViolation {
+            path: path.to_string(),
+            line: span.start().line,
+            owner: owner.to_string(),
+            method: method.to_string(),
+            returned: returned.clone(),
+        });
     }
 }
 
@@ -998,6 +1242,70 @@ mod tests {
         let constructors = collect_constructors(&files, &owners);
         let free_constructors = collect_free_constructors(&files, &owners);
         assert!(find_violations(&files, &owners, &constructors, &free_constructors).is_empty());
+    }
+
+    #[test]
+    fn owner_cannot_return_a_service_retained_by_a_composition_root() {
+        let source = syn::parse_file(
+            r#"
+            struct Database;
+            struct StoreBlobAccess { database: Database }
+            struct StoreSync { database: Database }
+            struct CovenHandle { sync: StoreSync, blobs: StoreBlobAccess }
+
+            impl StoreSync {
+                fn blob_access(&self) -> Result<Option<Arc<StoreBlobAccess>>, Error> {
+                    todo!()
+                }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let declared_types = collect_declared_types(&files);
+        let owners = infer_owners(&declared_types);
+        let retained_services =
+            collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
+        let violations = find_service_return_violations(&files, &retained_services);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].owner, "StoreSync");
+        assert_eq!(violations[0].returned, "StoreBlobAccess");
+    }
+
+    #[test]
+    fn operation_scoped_values_and_a_services_own_constructor_are_returnable() {
+        let source = syn::parse_file(
+            r#"
+            struct Database;
+            struct StoreBlobAccess { database: Database }
+            struct StoreSync { database: Database }
+            struct CovenHandle { sync: StoreSync, blobs: StoreBlobAccess }
+            struct AuthorizedWrite;
+
+            impl StoreBlobAccess {
+                fn new(database: Database) -> Self { Self { database } }
+            }
+
+            impl StoreSync {
+                fn authorize(&self) -> AuthorizedWrite { AuthorizedWrite }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let declared_types = collect_declared_types(&files);
+        let owners = infer_owners(&declared_types);
+        let retained_services =
+            collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
+
+        assert!(find_service_return_violations(&files, &retained_services).is_empty());
     }
 
     #[test]

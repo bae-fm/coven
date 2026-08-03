@@ -112,17 +112,6 @@ async fn cycle_test_store(
         .expect("create exact cycle test Store")
 }
 
-/// Run one sync cycle for device "M" with no cloud home (no outbox drain).
-async fn run_cycle_m(storage: &Arc<TestStore>, db: &Database, ld: &StoreDir) {
-    storage
-        .open_into(db)
-        .await
-        .expect("open exact test Store")
-        .run_cycle(ld, None)
-        .await
-        .expect("cycle");
-}
-
 async fn run_cycle_in_task(
     storage: Arc<CycleStorageInterceptor>,
     device: TestDevice,
@@ -762,13 +751,53 @@ fn exercise_post_attempt_cancellation<'a>(
     })
 }
 
-fn exercise_missing_provider_administrator<'a>(
-    owner_db: &'a crate::database::StoreDatabase,
-    storage: &'a TestStore,
-    home: &'a crate::InMemoryCloudHome,
-    owner: &'a UserKeypair,
-    member: &'a UserKeypair,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+#[tokio::test]
+async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
+    use crate::protocol::membership::MemberRole;
+    use crate::storage::{
+        ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
+    };
+
+    let owner = UserKeypair::generate();
+    let database = open_test_db();
+    let home = crate::sync::test_helpers::test_cloud_home_with_binding(ResolvedProviderBinding {
+        store: StoreProviderBinding::Dropbox {
+            namespace_id: "revocation-namespace".to_string(),
+        },
+        device: ProviderDeviceBinding {
+            principal: ProviderPrincipalId::Dropbox {
+                account_id: "administrator-account".to_string(),
+            },
+        },
+    });
+    let storage = TestStore::create(
+        &database,
+        "cross-principal-revocation-store",
+        owner.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create cross-principal test Store");
+    let member = UserKeypair::generate();
+    storage
+        .invite_member(
+            &database,
+            &owner,
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([48; 32]),
+            "Test Store",
+        )
+        .await
+        .expect("invite exact Member identity");
+    let owner_db = crate::database::StoreDatabase::new(&database);
+    let owner_db = &owner_db;
+    let storage = &storage;
+    let home = home.as_ref();
+    let owner = &owner;
+    let member = &member;
+
     Box::pin(async move {
         use crate::storage::{ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding};
         use crate::sync::store::{JoinerJoinTerminal, ProviderAdminJoinTerminal};
@@ -948,6 +977,7 @@ fn exercise_missing_provider_administrator<'a>(
             .complete_joiner_cleanup(activation)
             .expect("complete joiner cleanup");
     })
+    .await;
 }
 
 /// A pending cloud upload does not hold back a gated-true changeset: the gate
@@ -1183,7 +1213,11 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
         .await
         .expect("seed exact pending upload");
 
-    run_cycle_m(&storage, &db, &ld).await;
+    let cycle_device = storage.open_into(&db).await.expect("open exact test Store");
+    cycle_device
+        .run_cycle(&ld, None)
+        .await
+        .expect("run snapshot cycle");
     assert!(
         db.latest_store_snapshot_meta().await.is_some(),
         "the snapshot must publish even while an upload is pending — the gate, not a \
@@ -1228,7 +1262,11 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     // still reach the cloud through the snapshot, which reads them from the db.
     let _ = db.capture_test_changeset(&[]).await;
 
-    run_cycle_m(&storage, &db, &ld).await;
+    let cycle_device = storage.open_into(&db).await.expect("open exact test Store");
+    cycle_device
+        .run_cycle(&ld, None)
+        .await
+        .expect("run initial snapshot cycle");
 
     let stored = db
         .stored_blob_for_row("note_photos", "cover1")
@@ -3759,7 +3797,11 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         .expect("push-timestamp write is pending")
         .write_id;
 
-    run_cycle_m(&storage, &db, &ld).await;
+    let cycle_device = storage.open_into(&db).await.expect("open exact test Store");
+    cycle_device
+        .run_cycle(&ld, None)
+        .await
+        .expect("run acknowledgement timestamp cycle");
     let published = match crate::database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
@@ -3790,7 +3832,11 @@ async fn snapshot_cycle_writes_rfc3339_metadata_timestamp() {
         .await
         .expect("seed local_seq");
 
-    run_cycle_m(&storage, &db, &ld).await;
+    let cycle_device = storage.open_into(&db).await.expect("open exact test Store");
+    cycle_device
+        .run_cycle(&ld, None)
+        .await
+        .expect("run snapshot timestamp cycle");
     let snapshot = db
         .latest_store_snapshot_meta()
         .await
@@ -3904,7 +3950,11 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .expect("invite unregistered member to hold back package reclamation");
 
         let (_temp, store_dir) = temp_store_dir();
-        run_cycle_m(&storage, &db, &store_dir).await;
+        let cycle_device = storage.open_into(&db).await.expect("open exact test Store");
+        cycle_device
+            .run_cycle(&store_dir, None)
+            .await
+            .expect("run snapshot cadence cycle");
 
         assert_eq!(
             store_database(&db)
@@ -4491,7 +4541,14 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
                 .expect("second owner Store commit is materialized")
                 .coord
                 .sequence();
-            run_cycle_m(&storage, &owner_db, &ld).await;
+            let cycle_device = storage
+                .open_into(&owner_db)
+                .await
+                .expect("open exact test Store");
+            cycle_device
+                .run_cycle(&ld, None)
+                .await
+                .expect("run package-retention cycle");
 
             assert!(
                 storage
@@ -5462,57 +5519,6 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
 }
 
 #[tokio::test]
-async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
-    use crate::protocol::membership::MemberRole;
-    use crate::storage::{
-        ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
-    };
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let home = crate::sync::test_helpers::test_cloud_home_with_binding(ResolvedProviderBinding {
-        store: StoreProviderBinding::Dropbox {
-            namespace_id: "revocation-namespace".to_string(),
-        },
-        device: ProviderDeviceBinding {
-            principal: ProviderPrincipalId::Dropbox {
-                account_id: "administrator-account".to_string(),
-            },
-        },
-    });
-    let storage = TestStore::create(
-        &owner_db,
-        "cross-principal-revocation-store",
-        owner.clone(),
-        home.clone(),
-    )
-    .await
-    .expect("create cross-principal test Store");
-    let member = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([48; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
-
-    exercise_missing_provider_administrator(
-        &crate::database::StoreDatabase::new(&owner_db),
-        &storage,
-        home.as_ref(),
-        &owner,
-        &member,
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn cancellation_removes_an_inflight_registration_on_merge() {
     use crate::protocol::membership::MemberRole;
 
@@ -5772,7 +5778,11 @@ async fn owner_device_creates_a_snapshot() {
     )
     .await;
 
-    run_cycle_m(&storage, &db, &ld).await;
+    let cycle_device = storage.open_into(&db).await.expect("open exact test Store");
+    cycle_device
+        .run_cycle(&ld, None)
+        .await
+        .expect("run owner snapshot cycle");
 
     assert!(
         db.latest_store_snapshot_meta().await.is_some(),
