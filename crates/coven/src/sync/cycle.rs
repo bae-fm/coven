@@ -594,6 +594,8 @@ pub enum InitSyncError {
     MembershipAnchor(String),
     #[error("restoring the persisted pending rotation failed: {0}")]
     PendingRotationRestore(String),
+    #[error("prepared sync identity differs from its storage identity")]
+    StorageIdentityMismatch,
 }
 
 /// Establish the storage representation and signed owner anchor over an
@@ -612,6 +614,7 @@ pub(crate) struct PreparedSyncComponents {
     database: crate::database::StoreDatabase,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: std::sync::Arc<CloudSyncStorage>,
+    identity: crate::keys::UserKeypair,
     initialization: StoreInitialization,
     hlc: std::sync::Arc<Hlc>,
     store_id: String,
@@ -625,10 +628,14 @@ impl PreparedSyncComponents {
         database: crate::database::StoreDatabase,
         local_blob_access: super::store::blob::LocalStoreBlobAccess,
         storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
+        identity: crate::keys::UserKeypair,
         initialization: StoreInitialization,
         routing_encryption: Option<crate::encryption::EncryptionService>,
     ) -> Result<Self, InitSyncError> {
         let storage = storage.into();
+        if !storage.uses_identity(&identity) {
+            return Err(InitSyncError::StorageIdentityMismatch);
+        }
         // Integration guard. The host declared its synced tables on the builder; an
         // empty set means a synced store would attach nothing, every changeset would
         // come out empty, and sync would silently become snapshot-only. Refuse loudly
@@ -667,6 +674,7 @@ impl PreparedSyncComponents {
             database,
             local_blob_access,
             storage,
+            identity,
             initialization,
             hlc,
             store_id,
@@ -678,14 +686,13 @@ impl PreparedSyncComponents {
 
     pub(crate) async fn initialize(self) -> Result<SyncComponents, InitSyncError> {
         let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
-        let user_keypair = self.storage.user_keypair().clone();
         let initialized = match self.initialization {
             StoreInitialization::CreateStore => {
                 Store::create(
                     self.database.clone(),
                     store_storage.clone(),
                     &self.hlc.now().to_string(),
-                    &user_keypair,
+                    &self.identity,
                 )
                 .await
             }
@@ -696,7 +703,7 @@ impl PreparedSyncComponents {
                     self.database.clone(),
                     store_storage.clone(),
                     &expected_store_root,
-                    &user_keypair,
+                    &self.identity,
                 )
                 .await
             }

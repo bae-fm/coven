@@ -665,6 +665,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             store_dir.clone(),
         ),
         writer,
+        signer.clone(),
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
         },
@@ -1275,6 +1276,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             store_dir.clone(),
         ),
         owner_storage,
+        signer.clone(),
         crate::sync::cycle::StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
         },
@@ -2286,6 +2288,7 @@ impl ClosingFounderCircle {
                 store_dir.clone(),
             ),
             owner_storage,
+            signer.clone(),
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: store.root.clone(),
             },
@@ -3353,6 +3356,7 @@ impl SilentParticipantCircle {
                 store_dir.clone(),
             ),
             owner_storage,
+            signer.clone(),
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: store.root.clone(),
             },

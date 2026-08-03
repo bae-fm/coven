@@ -462,6 +462,7 @@ impl EffectiveAccessFixture {
                 owner_store_dir.clone(),
             ),
             owner_storage,
+            owner.clone(),
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: store.root.clone(),
             },

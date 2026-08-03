@@ -84,6 +84,7 @@ trait PullTestDatabaseOps {
         &self,
         source: &crate::database::Database,
         storage: &Arc<CloudSyncStorage>,
+        identity: &UserKeypair,
         store_dir: &crate::store_dir::StoreDir,
     ) -> (
         std::collections::BTreeMap<String, u64>,
@@ -172,6 +173,7 @@ impl PullTestDatabaseOps for crate::database::Database {
         &self,
         source: &crate::database::Database,
         storage: &Arc<CloudSyncStorage>,
+        identity: &UserKeypair,
         store_dir: &crate::store_dir::StoreDir,
     ) -> (
         std::collections::BTreeMap<String, u64>,
@@ -186,7 +188,7 @@ impl PullTestDatabaseOps for crate::database::Database {
             crate::database::StoreDatabase::new(self),
             storage.clone(),
             &root,
-            storage.user_keypair(),
+            identity,
         )
         .await
         .expect("open exact Store on destination");
@@ -4548,7 +4550,9 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // pulls and downloads the cover from the readable key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld) = temp_store_dir();
-    let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld).await;
+    let (_updated, result) = db2
+        .pull_exact_store_into(&db1, &storage, &keypair, &ld)
+        .await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -4668,7 +4672,8 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
         // replaced blob when the new one arrives.
         let db2 = open_test_db_with_blob(readable_photo_decl());
         let (_t2, ld2) = temp_store_dir();
-        db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        db2.pull_exact_store_into(&db1, &storage, &keypair, &ld2)
+            .await;
 
         // Add another blob whose readable path names it.
         ld1.store_local("p2cover", new_bytes).await;
@@ -4700,7 +4705,9 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
 
         // Device B pulls the replacement. Its download verifies the object against the new
         // row's content hash, so an object holding the replaced bytes would fail the pull.
-        let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        let (_updated, result) = db2
+            .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
+            .await;
 
         assert!(
             !result.asset_downloads_failed,
@@ -4810,7 +4817,9 @@ async fn plain_scheme_two_replacements_write_two_objects() {
         // A peer pulls every changeset and serves the latest object.
         let db_c = open_test_db_with_blob(replaceable_photo_decl());
         let (_tc, ld_c) = temp_store_dir();
-        let (_updated, result) = db_c.pull_exact_store_into(&db_a, &storage, &ld_c).await;
+        let (_updated, result) = db_c
+            .pull_exact_store_into(&db_a, &storage, &keypair, &ld_c)
+            .await;
         assert!(
             !result.asset_downloads_failed,
             "every row the third device applies names an object that holds its bytes",
@@ -4905,7 +4914,9 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
     // row names the replaced blob. Its bytes are still at their own key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_positions, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+    let (_positions, result) = db2
+        .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
+        .await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -4988,7 +4999,9 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     // A peer pulls it off that readable key and verifies it against the row's hash.
     let db2 = open_test_db_with_blob(write_once_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_positions, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+    let (_positions, result) = db2
+        .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
+        .await;
     assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(exact_cache_path(
@@ -5141,7 +5154,8 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         // replaced blob when the new one arrives.
         let db2 = open_test_db_with_blob(replaceable_photo_decl());
         let (_t2, ld2) = temp_store_dir();
-        db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        db2.pull_exact_store_into(&db1, &storage, &keypair, &ld2)
+            .await;
         let old_cache_path =
             exact_cache_path(&ld2, &db2.exact_row_blob_ref("note_photos", "ph1").await);
 
@@ -5178,7 +5192,9 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 
         // Device B pulls the repointing. Its download verifies the object against the new
         // row's content hash, so serving it the replaced bytes would fail the pull outright.
-        let (_updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld2).await;
+        let (_updated, result) = db2
+            .pull_exact_store_into(&db1, &storage, &keypair, &ld2)
+            .await;
 
         assert!(
             !result.asset_downloads_failed,
@@ -5358,7 +5374,9 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // Device B: a fresh DB and its own store dir, same cloud + key + declaration.
     let db2 = open_test_db_with_blob(decl());
     let (_t, ld) = temp_store_dir();
-    let (updated, result) = db2.pull_exact_store_into(&db1, &storage, &ld).await;
+    let (updated, result) = db2
+        .pull_exact_store_into(&db1, &storage, &keypair, &ld)
+        .await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);

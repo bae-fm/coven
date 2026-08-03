@@ -259,6 +259,7 @@ impl TestOwnerGraph {
     pub(crate) async fn prepare_sync(
         &self,
         storage: impl Into<std::sync::Arc<crate::storage::CloudSyncStorage>>,
+        identity: crate::keys::UserKeypair,
     ) -> Result<crate::sync::cycle::SyncComponents, String> {
         let expected_store_root = self
             .database
@@ -270,6 +271,7 @@ impl TestOwnerGraph {
             self.database.clone(),
             self.local_access.clone(),
             storage,
+            identity,
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root,
             },

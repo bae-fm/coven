@@ -319,6 +319,7 @@ impl StoreSync {
             self.database.clone(),
             self.local_blob_access.clone(),
             storage,
+            self.security.require_identity()?,
             initialization,
             routing_encryption,
         )

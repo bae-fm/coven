@@ -1333,7 +1333,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             crate::database::StoreDatabase::new(&db_b),
             lib_b.clone(),
         )
-        .prepare_sync(joiner_storage)
+        .prepare_sync(joiner_storage, joiner_keypair)
         .await
         .expect("prepare B sync cycle");
         components
@@ -1567,7 +1567,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
                 crate::database::StoreDatabase::new(&db_owner),
                 owner_dir.clone(),
             )
-            .prepare_sync(cycle_storage),
+            .prepare_sync(cycle_storage, owner_keypair.clone()),
         )
         .await
         .expect("prepare owner row and blob publication");
@@ -1755,7 +1755,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             cipher,
             blob_paths,
             store_id.to_string(),
-            joiner_keypair,
+            joiner_keypair.clone(),
         )
         .expect("build restored cloud storage");
         let components = Box::pin(
@@ -1763,7 +1763,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
                 crate::database::StoreDatabase::new(&restored),
                 lib_b.clone(),
             )
-            .prepare_sync(restored_storage),
+            .prepare_sync(restored_storage, joiner_keypair),
         )
         .await
         .expect("prepare restored row publication");

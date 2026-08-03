@@ -565,6 +565,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
             store_dir.clone(),
         ),
         owner_storage,
+        founder.clone(),
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
         },

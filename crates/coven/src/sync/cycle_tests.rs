@@ -2219,6 +2219,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
             store_dir,
         ),
         storage,
+        owner,
         cycle::StoreInitialization::CreateStore,
         None,
     )
@@ -2273,7 +2274,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "test-lib",
-        owner,
+        owner.clone(),
     );
     let (_store_temp, store_dir) = temp_store_dir();
 
@@ -2284,6 +2285,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
             store_dir,
         ),
         storage,
+        owner,
         cycle::StoreInitialization::OpenStore {
             expected_store_root: root,
         },
@@ -2346,7 +2348,7 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "test-lib",
-        owner,
+        owner.clone(),
     );
     let db = open_test_db();
     let (_store_temp, store_dir) = temp_store_dir();
@@ -2357,6 +2359,7 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
             store_dir,
         ),
         storage,
+        owner,
         cycle::StoreInitialization::OpenStore {
             expected_store_root: root,
         },
@@ -2410,7 +2413,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "test-lib",
-        owner,
+        owner.clone(),
     );
     let (_store_temp, store_dir) = temp_store_dir();
     cycle::PreparedSyncComponents::prepare(
@@ -2420,6 +2423,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
             store_dir,
         ),
         storage,
+        owner,
         cycle::StoreInitialization::OpenStore {
             expected_store_root: root,
         },
@@ -2488,6 +2492,7 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
                 store_dir,
             ),
             victim_storage,
+            victim,
             cycle::StoreInitialization::OpenStore {
                 expected_store_root: root,
             },
@@ -2518,6 +2523,39 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     assert_eq!(watermark_count, 0);
     let cloud_after = cloud_objects(&home);
     assert_eq!(cloud_after, cloud_before, "cloud objects are unchanged");
+}
+
+#[tokio::test]
+async fn initialization_rejects_an_identity_other_than_the_storage_identity() {
+    let owner = UserKeypair::generate();
+    let other = UserKeypair::generate();
+    let db = open_test_db();
+    let storage = cycle_cloud_storage(
+        Arc::new(InMemoryCloudHome::new()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        owner,
+    );
+    let (_store_temp, store_dir) = temp_store_dir();
+
+    let result = cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&db),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&db),
+            store_dir,
+        ),
+        storage,
+        other,
+        cycle::StoreInitialization::CreateStore,
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(cycle::InitSyncError::StorageIdentityMismatch)
+    ));
 }
 
 #[tokio::test]
@@ -2556,6 +2594,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
                     store_dir,
                 ),
                 storage,
+                owner,
                 cycle::StoreInitialization::CreateStore,
                 None,
             )

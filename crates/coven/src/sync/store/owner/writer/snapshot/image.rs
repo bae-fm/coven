@@ -1870,14 +1870,14 @@ mod tests {
                 ),
                 crate::storage::BlobPathScheme::Hashed,
                 "snapshot-blob-ownership-graph",
-                signer,
+                signer.clone(),
             )
             .expect("construct blob writer");
             let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
                 StoreDatabase::new(&source),
                 source_dir.clone(),
             )
-            .prepare_sync(writer)
+            .prepare_sync(writer, signer)
             .await
             .expect("prepare source blob publication");
             components

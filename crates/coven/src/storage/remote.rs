@@ -1126,8 +1126,8 @@ impl CloudSyncStorage {
         Ok(())
     }
 
-    pub(crate) fn user_keypair(&self) -> &UserKeypair {
-        &self.keypair
+    pub(crate) fn uses_identity(&self, identity: &UserKeypair) -> bool {
+        self.keypair.public_key() == identity.public_key()
     }
 
     #[cfg(test)]
@@ -3764,6 +3764,7 @@ mod tests {
                 store_dir.clone(),
             ),
             storage,
+            signer.clone(),
             crate::sync::cycle::StoreInitialization::CreateStore,
             None,
         )
@@ -3789,7 +3790,7 @@ mod tests {
             CloudCipher::Encrypted(encryption),
             BlobPathScheme::Hashed,
             "pending-rotation-reopen",
-            signer,
+            signer.clone(),
         )
         .expect("reconstruct pending-rotation storage");
         let result = crate::sync::cycle::PreparedSyncComponents::prepare(
@@ -3799,6 +3800,7 @@ mod tests {
                 store_dir,
             ),
             storage,
+            signer,
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: root,
             },

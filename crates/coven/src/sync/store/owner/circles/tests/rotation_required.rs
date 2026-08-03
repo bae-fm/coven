@@ -172,6 +172,7 @@ impl RotationFixture {
                 store_dir.clone(),
             ),
             owner_storage,
+            signer.clone(),
             StoreInitialization::OpenStore {
                 expected_store_root: store.root.clone(),
             },
@@ -1300,6 +1301,7 @@ impl ActiveMemberCircleSnapshot {
                 store_dir.clone(),
             ),
             owner_storage,
+            signer.clone(),
             StoreInitialization::OpenStore {
                 expected_store_root: store.root.clone(),
             },
@@ -1653,6 +1655,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             store_dir.clone(),
         ),
         owner_storage,
+        signer.clone(),
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
         },
@@ -1941,6 +1944,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
             store_dir.clone(),
         ),
         owner_storage,
+        signer.clone(),
         StoreInitialization::OpenStore {
             expected_store_root: store.root.clone(),
         },

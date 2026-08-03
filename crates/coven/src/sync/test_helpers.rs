@@ -391,6 +391,7 @@ pub(crate) struct TestDevice {
     pub store: std::sync::Arc<crate::sync::store::Store>,
     pub device_id: String,
     storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+    identity: UserKeypair,
 }
 
 impl std::ops::Deref for TestDevice {
@@ -436,6 +437,7 @@ impl TestDevice {
             store: std::sync::Arc::new(initialized.store),
             device_id: initialized.device_id,
             storage,
+            identity,
         })
     }
 
@@ -454,6 +456,7 @@ impl TestDevice {
             store: std::sync::Arc::new(initialized.store),
             device_id: initialized.device_id,
             storage,
+            identity: identity.clone(),
         })
     }
 
@@ -471,7 +474,8 @@ impl TestDevice {
         identity: UserKeypair,
     ) -> Result<Self, crate::sync::store::StoreError> {
         let store =
-            crate::sync::store::Store::load(database.clone(), storage.clone(), identity).await?;
+            crate::sync::store::Store::load(database.clone(), storage.clone(), identity.clone())
+                .await?;
         let device_id = database
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?
@@ -483,6 +487,7 @@ impl TestDevice {
             store: std::sync::Arc::new(store),
             device_id,
             storage,
+            identity,
         })
     }
 
@@ -631,7 +636,7 @@ impl TestDevice {
     ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure> {
         let components =
             crate::sync::test_owner_graph::TestOwnerGraph::new(self.db.clone(), store_dir.clone())
-                .prepare_sync(self.storage.clone())
+                .prepare_sync(self.storage.clone(), self.identity.clone())
                 .await
                 .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
         components
