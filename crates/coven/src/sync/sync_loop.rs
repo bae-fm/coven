@@ -1,13 +1,9 @@
 //! Sync loop handle: runs the background sync loop on a dedicated OS thread.
 //!
 //! Owns the sync infrastructure (storage client, HLC, the owned [`Database`]
-//! handle, etc.) and runs sync cycles on a timer or manual trigger. The
-//! database access goes through the [`Database`] handle, so the loop holds
-//! nothing `!Send` — but it still runs on its own OS thread (a current-thread
-//! tokio runtime that `block_on`s the loop) for the *stack*: aws-sdk-s3's
-//! endpoint/auth resolution recurses deeply enough to overflow the default
-//! secondary-thread stack in debug builds. The thread is given a main-thread-
-//! sized stack so S3 sync doesn't `SIGBUS` in `resolve_endpoint`.
+//! handle, etc.) and runs sync cycles on a timer or manual trigger. Its
+//! dedicated OS thread owns the current-thread Tokio runtime, so starting the
+//! loop does not depend on a host-provided async runtime.
 //! Publishes the current [`SyncLoopStatus`] through a watch channel the
 //! [`CovenHandle`](crate::CovenHandle) owns — so a subscription survives a loop
 //! restart, and the loop only ever sends.
@@ -206,14 +202,9 @@ impl SyncLoopHandle {
     /// Start the background sync loop on a dedicated OS thread. No-op if already
     /// running.
     ///
-    /// The thread runs a current-thread tokio runtime that `block_on`s the loop.
-    /// A dedicated thread (rather than `tokio::spawn` on the host runtime) is for
-    /// the *stack*: aws-sdk-s3's endpoint/auth resolution recurses deeply enough
-    /// to overflow the default secondary-thread stack in debug builds (SIGBUS in
-    /// `resolve_endpoint`), so the thread is given a main-thread-sized stack.
-    /// Everything the loop holds is `Send`; database access goes through async
-    /// calls on the [`Database`] handle, so nothing here is bound to this thread
-    /// except by choice of stack size.
+    /// The thread runs a current-thread Tokio runtime that `block_on`s the loop.
+    /// S3 work runs on the runtime retained by the S3 provider, so this thread
+    /// needs no provider-specific stack configuration.
     pub(crate) fn start(&self) -> Result<(), SyncLoopError> {
         if self.running.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -247,11 +238,6 @@ impl SyncLoopHandle {
 
         let handle = std::thread::Builder::new()
             .name("coven-sync-loop".to_string())
-            // aws-sdk-s3's endpoint/auth resolution recurses deeply enough to blow
-            // the ~2 MiB default secondary-thread stack in debug builds (SIGBUS in
-            // resolve_endpoint). Give this thread a main-thread-sized stack so S3
-            // sync doesn't overflow it.
-            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let _running_guard = RunningGuard {
                     running: Arc::clone(&running),

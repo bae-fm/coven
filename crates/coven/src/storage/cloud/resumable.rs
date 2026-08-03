@@ -14,18 +14,6 @@ use reqwest::StatusCode;
 use super::http::range_content_header;
 use super::{combine_cleanup_failure, CloudHomeError};
 
-fn cancellation_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("coven-resumable-cancel")
-            .enable_all()
-            .build()
-            .expect("build resumable cancellation runtime")
-    })
-}
-
 /// Maps a non-success upload response `(status, body)` to a `CloudHomeError` —
 /// the per-provider quota/error classifier.
 pub(super) type ClassifyWrite = Box<dyn Fn(StatusCode, &str) -> CloudHomeError + Send + Sync>;
@@ -196,21 +184,33 @@ impl Drop for RangePutUploader {
         let session = self.session.clone();
         let cancellation_key = session.key.clone();
         let cancellation_url = session.url.clone();
-        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-        cancellation_runtime().spawn(async move {
-            let result = session.cancel().await;
-            if result_tx.send(result).is_err() {
+        let worker = match std::thread::Builder::new()
+            .name("coven-resumable-cancel".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        CloudHomeError::Transport(format!(
+                            "build resumable cancellation runtime: {error}"
+                        ))
+                    })?;
+                runtime.block_on(session.cancel())
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation thread failed to start");
                 std::process::abort();
             }
-        });
-        match result_rx.recv() {
+        };
+        match worker.join() {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation failed");
                 std::process::abort();
             }
-            Err(error) => {
-                tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation task disappeared");
+            Err(_) => {
+                tracing::error!(key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation thread panicked");
                 std::process::abort();
             }
         }
