@@ -1115,6 +1115,100 @@ class SemanticCacheTests(unittest.TestCase):
         self.assertEqual(baseline["caller"], changed["caller"])
         self.assertEqual(baseline["stable"], changed["stable"])
 
+    def test_moving_an_unchanged_declaration_does_not_invalidate_its_dependents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "crates" / "sample" / "src"
+            caller_path = source_root / "caller.rs"
+            container_path = source_root / "container.rs"
+            old_path = source_root / "old.rs"
+            new_path = source_root / "new.rs"
+            source_root.mkdir(parents=True)
+            caller_path.write_text(
+                "use crate::container::Container;\n"
+                "fn caller(value: &Container) { value.read(); }\n"
+            )
+
+            def fingerprint(import_path: str, moved_path: Path) -> str:
+                container_path.write_text(
+                    f"use crate::{import_path}::Moved;\n"
+                    "struct Container { value: Moved }\n"
+                )
+                moved_path.write_text("struct Moved { value: u8 }\n")
+                source_files = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (caller_path, container_path, moved_path)
+                }
+                records = [
+                    record
+                    for source_file in source_files.values()
+                    for record in ownership_audit.inventory_file(source_file)
+                ]
+                caller = next(
+                    record for record in records if record["name"] == "caller"
+                )
+                return ownership_audit.semantic_entry_source_fingerprints(
+                    records,
+                    records,
+                    source_files,
+                    ownership_audit.semantic_declaration_surfaces(source_files),
+                )[caller["symbol"]]
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = fingerprint("old", old_path)
+                old_path.unlink()
+                moved = fingerprint("new", new_path)
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(baseline, moved)
+
+    def test_moving_an_unrelated_same_named_callable_keeps_caller_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source_root = root / "crates" / "sample" / "src"
+            caller_path = source_root / "caller.rs"
+            stable_path = source_root / "stable.rs"
+            old_path = source_root / "old.rs"
+            new_path = source_root / "new.rs"
+            source_root.mkdir(parents=True)
+            caller_path.write_text("fn caller(value: &Stable) { value.run(); }\n")
+            stable_path.write_text("struct Stable; impl Stable { fn run(&self) {} }\n")
+
+            def fingerprint(moved_path: Path) -> str:
+                moved_path.write_text("struct Other; impl Other { fn run(&self) {} }\n")
+                source_files = {
+                    path.resolve(): ownership_audit.parse_source(path)
+                    for path in (caller_path, stable_path, moved_path)
+                }
+                records = [
+                    record
+                    for source_file in source_files.values()
+                    for record in ownership_audit.inventory_file(source_file)
+                ]
+                caller = next(
+                    record for record in records if record["name"] == "caller"
+                )
+                return ownership_audit.semantic_entry_source_fingerprints(
+                    records,
+                    records,
+                    source_files,
+                    ownership_audit.semantic_declaration_surfaces(source_files),
+                )[caller["symbol"]]
+
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                baseline = fingerprint(old_path)
+                old_path.unlink()
+                moved = fingerprint(new_path)
+            finally:
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(baseline, moved)
+
     def test_semantic_cache_invalidates_only_the_callable_whose_body_changed(self):
         def fingerprints(root: Path, path: Path, source: str):
             source_file = ownership_audit.parse_source(path, source)
@@ -1484,6 +1578,93 @@ class SemanticCacheTests(unittest.TestCase):
             set(entries),
             {by_name["cached"]["symbol"], by_name["missing"]["symbol"]},
         )
+
+    def test_semantic_view_cache_requeries_a_caller_whose_target_moved(self):
+        class FakeAnalyzer:
+            queried = []
+
+            def __init__(self, root, view):
+                pass
+
+            def initialize(self):
+                pass
+
+            def wait_until_ready(self):
+                pass
+
+            def open_document(self, path, source):
+                pass
+
+            def outgoing(self, path, position):
+                self.queried.append(position)
+                return []
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = (root / "crates" / "sample" / "src" / "lib.rs").resolve()
+            path.parent.mkdir(parents=True)
+            original_root = ownership_audit.ROOT
+            original_cache_dir = ownership_audit.CACHE_DIR
+            original_analyzer = ownership_audit.RustAnalyzer
+            ownership_audit.ROOT = root
+            ownership_audit.CACHE_DIR = root / "cache"
+            ownership_audit.RustAnalyzer = FakeAnalyzer
+            view = ownership_audit.SEMANTIC_VIEWS[0]
+            fingerprint = ownership_audit.view_cache_fingerprint("workspace", view)
+            try:
+                source_file = ownership_audit.parse_source(
+                    path,
+                    "fn caller() { moved_target(); }\n",
+                )
+                records = ownership_audit.inventory_file(source_file)
+                caller = records[0]
+                source_fingerprints = (
+                    ownership_audit.semantic_entry_source_fingerprints(
+                        records,
+                        records,
+                        {path: source_file},
+                        ownership_audit.semantic_declaration_surfaces(
+                            {path: source_file}
+                        ),
+                    )
+                )
+                entry_fingerprint = ownership_audit.semantic_entry_cache_fingerprint(
+                    fingerprint,
+                    source_fingerprints[caller["symbol"]],
+                )
+                ownership_audit.write_semantic_view_cache(
+                    view,
+                    fingerprint,
+                    {
+                        caller["symbol"]: {
+                            "fingerprint": entry_fingerprint,
+                            "calls": [
+                                {
+                                    "target": "sample::old::moved_target",
+                                    "relativeRanges": [],
+                                }
+                            ],
+                        }
+                    },
+                )
+                ownership_audit.collect_semantic_view_calls(
+                    view,
+                    records,
+                    records,
+                    {path: records},
+                    {path: source_file},
+                    "workspace",
+                    source_fingerprints,
+                )
+            finally:
+                ownership_audit.RustAnalyzer = original_analyzer
+                ownership_audit.CACHE_DIR = original_cache_dir
+                ownership_audit.ROOT = original_root
+
+        self.assertEqual(FakeAnalyzer.queried, [caller["name_range"]["start"]])
 
 
 class SemanticIndexTests(unittest.TestCase):

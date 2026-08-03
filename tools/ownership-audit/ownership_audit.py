@@ -28,7 +28,7 @@ ANALYZER_LOG_PATH = ARTIFACT_DIR / "rust-analyzer.log"
 DECISIONS_PATH = Path(__file__).resolve().parent / "decisions.toml"
 CACHE_DIR = ARTIFACT_DIR / "cache"
 CACHE_SCHEMA = 2
-SEMANTIC_CACHE_SCHEMA = 2
+SEMANTIC_CACHE_SCHEMA = 3
 CACHE_CHECKPOINT_INTERVAL = 100
 
 SEMANTIC_DECLARATION_KINDS = {
@@ -685,7 +685,13 @@ def semantic_declaration_fingerprints(
             digest.update(b"\0declarations\0")
             digest.update(
                 json.dumps(
-                    declaration_surfaces[name],
+                    [
+                        {
+                            "surface": declaration["surface"],
+                            "references": declaration["references"],
+                        }
+                        for declaration in declaration_surfaces[name]
+                    ],
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode()
@@ -843,14 +849,19 @@ def semantic_callable_candidate_surfaces(
             continue
         surfaces.setdefault(record["name"], []).append(
             {
-                "symbol": record["symbol"],
                 "signature": record["signature"],
                 "receiver": record.get("receiver_type"),
                 "cfg": record.get("cfg", []),
             }
         )
     for candidates in surfaces.values():
-        candidates.sort(key=lambda candidate: candidate["symbol"])
+        candidates.sort(
+            key=lambda candidate: json.dumps(
+                candidate,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     return surfaces
 
 
@@ -3878,6 +3889,17 @@ def collect_semantic_view_calls(
         fingerprint,
         entry_fingerprints,
     )
+    current_symbols = {record["symbol"] for record in records}
+    entries = {
+        symbol: entry
+        for symbol, entry in entries.items()
+        if entry["calls"] is None
+        or all(
+            call["target"].startswith("external::")
+            or call["target"] in current_symbols
+            for call in entry["calls"]
+        )
+    }
     missing = [record for record in named if record["symbol"] not in entries]
     if not missing:
         print(
