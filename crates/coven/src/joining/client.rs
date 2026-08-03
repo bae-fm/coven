@@ -411,9 +411,13 @@ impl DeviceJoinClient {
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = self
-            .pending_observation(&pending, &storage, &offer.store_root, offer.attempt_id)
-            .await?;
+        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+            &pending,
+            &storage,
+            &offer.store_root,
+            offer.attempt_id,
+        )
+        .await?;
         let authority =
             crate::sync::store::PendingDeviceJoinAuthority::open(observation, &signer, offer)
                 .await?;
@@ -427,14 +431,13 @@ impl DeviceJoinClient {
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let mut observation = self
-            .pending_observation(
-                &pending,
-                &storage,
-                &self.code.store_root,
-                abandonment.abandonment.attempt_id,
-            )
-            .await?;
+        let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
+            &pending,
+            &storage,
+            &self.code.store_root,
+            abandonment.abandonment.attempt_id,
+        )
+        .await?;
         Ok(observation.observe_abandonment(abandonment).await?)
     }
 
@@ -459,14 +462,13 @@ impl DeviceJoinClient {
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = self
-            .pending_observation(
-                &pending,
-                &storage,
-                &self.code.store_root,
-                cancellation.outcome.attempt().attempt_id,
-            )
-            .await?;
+        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+            &pending,
+            &storage,
+            &self.code.store_root,
+            cancellation.outcome.attempt().attempt_id,
+        )
+        .await?;
         let mut closure = observation.authorize_closure(&signer);
         Ok(closure.close(cancellation).await?)
     }
@@ -486,14 +488,13 @@ impl DeviceJoinClient {
             _ => {
                 let storage: Arc<dyn crate::storage::SyncStorage> =
                     Arc::new(self.transport_storage().await?);
-                let mut observation = self
-                    .pending_observation(
-                        &pending,
-                        &storage,
-                        &self.code.store_root,
-                        activation.receipt.attempt_id,
-                    )
-                    .await?;
+                let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
+                    &pending,
+                    &storage,
+                    &self.code.store_root,
+                    activation.receipt.attempt_id,
+                )
+                .await?;
                 observation.accept_cleanup(activation.clone()).await?;
             }
         }
@@ -530,9 +531,13 @@ impl DeviceJoinClient {
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = self
-            .pending_observation(&pending, &storage, &offer.store_root, offer.attempt_id)
-            .await?;
+        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+            &pending,
+            &storage,
+            &offer.store_root,
+            offer.attempt_id,
+        )
+        .await?;
         let mut authority = crate::sync::store::PendingDeviceJoinAuthority::open(
             observation,
             &signer,
@@ -676,9 +681,13 @@ impl DeviceJoinClient {
         // has to hold those commits and the row data they carry.
         on_status("Catching up on store history...");
         let routing_encryption = EncryptionService::from(join.keyring.clone());
-        let observation = self
-            .pending_observation(&pending, &join.storage, &self.code.store_root, attempt_id)
-            .await?;
+        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+            &pending,
+            &join.storage,
+            &self.code.store_root,
+            attempt_id,
+        )
+        .await?;
         let mut joining = observation
             .into_joining_store(database, signer.clone())
             .await?;
@@ -743,25 +752,6 @@ impl DeviceJoinClient {
         )?)
     }
 
-    async fn pending_observation<'storage>(
-        &self,
-        pending: &crate::DeviceJoinJournalDatabase,
-        storage: &'storage Arc<dyn crate::storage::SyncStorage>,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        attempt_id: crate::DeviceJoinAttemptId,
-    ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'storage>, BootstrapError> {
-        let history_verifier =
-            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
-                .open_pinned(storage.as_ref(), root)
-                .await?;
-        Ok(crate::sync::store::PendingDeviceJoinObservation::new(
-            pending,
-            storage,
-            history_verifier,
-            attempt_id,
-        ))
-    }
-
     async fn build_cloud_home(&self) -> Result<Arc<dyn CloudHome>, BootstrapError> {
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(home) = &self.test_home {
@@ -811,7 +801,38 @@ impl DeviceJoinClient {
     ) -> Result<DeviceJoinStorage, BootstrapError> {
         let cloud = self.build_cloud_home().await?;
         let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
-        let encryption = self.code.open_keyring(&bootstrap_storage, signer).await?;
+        let recipient = hex::encode(signer.public_key());
+        if self.code.wrapped_key.recipient_pubkey != recipient {
+            return Err(crate::sync::store::InviteError::Crypto(
+                "invite wrapped-key ref names another recipient".to_string(),
+            )
+            .into());
+        }
+        self.code
+            .membership_floor
+            .validate()
+            .map_err(crate::sync::store::InviteError::Crypto)?;
+        let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
+            .open_pinned(&bootstrap_storage, &self.code.store_root)
+            .await
+            .map_err(|error| {
+                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
+            })?;
+        let chain = history
+            .load_exact_anchored_membership(
+                &self.code.membership_floor.0,
+                Some(&self.code.owner_pubkey),
+            )
+            .await
+            .map_err(|error| {
+                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
+            })?;
+        let encryption = crate::sync::store::StoreKeyrings::new(
+            &bootstrap_storage,
+            self.code.store_root.clone(),
+        )
+        .open_containing(signer, &chain, &self.code.wrapped_key)
+        .await?;
         cloud.clone().exact_slot_storage().ok_or_else(|| {
             BootstrapError::Provider("provider has no exact-slot adapter".to_string())
         })?;

@@ -41,39 +41,6 @@ pub(crate) struct InviteCode {
     pub membership_floor: MembershipFloor,
 }
 
-impl InviteCode {
-    pub(crate) async fn open_keyring(
-        &self,
-        storage: &dyn crate::storage::SyncStorage,
-        identity: &crate::keys::UserKeypair,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::InviteError> {
-        let recipient = hex::encode(identity.public_key());
-        if self.wrapped_key.recipient_pubkey != recipient {
-            return Err(crate::sync::store::InviteError::Crypto(
-                "invite wrapped-key ref names another recipient".to_string(),
-            ));
-        }
-        self.membership_floor
-            .validate()
-            .map_err(crate::sync::store::InviteError::Crypto)?;
-        let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
-            .open_pinned(storage, &self.store_root)
-            .await
-            .map_err(|error| {
-                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
-            })?;
-        let chain = history
-            .load_exact_anchored_membership(&self.membership_floor.0, Some(&self.owner_pubkey))
-            .await
-            .map_err(|error| {
-                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
-            })?;
-        crate::sync::store::StoreKeyrings::new(storage, self.store_root.clone())
-            .open_containing(identity, &chain, &self.wrapped_key)
-            .await
-    }
-}
-
 /// Encode an `InviteCode` into a prefixed base64url string.
 pub(crate) fn encode(code: &InviteCode) -> String {
     code_envelope::encode_code(code_envelope::PREFIX, code)

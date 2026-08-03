@@ -413,10 +413,22 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         )
         .await
         .expect("publish post-rotation invitation");
-    let invited_keyring = invitation
-        .open_keyring(&*storage, &invited_member)
+    let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
+        .open_pinned(&*storage, &invitation.store_root)
         .await
-        .expect("invited member opens the activated exact wrap");
+        .expect("open invitation history");
+    let chain = history
+        .load_exact_anchored_membership(
+            &invitation.membership_floor.0,
+            Some(&invitation.owner_pubkey),
+        )
+        .await
+        .expect("load invitation membership");
+    let invited_keyring =
+        crate::sync::store::StoreKeyrings::new(&*storage, invitation.store_root.clone())
+            .open_containing(&invited_member, &chain, &invitation.wrapped_key)
+            .await
+            .expect("invited member opens the activated exact wrap");
     let sealed = rotated.seal_app_data(b"current Store data", b"post-rotation invite");
     assert_eq!(
         invited_keyring

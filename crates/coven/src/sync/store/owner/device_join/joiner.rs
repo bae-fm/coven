@@ -244,6 +244,19 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
 }
 
 impl<'storage> PendingDeviceJoinObservation<'storage> {
+    pub(crate) async fn open(
+        pending: &DeviceJoinJournalDatabase,
+        storage: &'storage std::sync::Arc<dyn SyncStorage>,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> Result<Self, crate::sync::store::StorePullError> {
+        let history_verifier =
+            crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                .open_pinned(storage.as_ref(), root)
+                .await?;
+        Ok(Self::new(pending, storage, history_verifier, attempt_id))
+    }
+
     pub(crate) fn new(
         pending: &DeviceJoinJournalDatabase,
         storage: &'storage std::sync::Arc<dyn SyncStorage>,
