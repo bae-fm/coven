@@ -386,7 +386,10 @@ impl DatabaseCore {
         }
     }
 
-    pub(super) fn connection(&self) -> &Connection {
-        &self.conn
+    pub(super) fn run<F, R>(&self, operation: F) -> R
+    where
+        F: FnOnce(&Connection) -> R,
+    {
+        operation(&self.conn)
     }
 }

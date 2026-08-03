@@ -34,8 +34,7 @@ impl DatabaseConnection {
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        self.on_connection_thread(move |core| f(core.connection()))
-            .await
+        self.on_connection_thread(move |core| core.run(f)).await
     }
 
     /// Send `f` to the connection thread, run it against the owned core there, and
