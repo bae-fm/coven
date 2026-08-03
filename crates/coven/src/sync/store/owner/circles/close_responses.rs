@@ -299,7 +299,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                         .database
                         .activated_store_device_registration(participant.registration.clone())
                         .await?;
-                    if !response.verify_for(control, &registration) {
+                    if !response.verify_for(control, registration.value()) {
                         return Err(CircleOperationError::InvalidState(format!(
                             "Circle epoch-close response from device {} failed verification",
                             participant.registration.device_id

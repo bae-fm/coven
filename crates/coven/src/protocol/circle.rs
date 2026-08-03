@@ -1376,10 +1376,12 @@ mod tests {
                 rotation_required: false,
             }]
         );
-        let (publication_encryption, publication_fingerprint) = store_database
+        let publication = store_database
             .circle_publication_context(creation.circle_id, control.coord.clone())
             .await
             .expect("load publication authority from derived current state");
+        let publication_fingerprint = publication.key_fingerprint();
+        let publication_encryption = publication.into_encryption();
         assert_eq!(
             publication_encryption.seal_key_fingerprint(),
             publication_fingerprint

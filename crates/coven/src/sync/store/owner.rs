@@ -27,6 +27,8 @@ pub(super) mod writer;
 use super::prepare_registration_object;
 use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
+#[cfg(test)]
+pub(crate) use circles::CirclePackageReadError;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};
 use founder_creation::FounderStoreCreation;
 pub(crate) use history_construction::HistoryConstructionAuthority;
@@ -36,6 +38,11 @@ pub(crate) use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
 pub(crate) use restore::RestoringStore;
 use verification::StoreCommitVerifier;
+#[cfg(test)]
+pub(crate) use verified_history::{
+    MergeHistorySuccessorEvidence, MergeOutboundAuthorization, PreparedMergeHistorySuccessor,
+    VerifiedMergeMembershipPrefix,
+};
 pub(super) use writer::{operations, reclaim, snapshot};
 pub(crate) use writer::{AuthorizedWriterOperation, StoreAckError};
 
@@ -157,16 +164,9 @@ impl Store {
             root.reference().clone(),
         );
         let keyrings = keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
-        AuthorizedStoreHistory::new(
-            database,
-            &storage,
-            root,
-            history_verifier,
-            blob_source,
-            keyrings,
-        )
-        .finish_initialization(identity)
-        .await
+        AuthorizedStoreHistory::new(database, &storage, history_verifier, blob_source, keyrings)
+            .finish_initialization(identity)
+            .await
     }
 
     #[doc(hidden)]
@@ -370,7 +370,6 @@ impl Store {
         Ok(AuthorizedStoreHistory::new(
             self.database.clone(),
             &self.storage,
-            self.root.clone(),
             history_verifier,
             blob_source,
             keyrings,
@@ -385,8 +384,19 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(super) async fn restoring_for_test(&self) -> Result<RestoringStore<'_>, SyncCycleFailure> {
-        Ok(self.authorize().await?.bind_restore_for_test())
+    pub(crate) async fn recover_owner_device_for_test(
+        &self,
+        authority: &crate::restoration::OwnerRecoveryAuthority,
+    ) -> Result<crate::protocol::store_commit::StoreDeviceRegistrationRef, String> {
+        let mut restoring = self
+            .authorize()
+            .await
+            .map_err(|error| error.to_string())?
+            .bind_restore_for_test();
+        restoring
+            .recover_owner_device(authority)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn authorize_writer(
@@ -476,7 +486,7 @@ impl Store {
         crate::protocol::store_commit::OwnerPromotionRequest,
         owner_promotion::OwnerPromotionError,
     > {
-        let (registration, _, _) = self
+        let registration = self
             .database
             .activated_store_device_registration_for_device(device_id)
             .await?
@@ -485,7 +495,8 @@ impl Store {
                     "the target Store device is not active".to_string(),
                 )
             })?;
-        self.begin_owner_promotion(registration).await
+        self.begin_owner_promotion(registration.reference().clone())
+            .await
     }
 
     pub(crate) async fn begin_owner_promotion(
@@ -703,7 +714,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn complete_revoke_rotation_adoption_for_test(
         &self,
-        pending_rotation: &crate::storage::PendingRotation,
+        pending_rotation: &dyn crate::storage::CloudRotationAccess,
         adopted_generation: u64,
     ) -> Result<(), membership::InviteError> {
         self.authorize_writer()
@@ -1193,7 +1204,6 @@ impl Store {
         Ok(crate::sync::store::PendingDeviceJoinObservation::new(
             pending,
             &self.storage,
-            self.root.clone(),
             history_verifier,
             offer.attempt_id,
         ))
@@ -1225,7 +1235,6 @@ impl Store {
             .await?;
         crate::sync::store::PreparedSnapshotBootstrap::prepare(
             &self.storage,
-            self.root.clone(),
             history_verifier,
             membership_floor,
             binary_schema_version,
@@ -1406,7 +1415,6 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invite_member(
         &self,
-        hlc: &crate::sync::hlc::Hlc,
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
@@ -1422,7 +1430,6 @@ impl Store {
         })?;
         authorization
             .invite_member(
-                hlc,
                 public_key_hex,
                 invitee_email,
                 role,
@@ -1436,12 +1443,11 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn remove_member(
         &self,
-        hlc: &crate::sync::hlc::Hlc,
         public_key_hex: &str,
         encryption: &crate::encryption::EncryptionService,
         security: &crate::store_security::StoreSecurity,
         cipher: &dyn crate::storage::CloudCipherAccess,
-        pending_rotation: &crate::storage::PendingRotation,
+        pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
         let mut authorization = self.authorize_writer().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
@@ -1450,7 +1456,6 @@ impl Store {
         })?;
         authorization
             .remove_member(
-                hlc,
                 public_key_hex,
                 encryption,
                 security,
@@ -1469,18 +1474,21 @@ mod tests {
     #[tokio::test]
     async fn loaded_store_authorization_retains_its_verified_root() {
         let db = open_test_db();
-        let fixture = TestStore::create(&db, "retained-root-authority", UserKeypair::generate())
-            .await
-            .expect("create Store");
+        let signer = UserKeypair::generate();
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let fixture =
+            TestStore::create(&db, "retained-root-authority", signer.clone(), home.clone())
+                .await
+                .expect("create Store");
         let store = Store::load(
             crate::database::StoreDatabase::new(&db),
-            fixture.storage.clone(),
-            fixture.signer.clone(),
+            fixture.clone(),
+            signer,
         )
         .await
         .expect("load Store");
 
-        fixture.home.remove_exact_object(fixture.root.object.slot());
+        home.remove_exact_object(fixture.root.object.slot());
 
         store
             .authorize()

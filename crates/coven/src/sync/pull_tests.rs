@@ -59,13 +59,6 @@ fn exact_pinned_path(
 
 trait PullTestDatabaseOps {
     async fn exact_row_blob_ref(&self, table: &str, row_id: &str) -> crate::blob::RowBlobRef;
-    async fn pull_with_bound_storage(
-        &self,
-        storage: Arc<dyn SyncStorage>,
-        identity: UserKeypair,
-        store_dir: &crate::store_dir::StoreDir,
-        routing_encryption: Option<&EncryptionService>,
-    ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure>;
     async fn stored_remote_object(
         &self,
         object: &crate::storage::ExactObjectRef,
@@ -99,28 +92,6 @@ impl PullTestDatabaseOps for crate::database::Database {
         self.row_blob_ref(table, row_id)
             .await
             .expect("load exact row blob reference")
-    }
-
-    async fn pull_with_bound_storage(
-        &self,
-        storage: Arc<dyn SyncStorage>,
-        identity: UserKeypair,
-        store_dir: &crate::store_dir::StoreDir,
-        routing_encryption: Option<&EncryptionService>,
-    ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
-        let store = crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(self),
-            storage,
-            identity,
-        )
-        .await
-        .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?;
-        store
-            .authorize_writer()
-            .await
-            .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?
-            .pull(store_dir, routing_encryption)
-            .await
     }
 
     async fn stored_remote_object(
@@ -159,12 +130,13 @@ impl PullTestDatabaseOps for crate::database::Database {
     }
 
     async fn local_announcement_stream(&self) -> crate::protocol::membership::AuthorStreamId {
-        let (registration_ref, registration) = store_database(self)
+        let registration = store_database(self)
             .local_blob_write_authority()
             .await
             .expect("read active local Store registration");
         registration
-            .store_announcement_activation(&registration_ref)
+            .value()
+            .store_announcement_activation(registration.reference())
             .expect("derive local Store announcement activation")
             .author_stream_id()
     }
@@ -285,13 +257,11 @@ fn commit_stream_id(reference: &crate::protocol::store_commit::StoreBatchCommitR
 
 #[async_trait]
 trait TestStoreStorage: Sync {
-    fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage>;
-
-    async fn bind_for_test_publish(
+    async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
         keypair: &UserKeypair,
-    ) -> Result<(), String>;
+    ) -> Result<crate::sync::store::Store, String>;
 
     async fn sync_for_test(
         &self,
@@ -310,14 +280,7 @@ trait TestStoreStorage: Sync {
             message.is_empty(),
             "Store commits carry no arbitrary message"
         );
-        self.bind_for_test_publish(db, keypair).await?;
-        let store = crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(db),
-            self.cloud_storage(),
-            keypair.clone(),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let store = self.store_for_test_publish(db, keypair).await?;
         let before = store
             .latest_local_store_position()
             .await
@@ -374,33 +337,25 @@ trait TestStoreStorage: Sync {
 
 #[async_trait]
 impl TestStoreStorage for TestStore {
-    fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage> {
-        self.storage.clone()
-    }
-
-    async fn bind_for_test_publish(
+    async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
         keypair: &UserKeypair,
-    ) -> Result<(), String> {
+    ) -> Result<crate::sync::store::Store, String> {
         self.bind_device(db, keypair)
             .await
             .map_err(|error| error.to_string())?;
-        Ok(())
+        self.open_store_with_identity(db, keypair).await
     }
 }
 
 #[async_trait]
 impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
-    fn cloud_storage(&self) -> std::sync::Arc<CloudSyncStorage> {
-        self.clone()
-    }
-
-    async fn bind_for_test_publish(
+    async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
         keypair: &UserKeypair,
-    ) -> Result<(), String> {
+    ) -> Result<crate::sync::store::Store, String> {
         if crate::database::StoreDatabase::new(db)
             .local_store_root_ref()
             .await
@@ -416,7 +371,13 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
             .await
             .map_err(|error| error.to_string())?;
         }
-        Ok(())
+        crate::sync::store::Store::load(
+            crate::database::StoreDatabase::new(db),
+            self.clone(),
+            keypair.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -439,6 +400,7 @@ trait PullTestStoreOps {
 
     async fn publish_exact_changeset_with_authority(
         &self,
+        signer: &UserKeypair,
         name: &str,
         sequence: u64,
         changeset: &[u8],
@@ -454,35 +416,29 @@ impl PullTestStoreOps for TestStore {
         root_id: &str,
     ) {
         self.open_into(db).await.expect("open exact test Store");
-        self.bind_device(db, &self.signer)
+        self.bind_founder_device(db)
             .await
             .expect("load exact fixture Store")
             .authorize_writer()
             .await
             .expect("activate exact fixture writer");
-        let hlc = crate::sync::hlc::Hlc::new(
-            "blob-fixture".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
         crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
             .local_transitions()
             .make_remote("notes", root_id, false)
             .await
             .expect("queue exact blob fixture upload");
-        let (registration_ref, registration) = store_database(db)
+        let registration = store_database(db)
             .local_blob_write_authority()
             .await
             .expect("load exact blob fixture write authority");
-        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-            .expect("validate exact blob fixture write authority");
+        let authority = crate::storage::BlobWriteAuthority::new(&registration);
         let database = store_database(db);
         let outcome = crate::blob::upload::BlobUploadQueue::new(
             &database,
-            &self.storage,
+            self,
             authority,
             store_dir,
             &crate::clock::SystemClock,
-            &hlc,
             None,
             None,
         )
@@ -561,6 +517,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn publish_exact_changeset_with_authority(
         &self,
+        signer: &UserKeypair,
         name: &str,
         sequence: u64,
         changeset: &[u8],
@@ -570,7 +527,7 @@ impl PullTestStoreOps for TestStore {
             .publish_changeset(name, sequence, changeset, SCHEMA_VERSION)
             .await
             .expect("publish exact Store changeset");
-        let graph = ExactPublishedCommit::load(self, reference).await;
+        let graph = ExactPublishedCommit::load(self, reference, signer).await;
         let commit = graph
             .resign_commit(
                 SCHEMA_VERSION,
@@ -691,13 +648,20 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
         &test_migrations(),
     )
     .expect("open file-backed blob test database")
-    .0
 }
 
-async fn create_store(db: &crate::database::Database, signer: UserKeypair) -> TestStore {
-    TestStore::create(db, "test-store", signer)
-        .await
-        .expect("create exact test Store for the test database")
+async fn create_store(
+    db: &crate::database::Database,
+    signer: UserKeypair,
+) -> std::sync::Arc<TestStore> {
+    TestStore::create(
+        db,
+        "test-store",
+        signer,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact test Store for the test database")
 }
 
 fn constraint_conflicts(result: &crate::sync::store::StorePullResult) -> Vec<&HeldStorePosition> {
@@ -909,14 +873,14 @@ impl<'storage> ExactMembershipChain<'storage> {
                 )
                 .await
                 .expect("allocate exact snapshot slot");
-            let (_, founder_registration, _) = storage
+            let founder_authority = storage
                 .founder_device_authority()
                 .await
                 .expect("load exact founder device registration");
             let registration = StoreDeviceRegistration::signed(
                 storage.root.clone(),
                 origin,
-                founder_registration.provider,
+                founder_authority.registration().provider.clone(),
                 DeviceStreamAnchor::StoreAnnouncements {
                     first_slot: announcement_slot,
                 },
@@ -944,7 +908,6 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
                 .expect("prepare exact membership registration object");
             storage
-                .storage
                 .create_protocol_object(&prepared)
                 .await
                 .expect("publish exact membership registration object");
@@ -990,15 +953,11 @@ impl<'storage> ExactMembershipChain<'storage> {
                 }
             },
         };
-        let (entry_object, entry_ref) = crate::storage::prepare_membership_entry(
-            &storage.storage,
-            storage.root.store_root_hash,
-            &entry,
-        )
-        .await
-        .expect("prepare exact membership entry");
+        let (entry_object, entry_ref) =
+            crate::storage::prepare_membership_entry(storage, storage.root.store_root_hash, &entry)
+                .await
+                .expect("prepare exact membership entry");
         storage
-            .storage
             .create_protocol_object(&entry_object)
             .await
             .expect("publish exact membership entry");
@@ -1060,7 +1019,6 @@ impl<'storage> ExactMembershipChain<'storage> {
             )
             .expect("prepare exact membership head");
         storage
-            .storage
             .create_protocol_object(&prepared)
             .await
             .expect("publish exact membership head");
@@ -1135,8 +1093,9 @@ impl<'storage> ExactPublishedCommit<'storage> {
     async fn load(
         storage: &'storage TestStore,
         reference: crate::protocol::store_commit::StoreBatchCommitRef,
+        identity: &UserKeypair,
     ) -> Self {
-        Self::load_as(storage, reference, &storage.signer).await
+        Self::load_as(storage, reference, identity).await
     }
 
     async fn load_as(
@@ -1278,7 +1237,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
             .prepare_protocol_object(&commit_context, slot, &semantic_prefix, commit_bytes)
             .expect("prepare replacement exact Store commit");
         self.storage
-            .storage
             .create_protocol_object(&commit_prepared)
             .await
             .expect("publish replacement exact Store commit");
@@ -1330,7 +1288,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
             )
             .expect("prepare replacement exact Store head");
         self.storage
-            .storage
             .create_protocol_object(&head_prepared)
             .await
             .expect("publish replacement exact Store head");
@@ -1395,7 +1352,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
             )
             .expect("prepare replacement exact Store head");
         self.storage
-            .storage
             .create_protocol_object(&prepared)
             .await
             .expect("publish replacement exact Store head");
@@ -1469,7 +1425,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
             .prepare_protocol_object(&context, package.object.slot().clone(), &prefix, bytes)
             .expect("prepare replacement exact Store package");
         self.storage
-            .storage
             .create_protocol_object(&prepared)
             .await
             .expect("publish replacement exact Store package");
@@ -1853,7 +1808,6 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
         )
-        .map(|(database, _)| database)
     };
     let target = open_target().expect("open retained-input target");
 
@@ -1966,7 +1920,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         .replace_retained_merge_input(stream_id.clone(), missing_receiver)
         .await;
     let target_store = storage
-        .bind_device(&target, &storage.signer)
+        .bind_founder_device(&target)
         .await
         .expect("load retained materialization Store");
     let error = match target_store
@@ -2023,7 +1977,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     drop(target);
     let reopened = open_target().expect("reopen retained-input target");
     let reopened_store = storage
-        .bind_device(&reopened, &storage.signer)
+        .bind_founder_device(&reopened)
         .await
         .expect("bind reopened retained materialization Store");
     let error = match reopened_store.retained_merge_replay_inputs_for_test().await {
@@ -2199,7 +2153,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         })
         .await
         .expect("copy the locally-authored retained input");
-    let (target, _stamper) = crate::database::Database::open(
+    let target = crate::database::Database::open(
         &target_path,
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
@@ -2331,7 +2285,8 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
 #[tokio::test]
 async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     let db1 = open_test_db();
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&db1, founder.clone()).await;
 
     // The source device's head advertises seq 1, but the changeset object is
     // gone: reclamation deleted it as superseded. `store_changeset` both writes
@@ -2348,13 +2303,12 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
         .await
         .expect("publish exact Store changeset");
     let stream_id = commit_stream_id(&commit);
-    let graph = ExactPublishedCommit::load(&storage, commit).await;
+    let graph = ExactPublishedCommit::load(&storage, commit, &founder).await;
     let package = graph
         .commit
         .store_package()
         .expect("Store commit carries a Store package");
     storage
-        .storage
         .delete_protocol_object(&package.object)
         .await
         .expect("delete exact Store package");
@@ -2758,7 +2712,8 @@ async fn fk_violation_still_retries_and_resolves() {
 #[tokio::test]
 async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     let db1 = open_test_db();
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&db1, founder.clone()).await;
     // A changeset stamped one schema version above the local db, signed at its own
     // position so the position check passes and the loop reaches the signature and
     // schema checks.
@@ -2772,7 +2727,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let commit = graph
         .resign_commit(
             SCHEMA_VERSION + 1,
@@ -2825,7 +2780,8 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
 #[tokio::test]
 async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
     let db1 = open_test_db();
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&db1, founder.clone()).await;
     let cs = db1
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
@@ -2836,7 +2792,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let commit = graph
         .resign_commit(
             SCHEMA_VERSION + 1,
@@ -2876,7 +2832,8 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
 #[tokio::test]
 async fn pull_gate_tracks_the_dbs_schema_version() {
     let db1 = open_test_db();
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&db1, founder.clone()).await;
 
     let n = db1.schema_version();
 
@@ -2904,7 +2861,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
         .publish_changeset("dev1", 2, &cs2, n)
         .await
         .expect("publish second exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let commit = graph
         .resign_commit(n + 1, graph.commit.membership_authority.clone())
         .await;
@@ -2958,7 +2915,6 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 async fn push_stamps_the_dbs_schema_version() {
     let db1 = open_test_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
-    let tables = test_synced_tables();
     let (_tmp, ld1) = temp_store_dir();
 
     // `shared = 1` so the gated `notes` root survives the push gate and there is an
@@ -2970,16 +2926,14 @@ async fn push_stamps_the_dbs_schema_version() {
         ])
         .await;
 
-    let keypair = storage.protocol_founder_keypair();
-    let result = storage
-        .sync_for_test(&db1, &tables, outgoing, 0, "", &keypair, &ld1)
+    let position = storage
+        .publish_founder_changeset(&ld1, outgoing, 0)
         .await
         .expect("sync push");
 
-    let position = result.expect("an outgoing Store commit");
     let stream_id = commit_stream_id(&position);
     let device = storage
-        .bind_device(&db1, &keypair)
+        .bind_founder_device(&db1)
         .await
         .expect("load exact materialized Store");
     let (_commit_ref, commit) = device
@@ -3014,18 +2968,9 @@ async fn sync_reuses_opened_schema_models() {
         ])
         .await;
 
-    let keypair = storage.protocol_founder_keypair();
     let (_tmp, store_dir) = temp_store_dir();
     storage
-        .sync_for_test(
-            &db,
-            db.synced_tables(),
-            outgoing,
-            0,
-            "",
-            &keypair,
-            &store_dir,
-        )
+        .publish_founder_changeset(&store_dir, outgoing, 0)
         .await
         .expect("sync");
 
@@ -3072,7 +3017,6 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .cloned()
         .expect("published row carries exact blob authority");
     storage
-        .storage
         .delete_blob_object(&stored)
         .await
         .expect("remove exact remote blob fixture");
@@ -3134,7 +3078,8 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
 #[tokio::test]
 async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let db1 = open_test_db();
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&db1, founder.clone()).await;
 
     let cs = db1
         .capture_test_changeset(&[
@@ -3146,7 +3091,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let package = graph
         .commit
         .store_package()
@@ -3197,7 +3142,8 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
 #[tokio::test]
 async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let src = open_test_db();
-    let storage = create_store(&src, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&src, founder.clone()).await;
 
     let cs = src
         .capture_test_changeset(&[
@@ -3209,7 +3155,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         .publish_changeset("dev", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = &graph.reference.coord;
     let relocated_coord = crate::protocol::store_commit::StoreCommitCoord {
         stream_id: *stream_id,
@@ -3277,7 +3223,8 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
 #[tokio::test]
 async fn a_store_commit_relocated_to_another_device_is_rejected() {
     let src = open_test_db();
-    let storage = create_store(&src, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&src, founder.clone()).await;
 
     let cs = src
         .capture_test_changeset(&[
@@ -3289,7 +3236,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         .publish_changeset("devVictim", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let relocated_stream = crate::protocol::membership::AuthorStreamId::from_bytes([99; 32]);
     let relocated_object = storage
         .create_exact_protocol_object(
@@ -3484,7 +3431,8 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
 #[tokio::test]
 async fn malformed_store_package_isolates_to_one_device() {
     let bad_source = open_test_db();
-    let storage = create_store(&bad_source, UserKeypair::generate()).await;
+    let founder = UserKeypair::generate();
+    let storage = create_store(&bad_source, founder.clone()).await;
     storage
         .device_id("founder")
         .await
@@ -3528,7 +3476,7 @@ async fn malformed_store_package_isolates_to_one_device() {
         .await
         .expect("publish valid exact Store changeset");
     let good_stream_id = commit_stream_id(&good_reference);
-    let bad_reference = ExactPublishedCommit::load(&storage, bad_reference)
+    let bad_reference = ExactPublishedCommit::load(&storage, bad_reference, &founder)
         .await
         .replace_package_with_malformed_bytes()
         .await;
@@ -3710,11 +3658,11 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .expect("open exact Store before failed lazy verification");
     let failing: Arc<dyn SyncStorage> =
         Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-            storage.storage.clone(),
+            storage.clone(),
             FaultingStorage::blob(),
         ));
-    let error = db2
-        .pull_with_bound_storage(failing, storage.signer.clone(), &ld, None)
+    let error = storage
+        .pull_with_storage_for_test(&db2, failing, &ld, None)
         .await
         .expect_err("lazy blob verification failure rejects the Store commit");
     assert!(
@@ -3873,10 +3821,15 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     let owner = UserKeypair::generate();
     let routing_encryption = EncryptionService::from_key([42; 32]);
     let observer = open_scoped_circle_test_db();
-    let storage = TestStore::create(&observer, "circle-activation-order", owner.clone())
-        .await
-        .expect("create Store for Circle activation ordering");
-    storage.home.sort_listings();
+    let storage = TestStore::create(
+        &observer,
+        "circle-activation-order",
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store for Circle activation ordering");
+    storage.sort_provider_listings();
     let first = open_scoped_circle_test_db();
     let second = open_scoped_circle_test_db();
     let receiver = open_scoped_circle_test_db();
@@ -4010,9 +3963,14 @@ fn scoped_fk_circle_db() -> crate::database::Database {
 async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component() {
     let owner = UserKeypair::generate();
     let founder = scoped_fk_circle_db();
-    let storage = TestStore::create(&founder, "receiver-final-component", owner.clone())
-        .await
-        .expect("create scoped Store");
+    let storage = TestStore::create(
+        &founder,
+        "receiver-final-component",
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create scoped Store");
 
     // A second owner device that will hold the comment the mover never sees.
     let receiver = scoped_fk_circle_db();
@@ -4143,23 +4101,10 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
            _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"])
         .await;
 
-    let result = storage
-        .sync_for_test(
-            &db,
-            &test_synced_tables_with_blob(BlobDecl::new(
-                "audio",
-                Provenance::UserProvided,
-                CacheFill::CacheLazy,
-            )),
-            outgoing,
-            0,
-            "",
-            &storage.protocol_founder_keypair(),
-            &ld,
-        )
+    storage
+        .publish_founder_changeset(&ld, outgoing, 0)
         .await
         .expect("a Local blob does not require remote object authority");
-    assert!(result.is_some(), "the changeset publishes a Store commit");
     assert!(
         device
             .latest_local_store_position()
@@ -4195,21 +4140,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
     .await;
     let (_tmp, ld) = temp_store_dir();
 
-    let result = storage
-        .sync_for_test(
-            &db,
-            &test_synced_tables_with_blob(BlobDecl::new(
-                "audio",
-                Provenance::UserProvided,
-                CacheFill::CacheLazy,
-            )),
-            outgoing,
-            0,
-            "",
-            &storage.protocol_founder_keypair(),
-            &ld,
-        )
-        .await;
+    let result = storage.publish_founder_changeset(&ld, outgoing, 0).await;
     let err = match result {
         Err(err) => err,
         Ok(_) => panic!("missing remote user-provided blob must abort publish"),
@@ -4300,28 +4231,12 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     let (_tmp, ld) = temp_store_dir();
 
     let result = storage
-        .sync_for_test(
-            &db,
-            &test_synced_tables_with_blob(BlobDecl::new(
-                "audio",
-                Provenance::UserProvided,
-                CacheFill::CacheLazy,
-            )),
-            outgoing,
-            0,
-            "",
-            &storage.protocol_founder_keypair(),
-            &ld,
-        )
+        .publish_founder_changeset(&ld, outgoing, 0)
         .await
         .expect("delete does not require the removed blob to exist remotely");
-    assert!(result.is_some(), "the delete publishes a Store commit");
 
     assert_eq!(
-        result
-            .expect("published exact Store commit")
-            .coord
-            .sequence(),
+        result.coord.sequence(),
         1,
         "delete publishes even when the removed blob is absent remotely",
     );
@@ -4531,16 +4446,14 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     );
     assert!(
         storage
-            .cloud_home()
-            .exists(&blob_key)
+            .provider_object_exists_for_test(&blob_key)
             .await
             .expect("exists at exact readable version"),
         "the exact readable blob version exists",
     );
     assert!(
         !storage
-            .cloud_home()
-            .exists("photos/n1/cover-p1cover.jpg")
+            .provider_object_exists_for_test("photos/n1/cover-p1cover.jpg")
             .await
             .expect("check obsolete mutable readable key"),
         "no mutable object occupies the bare readable path",
@@ -5362,8 +5275,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         .slot()
         .logical_key();
     let at_rest = storage
-        .cloud_home()
-        .read(blob_key)
+        .read_provider_object_for_test(blob_key)
         .await
         .expect("blob present in cloud");
     assert_ne!(
@@ -5416,7 +5328,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         .await
         .expect("load exact blob uploader registration");
     assert_eq!(
-        uploader.author_pubkey,
+        uploader.value().author_pubkey,
         hex::encode(keypair.public_key()),
         "device B's exact blob reference names A's registration",
     );
@@ -5530,7 +5442,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         crate::database::StoreDatabase::new(&db1),
         source_store_dir.clone(),
     )
-    .connected_blob_transitions(storage.storage.clone(), None, None)
+    .connected_blob_transitions(storage.clone(), None, None)
     .make_local("notes", "n1", &HashMap::new(), &cancel)
     .await
     .expect("make exact blob root Local");
@@ -5935,6 +5847,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &founder,
             "dev1",
             1,
             &cs,
@@ -5946,7 +5859,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
             ),
         )
         .await;
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
     let mut unsigned: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     unsigned
         .as_object_mut()
@@ -6050,7 +5963,6 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .unwrap();
     storage
-        .storage
         .delete_protocol_object(&founder_head.object)
         .await
         .expect("remove exact founder membership head");
@@ -6066,7 +5978,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 }
 
 struct PersistedCycleRemoval {
-    storage: TestStore,
+    storage: std::sync::Arc<TestStore>,
     db: crate::database::Database,
     founder_pubkey: String,
     second_owner_head: crate::protocol::membership::MembershipHeadRef,
@@ -6088,10 +6000,6 @@ impl PersistedCycleRemoval {
             .invite_member(
                 &db,
                 &founder,
-                &crate::sync::hlc::Hlc::new(
-                    "persisted-cycle-second-owner".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &second_owner_pubkey,
                 None,
                 MemberRole::Member,
@@ -6170,7 +6078,7 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 
     let recovered = fixture
         .storage
-        .bind_device(&fixture.db, &fixture.storage.signer)
+        .bind_founder_device(&fixture.db)
         .await
         .expect("load persisted-author Store")
         .membership_for_test()
@@ -6194,14 +6102,13 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
     let fixture = PersistedCycleRemoval::build().await;
     fixture
         .storage
-        .storage
         .delete_protocol_object(&fixture.second_owner_head.object)
         .await
         .expect("delete exact persisted membership head");
 
     let error = match fixture
         .storage
-        .bind_device(&fixture.db, &fixture.storage.signer)
+        .bind_founder_device(&fixture.db)
         .await
         .expect("load persisted-author Store")
         .membership_for_test()
@@ -6259,6 +6166,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &owner,
             "devM",
             1,
             &changeset,
@@ -6330,7 +6238,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .await
         .expect("open exact Store before fault injection");
     let failing = std::sync::Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.storage.clone(),
+        storage.clone(),
         FaultingStorage::membership(1),
     ));
     let result =
@@ -6372,6 +6280,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &owner,
             "devOwner",
             1,
             &cs,
@@ -6420,10 +6329,6 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .invite_member(
             &source,
             &owner,
-            &crate::sync::hlc::Hlc::new(
-                "exact-predecessor-second-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &pubkey_hex(&second_owner),
             None,
             MemberRole::Member,
@@ -6467,6 +6372,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &owner,
             "devOwner",
             1,
             &changeset,
@@ -6489,10 +6395,6 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .remove_member(
             &second_owner_db,
             &second_owner,
-            &crate::sync::hlc::Hlc::new(
-                "exact-predecessor-founder-removal".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &owner_pk,
             &encryption,
             &second_owner_security,
@@ -6542,7 +6444,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         .publish_changeset("devOwner", 1, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish valid Store changeset before removing its authority");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &owner).await;
     let commit = graph.resign_commit(SCHEMA_VERSION, None).await;
     let reference = graph
         .replace_commit_bytes_before_validation(
@@ -6613,7 +6515,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .publish_changeset("devOwner", owner_sequence, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &owner).await;
     let other_sequence = storage
         .next_commit_sequence("other-device")
         .await
@@ -6622,9 +6524,8 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .publish_changeset("other-device", other_sequence, &[], SCHEMA_VERSION)
         .await
         .expect("publish second exact device graph");
-    let other = ExactPublishedCommit::load(&storage, other_reference).await;
+    let other = ExactPublishedCommit::load(&storage, other_reference, &owner).await;
     storage
-        .storage
         .delete_protocol_object(&graph.head_object)
         .await
         .expect("remove original stream head");
@@ -6745,7 +6646,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .unwrap();
 
     let lagging = Arc::new(InterceptedStorage::new(
-        storage.storage.clone(),
+        storage.clone(),
         MissingProtocolSlot {
             semantic_prefix: hidden_head,
         },
@@ -6824,7 +6725,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         ])
         .await;
     let reference = storage
-        .publish_exact_changeset_with_authority("devX", 1, &cs, Some(unrelated_authority))
+        .publish_exact_changeset_with_authority(&owner, "devX", 1, &cs, Some(unrelated_authority))
         .await;
     let stream_id = commit_stream_id(&reference);
 
@@ -6883,6 +6784,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &owner,
             "dev1",
             1,
             &cs,
@@ -6894,7 +6796,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
             ),
         )
         .await;
-    let graph = ExactPublishedCommit::load(&storage, reference).await;
+    let graph = ExactPublishedCommit::load(&storage, reference, &owner).await;
     let mut forged: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
     let commit_ref = graph
@@ -7125,7 +7027,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .expect("revocation witness produces a Store commit");
 
     let (_pull_temp, pull_store_dir) = temp_store_dir();
-    storage.home.fail_nth_exact_delete_of(
+    storage.fail_nth_exact_delete_of(
         &[
             candidate_graph.reference.object.slot(),
             candidate_graph.head_object.slot(),
@@ -7151,14 +7053,10 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .finish_retracted_merge_candidate_cleanup(write_id.clone())
         .await
         .expect("finalize removed-member candidate cleanup");
-    assert!(storage
-        .home
-        .get(candidate_graph.reference.object.slot().logical_key())
-        .is_none());
-    assert!(storage
-        .home
-        .get(candidate_graph.head_object.slot().logical_key())
-        .is_none());
+    assert!(
+        storage.provider_object_is_absent(candidate_graph.reference.object.slot().logical_key())
+    );
+    assert!(storage.provider_object_is_absent(candidate_graph.head_object.slot().logical_key()));
     assert!(matches!(
         crate::database::StoreDatabase::new(&member_db)
             .write_status(&write_id)
@@ -7245,7 +7143,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         .expect("membership head slot key has a .json suffix")
         .to_string();
     let lagging = std::sync::Arc::new(InterceptedStorage::new(
-        storage.storage.clone(),
+        storage.clone(),
         MissingProtocolSlot {
             semantic_prefix: hidden,
         },
@@ -7295,14 +7193,13 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         .expect("active Owner signs membership grant");
     let grant = add_member.coord();
     let (prepared, _) = crate::storage::prepare_membership_entry(
-        &storage.storage,
+        &storage,
         storage.root.store_root_hash,
         &add_member,
     )
     .await
     .expect("prepare uncommitted exact membership entry");
     storage
-        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish uncommitted exact membership entry");
@@ -7316,7 +7213,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         ])
         .await;
     let reference = storage
-        .publish_exact_changeset_with_authority("devM", 1, &cs, Some(grant))
+        .publish_exact_changeset_with_authority(&owner, "devM", 1, &cs, Some(grant))
         .await;
     let stream_id = commit_stream_id(&reference);
 
@@ -7382,7 +7279,6 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .prepare_protocol_object(&context, slot, &relocated_prefix, grant_bytes)
         .expect("prepare relocated exact membership grant");
     storage
-        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("relocate the grant to another author's coordinate");
@@ -7395,6 +7291,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &owner,
             "devM",
             1,
             &changeset,
@@ -7457,7 +7354,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .await
         .expect("load exact committed membership prefix");
     let failing = Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.storage.clone(),
+        storage.clone(),
         FaultingStorage::membership(0),
     ));
     let retained_store =
@@ -7646,12 +7543,11 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         )
         .expect("prepare corrupt exact founder entry");
     storage
-        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish corrupt exact founder entry");
 
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&storage.signer))
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &storage.protocol_founder_pubkey())
         .await
         .unwrap();
 
@@ -7684,6 +7580,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &owner,
             "devA",
             1,
             &cs,
@@ -7856,10 +7753,15 @@ mod blob_path_traversal {
 async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     let keypair = UserKeypair::generate();
     let observer = open_test_db();
-    let storage = TestStore::create(&observer, "test-lib", keypair.clone())
-        .await
-        .expect("create exact Store for dependency-order test");
-    storage.home.sort_listings();
+    let storage = TestStore::create(
+        &observer,
+        "test-lib",
+        keypair.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact Store for dependency-order test");
+    storage.sort_provider_listings();
     let tables = test_synced_tables();
 
     let first = open_test_db();

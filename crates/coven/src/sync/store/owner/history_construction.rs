@@ -34,15 +34,14 @@ impl HistoryConstructionAuthority {
         self,
         storage: &'storage dyn SyncStorage,
         root: &StoreRootRef,
-    ) -> Result<(VerifiedStoreRoot, MergeHistoryVerifier<'storage>), StorePullError> {
+    ) -> Result<MergeHistoryVerifier<'storage>, StorePullError> {
         let object =
             crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
                 .await
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
         let verified_root = VerifiedStoreRoot::from_verified_object(root.clone(), object)
             .map_err(|error| StorePullError::Database(error.to_string()))?;
-        let verifier = self.bind_verified(storage, verified_root.clone()).await?;
-        Ok((verified_root, verifier))
+        self.bind_verified(storage, verified_root).await
     }
 
     pub(super) async fn bind_verified<'storage>(

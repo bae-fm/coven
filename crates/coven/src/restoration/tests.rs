@@ -35,7 +35,6 @@ use crate::storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedOb
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreLayout;
-use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
@@ -1046,7 +1045,7 @@ impl OwnerRecoveryRestoreFixture {
         ))
         .await
         .expect("restore through OwnerRecovery code");
-        let (restored, _stamper) = Database::open(
+        let restored = Database::open(
             &config.store_dir.db_path(),
             tables,
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
@@ -1219,8 +1218,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .expect("publish owner snapshot acknowledgement");
 
         let snapshot_before = owner_storage
-            .cloud_home()
-            .list("store-v1/snapshots/")
+            .list_provider_objects_for_test("store-v1/snapshots/")
             .await
             .expect("list Store snapshot objects");
 
@@ -1309,7 +1307,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             "restoring one store establishes no identity for another store",
         );
 
-        let (db_b, _stamper) = Database::open(
+        let db_b = Database::open(
             &lib_b.db_path(),
             tables.clone(),
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
@@ -1383,10 +1381,14 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     let owner = UserKeypair::generate();
     let db_owner = open_test_db();
-    let storage =
-        crate::sync::test_helpers::TestStore::create(&db_owner, "test-lib", owner.clone())
-            .await
-            .expect("create exact owner Store");
+    let storage = crate::sync::test_helpers::TestStore::create(
+        &db_owner,
+        "test-lib",
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact owner Store");
     let member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
     let encryption = EncryptionService::from_key([42; 32]);
@@ -1394,10 +1396,6 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .invite_member(
             &db_owner,
             &owner,
-            &Hlc::new(
-                "owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &pubkey_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -1425,10 +1423,6 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .remove_member(
             &db_owner,
             &owner,
-            &Hlc::new(
-                "owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &pubkey_hex(&member),
             &encryption,
             &security,
@@ -1689,7 +1683,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         );
 
         drop(owner_tmp);
-        let (restored, _stamper) = Database::open(
+        let restored = Database::open(
             &lib_b.db_path(),
             tables,
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,

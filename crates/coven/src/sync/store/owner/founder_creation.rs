@@ -447,16 +447,10 @@ impl<'operation> FounderStoreCreation<'operation> {
         let signer = self.identity;
         let reservation = self.durable_descriptor_reservation().await?;
         let authority = &reservation.membership.founder.root.authority;
-        let (first_exact, second_exact) = storage.exact_slot_probe_clients();
-        let exact_slots = crate::protocol::provider::probe_exact_slots(
-            first_exact,
-            second_exact,
-            db,
-            authority.probes.exact_slots(),
-            &authority.binding,
-        )
-        .await
-        .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
+        let exact_slots = storage
+            .probe_exact_slots(db, authority.probes.exact_slots(), &authority.binding)
+            .await
+            .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let provider_admin = crate::protocol::provider::FounderProviderAdminGrant {
             grant_id: authority.provider_admin_grant.clone(),
             provider: authority.binding.device.clone(),
@@ -795,9 +789,16 @@ impl StagedFounderStoreCreation<'_> {
                     "Store founder rollback before publication: {rollback}"
                 ))
             })?;
-        self.graph = self
-            .creation
-            .database
+        self.graph = self.creation.reload_founder_graph().await?;
+        Ok(())
+    }
+}
+
+impl FounderStoreCreation<'_> {
+    async fn reload_founder_graph(
+        &self,
+    ) -> Result<Box<crate::database::DurableFounderGraph>, StoreInitializationError> {
+        self.database
             .local_store_founder_graph()
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
@@ -805,17 +806,18 @@ impl StagedFounderStoreCreation<'_> {
                 StoreInitializationError::ProtocolRoot(
                     "rolled-back Store founder graph is absent".to_string(),
                 )
-            })?;
-        Ok(())
+            })
     }
 
-    async fn publish_history(&self) -> Result<AuthorizedStoreHistory<'_>, StoreProtocolRootError> {
-        let database = &self.creation.database;
-        let storage = &self.creation.storage;
+    async fn publish_history<'creation>(
+        &'creation self,
+        graph: &crate::database::DurableFounderGraph,
+    ) -> Result<AuthorizedStoreHistory<'creation>, StoreProtocolRootError> {
+        let database = &self.database;
+        let storage = &self.storage;
         let storage_access = storage.as_ref();
-        let founder_timestamp = self.creation.founder_timestamp;
-        let identity = self.creation.identity;
-        let graph = &self.graph;
+        let founder_timestamp = self.founder_timestamp;
+        let identity = self.identity;
         let root = StoreRootRef {
             store_root_id: graph.root.value.descriptor.store_root_id(),
             store_root_hash: graph.root.value.object_hash(),
@@ -961,15 +963,38 @@ impl StagedFounderStoreCreation<'_> {
         Ok(AuthorizedStoreHistory::new(
             database.clone(),
             storage,
-            verified_root,
             history_verifier,
             blob_source,
             keyrings,
         ))
     }
 
+    async fn finish_published(
+        &self,
+        history: AuthorizedStoreHistory<'_>,
+    ) -> Result<InitializedStore, StoreInitializationError> {
+        let durable_root = self
+            .database
+            .local_store_root_ref()
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
+            .ok_or_else(|| {
+                StoreInitializationError::ProtocolRoot(
+                    "published Store founder graph has no durable exact root".to_string(),
+                )
+            })?;
+        if history.root() != &durable_root {
+            return Err(StoreInitializationError::ProtocolRoot(
+                "published Store founder history differs from its durable exact root".to_string(),
+            ));
+        }
+        history.finish_initialization(self.identity).await
+    }
+}
+
+impl StagedFounderStoreCreation<'_> {
     async fn publish(self) -> Result<InitializedStore, StoreInitializationError> {
-        let history = match self.publish_history().await {
+        let history = match self.creation.publish_history(&self.graph).await {
             Ok(history) => history,
             Err(operation) if self.rollback_allowed => {
                 match Box::pin(self.creation.rollback_founder_publication(&self.graph)).await {
@@ -991,23 +1016,7 @@ impl StagedFounderStoreCreation<'_> {
                 ));
             }
         };
-        let durable_root = self
-            .creation
-            .database
-            .local_store_root_ref()
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-            .ok_or_else(|| {
-                StoreInitializationError::ProtocolRoot(
-                    "published Store founder graph has no durable exact root".to_string(),
-                )
-            })?;
-        if history.root() != &durable_root {
-            return Err(StoreInitializationError::ProtocolRoot(
-                "published Store founder history differs from its durable exact root".to_string(),
-            ));
-        }
-        history.finish_initialization(self.creation.identity).await
+        self.creation.finish_published(history).await
     }
 }
 

@@ -56,7 +56,7 @@ impl<'fixture> HistoryPublisher<'fixture> {
 
 struct PublishedHistory {
     db: crate::database::Database,
-    store: TestStore,
+    home: std::sync::Arc<crate::InMemoryCloudHome>,
     device: crate::sync::test_helpers::TestDevice,
     membership: MembershipChain,
     _temp: tempfile::TempDir,
@@ -67,15 +67,17 @@ impl PublishedHistory {
     async fn publish(history_length: u64) -> Self {
         let signer = UserKeypair::generate();
         let db = open_test_db();
+        let home = crate::sync::test_helpers::test_cloud_home();
         let store = TestStore::create(
             &db,
             &format!("checkpoint-sabotage-{history_length}"),
-            signer,
+            signer.clone(),
+            home.clone(),
         )
         .await
         .expect("create Merge Store");
         let device = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &signer)
             .await
             .expect("load Merge Store");
         let membership = device
@@ -89,7 +91,7 @@ impl PublishedHistory {
         }
         let fixture = Self {
             db,
-            store,
+            home,
             device,
             membership,
             _temp: temp,
@@ -129,13 +131,12 @@ impl PublishedHistory {
             .slot()
             .clone();
 
-        self.store.home.clear_exact_reads();
+        self.home.clear_exact_reads();
         HistoryPublisher::new(&self.db, &self.device, &self.store_dir)
             .publish_note(history_length + 1)
             .await;
 
         let reread = self
-            .store
             .home
             .exact_reads()
             .into_iter()
@@ -419,7 +420,7 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
 
 struct MemberRemovalHistory {
     db: crate::database::Database,
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
     device: crate::sync::test_helpers::TestDevice,
     summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 }
@@ -431,17 +432,18 @@ impl MemberRemovalHistory {
         let member = UserKeypair::generate();
         let member_pubkey = crate::sync::test_helpers::pubkey_hex(&member);
         let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-        let store = TestStore::create(&db, "retained-removal-proof", owner.clone())
-            .await
-            .expect("create removal-proof Store");
+        let store = TestStore::create(
+            &db,
+            "retained-removal-proof",
+            owner.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await
+        .expect("create removal-proof Store");
         store
             .invite_member(
                 &db,
                 &owner,
-                &super::hlc::Hlc::new(
-                    "retained-removal-proof".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &member_pubkey,
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -465,21 +467,11 @@ impl MemberRemovalHistory {
             std::sync::Arc::new(custody),
         );
         store
-            .remove_member(
-                &db,
-                &owner,
-                &super::hlc::Hlc::new(
-                    "retained-removal-proof-remove".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
-                &member_pubkey,
-                &encryption,
-                &security,
-            )
+            .remove_member(&db, &owner, &member_pubkey, &encryption, &security)
             .await
             .expect("remove retained member");
         let device = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &owner)
             .await
             .expect("bind retained-removal Store");
         let retained = device
@@ -675,14 +667,13 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
             ]
         })
         .collect::<Vec<_>>();
-    fixture.store.home.clear_exact_reads();
+    fixture.home.clear_exact_reads();
     fixture
         .device
         .prepare_conflict_resolution_plan_for_test(fixture.membership.head_refs())
         .await
         .expect("authorize from retained conflict-resolution predecessor");
     let reread = fixture
-        .store
         .home
         .exact_reads()
         .into_iter()

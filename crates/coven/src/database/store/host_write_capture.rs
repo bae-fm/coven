@@ -45,13 +45,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     pub(crate) fn local_activated_registration(
         &self,
         root: &crate::protocol::store_commit::StoreRootRef,
-    ) -> Result<
-        (
-            crate::protocol::store_commit::StoreDeviceRegistrationRef,
-            crate::protocol::store_commit::StoreDeviceRegistration,
-        ),
-        DbError,
-    > {
+    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         let reference =
             local_activated_registration_ref_on(self.transaction)?.ok_or_else(|| {
                 DbError::Message(
@@ -59,14 +53,18 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
                 )
             })?;
         let registration = load_activated_registration_on(self.transaction, root, &reference)?;
-        Ok((reference, registration))
+        crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+            reference,
+            registration,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))
     }
 
     pub(crate) fn circle_publication_context(
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+    ) -> Result<crate::sync::CirclePackageAccess, DbError> {
         StoreDatabase::circle_publication_context_on(self.transaction, circle_id, expected_control)
     }
 

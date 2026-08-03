@@ -10,8 +10,8 @@ use crate::database::{
     STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY, SYNC_ROUTING_HASH_STATE_KEY,
 };
 use crate::protocol::store_commit::{
-    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, RetainedVerifiedActivatedAck,
-    RetainedVerifiedRegistration, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
+    CommitFrontier, ObjectHash, ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
+    RetainedVerifiedActivatedAck, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
     VerifiedStoreBatchCommit,
 };
@@ -195,7 +195,7 @@ pub(crate) struct RetainedReplaySnapshotAuthority {
     pub(crate) accepted_cut: StoreHistoryCut,
     pub(crate) device_state: ResolvedStoreDeviceState,
     pub(crate) active_registrations:
-        BTreeMap<crate::protocol::store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
+        BTreeMap<crate::protocol::store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
     pub(crate) acknowledgements:
         BTreeMap<crate::protocol::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
 }
@@ -213,7 +213,7 @@ impl RetainedReplaySnapshotAuthority {
         let author = self
             .active_registrations
             .get(&self.metadata.author_registration.device_id)
-            .filter(|registration| registration.reference == self.metadata.author_registration)
+            .filter(|registration| registration.reference() == &self.metadata.author_registration)
             .ok_or_else(|| {
                 DbError::Message(
                     "retained snapshot author is absent from its active registrations".to_string(),
@@ -223,7 +223,7 @@ impl RetainedReplaySnapshotAuthority {
             &metadata_bytes,
             self.store_root.store_root_hash,
             &self.snapshot,
-            &author.value,
+            author.value(),
         )
         .map_err(|error| DbError::Message(format!("retained snapshot metadata: {error}")))?;
         if self.metadata.store_root_hash != self.store_root.store_root_hash
@@ -260,7 +260,7 @@ impl RetainedReplaySnapshotAuthority {
             || expected_active.iter().any(|(device_id, reference)| {
                 self.active_registrations
                     .get(device_id)
-                    .is_none_or(|registration| &registration.reference != *reference)
+                    .is_none_or(|registration| registration.reference() != *reference)
             })
             || self.acknowledgements.len() != self.active_registrations.len()
         {
@@ -270,22 +270,22 @@ impl RetainedReplaySnapshotAuthority {
             ));
         }
         for (device_id, registration) in &self.active_registrations {
-            let bytes = registration.value.to_bytes();
+            let bytes = registration.value().to_bytes();
             registration
-                .reference
+                .reference()
                 .object
                 .verify(&bytes)
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let parsed = StoreDeviceRegistration::parse_at(&bytes, &self.store_root, *device_id)
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            if parsed != registration.value {
+            if &parsed != registration.value() {
                 return Err(DbError::Message(
                     "retained snapshot registration is not canonical".to_string(),
                 ));
             }
             registration
-                .reference
-                .verify_registration(&registration.value)
+                .reference()
+                .verify_registration(registration.value())
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
                 DbError::Message(
@@ -311,7 +311,7 @@ impl RetainedReplaySnapshotAuthority {
                 &commit_bytes,
                 self.store_root.store_root_hash,
                 &acknowledgement.activating_commit,
-                &registration.value,
+                registration.value(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
             if parsed_commit.value() != &acknowledgement.activating_commit_value

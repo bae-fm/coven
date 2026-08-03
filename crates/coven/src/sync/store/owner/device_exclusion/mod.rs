@@ -17,10 +17,10 @@ use crate::protocol::remote_object::{
 };
 use crate::protocol::store_commit::{
     device_exclusion_outcome_semantic_prefix, device_exclusion_proposal_semantic_prefix,
-    ObjectHash, StoreBatchCommitRef, StoreDeviceExclusion, StoreDeviceExclusionCancellation,
-    StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProof,
-    StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId, StoreDeviceExclusionProposalRef,
-    StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut, StoreProtocolError,
+    ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef,
+    StoreDeviceExclusionProof, StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId,
+    StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
+    StoreProtocolError,
 };
 use crate::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
@@ -616,19 +616,14 @@ impl Store {
             .storage
             .allocate_protocol_slot(&outcome_context, &outcome_prefix, ".json")
             .await?;
-        let proposal = StoreDeviceExclusionProposal::signed(
-            plan.root().store_root_hash,
+        let proposal = plan.sign_device_exclusion_proposal(
             proposal_id,
             target.clone(),
             plan.registration(),
-            plan.device_state().clone(),
             outcome_slot,
-            target.clone(),
             plan.owner_grant()
                 .ok_or(StoreDeviceExclusionError::OwnerAuthorityRequired)?
                 .clone(),
-            plan.registration(),
-            plan.device_signer(),
         )?;
         let prefix = device_exclusion_proposal_semantic_prefix(
             target.device_id,
@@ -683,12 +678,12 @@ impl Store {
         &self,
         device_id: crate::protocol::store_commit::StoreDeviceId,
     ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
-        let (target, _, _) = self
+        let target = self
             .database
             .activated_store_device_registration_for_device(device_id)
             .await?
             .ok_or(StoreDeviceExclusionError::TargetNotActive)?;
-        match self.propose_device_exclusion(&target).await? {
+        match self.propose_device_exclusion(target.reference()).await? {
             StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => Ok(proposal),
             other => Err(StoreDeviceExclusionError::InvalidState(format!(
                 "proposal did not activate: {other:?}"
@@ -849,17 +844,12 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .storage
             .allocate_protocol_slot(&outcome_context, &outcome_prefix, ".json")
             .await?;
-        let proposal = StoreDeviceExclusionProposal::signed(
-            plan.root().store_root_hash,
+        let proposal = plan.sign_device_exclusion_proposal(
             proposal_id,
             target.clone(),
-            &target_registration,
-            plan.device_state().clone(),
+            target_registration.value(),
             outcome_slot,
-            plan.registration_ref().clone(),
             owner_grant,
-            plan.registration(),
-            plan.device_signer(),
         )?;
         let proposal_prefix = device_exclusion_proposal_semantic_prefix(
             target.device_id,
@@ -888,7 +878,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
                 reference.clone(),
                 &proposal,
-                &target_registration,
+                target_registration.value(),
                 plan.registration(),
             )?;
         let candidate = Box::pin(self.writer.prepare_candidate(
@@ -956,29 +946,23 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         require_pending_proposal(&state, proposal_ref)?;
         let outcome = match intent {
             OutcomeIntent::Cancel => {
-                StoreDeviceExclusionOutcome::Cancelled(StoreDeviceExclusionCancellation::signed(
+                StoreDeviceExclusionOutcome::Cancelled(plan.sign_device_exclusion_cancellation(
                     proposal_ref.clone(),
                     &proposal.object.value,
-                    plan.registration_ref().clone(),
                     owner_grant,
-                    plan.registration(),
-                    plan.device_signer(),
                 )?)
             }
             OutcomeIntent::Exclude => {
                 let proof = self
                     .build_exclusion_proof(proposal_ref, &proposal.object.value)
                     .await?;
-                StoreDeviceExclusionOutcome::Excluded(StoreDeviceExclusion::signed(
+                StoreDeviceExclusionOutcome::Excluded(plan.sign_device_exclusion(
                     proposal_ref.clone(),
                     &proposal.object.value,
                     proposal_ref.target.clone(),
                     &proposal.target,
                     proof,
-                    plan.registration_ref().clone(),
                     owner_grant,
-                    plan.registration(),
-                    plan.device_signer(),
                 )?)
             }
         };
@@ -1393,7 +1377,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             let acknowledgement = self
                 .writer
                 .device_exclusion_history()
-                .load_acknowledgement(&reference, &registration)
+                .load_acknowledgement(&reference, registration.value())
                 .await?;
             let proposal_freezes = &acknowledgement.value.exclusions.proposal_freezes;
             let freeze = proposal_freezes

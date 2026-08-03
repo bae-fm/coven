@@ -367,8 +367,8 @@ pub(super) fn validate_replay_authority_on(
     if let RetainedReplayAuthority::StableSnapshot(authority) = &baseline.authority {
         for registration in authority.active_registrations.values() {
             let installed =
-                load_activated_registration_on(conn, &root_ref, &registration.reference)?;
-            if installed != registration.value {
+                load_activated_registration_on(conn, &root_ref, registration.reference())?;
+            if &installed != registration.value() {
                 return Err(DbError::Message(
                     "retained snapshot active registration differs from its installed authority"
                         .to_string(),

@@ -334,7 +334,7 @@ impl CovenBuilder {
         };
         let open_guard = Arc::new(StoreOpenGuard::acquire(&store_dir)?);
         store_dir.remove_orphaned_blob_temps(std::time::SystemTime::now())?;
-        let (db, stamper) = Database::open(
+        let db = Database::open(
             &db_path,
             tables.clone(),
             self.blob_tombstone_grace,
@@ -364,7 +364,6 @@ impl CovenBuilder {
         Ok(CovenHandle::new(
             db,
             read_db,
-            stamper,
             store_dir,
             provider,
             key_service,
@@ -851,9 +850,10 @@ mod tests {
     async fn merge_test_storage(
         handle: &CovenHandle,
         keypair: &crate::keys::UserKeypair,
-    ) -> TestStore {
+        home: std::sync::Arc<crate::InMemoryCloudHome>,
+    ) -> std::sync::Arc<TestStore> {
         handle
-            .create_test_store("lib-test", keypair.clone())
+            .create_test_store("lib-test", keypair.clone(), home)
             .await
             .expect("create exact test Store")
     }
@@ -865,7 +865,9 @@ mod tests {
     impl CovenHandleWriteTestOps for CovenHandle {
         async fn publish_current_writes(&self) {
             let keypair = crate::keys::UserKeypair::generate();
-            let storage = merge_test_storage(self, &keypair).await;
+            let storage =
+                merge_test_storage(self, &keypair, crate::sync::test_helpers::test_cloud_home())
+                    .await;
             self.publish_test_store(&storage)
                 .await
                 .expect("publish pending Store write");
@@ -892,7 +894,12 @@ mod tests {
 
         let reopened = open_files_handle_in(dir);
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&reopened, &keypair).await;
+        let storage = merge_test_storage(
+            &reopened,
+            &keypair,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         reopened
             .publish_test_store(&storage)
             .await
@@ -943,7 +950,12 @@ mod tests {
             .expect("subscribe after restart");
         assert_eq!(*first_status.borrow(), crate::WriteStatus::Pending);
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&reopened, &keypair).await;
+        let storage = merge_test_storage(
+            &reopened,
+            &keypair,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         reopened
             .publish_test_store(&storage)
             .await
@@ -1021,7 +1033,12 @@ mod tests {
         assert_eq!(lease_count, 0);
 
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&handle, &keypair).await;
+        let storage = merge_test_storage(
+            &handle,
+            &keypair,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         handle
             .publish_test_store(&storage)
             .await
@@ -1072,7 +1089,12 @@ mod tests {
         );
 
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&handle, &keypair).await;
+        let storage = merge_test_storage(
+            &handle,
+            &keypair,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         handle
             .publish_test_store(&storage)
             .await
@@ -1115,7 +1137,12 @@ mod tests {
             .await
             .expect("insert before first cycle");
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&handle, &keypair).await;
+        let storage = merge_test_storage(
+            &handle,
+            &keypair,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         handle
             .publish_test_store(&storage)
             .await
@@ -1165,8 +1192,9 @@ mod tests {
             .await
             .expect("write before failed push");
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&handle, &keypair).await;
-        storage.home.fail_exact_create_before_call(1);
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let storage = merge_test_storage(&handle, &keypair, home.clone()).await;
+        home.fail_exact_create_before_call(1);
 
         let first = handle.publish_test_store(&storage).await;
         assert!(
@@ -1617,7 +1645,8 @@ mod tests {
         _tmp: tempfile::TempDir,
         dir: StoreDir,
         handle: CovenHandle,
-        store: TestStore,
+        store: std::sync::Arc<TestStore>,
+        home: std::sync::Arc<crate::InMemoryCloudHome>,
         encryption: crate::EncryptionService,
         destination_circle: crate::CircleId,
         source_object: ObjectSlot,
@@ -1636,8 +1665,9 @@ mod tests {
                 .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
                 .open()
                 .expect("open scoped blob store");
+            let home = crate::sync::test_helpers::test_cloud_home();
             let store = handle
-                .create_test_store("lib-test", signer)
+                .create_test_store("lib-test", signer, home.clone())
                 .await
                 .expect("create exact test Store");
             let destination_circle = handle
@@ -1697,6 +1727,7 @@ mod tests {
                 dir,
                 handle,
                 store,
+                home,
                 encryption,
                 destination_circle,
                 source_object,
@@ -1720,13 +1751,13 @@ mod tests {
     #[tokio::test]
     async fn audience_move_requires_remote_only_blob_before_committing_sql() {
         let fixture = RemoteOnlyStoreBlob::create().await;
-        ExactSlotStorage::delete_at(fixture.store.home.as_ref(), &fixture.source_object)
+        ExactSlotStorage::delete_at(fixture.home.as_ref(), &fixture.source_object)
             .await
             .expect("remove the only remote source");
         fixture
             .handle
             .connect_sync_with_test_home(
-                fixture.store.home.clone(),
+                fixture.home.clone(),
                 CloudCipher::Encrypted(fixture.encryption.clone()),
             )
             .await
@@ -1857,7 +1888,7 @@ mod tests {
         fixture
             .handle
             .connect_sync_with_test_home(
-                fixture.store.home.clone(),
+                fixture.home.clone(),
                 CloudCipher::Encrypted(fixture.encryption.clone()),
             )
             .await
@@ -1909,7 +1940,7 @@ mod tests {
         fixture
             .handle
             .connect_sync_with_test_home(
-                fixture.store.home.clone(),
+                fixture.home.clone(),
                 CloudCipher::Encrypted(fixture.encryption.clone()),
             )
             .await
@@ -2009,7 +2040,7 @@ mod tests {
         fixture
             .handle
             .connect_sync_with_test_home(
-                fixture.store.home.clone(),
+                fixture.home.clone(),
                 CloudCipher::Encrypted(fixture.encryption.clone()),
             )
             .await
@@ -2056,7 +2087,7 @@ mod tests {
             "the destination spool is durable before the SQL write returns",
         );
 
-        ExactSlotStorage::delete_at(fixture.store.home.as_ref(), &fixture.source_object)
+        ExactSlotStorage::delete_at(fixture.home.as_ref(), &fixture.source_object)
             .await
             .expect("remove source after the move commits");
         fixture
@@ -2108,13 +2139,14 @@ mod tests {
                             .expect("open remote-root store")
                     };
                     let handle = open();
-                    let store = handle
-                        .create_test_store("lib-test", signer.clone())
+                    let home = crate::sync::test_helpers::test_cloud_home();
+                    handle
+                        .create_test_store("lib-test", signer.clone(), home.clone())
                         .await
                         .expect("create exact test Store");
                     handle
                         .connect_sync_with_test_home(
-                            store.home.clone(),
+                            home,
                             CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
                         )
                         .await
@@ -2385,7 +2417,8 @@ mod tests {
 
         async fn assert_publishes_in_order(&self, handle: &CovenHandle) {
             let keypair = crate::keys::UserKeypair::generate();
-            let storage = merge_test_storage(handle, &keypair).await;
+            let home = crate::sync::test_helpers::test_cloud_home();
+            let storage = merge_test_storage(handle, &keypair, home.clone()).await;
             handle
                 .publish_test_store(&storage)
                 .await
@@ -2425,8 +2458,7 @@ mod tests {
                 first_sequence + 1,
                 "replacement writes publish in their host transaction order"
             );
-            let blob_objects = storage
-                .home
+            let blob_objects = home
                 .keys()
                 .into_iter()
                 .filter(|key| key.starts_with("media-files/opaque/"))
@@ -2734,7 +2766,11 @@ mod tests {
         let (_source_tmp, source) = open_files_handle();
         let storage = Arc::new(
             source
-                .create_test_store("lib-test", crate::keys::UserKeypair::generate())
+                .create_test_store(
+                    "lib-test",
+                    crate::keys::UserKeypair::generate(),
+                    crate::sync::test_helpers::test_cloud_home(),
+                )
                 .await
                 .expect("create remote exact test Store"),
         );

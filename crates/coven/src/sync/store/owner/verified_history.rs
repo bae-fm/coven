@@ -3,15 +3,16 @@ use super::*;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{MembershipChain, MembershipStatus};
 use crate::protocol::store_commit::{
-    ActivatedStoreDeviceRegistrationRef, DeviceJoinAttempt, DeviceJoinAttemptDecisionRef,
-    DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash, OpenedRetainedMergeHistorySummary,
-    OwnerRecoveryNode, OwnerRecoveryNodeRef, ResolvedStoreDeviceState,
-    RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState,
-    StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreDeviceStatus, StoreHistoryCut,
-    StoreProtocolError, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttempt,
+    DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash,
+    OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
+    ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
+    RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, VerifiedStoreBatchCommit,
+    VerifiedStoreDeviceOperations,
 };
 use crate::protocol::store_commit::{
     DeviceJoinAttemptRef, DeviceJoinOutcome, DeviceJoinOutcomeRef, SnapshotMeta, StoreAck,
@@ -117,7 +118,7 @@ pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) predecessor_membership: MembershipChain,
     pub(crate) predecessor_state: ResolvedStoreDeviceState,
     pub(crate) state_after: ResolvedStoreDeviceState,
-    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub(crate) operations: VerifiedStoreDeviceOperations,
     pub(crate) acknowledgement: Option<(store_commit::StoreAckRef, store_commit::StoreAck)>,
     pub(crate) membership_control: Option<VerifiedMergeMembershipControl>,
@@ -603,6 +604,10 @@ impl VerifiedOwnerPromotionRequestActivation {
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
+    pub(crate) fn verified_root(&self) -> &super::super::protocol_root::VerifiedStoreRoot {
+        &self.root
+    }
+
     pub(crate) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'a> {
         self.commit_verifier.membership_objects()
     }
@@ -1103,7 +1108,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn discover_owner_recoveries(
         &self,
         membership: &MembershipChain,
-    ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
+    ) -> Result<Vec<ReferencedStoreDeviceRegistration>, StorePullError> {
         self.commit_verifier
             .discover_owner_recoveries(membership)
             .await
@@ -1154,7 +1159,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         commit: &StoreBatchCommit,
         predecessor_state: ResolvedStoreDeviceState,
-        registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
+        registrations: &[ActivatedStoreDeviceRegistration],
         device_operations: VerifiedStoreDeviceOperations,
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
         let (authorized_predecessor, recovery_author) =
@@ -1637,9 +1642,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         let founder = self.commit_verifier.load_founder_registration().await?;
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object);
-        registrations.insert(founder_ref.device_id, (founder_ref, founder.value));
+        registrations.insert(
+            founder_ref.device_id,
+            ReferencedStoreDeviceRegistration::verified(founder_ref, founder.value)
+                .map_err(|error| StorePullError::Database(error.to_string()))?,
+        );
         for recovered in self.discover_owner_recoveries(membership).await? {
-            registrations.insert(recovered.0.device_id, recovered);
+            registrations.insert(recovered.reference().device_id, recovered);
         }
         self.load_state_registrations(&state, &mut registrations)
             .await?;
@@ -1648,7 +1657,8 @@ impl<'a> MergeHistoryVerifier<'a> {
         let mut observed_states = BTreeSet::new();
         loop {
             let mut next = BTreeMap::new();
-            for (registration_ref, registration) in registrations.values() {
+            for registration in registrations.values() {
+                let registration_ref = registration.reference();
                 let inactive_cut = match state.devices.get(&registration_ref.device_id) {
                     Some(record) if record.registration != *registration_ref => {
                         return Err(StorePullError::Database(
@@ -1663,7 +1673,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     None => None,
                 };
                 let discovered = self
-                    .discover_merge_stream(registration_ref, registration, inactive_cut)
+                    .discover_merge_stream(registration_ref, registration.value(), inactive_cut)
                     .await?;
                 if matches!(discovered.block, Some(MergeStreamBlock::Authenticated(_))) {
                     return Err(StorePullError::Database(
@@ -1728,13 +1738,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         state: &ResolvedStoreDeviceState,
         registrations: &mut BTreeMap<
             store_commit::StoreDeviceId,
-            (StoreDeviceRegistrationRef, StoreDeviceRegistration),
+            ReferencedStoreDeviceRegistration,
         >,
     ) -> Result<(), StorePullError> {
         for (device_id, record) in &state.devices {
             if registrations
                 .get(device_id)
-                .is_some_and(|(reference, _)| reference == &record.registration)
+                .is_some_and(|registration| registration.reference() == &record.registration)
             {
                 continue;
             }
@@ -1749,7 +1759,11 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             registrations.insert(
                 *device_id,
-                (record.registration.clone(), registration.value),
+                ReferencedStoreDeviceRegistration::verified(
+                    record.registration.clone(),
+                    registration.value,
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?,
             );
         }
         Ok(())
@@ -1951,7 +1965,7 @@ pub(crate) struct PreparedMergeHistorySuccessor {
 }
 
 pub(crate) struct MergeHistorySuccessorEvidence {
-    pub(crate) registrations: Vec<RetainedVerifiedRegistration>,
+    pub(crate) registrations: Vec<ReferencedStoreDeviceRegistration>,
     pub(crate) acknowledgement: Option<store_commit::RetainedVerifiedActivatedAck>,
     pub(crate) membership_proof: Option<store_commit::RetainedMergeMembershipProof>,
 }
@@ -2050,7 +2064,7 @@ fn insert_latest_announcement(
 
 pub(crate) struct MergedRetainedMergeHistory {
     causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
-    registrations: BTreeMap<store_commit::StoreDeviceId, RetainedVerifiedRegistration>,
+    registrations: BTreeMap<store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
     acknowledgements:
         BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedVerifiedActivatedAck>,
     membership_proofs: BTreeMap<StoreBatchCommitRef, store_commit::RetainedMergeMembershipProof>,
@@ -2187,7 +2201,7 @@ pub(crate) fn compose_merge_history_successor(
         if !commit
             .device_registrations()
             .iter()
-            .any(|activation| activation.registration == registration.reference)
+            .any(|activation| &activation.registration == registration.reference())
         {
             return Err(StorePullError::Database(
                 "Merge history registration is absent from its activating commit".to_string(),
@@ -2195,7 +2209,7 @@ pub(crate) fn compose_merge_history_successor(
         }
         insert_exact(
             &mut merged.registrations,
-            registration.reference.device_id,
+            registration.reference().device_id,
             registration,
             "Merge successor registration conflicts with retained authority",
         )?;
@@ -2241,10 +2255,8 @@ pub(crate) fn compose_merge_history_successor(
     insert_exact(
         &mut merged.registrations,
         author_ref.device_id,
-        RetainedVerifiedRegistration {
-            reference: author_ref.clone(),
-            value: author.clone(),
-        },
+        ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
+            .map_err(|error| StorePullError::Database(error.to_string()))?,
         "Merge successor author registration conflicts with retained authority",
     )?;
     let mut post_frontier = BTreeMap::new();
@@ -2338,10 +2350,8 @@ pub(crate) fn compose_merge_snapshot_history_summary(
     insert_exact(
         &mut registrations,
         author_ref.device_id,
-        RetainedVerifiedRegistration {
-            reference: author_ref.clone(),
-            value: author.clone(),
-        },
+        ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
+            .map_err(|error| StorePullError::Database(error.to_string()))?,
         "Merge snapshot author registration conflicts with retained authority",
     )?;
     let summary = RetainedVerifiedMergeHistorySummary {
@@ -3590,13 +3600,13 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "Merge snapshot device state differs from its exact verified history".to_string(),
             ));
         }
-        let (_, author) = state
+        let author = state
             .common
             .active_registrations
             .get(&snapshot.meta.author_registration.device_id)
-            .filter(|(reference, _)| reference == &snapshot.meta.author_registration)
+            .filter(|registration| registration.reference() == &snapshot.meta.author_registration)
             .ok_or(StorePullError::SnapshotAuthorInactive)?;
-        if !state.membership.is_owner_now(&author.author_pubkey) {
+        if !state.membership.is_owner_now(&author.value().author_pubkey) {
             return Err(StorePullError::SnapshotAuthorNotOwner);
         }
         let canonical = compose_merge_snapshot_history_summary(
@@ -3605,7 +3615,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             &state.membership,
             &state.common.device_state,
             &snapshot.meta.author_registration,
-            author,
+            author.value(),
             state.checkpoints.clone(),
         )?;
         if snapshot.meta.history_summary != canonical {
@@ -3623,14 +3633,15 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<StoreHistoryCut, StorePullError> {
         let root = self.root.reference().clone();
         let mut accepted = snapshot_frontier.clone();
-        for (registration_ref, registration) in state.common.active_registrations.values() {
+        for registration in state.common.active_registrations.values() {
+            let registration_ref = registration.reference();
             let stream_id = store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
                 registration_ref,
                 store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
             let discovery = self
-                .discover_merge_stream(registration_ref, registration, None)
+                .discover_merge_stream(registration_ref, registration.value(), None)
                 .await?;
             let Some((_, _, latest, _)) = discovery.commits.last() else {
                 if accepted.contains_key(&stream_id) {
@@ -3712,7 +3723,8 @@ impl<'a> MergeHistoryVerifier<'a> {
             .activated_snapshot_acknowledgements(&accepted_cut.0)
             .await?;
         let mut retained_acknowledgements = BTreeMap::new();
-        for (device_id, (registration_ref, registration)) in &state.common.active_registrations {
+        for (device_id, registration) in &state.common.active_registrations {
+            let registration_ref = registration.reference();
             let matching = acknowledgements
                 .iter()
                 .filter(|ack| {
@@ -3730,7 +3742,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 })
                 .max_by_key(|ack| (ack.reference.sequence, ack.activating_commit.clone()))
                 .ok_or_else(|| StorePullError::SnapshotNotStable {
-                    member: registration.author_pubkey.clone(),
+                    member: registration.value().author_pubkey.clone(),
                     device_id: device_id.to_string(),
                 })?;
             retained_acknowledgements.insert(
@@ -3754,17 +3766,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             snapshot_cut,
             accepted_cut,
             device_state: state.common.device_state,
-            active_registrations: state
-                .common
-                .active_registrations
-                .into_iter()
-                .map(|(device_id, (reference, value))| {
-                    (
-                        device_id,
-                        store_commit::RetainedVerifiedRegistration { reference, value },
-                    )
-                })
-                .collect(),
+            active_registrations: state.common.active_registrations,
             acknowledgements: retained_acknowledgements,
         };
         VerifiedStoreSnapshotStability::from_authority(authority)
@@ -4283,8 +4285,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         author: &StoreDeviceRegistration,
         membership: &MembershipChain,
         accepted_frontier: &[StoreBatchCommitRef],
-    ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, StorePullError>
-    {
+    ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StorePullError> {
         let accepted =
             VerifiedMergePredecessorHistory::new(&self.history.commits, accepted_frontier);
         let loaded = self.load_commit_join_evidence(commit, author).await;
@@ -4309,10 +4310,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         predecessor: Option<&MembershipChain>,
         join_evidence: &VerifiedCommitJoinEvidence,
         accepted: VerifiedMergePredecessorHistory<'_>,
-    ) -> Result<
-        Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
-        RegistrationLoadError,
-    > {
+    ) -> Result<Vec<ActivatedStoreDeviceRegistration>, RegistrationLoadError> {
         if join_evidence.commit != *commit {
             return Err(RegistrationLoadError::Invalid(
                 "verified device-join evidence belongs to another Store commit".to_string(),
@@ -4456,7 +4454,17 @@ impl<'a> MergeHistoryVerifier<'a> {
                 &verified_join_outcomes,
             ))
             .await?;
-            registrations.push((registration, authority));
+            let registration = ReferencedStoreDeviceRegistration::verified(
+                activated.registration.clone(),
+                registration,
+            )
+            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            let registration = ActivatedStoreDeviceRegistration::verified(registration, authority)
+                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            registration
+                .verify_reference(activated)
+                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            registrations.push(registration);
         }
         Ok(registrations)
     }
@@ -4682,14 +4690,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .verified_merge_membership_objects(&reference, &commit),
             )
             .await?;
-            let retained_registrations = commit
-                .device_registrations()
+            let retained_registrations = registrations
                 .iter()
-                .zip(&registrations)
-                .map(|(activation, (value, _))| RetainedVerifiedRegistration {
-                    reference: activation.registration.clone(),
-                    value: value.clone(),
-                })
+                .map(|registration| registration.registration().clone())
                 .collect();
             let retained_acknowledgement = match acknowledgement.clone() {
                 Some((acknowledgement_ref, acknowledgement_value)) => Some(

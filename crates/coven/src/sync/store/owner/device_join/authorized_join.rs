@@ -774,21 +774,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let activated_registration =
-            crate::sync::store::operations::DeviceJoinRegistrationActivation {
-                reference: crate::protocol::store_commit::ActivatedStoreDeviceRegistrationRef {
-                    registration: completion.readiness.proof.registration.clone(),
-                    authority:
-                        crate::protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
-                            attempt_id,
-                            outcome: outcome_ref.clone(),
-                        },
-                },
-                registration: attempt.expected_registration.clone(),
-                authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation::Join {
+            crate::protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
+                crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                    completion.readiness.proof.registration.clone(),
+                    attempt.expected_registration.clone(),
+                )?,
+                crate::protocol::store_commit::StoreDeviceRegistrationActivation::Join {
                     attempt_id,
                     outcome: outcome_ref.clone(),
                 },
-            };
+            )?;
         let plan = self.writer.prepare_plan().await?;
         let activation_ref = self
             .writer
@@ -1022,8 +1017,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         receipt_object.verify(&attempt.value, &executor)?;
         for slot in &receipt_object.deleted_slots {
             self.storage
-                .exact_slot_storage()
-                .delete_and_verify_absent(slot)
+                .delete_exact_slot_and_verify_absent(slot)
                 .await
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }
@@ -1066,7 +1060,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .activated_store_device_registration(closure.administrator_registration.clone())
                     .await
                     .map_err(database_error)?;
-                closure.verify(&registration)?;
+                closure.verify(registration.value())?;
             }
             ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
                 let registration = self
@@ -1074,7 +1068,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .activated_store_device_registration(revocation.executor.clone())
                     .await
                     .map_err(database_error)?;
-                revocation.verify(&registration)?;
+                revocation.verify(registration.value())?;
             }
         }
         match joiner {
@@ -1086,7 +1080,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     .activated_store_device_registration(revocation.executor.clone())
                     .await
                     .map_err(database_error)?;
-                revocation.verify(&registration)?;
+                revocation.verify(registration.value())?;
             }
         }
         Ok(())
@@ -1136,7 +1130,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .activated_store_device_registration(receipt_object.executor.clone())
             .await
             .map_err(database_error)?;
-        receipt.receipt.verify(&receipt_object, &executor)?;
+        receipt.receipt.verify(&receipt_object, executor.value())?;
         if receipt_object.store_root_hash != self.root.store_root_hash
             || plan.membership_state() != &receipt_object.membership
         {

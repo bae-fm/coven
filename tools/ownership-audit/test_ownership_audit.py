@@ -246,6 +246,111 @@ impl History<'_> {
             ],
         )
 
+    def test_service_exposure_report_finds_anonymous_owner_bundles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates" / "coven-core" / "src" / "sample.rs"
+            path.parent.mkdir(parents=True)
+            source = """
+fn founder_authority() -> Result<
+    (StoreDeviceRegistrationRef, StoreDeviceRegistration, UserKeypair),
+    Error,
+> {
+    todo!()
+}
+
+fn database_runtime() -> (Database, RuntimeHandle) {
+    todo!()
+}
+
+fn nested_runtime() -> Option<(HashMap<String, Vec<u8>>, RuntimeHandle)> {
+    todo!()
+}
+
+fn callback_factory() -> impl Fn(Database, RuntimeHandle) {
+    todo!()
+}
+
+fn selected_position() -> (String, u64) {
+    todo!()
+}
+"""
+            path.write_text(source)
+            source_file = ownership_audit.parse_source(path, source)
+            original_root = ownership_audit.ROOT
+            ownership_audit.ROOT = root
+            try:
+                findings = ownership_audit.service_exposures_for_source(source_file)
+            finally:
+                ownership_audit.ROOT = original_root
+
+        bundles = [
+            finding
+            for finding in findings
+            if finding["kind"] == "service-bundle"
+        ]
+        self.assertEqual(
+            [
+                (
+                    finding["name"],
+                    finding["dependencies"],
+                    finding["members"],
+                )
+                for finding in bundles
+            ],
+            [
+                (
+                    "coven_core::sample::founder_authority",
+                    ["authority", "identity"],
+                    [
+                        "StoreDeviceRegistrationRef",
+                        "StoreDeviceRegistration",
+                        "UserKeypair",
+                    ],
+                ),
+                (
+                    "coven_core::sample::database_runtime",
+                    ["database", "runtime"],
+                    ["Database", "RuntimeHandle"],
+                ),
+                (
+                    "coven_core::sample::nested_runtime",
+                    ["runtime"],
+                    ["HashMap<String, Vec<u8>>", "RuntimeHandle"],
+                ),
+            ],
+        )
+
+    def test_call_site_records_tuple_destructuring(self):
+        records = self.inventory(
+            """
+fn database_runtime() -> (Database, RuntimeHandle) { todo!() }
+fn consume(_: Database, _: RuntimeHandle) {}
+fn caller() {
+    let (database, runtime) = database_runtime();
+    consume(database, runtime);
+}
+"""
+        )
+        caller = next(record for record in records if record["name"] == "caller")
+        site = next(
+            call
+            for call in caller["calls"]
+            if call["callee_text"] == "database_runtime"
+        )
+
+        self.assertEqual(
+            site["result_binding"],
+            {
+                "kind": "TUPLE_PAT",
+                "text": "(database, runtime)",
+                "members": [
+                    {"position": 0, "text": "database", "bindings": ["database"]},
+                    {"position": 1, "text": "runtime", "bindings": ["runtime"]},
+                ],
+            },
+        )
+
     def test_inventory_records_closures_under_their_enclosing_callable(self):
         records = self.inventory(
             "fn run(database: &Database) { let load = || database.load(); load(); }"
@@ -1481,6 +1586,107 @@ class SemanticIndexTests(unittest.TestCase):
         ])
         self.assertFalse(nodes["store::publish_snapshot"]["ready"])
         self.assertEqual(graph["summary"]["ready"], 1)
+
+    def test_graph_exposes_anonymous_bundle_consumers(self):
+        producer = self.graph_record(
+            "sample::database_runtime",
+            return_type="(Database, RuntimeHandle)",
+            retained_dependencies=["database", "runtime"],
+            anonymous_owner_bundles=[
+                {
+                    "members": ["Database", "RuntimeHandle"],
+                    "dependencies": ["database", "runtime"],
+                }
+            ],
+            callers=[
+                {
+                    "symbol": "sample::Store::load",
+                    "sites": [
+                        {
+                            "expression": "database_runtime()",
+                            "result_binding": {
+                                "kind": "TUPLE_PAT",
+                                "text": "(database, runtime)",
+                                "members": [
+                                    {
+                                        "position": 0,
+                                        "text": "database",
+                                        "bindings": ["database"],
+                                    },
+                                    {
+                                        "position": 1,
+                                        "text": "runtime",
+                                        "bindings": ["runtime"],
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        caller = self.graph_record(
+            "sample::Store::load",
+            kind="method",
+            receiver_type="Store",
+            parameters=[{"name": "self", "type": "&self"}],
+            calls=[
+                {
+                    "callee_text": "consume",
+                    "arguments": [
+                        {"text": "database"},
+                        {"text": "runtime"},
+                    ],
+                }
+            ],
+            callees=[
+                {"symbol": producer["symbol"], "sites": [{}]},
+            ],
+        )
+
+        graph = ownership_audit.build_graph_data(
+            {"callables": [producer, caller], "reach_throughs": {}}
+        )
+        producer_node = next(
+            node
+            for node in [
+                *graph["nodes"],
+                *graph["construction_boundaries"],
+            ]
+            if any(
+                callable_record["symbol"] == producer["symbol"]
+                for callable_record in node["callables"]
+            )
+        )
+        bundle = next(
+            callable_record["anonymous_owner_bundles"][0]
+            for callable_record in producer_node["callables"]
+            if callable_record["symbol"] == producer["symbol"]
+        )
+
+        self.assertEqual(bundle["nearest_owner"], "Store")
+        self.assertEqual(
+            bundle["consumers"][0]["downstream_arguments"],
+            [
+                {
+                    "member": 0,
+                    "binding": "database",
+                    "callee": "consume",
+                    "argument": 0,
+                    "expression": "database",
+                },
+                {
+                    "member": 1,
+                    "binding": "runtime",
+                    "callee": "consume",
+                    "argument": 1,
+                    "expression": "runtime",
+                },
+            ],
+        )
+        html = ownership_audit.render_graph_html(graph)
+        self.assertIn("Anonymous owner bundles", html)
+        self.assertIn("nearest retained owner", html)
 
     def test_cfg_realm_distinguishes_production_alternatives_from_test_only_paths(self):
         oauth = self.graph_record(

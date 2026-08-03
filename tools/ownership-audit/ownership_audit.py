@@ -99,11 +99,11 @@ STATEFUL_TYPE_PATTERNS = {
         r"\b(?:UserKeypair|Identity|DeviceSigner|MasterKeyCustody|Keyring|Keypair)\b"
     ),
     "authority": re.compile(
-        r"\b(?:Authorized\w+|MergeHistoryVerifier|StoreCommitVerifier|MembershipChain|StoreRootRef)\b"
+        r"\b(?:Authorized\w+|MergeHistoryVerifier|StoreCommitVerifier|MembershipChain|StoreRootRef|StoreDeviceRegistration(?:Ref)?)\b"
     ),
     "encryption": re.compile(r"\b(?:EncryptionService|CloudCipher|RoutingKey|EpochKey)\b"),
     "runtime": re.compile(
-        r"\b(?:Runtime|Handle|Cancellation|Cancel|Sender|Receiver|Mutex|RwLock|Semaphore)\b"
+        r"\b(?:Runtime|RuntimeHandle|Handle|Cancellation|Cancel|Sender|Receiver|Mutex|RwLock|Semaphore)\b"
     ),
     "configuration": re.compile(
         r"\b(?:Config|Configuration|TransferLimits|Migration|SyncedTable|RetryPolicy)\b"
@@ -116,7 +116,7 @@ SERVICE_TYPE_PATTERNS = {
         r"\b(?:Database|StoreDatabase|Connection|Transaction|WriteTransaction|DbHandle)\b"
     ),
     "storage": re.compile(
-        r"\b(?:SyncStorage|CloudSyncStorage|ExactSlotStorage|Storage|CloudHome)\b"
+        r"\b(?:SyncStorage|CloudSyncStorage|ExactSlotStorage|StoreDir|Storage|CloudHome)\b"
     ),
     "identity": re.compile(
         r"\b(?:UserKeypair|Identity|DeviceSigner|MasterKeyCustody|Keypair)\b"
@@ -124,7 +124,7 @@ SERVICE_TYPE_PATTERNS = {
     "verification": re.compile(r"\b(?:[A-Za-z0-9_]*Verifier|Authorized[A-Za-z0-9_]*)\b"),
     "encryption": re.compile(r"\b(?:EncryptionService|CloudCipherAccess)\b"),
     "runtime": re.compile(
-        r"\b(?:Runtime|Handle|Cancellation|Cancel|Sender|Receiver|Mutex|RwLock|Semaphore)\b"
+        r"\b(?:Runtime|RuntimeHandle|Handle|Cancellation|Cancel|Sender|Receiver|Mutex|RwLock|Semaphore)\b"
     ),
     "client": re.compile(r"\b(?:Client|HttpClient|OAuth)\b"),
 }
@@ -1751,6 +1751,104 @@ def service_field_dependencies(fields: Iterable[str]) -> list[str]:
     )
 
 
+def tuple_type_members(type_text: str) -> list[list[str]]:
+    tuples: list[list[str]] = []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+
+    def matching_close(start: int) -> int | None:
+        stack: list[str] = []
+        for index in range(start, len(type_text)):
+            character = type_text[index]
+            if character in pairs:
+                stack.append(pairs[character])
+            elif stack and character == stack[-1]:
+                stack.pop()
+                if not stack:
+                    return index
+        return None
+
+    def split_members(content: str) -> list[str]:
+        members: list[str] = []
+        start = 0
+        round_depth = 0
+        square_depth = 0
+        brace_depth = 0
+        angle_depth = 0
+        for index, character in enumerate(content):
+            if character == "(":
+                round_depth += 1
+            elif character == ")":
+                round_depth -= 1
+            elif character == "[":
+                square_depth += 1
+            elif character == "]":
+                square_depth -= 1
+            elif character == "{":
+                brace_depth += 1
+            elif character == "}":
+                brace_depth -= 1
+            elif character == "<":
+                angle_depth += 1
+            elif character == ">" and angle_depth:
+                angle_depth -= 1
+            elif (
+                character == ","
+                and round_depth == 0
+                and square_depth == 0
+                and brace_depth == 0
+                and angle_depth == 0
+            ):
+                member = content[start:index].strip()
+                if member:
+                    members.append(member)
+                start = index + 1
+        member = content[start:].strip()
+        if member:
+            members.append(member)
+        return members
+
+    for index, character in enumerate(type_text):
+        if character != "(":
+            continue
+        previous = type_text[:index].rstrip()
+        if previous and (previous[-1].isalnum() or previous[-1] in "_>)"):
+            continue
+        close = matching_close(index)
+        if close is None:
+            continue
+        members = split_members(type_text[index + 1 : close])
+        if len(members) >= 2:
+            tuples.append(members)
+    return tuples
+
+
+def anonymous_owner_bundles(type_text: str) -> list[dict[str, Any]]:
+    bundles: list[dict[str, Any]] = []
+    for members in tuple_type_members(type_text):
+        dependencies = sorted(
+            {
+                dependency
+                for member in members
+                for dependency in retained_dependencies(member)
+            }
+        )
+        service_members = [
+            member for member in members if service_dependencies(member)
+        ]
+        stateful_members = [
+            member for member in members if retained_dependencies(member)
+        ]
+        if not service_members and len(stateful_members) < 2:
+            continue
+        bundles.append(
+            {
+                "members": members,
+                "dependencies": dependencies,
+            }
+        )
+    return bundles
+
+
 def service_exposures_for_source(
     source_file: SourceFile,
 ) -> list[dict[str, Any]]:
@@ -1833,6 +1931,19 @@ def service_exposures_for_source(
         )
 
     for record in records:
+        for bundle in anonymous_owner_bundles(record["return_type"]):
+            findings.append(
+                {
+                    "kind": "service-bundle",
+                    "name": record["symbol"],
+                    "dependencies": bundle["dependencies"],
+                    "members": bundle["members"],
+                    "visibility": record["visibility"],
+                    "path": path,
+                    "line": record["range"]["start"]["line"] + 1,
+                    "expression": record["signature"],
+                }
+            )
         if record["visibility"] == "private" or record["kind"] != "method":
             continue
         dependencies = service_dependencies(record["return_type"])
@@ -2065,6 +2176,7 @@ def inventory_file(
                 ),
                 "return_type": return_type,
                 "return_dependencies": retained_dependencies(return_type),
+                "anonymous_owner_bundles": anonymous_owner_bundles(return_type),
                 "receiver_constructor": is_receiver_constructor(
                     owner,
                     parameters,
@@ -2131,6 +2243,10 @@ def inventory_file(
                 "callee_range": callee_range,
                 "callee_text": callee_text,
                 "arguments": call_arguments(source_file, node_index),
+                "result_binding": call_result_binding(
+                    source_file,
+                    node_index,
+                ),
                 "cfg": nested_cfg_attributes(
                     source_file,
                     node_index,
@@ -3281,7 +3397,70 @@ def source_call_site(
         "expression": call_text(source_file, node),
         "arguments": call_arguments(source_file, index),
         "callee_text": callee_text,
+        "result_binding": call_result_binding(source_file, index),
     }
+
+
+def pattern_bindings(
+    source_file: SourceFile,
+    pattern_index: int,
+) -> list[str]:
+    candidates = [
+        (pattern_index, source_file.nodes[pattern_index]),
+        *list(descendants(source_file, pattern_index)),
+    ]
+    return [
+        name[0]
+        for index, node in candidates
+        if node.kind == "IDENT_PAT"
+        and (name := direct_name(source_file, index)) is not None
+    ]
+
+
+def call_result_binding(
+    source_file: SourceFile,
+    call_index: int,
+) -> dict[str, Any] | None:
+    transparent = {"AWAIT_EXPR", "PAREN_EXPR", "TRY_EXPR"}
+    for ancestor_index, ancestor in ancestors(source_file, call_index):
+        if is_callable_node(source_file, ancestor_index):
+            return None
+        if ancestor.kind == "LET_STMT":
+            pattern = next(
+                (
+                    child
+                    for child in ancestor.children
+                    if source_file.nodes[child].kind.endswith("_PAT")
+                ),
+                None,
+            )
+            if pattern is None:
+                return None
+            pattern_node = source_file.nodes[pattern]
+            members = []
+            if pattern_node.kind == "TUPLE_PAT":
+                for position, child in enumerate(
+                    child
+                    for child in pattern_node.children
+                    if source_file.nodes[child].kind.endswith("_PAT")
+                ):
+                    members.append(
+                        {
+                            "position": position,
+                            "text": source_file.text(
+                                source_file.nodes[child]
+                            ).strip(),
+                            "bindings": pattern_bindings(source_file, child),
+                        }
+                    )
+            return {
+                "kind": pattern_node.kind,
+                "text": source_file.text(pattern_node).strip(),
+                "members": members,
+            }
+        if ancestor.kind not in transparent:
+            return None
+    return None
 
 
 def receiver_matches_qualifier(
@@ -4018,6 +4197,9 @@ def build_index(
                         "range": call["range"],
                         "views": record["semantic_views"],
                         "expression": call["text"],
+                        "arguments": call["arguments"],
+                        "callee_text": call["callee_text"],
+                        "result_binding": call.get("result_binding"),
                     },
                 )
                 continue
@@ -4039,6 +4221,7 @@ def build_index(
                         "expression": call["text"],
                         "arguments": call["arguments"],
                         "callee_text": call["callee_text"],
+                        "result_binding": call.get("result_binding"),
                     },
                 )
                 continue
@@ -4579,7 +4762,122 @@ def verified_component_disposition(
     return True, sorted(set(classifications))
 
 
-def callable_graph_record(record: dict[str, Any]) -> dict[str, Any]:
+def binding_references_in_argument(
+    binding: dict[str, Any],
+    argument: str,
+) -> list[tuple[int | None, str]]:
+    references: list[tuple[int | None, str]] = []
+    members = binding.get("members", [])
+    if members:
+        for member in members:
+            for name in member.get("bindings", []):
+                if re.search(rf"\b{re.escape(name)}\b", argument):
+                    references.append((member["position"], name))
+        return references
+
+    names = re.findall(
+        r"(?:r#)?[A-Za-z_][A-Za-z0-9_]*",
+        binding.get("text", ""),
+    )
+    if not names:
+        return []
+    name = names[-1]
+    for match in re.finditer(
+        rf"\b{re.escape(name)}\s*\.\s*(\d+)\b",
+        argument,
+    ):
+        references.append((int(match.group(1)), name))
+    if not references and re.search(rf"\b{re.escape(name)}\b", argument):
+        references.append((None, name))
+    return references
+
+
+def bundle_downstream_arguments(
+    caller: dict[str, Any],
+    binding: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if binding is None:
+        return []
+    downstream = []
+    seen: set[tuple[Any, ...]] = set()
+    for call in caller.get("calls", []):
+        for position, argument in enumerate(call.get("arguments", [])):
+            expression = argument.get("text", "")
+            for member, name in binding_references_in_argument(
+                binding,
+                expression,
+            ):
+                key = (
+                    member,
+                    name,
+                    call.get("callee_text", ""),
+                    position,
+                    expression,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                downstream.append(
+                    {
+                        "member": member,
+                        "binding": name,
+                        "callee": call.get("callee_text", ""),
+                        "argument": position,
+                        "expression": expression,
+                    }
+                )
+    return downstream
+
+
+def anonymous_bundle_graph_records(
+    record: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output = []
+    for bundle in record.get(
+        "anonymous_owner_bundles",
+        anonymous_owner_bundles(record.get("return_type", "")),
+    ):
+        consumers = []
+        owners = set()
+        for edge in record.get("callers", []):
+            caller = records_by_symbol.get(edge["symbol"])
+            if caller is None:
+                continue
+            owner = anchored_owner(caller, records_by_symbol)
+            if owner is not None:
+                owners.add(owner)
+            for site in edge.get("sites", []):
+                binding = site.get("result_binding")
+                consumers.append(
+                    {
+                        "symbol": caller["symbol"],
+                        "owner": owner,
+                        "expression": site.get("expression", ""),
+                        "binding": binding,
+                        "downstream_arguments": bundle_downstream_arguments(
+                            caller,
+                            binding,
+                        ),
+                    }
+                )
+        own_owner = anchored_owner(record, records_by_symbol)
+        if not owners and own_owner is not None:
+            owners.add(own_owner)
+        output.append(
+            {
+                **bundle,
+                "nearest_owner": next(iter(owners)) if len(owners) == 1 else None,
+                "consumers": consumers,
+            }
+        )
+    return output
+
+
+def callable_graph_record(
+    record: dict[str, Any],
+    records_by_symbol: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "symbol": record["symbol"],
         "signature": record["signature"],
@@ -4595,6 +4893,10 @@ def callable_graph_record(record: dict[str, Any]) -> dict[str, Any]:
         "unresolved": record.get("unresolved_calls", []),
         "views": record.get("semantic_views", []),
         "rank": record.get("bottom_up_rank", 0),
+        "anonymous_owner_bundles": anonymous_bundle_graph_records(
+            record,
+            records_by_symbol,
+        ),
     }
 
 
@@ -4713,11 +5015,14 @@ def build_graph_data(
                 "crate": root_record["crate"],
                 "components": [],
                 "callables": [
-                    callable_graph_record(record)
+                    callable_graph_record(record, records_by_symbol)
                     for record in members
                 ],
                 "construction_callers": [
-                    callable_graph_record(records_by_symbol[symbol])
+                    callable_graph_record(
+                        records_by_symbol[symbol],
+                        records_by_symbol,
+                    )
                     for symbol in caller_symbols
                 ],
                 "requirements": sorted(
@@ -4771,7 +5076,7 @@ def build_graph_data(
             decisions,
         )
         callables = [
-            callable_graph_record(record)
+            callable_graph_record(record, records_by_symbol)
             for record in members
         ]
         requirements = sorted(
@@ -5270,6 +5575,35 @@ function relatedRows(ids, title) {
   return "<h3>" + escapeHtml(title) + "</h3>" + rows;
 }
 
+function anonymousBundleMarkup(items) {
+  if (!items.length) return "";
+  return '<div class="anonymous-bundles"><div class="meta">Anonymous owner bundles</div>' +
+    items.map(function(bundle) {
+      const owner = bundle.nearest_owner
+        ? "nearest retained owner: " + bundle.nearest_owner
+        : "no single retained owner covers every caller";
+      const consumers = bundle.consumers.map(function(consumer) {
+        const binding = consumer.binding
+          ? " → " + consumer.binding.text
+          : "";
+        const downstream = consumer.downstream_arguments.map(function(use) {
+          const member = use.member === null
+            ? "whole bundle"
+            : "member " + use.member;
+          return '<div class="meta">' + escapeHtml(
+            member + " (" + use.binding + ") → " + use.callee +
+            " argument " + use.argument + ": " + use.expression
+          ) + '</div>';
+        }).join("");
+        return '<div class="meta">consumer: ' +
+          escapeHtml(consumer.symbol + binding) + '</div>' + downstream;
+      }).join("");
+      return '<div class="callable"><div>' +
+        badges(bundle.members) + '</div><div class="meta">' +
+        escapeHtml(owner) + '</div>' + consumers + '</div>';
+    }).join("") + '</div>';
+}
+
 function callableMarkup(items) {
   return items.map(function(item) {
     const facts = []
@@ -5277,12 +5611,16 @@ function callableMarkup(items) {
       .concat(item.ambient.map(function(value) { return "ambient:" + value; }))
       .concat(item.effects.map(function(value) { return "effect:" + value; }))
       .concat(item.captures.length ? ["captures:" + item.captures.length] : [])
-      .concat(item.unresolved.length ? ["unknown calls:" + item.unresolved.length] : []);
+      .concat(item.unresolved.length ? ["unknown calls:" + item.unresolved.length] : [])
+      .concat(item.anonymous_owner_bundles.length
+        ? ["anonymous owner bundles:" + item.anonymous_owner_bundles.length]
+        : []);
     return '<div class="callable"><div>' + escapeHtml(item.symbol) + '</div>' +
       '<div class="meta">' + escapeHtml(item.kind) + " · " +
       escapeHtml(item.visibility) + " · " +
       escapeHtml(item.path) + " · raw rank " + item.rank + "</div>" +
-      "<div>" + badges(facts) + "</div></div>";
+      "<div>" + badges(facts) + "</div>" +
+      anonymousBundleMarkup(item.anonymous_owner_bundles) + "</div>";
   }).join("");
 }
 
@@ -5857,10 +6195,15 @@ def command_service_exposures(args: argparse.Namespace) -> None:
     ]
     for finding in findings:
         dependencies = ",".join(finding["dependencies"])
+        members = (
+            " members=(" + " | ".join(finding["members"]) + ")"
+            if finding["kind"] == "service-bundle"
+            else ""
+        )
         print(
             f"{finding['path']}:{finding['line']}: "
             f"{finding['kind']} {finding['visibility']} "
-            f"[{dependencies}] {finding['name']}: "
+            f"[{dependencies}] {finding['name']}{members}: "
             f"{finding['expression']}"
         )
     print(f"{len(findings)} service exposures")

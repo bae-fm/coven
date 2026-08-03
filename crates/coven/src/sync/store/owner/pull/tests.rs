@@ -11,20 +11,23 @@ mod effective_access_failure;
 
 async fn one_retained_checkpoint() -> (
     Database,
-    crate::sync::test_helpers::TestStore,
+    std::sync::Arc<crate::sync::test_helpers::TestStore>,
+    crate::keys::UserKeypair,
     MembershipChain,
     OpenedRetainedMergeHistorySummary,
 ) {
     let db = crate::sync::test_helpers::open_test_db();
+    let signer = crate::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &db,
         "retained-checkpoint-conflict",
-        crate::keys::UserKeypair::generate(),
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create retained-checkpoint Store");
     let loaded_store = store
-        .bind_device(&db, &store.signer)
+        .bind_device(&db, &signer)
         .await
         .expect("load checkpoint Store");
     let membership = loaded_store
@@ -63,12 +66,12 @@ async fn one_retained_checkpoint() -> (
         .await
         .expect("open retained checkpoint");
     assert_eq!(retained.len(), 1);
-    (db, store, membership, retained.remove(0))
+    (db, store, signer, membership, retained.remove(0))
 }
 
 #[tokio::test]
 async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
-    let (_db, store, membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+    let (_db, store, _signer, membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
 
     let mut conflicting_commit = checkpoint.clone();
     let (coordinate, reference) = conflicting_commit
@@ -107,7 +110,7 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 
 #[tokio::test]
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
-    let (db, store, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+    let (db, store, signer, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
         crate::database::StoreDatabase::new(&db)
             .materialized_frontier()
@@ -116,7 +119,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
     )
     .expect("derive acknowledgement coverage");
     let device = store
-        .bind_device(&db, &store.signer)
+        .bind_device(&db, &signer)
         .await
         .expect("bind retained-checkpoint device");
     device
@@ -170,6 +173,7 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
         &founder,
         "progressive-canonical-replay",
         identity.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create canonical replay Store");
@@ -290,7 +294,6 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
         &migrations,
     )
     .expect("open scoped replay database")
-    .0
 }
 
 fn exact_circle_package_slot(commit: &StoreBatchCommit) -> crate::storage::cloud::ObjectSlot {
@@ -306,7 +309,8 @@ struct EffectiveAccessFixture {
     member_device: crate::sync::test_helpers::TestDevice,
     owner: crate::keys::UserKeypair,
     member: crate::keys::UserKeypair,
-    store: crate::sync::test_helpers::TestStore,
+    store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
+    home: std::sync::Arc<crate::InMemoryCloudHome>,
     circle_id: crate::protocol::circle::CircleId,
 }
 
@@ -403,10 +407,15 @@ impl EffectiveAccessFixture {
         let owner_database = open_scoped_replay_database();
         let owner = crate::keys::UserKeypair::generate();
         let member = crate::keys::UserKeypair::generate();
-        let store =
-            crate::sync::test_helpers::TestStore::create(&owner_database, label, owner.clone())
-                .await
-                .expect("create effective-access Store");
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &owner_database,
+            label,
+            owner.clone(),
+            home.clone(),
+        )
+        .await
+        .expect("create effective-access Store");
         store
             .open_into(&owner_database)
             .await
@@ -415,10 +424,6 @@ impl EffectiveAccessFixture {
             .invite_member(
                 &owner_database,
                 &owner,
-                &crate::sync::hlc::Hlc::new(
-                    format!("{label}-owner"),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &crate::keys::public_key_hex(&member),
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -446,12 +451,12 @@ impl EffectiveAccessFixture {
             .await
             .expect("create effective-access Circle");
         let owner_storage = crate::storage::CloudSyncStorage::new(
-            store.home.clone(),
+            home.clone(),
             crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
                 [42; 32],
             )),
             crate::storage::BlobPathScheme::Hashed,
-            store.storage.store_id(),
+            label,
             owner.clone(),
         )
         .expect("open effective-access owner storage");
@@ -497,6 +502,7 @@ impl EffectiveAccessFixture {
             owner,
             member,
             store,
+            home,
             circle_id,
         }
     }
@@ -644,10 +650,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .remove_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::sync::hlc::Hlc::new(
-                "removed-member-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &crate::keys::public_key_hex(&fixture.member),
             &crate::encryption::EncryptionService::from_key([42; 32]),
             &security,
@@ -670,7 +672,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .iter()
         .any(|(member, _)| member == &crate::keys::public_key_hex(&fixture.member)));
 
-    fixture.store.home.clear_exact_reads();
+    fixture.home.clear_exact_reads();
     member_database.fail_next_merge_materialization_at(
         crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
     );
@@ -694,26 +696,20 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .is_none());
 
     fixture
-        .store
         .home
         .remove_exact_object(&hidden_before_removal_package_slot);
-    fixture.store.home.remove_exact_object(&late_package_slot);
-    fixture.store.home.clear_exact_reads();
+    fixture.home.remove_exact_object(&late_package_slot);
+    fixture.home.clear_exact_reads();
     let pull = fixture
         .pull_member(&member_store_dir)
         .await
         .expect("pull Store state after membership removal");
     assert!(pull.held_positions.is_empty(), "{pull:?}");
     assert!(!fixture
-        .store
         .home
         .exact_reads()
         .contains(&hidden_before_removal_package_slot));
-    assert!(!fixture
-        .store
-        .home
-        .exact_reads()
-        .contains(&late_package_slot));
+    assert!(!fixture.home.exact_reads().contains(&late_package_slot));
     let state = member_database
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
@@ -858,10 +854,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .remove_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::sync::hlc::Hlc::new(
-                "readded-member-removal".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &crate::keys::public_key_hex(&fixture.member),
             &crate::encryption::EncryptionService::from_key([42; 32]),
             &security,
@@ -872,7 +864,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     // Circle content (the Circle is rotation-required until it is closed and
     // rotated), so no package is authored during the removed interval; the
     // re-add restores access to the Circle's current state alone.
-    fixture.store.home.clear_exact_reads();
+    fixture.home.clear_exact_reads();
     let removal_pull = fixture
         .pull_member(&member_store_dir)
         .await
@@ -880,7 +872,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     assert!(removal_pull.held_positions.is_empty(), "{removal_pull:?}");
     assert!(
         !fixture
-            .store
             .home
             .exact_reads()
             .contains(&pre_removal_package_slot),
@@ -899,10 +890,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .invite_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::sync::hlc::Hlc::new(
-                "readded-member-invitation".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &crate::keys::public_key_hex(&fixture.member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -911,10 +898,10 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         )
         .await
         .expect("re-add effective-access Store member");
-    let rotated_store_encryption = fixture
-        .store
-        .current_encryption()
-        .expect("re-added encrypted Store has a live keyring");
+    let rotated_store_encryption = security
+        .routing_encryption(true)
+        .expect("load rotated Store keyring")
+        .expect("scoped Store has routing encryption");
     fixture
         .member_device
         .adopt_key_rotation(&rotated_store_encryption, &custody)
@@ -941,7 +928,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         )
         .await;
 
-    fixture.store.home.clear_exact_reads();
+    fixture.home.clear_exact_reads();
     let readd_pull = fixture
         .pull_member(&member_store_dir)
         .await
@@ -1005,14 +992,16 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
     ] {
         let founder = open_scoped_replay_database();
         let identity = crate::keys::UserKeypair::generate();
+        let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &founder,
             conflict.store_id(),
             identity.clone(),
+            home.clone(),
         )
         .await
         .expect("create scoped replay Store");
-        store.home.sort_listings();
+        home.sort_listings();
         store
             .open_into(&founder)
             .await
@@ -1297,6 +1286,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         &founder_db,
         "causal-membership-proof",
         founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Merge Store");
@@ -1306,10 +1296,6 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .invite_member(
             &founder_db,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "causal-membership-proof".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &crate::sync::test_helpers::pubkey_hex(&candidate),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -1473,10 +1459,12 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
 #[tokio::test]
 async fn merge_gap_reports_the_exact_signed_predecessor() {
     let source = crate::sync::test_helpers::open_test_db();
+    let signer = crate::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
         "exact-predecessor-test",
-        crate::keys::UserKeypair::generate(),
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create exact predecessor test Store");
@@ -1498,19 +1486,19 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
         .publish_changeset("founder", 3, &changeset, source.schema_version())
         .await
         .expect("publish third exact commit");
-    let (_, founder, _) = store
+    let founder_authority = store
         .founder_device_authority()
         .await
         .expect("load founder authority");
     let source_device = store
-        .bind_device(&source, &store.signer)
+        .bind_device(&source, &signer)
         .await
         .expect("bind source Store device");
     let commit = source_device
         .load_commit_for_test(&third)
         .await
         .expect("load third exact commit");
-    assert_eq!(commit.author(), &founder);
+    assert_eq!(commit.author(), founder_authority.registration());
     let stream_id = commit_stream_id(&first.coord);
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
     let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");

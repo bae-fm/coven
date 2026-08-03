@@ -29,6 +29,25 @@ struct ResumableSession {
 }
 
 impl ResumableSession {
+    async fn send_part(
+        &self,
+        part: Bytes,
+        offset: u64,
+        end: u64,
+        total: u64,
+    ) -> Result<reqwest::Response, CloudHomeError> {
+        self.client
+            .put(&self.url)
+            .header("Content-Length", part.len())
+            .header("Content-Range", range_content_header(offset, end, total))
+            .body(part)
+            .send()
+            .await
+            .map_err(|error| {
+                CloudHomeError::Transport(format!("upload chunk {}: {error}", self.key))
+            })
+    }
+
     async fn cancel(&self) -> Result<(), CloudHomeError> {
         let response = self
             .client
@@ -125,25 +144,9 @@ impl RangePutUploader {
         completes_on_final_part: bool,
     ) -> Result<Option<reqwest::Response>, CloudHomeError> {
         let end = offset + part.len() as u64 - 1;
-        let response = match self
-            .session
-            .client
-            .put(&self.session.url)
-            .header("Content-Length", part.len())
-            .header(
-                "Content-Range",
-                range_content_header(offset, end, self.total),
-            )
-            .body(part)
-            .send()
-            .await
-        {
+        let response = match self.session.send_part(part, offset, end, self.total).await {
             Ok(response) => response,
-            Err(error) => {
-                let operation = CloudHomeError::Transport(format!(
-                    "upload chunk {}: {error}",
-                    self.session.key
-                ));
+            Err(operation) => {
                 let cleanup = self.abort().await;
                 return Err(combine_cleanup_failure(operation, cleanup));
             }

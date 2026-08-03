@@ -63,7 +63,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
         );
         let semantic_prefix = circle_ack_slot_prefix(
             reference.circle_id,
-            &author.device_id.to_string(),
+            &author.value().device_id.to_string(),
             reference.sequence,
         );
         let bytes = self
@@ -71,7 +71,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .read_protocol_object(&context, &reference.object, &semantic_prefix)
             .await
             .map_err(StoreObjectError::from)?;
-        CircleAck::parse_at(&bytes, self.root, reference, &author)
+        CircleAck::parse_at(&bytes, self.root, reference, author.value())
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
     }
 

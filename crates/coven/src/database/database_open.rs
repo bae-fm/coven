@@ -184,7 +184,7 @@ impl DatabaseCore {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
-    ) -> Result<(Self, DatabaseState, UpdatedAtStamper), OpenError> {
+    ) -> Result<(Self, DatabaseState), OpenError> {
         let mut conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
@@ -275,7 +275,6 @@ impl DatabaseCore {
         let on_disk = scan_max_updated_at(&conn, &synced_tables, seed_bound_ms)?;
         seed_from(&hlc, on_disk, "`_updated_at` in synced tables")?;
 
-        let stamper = UpdatedAtStamper::new(hlc.clone());
         let synced_tables = Arc::new(synced_tables);
         let gates = Arc::new(gates);
         let blob_decls = Arc::new(blob_decls);
@@ -297,7 +296,7 @@ impl DatabaseCore {
         };
         let state = core.state();
 
-        Ok((core, state, stamper))
+        Ok((core, state))
     }
 
     /// Open the connection at `path` read-only: a `SQLITE_OPEN_READONLY`

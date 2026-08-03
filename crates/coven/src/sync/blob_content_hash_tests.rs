@@ -18,7 +18,16 @@ fn protection() -> EncryptionService {
 
 #[tokio::test]
 async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
-    let store = TestStore::for_store("blob-reference-substitution").await;
+    let database = crate::sync::test_helpers::open_test_db();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let store = TestStore::create(
+        &database,
+        "blob-reference-substitution",
+        crate::keys::UserKeypair::generate(),
+        home,
+    )
+    .await
+    .expect("create blob substitution test Store");
     let real = b"THE-OWNERS-REAL-BLOB";
     let planted = b"THE-ATTACKERS-FAKED!";
     assert_eq!(real.len(), planted.len(), "fixture uses equal-size blobs");
@@ -44,7 +53,6 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("real");
     let staged = store
-        .storage
         .stage_verified_blob_plaintext(
             &real_blob,
             BlobSpoolProtection::Opaque(protection()),
@@ -59,7 +67,16 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
 
 #[tokio::test]
 async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publication() {
-    let store = TestStore::for_store("blob-provider-rollback").await;
+    let database = crate::sync::test_helpers::open_test_db();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let store = TestStore::create(
+        &database,
+        "blob-provider-rollback",
+        crate::keys::UserKeypair::generate(),
+        home.clone(),
+    )
+    .await
+    .expect("create provider rollback test Store");
     let previous = b"blob-content-VERSION1";
     let current = b"blob-content-VERSION2";
     assert_eq!(
@@ -75,25 +92,20 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     let current_blob = store
         .create_exact_opaque_blob("photos", BLOB_ID, current)
         .await;
-    let previous_stored = store
-        .home
+    let previous_stored = home
         .read_at(previous_blob.object().slot())
         .await
         .expect("read prior stored representation");
-    let current_stored = store
-        .home
+    let current_stored = home
         .read_at(current_blob.object().slot())
         .await
         .expect("read current stored representation");
-    store
-        .home
-        .replace_exact_object(current_blob.object().slot(), previous_stored);
+    home.replace_exact_object(current_blob.object().slot(), previous_stored);
 
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("current");
     assert!(matches!(
         store
-            .storage
             .stage_verified_blob_plaintext(
                 &current_blob,
                 BlobSpoolProtection::Opaque(protection()),
@@ -104,11 +116,8 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     ));
     assert!(!destination.exists());
 
-    store
-        .home
-        .replace_exact_object(current_blob.object().slot(), current_stored);
+    home.replace_exact_object(current_blob.object().slot(), current_stored);
     let staged = store
-        .storage
         .stage_verified_blob_plaintext(
             &current_blob,
             BlobSpoolProtection::Opaque(protection()),

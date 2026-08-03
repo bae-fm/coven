@@ -6,9 +6,9 @@ use crate::protocol::membership::{
 };
 use crate::protocol::remote_object::{remote_object_id, SharedLiveSetObjectDomain};
 use crate::protocol::store_commit::{
-    CirclePackageRef, ObjectHash, RetainedStoreDeviceOperations,
+    ActivatedStoreDeviceRegistration, CirclePackageRef, ObjectHash, RetainedStoreDeviceOperations,
     RetainedStoreDeviceRegistrationActivations, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceHead, StoreDeviceRegistration, StorePackageRef, VerifiedStoreDeviceOperations,
+    StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
 };
 use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::VerifiedCircleActivations;
@@ -246,20 +246,14 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
     membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
     packages: &'a [AudiencePackage],
     package_application: Option<RetainedPackageApplication>,
-    registrations: &'a [(
-        StoreDeviceRegistration,
-        crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-    )],
+    registrations: &'a [ActivatedStoreDeviceRegistration],
 }
 
 #[derive(Clone)]
 pub(crate) struct OwnedVerifiedMergeMaterialization {
     root: crate::protocol::store_commit::StoreRootRef,
     verified_commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
-    registrations: Vec<(
-        StoreDeviceRegistration,
-        crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-    )>,
+    registrations: Vec<ActivatedStoreDeviceRegistration>,
     device_operations: VerifiedStoreDeviceOperations,
     circle_activations: VerifiedCircleActivations,
     activation_head: StoreDeviceHead,
@@ -275,10 +269,7 @@ impl OwnedVerifiedMergeMaterialization {
     pub(crate) fn verify(
         root: crate::protocol::store_commit::StoreRootRef,
         verified_commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        registrations: Vec<(
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )>,
+        registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         circle_activations: VerifiedCircleActivations,
         activation_head: StoreDeviceHead,
@@ -340,12 +331,7 @@ impl OwnedVerifiedMergeMaterialization {
         &self.verified_commit
     }
 
-    pub(crate) fn registrations(
-        &self,
-    ) -> &[(
-        StoreDeviceRegistration,
-        crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-    )] {
+    pub(crate) fn registrations(&self) -> &[ActivatedStoreDeviceRegistration] {
         &self.registrations
     }
 
@@ -424,12 +410,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         self.verified_commit
     }
 
-    pub(crate) fn registrations(
-        &self,
-    ) -> &[(
-        StoreDeviceRegistration,
-        crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-    )] {
+    pub(crate) fn registrations(&self) -> &[ActivatedStoreDeviceRegistration] {
         self.registrations
     }
 
@@ -470,10 +451,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
     pub(crate) fn verify(
         root: &crate::protocol::store_commit::StoreRootRef,
         verified_commit: &'a crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        registrations: &'a [(
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )],
+        registrations: &'a [ActivatedStoreDeviceRegistration],
         device_operations: &'a VerifiedStoreDeviceOperations,
         circle_activations: &'a VerifiedCircleActivations,
         activation_head: &'a StoreDeviceHead,

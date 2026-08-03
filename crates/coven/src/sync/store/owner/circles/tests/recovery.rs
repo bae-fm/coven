@@ -5,7 +5,7 @@ use super::*;
 struct RevokedOperation {
     db: Database,
     owner_db: Database,
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
     founder: UserKeypair,
     successor: UserKeypair,
     operation_id: CircleOperationId,
@@ -16,7 +16,13 @@ impl RevokedOperation {
     async fn prepare(name: &str) -> Self {
         let db = open_test_db();
         let founder = UserKeypair::generate();
-        let store = create_test_store_in_its_own_task(&db, name, &founder).await;
+        let store = create_test_store_in_its_own_task(
+            &db,
+            name,
+            &founder,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         let successor = UserKeypair::generate();
         let successor_pubkey = keys::public_key_hex(&successor);
         let encryption = EncryptionService::from_key([42; 32]);
@@ -24,10 +30,6 @@ impl RevokedOperation {
             .invite_member(
                 &db,
                 &founder,
-                &crate::sync::hlc::Hlc::new(
-                    "founder-device".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &successor_pubkey,
                 None,
                 MemberRole::Member,
@@ -81,17 +83,7 @@ impl RevokedOperation {
             std::sync::Arc::new(custody),
         );
         store
-            .remove_member(
-                &db,
-                &founder,
-                &crate::sync::hlc::Hlc::new(
-                    "founder-device".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
-                &successor_pubkey,
-                &encryption,
-                &security,
-            )
+            .remove_member(&db, &founder, &successor_pubkey, &encryption, &security)
             .await
             .expect("remove successor grant");
 
@@ -148,8 +140,13 @@ async fn operation_inspection_surface_reports_the_typed_block() {
     // the public `NotBlocked` error carries.
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store =
-        create_test_store_in_its_own_task(&db, "recovery-inspection-notblocked", &founder).await;
+    let store = create_test_store_in_its_own_task(
+        &db,
+        "recovery-inspection-notblocked",
+        &founder,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let journal = store
         .bind_device(&db, &founder)
         .await
@@ -217,7 +214,13 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
 async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = create_test_store_in_its_own_task(&db, "recovery-retry-republish", &founder).await;
+    let store = create_test_store_in_its_own_task(
+        &db,
+        "recovery-retry-republish",
+        &founder,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let journal = store
         .bind_device(&db, &founder)
         .await
@@ -294,7 +297,8 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
 #[tokio::test]
 async fn discard_without_nonactivation_proof_is_refused() {
     let db = open_test_db();
-    let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-refusal").await;
+    let (store, _home, signer, journal) =
+        persist_merge_operation(&db, "recovery-discard-refusal").await;
     let operation_id = journal.operation_id.clone();
 
     let refusal = store
@@ -423,7 +427,8 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
 #[tokio::test]
 async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_objects() {
     let db = open_test_db();
-    let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-winner").await;
+    let (store, _home, signer, journal) =
+        persist_merge_operation(&db, "recovery-discard-winner").await;
     let operation_id = journal.operation_id.clone();
     let candidate_commit = journal.operation().commit_ref.object.clone();
 
@@ -439,7 +444,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         .await
         .expect_err("publication loses the successor slot to the winner");
     assert!(
-        store.home.contains_exact_object(&candidate_commit),
+        _home.contains_exact_object(&candidate_commit),
         "the candidate commit reached cloud storage before the slot was lost"
     );
 
@@ -460,7 +465,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
             .is_none(),
         "discard clears the journal row"
     );
-    assert!(!store.home.contains_exact_object(&candidate_commit));
+    assert!(!_home.contains_exact_object(&candidate_commit));
     assert!(
         !db.remote_object_exists_for_test(candidate_commit.clone())
             .await
@@ -468,11 +473,11 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         "the candidate commit's remote-object row is deleted"
     );
     assert!(
-        store.home.contains_exact_object(&winner_commit),
+        _home.contains_exact_object(&winner_commit),
         "the winner's commit is untouched"
     );
     assert!(
-        store.home.contains_exact_object(&winner_head),
+        _home.contains_exact_object(&winner_head),
         "the winner's activation head is untouched"
     );
 }
@@ -483,7 +488,8 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
 #[tokio::test]
 async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
     let db = open_test_db();
-    let (store, signer, journal) = persist_merge_operation(&db, "recovery-discard-crash").await;
+    let (store, _home, signer, journal) =
+        persist_merge_operation(&db, "recovery-discard-crash").await;
     let operation_id = journal.operation_id.clone();
     let candidate_commit = journal.operation().commit_ref.object.clone();
 
@@ -498,7 +504,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
 
     // Fail the first candidate-exclusive deletion, after the transaction that
     // recorded the proof and moved the row into `Discarding` has committed.
-    store.home.fail_exact_delete_on_call(1);
+    _home.fail_exact_delete_on_call(1);
     store
         .bind_device(&db, &signer)
         .await
@@ -533,14 +539,20 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
             .is_none(),
         "resume clears the discarded operation's journal row"
     );
-    assert!(!store.home.contains_exact_object(&candidate_commit));
+    assert!(!_home.contains_exact_object(&candidate_commit));
 }
 
 #[tokio::test]
 async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = create_test_store_in_its_own_task(&db, "recovery-retry-refusal", &founder).await;
+    let store = create_test_store_in_its_own_task(
+        &db,
+        "recovery-retry-refusal",
+        &founder,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let ready = store
         .bind_device(&db, &founder)
         .await
@@ -608,7 +620,8 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
 #[tokio::test]
 async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it() {
     let db = open_test_db();
-    let (store, signer, first) = persist_merge_operation(&db, "recovery-position-lost").await;
+    let (store, _home, signer, first) =
+        persist_merge_operation(&db, "recovery-position-lost").await;
     let second = store
         .bind_device(&db, &signer)
         .await

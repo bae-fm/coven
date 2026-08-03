@@ -8,7 +8,7 @@ struct CircleSnapshotFixture {
     directory: tempfile::TempDir,
     database: Database,
     store_database: StoreDatabase,
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
 }
 
 impl CircleSnapshotFixture {
@@ -23,13 +23,13 @@ impl CircleSnapshotFixture {
             Arc::new(crate::clock::SystemClock),
             &crate::sync::test_helpers::test_migrations(),
         )
-        .expect("open Circle snapshot test database")
-        .0;
+        .expect("open Circle snapshot test database");
         let store_database = StoreDatabase::new(&database);
         let store = TestStore::create_browsable(
             &database,
             "circle-snapshot-store",
             crate::keys::UserKeypair::generate(),
+            crate::sync::test_helpers::test_cloud_home(),
         )
         .await
         .expect("create Circle snapshot test Store");
@@ -78,10 +78,13 @@ impl CircleSnapshotFixture {
         circle_id: crate::protocol::circle::CircleId,
         control: crate::protocol::circle::CircleControlCoord,
     ) -> (crate::encryption::EncryptionService, crate::KeyFingerprint) {
-        self.store_database
+        let access = self
+            .store_database
             .circle_publication_context(circle_id, control)
             .await
-            .expect("resolve Circle publication context")
+            .expect("resolve Circle publication context");
+        let fingerprint = access.key_fingerprint();
+        (access.into_encryption(), fingerprint)
     }
 
     async fn load_snapshot_metas(

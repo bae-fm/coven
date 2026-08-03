@@ -5,7 +5,6 @@ use crate::database::StoreDatabase;
 use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::StoreSync;
-use crate::sync::hlc::UpdatedAtStamper;
 use crate::{CovenError, CovenResult};
 
 #[derive(Clone)]
@@ -13,7 +12,6 @@ pub(crate) struct StoreRows {
     database: StoreDatabase,
     read_database: StoreDatabase,
     store_dir: StoreDir,
-    stamper: UpdatedAtStamper,
     security: StoreSecurity,
     sync: StoreSync,
 }
@@ -23,7 +21,6 @@ impl StoreRows {
         database: StoreDatabase,
         read_database: StoreDatabase,
         store_dir: StoreDir,
-        stamper: UpdatedAtStamper,
         security: StoreSecurity,
         sync: StoreSync,
     ) -> Self {
@@ -31,7 +28,6 @@ impl StoreRows {
             database,
             read_database,
             store_dir,
-            stamper,
             security,
             sync,
         }
@@ -85,7 +81,6 @@ impl StoreRows {
             .execute_host_write(
                 operation,
                 self.store_dir.clone(),
-                self.stamper.clone(),
                 routing_encryption,
                 blob_staging,
             )
@@ -238,7 +233,6 @@ impl StoreRows {
             .execute_host_write(
                 operation,
                 self.store_dir.clone(),
-                self.stamper.clone(),
                 self.routing_encryption()?,
                 blob_staging,
             )

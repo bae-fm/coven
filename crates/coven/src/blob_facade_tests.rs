@@ -267,13 +267,14 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
         .open()
         .expect("open the store");
-    let store = handle
-        .create_test_store("blob-facade-test", owner.clone())
+    let home = crate::sync::test_helpers::test_cloud_home();
+    handle
+        .create_test_store("blob-facade-test", owner.clone(), home.clone())
         .await
         .expect("create the Store");
     handle
         .connect_sync_with_test_home(
-            store.home.clone(),
+            home.clone(),
             crate::storage::CloudCipher::Encrypted(encryption),
         )
         .await
@@ -369,7 +370,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     // no loop, so this drain is the only one — what it reports is what moved.
     reopened
         .connect_sync_with_test_home_caller_driven(
-            store.home.clone(),
+            home,
             crate::storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
         )
         .await
@@ -435,7 +436,11 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
         .open()
         .expect("open the store");
     let store = handle
-        .create_test_store("blob-facade-test", owner)
+        .create_test_store(
+            "blob-facade-test",
+            owner,
+            crate::sync::test_helpers::test_cloud_home(),
+        )
         .await
         .expect("create the Store");
     let bytes = b"a published photo".to_vec();

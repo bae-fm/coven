@@ -377,11 +377,23 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
             .commit
             .operations_membership_authority()
             .expect("fixture carries membership authority"),
-        vec![activated],
+        vec![activated.clone()],
         &device_signer,
     )
     .expect("sign registration activation commit");
-    let input = vec![(replacement_registration.clone(), authority.clone())];
+    let activated_value = ActivatedStoreDeviceRegistration::verified(
+        ReferencedStoreDeviceRegistration::verified(
+            activated.registration.clone(),
+            replacement_registration.clone(),
+        )
+        .expect("verify exact replacement registration"),
+        authority.clone(),
+    )
+    .expect("verify replacement activation");
+    activated_value
+        .verify_reference(&activated)
+        .expect("verify exact replacement activation reference");
+    let input = vec![activated_value];
     let retained = RetainedStoreDeviceRegistrationActivations::from_verified(
         &fixture.root_ref,
         &commit,

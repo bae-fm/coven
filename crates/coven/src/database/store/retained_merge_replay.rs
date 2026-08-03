@@ -1857,7 +1857,7 @@ impl StoreDatabase {
                 .iter()
                 .zip(&registrations)
                 .filter(|(activated, _)| &activated.registration == reference)
-                .map(|(_, (registration, _))| registration);
+                .map(|(_, registration)| registration.value());
             let registration = matches.next();
             if matches.next().is_some() {
                 return Err(DbError::Message(

@@ -37,37 +37,39 @@ mod tests {
     use crate::storage::SyncStorage;
     use crate::sync::test_helpers::{open_test_db, TestStore};
 
-    async fn initialized() -> (TestStore, Database) {
+    async fn initialized() -> (std::sync::Arc<TestStore>, Database, UserKeypair) {
         let signer = UserKeypair::generate();
         let db = open_test_db();
-        let store = TestStore::create(&db, "registration-store-test", signer)
-            .await
-            .expect("create exact registration test Store");
-        (store, db)
+        let store = TestStore::create(
+            &db,
+            "registration-store-test",
+            signer.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await
+        .expect("create exact registration test Store");
+        (store, db, signer)
     }
 
     async fn recovered_author() -> (
-        TestStore,
+        std::sync::Arc<TestStore>,
         Database,
         StoreDeviceRegistrationRef,
         StoreBatchCommitRef,
     ) {
-        let (store, db) = initialized().await;
+        let (store, db, signer) = initialized().await;
         let loaded = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &signer)
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
         let database = crate::database::StoreDatabase::new(&db);
         let registration = loaded
-            .restoring_for_test()
-            .await
-            .expect("authorize Owner recovery Store")
-            .recover_owner_device(&authority)
+            .recover_owner_device_for_test(&authority)
             .await
             .expect("recover Owner device");
         let loaded = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &signer)
             .await
             .expect("reload recovered Store");
         for reference in database
@@ -91,10 +93,17 @@ mod tests {
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
         let database = crate::database::StoreDatabase::new(&db);
-        let store = TestStore::for_store("registration-missing-root-storage").await;
+        let store = TestStore::create(
+            &db,
+            "registration-missing-root-storage",
+            UserKeypair::generate(),
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await
+        .expect("create registration failure test Store");
 
         assert!(matches!(
-            super::super::RegistrationOutbox::new(database, &store.storage)
+            super::super::RegistrationOutbox::new(database, &store)
                 .drain()
                 .await,
             Err(StoreRegistrationError::ExactRootAuthorityMissing)
@@ -103,10 +112,10 @@ mod tests {
 
     #[tokio::test]
     async fn exact_founder_registration_is_already_activated() {
-        let (store, db) = initialized().await;
+        let (store, db, signer) = initialized().await;
         let database = crate::database::StoreDatabase::new(&db);
         let loaded = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &signer)
             .await
             .expect("load founder Store");
         loaded
@@ -123,18 +132,15 @@ mod tests {
 
     #[tokio::test]
     async fn owner_recovery_publishes_and_activates_replacement_device() {
-        let (store, db) = initialized().await;
+        let (store, db, signer) = initialized().await;
         let loaded = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &signer)
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
         let database = crate::database::StoreDatabase::new(&db);
         let registration = loaded
-            .restoring_for_test()
-            .await
-            .expect("authorize Owner recovery Store")
-            .recover_owner_device(&authority)
+            .recover_owner_device_for_test(&authority)
             .await
             .expect("recover Owner device");
 
@@ -146,7 +152,7 @@ mod tests {
         assert_eq!(durable.device_id, registration.device_id);
         assert!(durable.is_activated());
         let loaded = store
-            .bind_device(&db, &store.signer)
+            .bind_device(&db, &signer)
             .await
             .expect("load recovered Owner Store");
         loaded
@@ -214,22 +220,27 @@ mod tests {
         for failed_call in [2, 3, 4] {
             let signer = UserKeypair::generate();
             let db = open_test_db();
-            let store = TestStore::create(&db, &format!("recovery-prefix-{failed_call}"), signer)
-                .await
-                .expect("create recovery prefix Store");
+            let home = crate::sync::test_helpers::test_cloud_home();
+            let store = TestStore::create(
+                &db,
+                &format!("recovery-prefix-{failed_call}"),
+                signer.clone(),
+                home.clone(),
+            )
+            .await
+            .expect("create recovery prefix Store");
             let loaded = store
-                .bind_device(&db, &store.signer)
+                .bind_device(&db, &signer)
                 .await
                 .expect("load recovery Store");
             let authority = store.founder_recovery_authority().await;
             let database = crate::database::StoreDatabase::new(&db);
-            let mut restoring = loaded
-                .restoring_for_test()
-                .await
-                .expect("authorize Owner recovery Store");
-            store.home.fail_exact_create_before_call(failed_call);
+            home.fail_exact_create_before_call(failed_call);
             assert!(
-                restoring.recover_owner_device(&authority).await.is_err(),
+                loaded
+                    .recover_owner_device_for_test(&authority)
+                    .await
+                    .is_err(),
                 "failure before exact create {failed_call} interrupts recovery",
             );
 
@@ -256,12 +267,11 @@ mod tests {
                 );
                 Some(
                     store
-                        .storage
                         .read_prepared_protocol_slot(
                             &context,
                             &recovery_slot,
                             &owner_recovery_semantic_prefix(
-                                &crate::keys::public_key_hex(&store.signer),
+                                &crate::keys::public_key_hex(&signer),
                                 authority.owner_grant.clone(),
                                 1,
                             ),
@@ -274,12 +284,12 @@ mod tests {
                 None
             };
 
-            restoring
-                .recover_owner_device(&authority)
+            loaded
+                .recover_owner_device_for_test(&authority)
                 .await
                 .expect("retry completes absent recovery suffix");
             assert_eq!(
-                store.home.exact_create_count(),
+                home.exact_create_count(),
                 6,
                 "retry after boundary {failed_call} creates only the absent suffix",
             );
@@ -323,12 +333,11 @@ mod tests {
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 let completed_node = store
-                    .storage
                     .read_prepared_protocol_slot(
                         &context,
                         &recovery_slot,
                         &owner_recovery_semantic_prefix(
-                            &crate::keys::public_key_hex(&store.signer),
+                            &crate::keys::public_key_hex(&signer),
                             authority.owner_grant.clone(),
                             1,
                         ),

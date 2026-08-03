@@ -60,7 +60,8 @@ fn open_circle_routing_test_db() -> Database {
 /// entry whose removal makes the Circle rotation-required.
 struct RotationFixture {
     db: Database,
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
+    home: Arc<crate::InMemoryCloudHome>,
     owner_device: TestDevice,
     signer: UserKeypair,
     components: SyncComponents,
@@ -91,7 +92,6 @@ impl RotationMemberDevice {
     async fn publish_acknowledgements(&self, stamp: &str) {
         let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
             self.device
-                .db
                 .materialized_frontier()
                 .await
                 .expect("read member frontier"),
@@ -115,7 +115,7 @@ impl RotationMemberDevice {
 impl RotationFixture {
     async fn build(label: &str) -> Self {
         let db = open_circle_routing_test_db();
-        let (store, signer, founder) = persist_merge_operation(&db, label).await;
+        let (store, _home, signer, founder) = persist_merge_operation(&db, label).await;
         let circle_id = founder.circle_id();
         let owner_device = store
             .bind_device(&db, &signer)
@@ -132,10 +132,6 @@ impl RotationFixture {
             .invite_member(
                 &db,
                 &signer,
-                &crate::sync::hlc::Hlc::new(
-                    format!("{label}-owner"),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &member_pubkey,
                 None,
                 MemberRole::Member,
@@ -158,10 +154,10 @@ impl RotationFixture {
 
         let (store_temp, store_dir) = temp_store_dir();
         let owner_storage = crate::storage::CloudSyncStorage::new(
-            store.home.clone(),
+            _home.clone(),
             crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             crate::storage::BlobPathScheme::Hashed,
-            store.storage.store_id(),
+            label,
             signer.clone(),
         )
         .expect("open Circle owner storage");
@@ -203,6 +199,7 @@ impl RotationFixture {
         Self {
             db,
             store,
+            home: _home,
             owner_device,
             signer,
             components,
@@ -337,7 +334,6 @@ impl RotationFixture {
         let stamp = stamp.to_string();
         let staging = self
             .components
-            .store()
             .host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir.clone());
         StoreDatabase::new(&self.db)
             .run_host_store_write_for_test(
@@ -709,19 +705,14 @@ async fn re_adding_the_store_member_clears_rotation_required() {
         .invite_member(
             &fixture.db,
             &fixture.signer,
-            &crate::sync::hlc::Hlc::new(
-                "rotation-readd".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &fixture.member_pubkey,
             None,
             MemberRole::Member,
             &fixture
-                .store
-                .storage
-                .cipher_state()
-                .encryption()
-                .expect("live Store keyring"),
+                .security
+                .routing_encryption(true)
+                .expect("load rotated Store keyring")
+                .expect("scoped Store has routing encryption"),
             "Rotation Store",
         )
         .await
@@ -1107,10 +1098,6 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         .invite_member(
             &fixture.db,
             &fixture.signer,
-            &crate::sync::hlc::Hlc::new(
-                "rotation-outsider".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &outsider_pubkey,
             None,
             MemberRole::Member,
@@ -1211,7 +1198,7 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
     let (_joined_temp, joined_dir) = temp_store_dir();
     let joined_store = crate::sync::store::Store::load(
         StoreDatabase::new(&joined_db),
-        fixture.store.storage.clone(),
+        fixture.store.clone(),
         fixture.signer.clone(),
     )
     .await
@@ -1236,7 +1223,8 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 /// differ only in who restores and what the storage provider serves.
 struct ActiveMemberCircleSnapshot {
     db: Database,
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
+    home: Arc<crate::InMemoryCloudHome>,
     signer: UserKeypair,
     member: UserKeypair,
     routing: EncryptionService,
@@ -1257,7 +1245,7 @@ impl ActiveMemberCircleSnapshot {
     async fn build(name: &str, mode: CircleFixtureMode) -> Self {
         let routing = EncryptionService::from_key([42; 32]);
         let db = open_circle_routing_test_db();
-        let (store, signer, founder) = persist_merge_operation(&db, name).await;
+        let (store, _home, signer, founder) = persist_merge_operation(&db, name).await;
         let circle_id = founder.circle_id();
         store
             .bind_device(&db, &signer)
@@ -1273,10 +1261,6 @@ impl ActiveMemberCircleSnapshot {
             .invite_member(
                 &db,
                 &signer,
-                &crate::sync::hlc::Hlc::new(
-                    format!("{name}-owner"),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &member_pubkey,
                 None,
                 MemberRole::Member,
@@ -1287,10 +1271,10 @@ impl ActiveMemberCircleSnapshot {
             .expect("invite Store member");
         let (_store_temp, store_dir) = temp_store_dir();
         let owner_storage = crate::storage::CloudSyncStorage::new(
-            store.home.clone(),
+            _home.clone(),
             crate::storage::CloudCipher::Encrypted(routing.clone()),
             crate::storage::BlobPathScheme::Hashed,
-            store.storage.store_id(),
+            name,
             signer.clone(),
         )
         .expect("open Circle owner storage");
@@ -1399,6 +1383,7 @@ impl ActiveMemberCircleSnapshot {
         Self {
             db,
             store,
+            home: _home,
             signer,
             member,
             routing,
@@ -1478,6 +1463,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
     let ActiveMemberCircleSnapshot {
         db,
         store,
+        home,
         signer,
         routing,
         membership,
@@ -1493,8 +1479,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
     // the bytes too, so it fails this same digest check first — those reach the
     // verifier only from a malicious author, whose defense is the verifier's own
     // tests, not a storage provider.)
-    let sabotaged_keys: Vec<String> = store
-        .home
+    let sabotaged_keys: Vec<String> = home
         .keys()
         .into_iter()
         .filter(|key| key.contains("/bootstraps/"))
@@ -1504,9 +1489,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
         "the Circle bootstrap image was uploaded to storage"
     );
     for key in &sabotaged_keys {
-        store
-            .home
-            .insert_exact_object(key, b"sabotaged Circle bootstrap image".to_vec());
+        home.insert_exact_object(key, b"sabotaged Circle bootstrap image".to_vec());
     }
 
     let destination = tempfile::tempdir().expect("sabotage restore destination");
@@ -1608,7 +1591,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
 async fn post_close_circle_store_snapshot_restores_and_converges() {
     let routing = EncryptionService::from_key([42; 32]);
     let db = open_circle_routing_test_db();
-    let (store, signer, founder) =
+    let (store, _home, signer, founder) =
         persist_merge_operation(&db, "snapshot-restore-after-close").await;
     let circle_id = founder.circle_id();
     store
@@ -1627,10 +1610,6 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new(
-                "snapshot-restore-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -1641,10 +1620,10 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .expect("invite Store member");
     let (_store_temp, store_dir) = temp_store_dir();
     let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
+        _home.clone(),
         crate::storage::CloudCipher::Encrypted(routing.clone()),
         crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
+        "snapshot-restore-after-close",
         signer.clone(),
     )
     .expect("open Circle owner storage");
@@ -1899,7 +1878,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
 async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let routing = EncryptionService::from_key([42; 32]);
     let db = open_circle_routing_test_db();
-    let (store, signer, founder) =
+    let (store, _home, signer, founder) =
         persist_merge_operation(&db, "standalone-restore-dominates").await;
     let circle_id = founder.circle_id();
     store
@@ -1916,10 +1895,6 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .invite_member(
             &db,
             &signer,
-            &crate::sync::hlc::Hlc::new(
-                "standalone-dominates-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -1930,10 +1905,10 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .expect("invite Store member");
     let (_store_temp, store_dir) = temp_store_dir();
     let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
+        _home.clone(),
         crate::storage::CloudCipher::Encrypted(routing.clone()),
         crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
+        "standalone-restore-dominates",
         signer.clone(),
     )
     .expect("open Circle owner storage");
@@ -2353,10 +2328,11 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
         .circle_authoring_context(fixture.circle_id, &owner_pk)
         .await
         .expect("Circle authoring context");
-    let (epoch_encryption, _) = StoreDatabase::new(&fixture.db)
+    let epoch_encryption = StoreDatabase::new(&fixture.db)
         .circle_publication_context(fixture.circle_id, authoring.control.coord.clone())
         .await
-        .expect("Circle publication context");
+        .expect("Circle publication context")
+        .into_encryption();
     fixture
         .store
         .verify_standalone_circle_snapshot_image(
@@ -2591,12 +2567,12 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     // it, then use the metadata create as the crash boundary.
     let baseline = RotationFixture::build("snapshot-resume-baseline").await;
     let baseline_temp = tempfile::tempdir().expect("baseline snapshot temp dir");
-    let before = baseline.store.home.exact_create_count();
+    let before = baseline.home.exact_create_count();
     baseline
         .drive_circle_snapshots(&baseline_temp, "2026-07-23T00:00:00Z")
         .await
         .expect("clean Circle snapshot publication");
-    let meta_create = baseline.store.home.exact_create_count() - before;
+    let meta_create = baseline.home.exact_create_count() - before;
     assert_eq!(
         meta_create, 2,
         "a blobless Circle snapshot uploads an image, then its metadata"
@@ -2619,10 +2595,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
         let fixture = RotationFixture::build("snapshot-resume-image-meta").await;
         let circle_id = fixture.circle_id;
         let temp = tempfile::tempdir().expect("snapshot temp dir");
-        fixture
-            .store
-            .home
-            .fail_exact_create_before_call(meta_create);
+        fixture.home.fail_exact_create_before_call(meta_create);
         fixture
             .drive_circle_snapshots(&temp, "2026-07-23T00:00:00Z")
             .await
@@ -2666,7 +2639,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
         let fixture = RotationFixture::build("snapshot-resume-meta-complete").await;
         let circle_id = fixture.circle_id;
         let temp = tempfile::tempdir().expect("snapshot temp dir");
-        fixture.store.home.fail_exact_create_after_call(meta_create);
+        fixture.home.fail_exact_create_after_call(meta_create);
         fixture
             .drive_circle_snapshots(&temp, "2026-07-23T00:00:00Z")
             .await
@@ -2760,7 +2733,6 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     assert_eq!(
         writer
             .drain_tombstones(
-                fixture.store.home.as_ref(),
                 &cipher,
                 &crate::storage::PendingRotation::default(),
                 &crate::clock::FixedClock(deleted_at),
@@ -2776,7 +2748,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])).suffix(),
     );
     assert!(
-        fixture.store.home.read(&tombstone_key).await.is_ok(),
+        fixture.home.read(&tombstone_key).await.is_ok(),
         "the tombstone is written at its exact slot"
     );
 
@@ -2784,7 +2756,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         deleted_at + crate::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
     );
     let collected = writer
-        .gc_tombstones(fixture.store.home.as_ref(), &cipher, &past)
+        .gc_tombstones(&cipher, &past)
         .await
         .expect("run the graced tombstone GC over an audience-scoped blob");
 
@@ -2801,7 +2773,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         "the referenced ciphertext stays in cloud storage"
     );
     assert!(
-        fixture.store.home.read(&tombstone_key).await.is_err(),
+        fixture.home.read(&tombstone_key).await.is_err(),
         "the stale tombstone is canceled"
     );
 }
@@ -3064,7 +3036,6 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
     // authorizes the deletion, the delete fails, and the run surfaces the failure
     // to its initiator with the object still present.
     fixture
-        .store
         .home
         .fail_nth_exact_delete_of(&[source.object().slot()], 1);
     let interrupted = fixture.owner_device.reclaim_packages().await;
@@ -3468,10 +3439,6 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         .invite_member(
             &fixture.db,
             &fixture.signer,
-            &crate::sync::hlc::Hlc::new(
-                "second-recipient".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &second_pubkey,
             None,
             MemberRole::Member,

@@ -13,7 +13,6 @@ pub(crate) enum CirclePackageReadError {
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
     database: &'operation StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
-    root: &'operation crate::protocol::store_commit::StoreRootRef,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
@@ -21,15 +20,17 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
-        root: &'operation crate::protocol::store_commit::StoreRootRef,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
             storage,
-            root,
             history,
         }
+    }
+
+    fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+        self.history.verified_root().reference()
     }
 
     pub(crate) async fn load_applicable(
@@ -39,7 +40,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
         author: &StoreDeviceRegistration,
         local_store_membership: LocalStoreMembership,
     ) -> Result<Vec<LoadedCirclePackage>, CirclePackageReadError> {
-        let root = self.root.clone();
+        let root = self.root().clone();
         let commit_ref = verified.reference();
         let commit = verified.value();
         if commit.circle_packages().is_empty() {
@@ -171,7 +172,6 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                 let roster_chain = super::activation::CircleActivationVerifier::new(
                     self.database,
                     self.storage,
-                    self.root,
                     self.history,
                 )
                 .load_control_roster_chain(

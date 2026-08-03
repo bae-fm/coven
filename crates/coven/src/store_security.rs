@@ -6,8 +6,60 @@ use crate::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
     MasterKeyError, StoreKeys, UserKeypair,
 };
-use crate::storage::cloud::{CloudHome, CloudHomeError};
+use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
+
+pub(crate) struct EstablishedStoreIdentity {
+    keypair: UserKeypair,
+}
+
+impl EstablishedStoreIdentity {
+    pub(crate) fn public_key(&self) -> [u8; 32] {
+        self.keypair.public_key()
+    }
+
+    pub(crate) fn public_key_hex(&self) -> String {
+        crate::keys::public_key_hex(&self.keypair)
+    }
+
+    pub(crate) async fn initialize_sync_components(
+        &self,
+        database: crate::database::StoreDatabase,
+        local_blob_access: crate::sync::store::blob::LocalStoreBlobAccess,
+        storage: Arc<CloudSyncStorage>,
+        initialization: crate::sync::cycle::StoreInitialization,
+        routing_encryption: Option<EncryptionService>,
+    ) -> Result<crate::sync::cycle::SyncComponents, crate::sync::cycle::InitSyncError> {
+        crate::sync::cycle::PreparedSyncComponents::prepare(
+            database,
+            local_blob_access,
+            storage,
+            self.keypair.clone(),
+            initialization,
+            routing_encryption,
+        )
+        .await?
+        .initialize()
+        .await
+    }
+
+    pub(crate) async fn load_store(
+        &self,
+        database: crate::database::StoreDatabase,
+        storage: Arc<dyn crate::storage::SyncStorage>,
+    ) -> Result<crate::sync::Store, crate::sync::store::StoreError> {
+        crate::sync::Store::load(database, storage, self.keypair.clone()).await
+    }
+
+    pub(crate) async fn export_activated_device_continuation(
+        &self,
+        database: &crate::database::StoreDatabase,
+    ) -> Result<crate::restoration::ActivatedContinuation, crate::database::DbError> {
+        database
+            .export_activated_device_continuation(&self.keypair)
+            .await
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct StoreSecurity {
@@ -63,8 +115,10 @@ impl StoreSecurity {
         Ok(crate::keys::public_key_hex(&identity))
     }
 
-    pub(crate) fn require_identity(&self) -> Result<UserKeypair, KeyError> {
-        crate::keys::require_identity(self.identity.as_ref())
+    pub(crate) fn established_identity(&self) -> Result<EstablishedStoreIdentity, KeyError> {
+        Ok(EstablishedStoreIdentity {
+            keypair: crate::keys::require_identity(self.identity.as_ref())?,
+        })
     }
 
     pub(crate) fn identity_public_key(&self) -> Result<Option<[u8; 32]>, KeyError> {
@@ -142,15 +196,6 @@ impl StoreSecurity {
             .ok_or(crate::store_sync::SyncError::MasterKeyNotEstablished)
     }
 
-    pub(crate) async fn create_cloud_home(
-        &self,
-        config: &Config,
-        clock: crate::clock::ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
-        self.cloud_homes.create(config, clock, cloudkit_ops).await
-    }
-
     pub(crate) async fn create_sync_storage(
         &self,
         config: &Config,
@@ -164,7 +209,7 @@ impl StoreSecurity {
             None => self.cloud_cipher(config)?,
         };
         crate::storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
-        let home = self.create_cloud_home(config, clock, cloudkit_ops).await?;
+        let home = self.cloud_homes.create(config, clock, cloudkit_ops).await?;
         self.create_sync_storage_with_home(config, Arc::from(home), Some(cipher), blob_chunking)
     }
 
@@ -183,13 +228,13 @@ impl StoreSecurity {
             home.clone(),
             config.cloud_home.provider.clone(),
         )?;
-        let identity = self.require_identity()?;
+        let identity = self.established_identity()?;
         Ok(CloudSyncStorage::new(
             home,
             cipher,
             BlobPathScheme::for_storage(config.cloud_home.storage),
             config.store_id.clone(),
-            identity,
+            identity.keypair,
         )?
         .with_blob_chunking(blob_chunking))
     }

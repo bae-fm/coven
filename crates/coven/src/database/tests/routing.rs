@@ -4,7 +4,7 @@ use crate::database::StoreDatabase;
 
 #[tokio::test]
 async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
-    let (db, _stamper) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
@@ -70,7 +70,7 @@ async fn capture_scoped_write_then_reopen(
             _updated_at TEXT NOT NULL
          ) STRICT;",
     )];
-    let (db, _) = Database::open(
+    let db = Database::open(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -80,9 +80,14 @@ async fn capture_scoped_write_then_reopen(
         &migrations,
     )
     .expect("open scoped Store");
-    crate::sync::test_helpers::TestStore::create(&db, name, crate::keys::UserKeypair::generate())
-        .await
-        .expect("install exact scoped Store authority");
+    crate::sync::test_helpers::TestStore::create(
+        &db,
+        name,
+        crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("install exact scoped Store authority");
     let circle_label = format!("{name}-circle");
     let (circle_id, _control) = db
         .call(move |conn| {
@@ -145,7 +150,7 @@ async fn capture_scoped_write_then_reopen(
     }));
     drop(db);
 
-    let (reopened, _) = Database::open(
+    let reopened = Database::open(
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
@@ -298,7 +303,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
             .scoped_by("audience"),
     ];
-    let (db, _) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -320,6 +325,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         &db,
         "circle-only",
         crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("install scoped Store authority");
@@ -422,7 +428,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
             .scoped_by("audience"),
     ];
-    let (db, _) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -444,6 +450,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         &db,
         "cross-circle-move",
         crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("install scoped Store authority");
@@ -547,7 +554,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         SyncedTable::new("comments", crate::sync::session::RowIdentity::SharedKey)
             .inherits_audience_through("note_id"),
     ];
-    let (db, _) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -580,6 +587,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         &db,
         "foreign-key-move",
         crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("install scoped Store authority");

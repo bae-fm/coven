@@ -146,7 +146,7 @@ mod tests {
     async fn slow_db_call_does_not_block_the_executor() {
         use std::time::{Duration, Instant};
 
-        let (db, _stamper) = Database::open(
+        let db = Database::open(
             Path::new(":memory:"),
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
@@ -195,7 +195,7 @@ mod tests {
         let db_path = dir.path().join("db.sqlite");
         let marker = dir.path().join("marker");
 
-        let (db, _stamper) = Database::open(
+        let db = Database::open(
             &db_path,
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,

@@ -19,7 +19,6 @@ use crate::protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StreamActivation,
 };
 use crate::storage::cloud::CloudHome;
-use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
 };
@@ -31,11 +30,12 @@ async fn create_test_store_in_its_own_task(
     db: &Database,
     name: &str,
     signer: &UserKeypair,
-) -> TestStore {
+    home: std::sync::Arc<crate::InMemoryCloudHome>,
+) -> std::sync::Arc<TestStore> {
     let db = db.clone();
     let name = name.to_string();
     let signer = signer.clone();
-    tokio::spawn(async move { TestStore::create(&db, &name, signer).await })
+    tokio::spawn(async move { TestStore::create(&db, &name, signer, home).await })
         .await
         .expect("join Circle test Store creation")
         .expect("create exact Circle test Store")
@@ -44,9 +44,15 @@ async fn create_test_store_in_its_own_task(
 async fn persist_merge_operation(
     db: &Database,
     name: &str,
-) -> (TestStore, UserKeypair, CircleOperationJournal) {
+) -> (
+    std::sync::Arc<TestStore>,
+    std::sync::Arc<crate::InMemoryCloudHome>,
+    UserKeypair,
+    CircleOperationJournal,
+) {
     let signer = UserKeypair::generate();
-    let store = create_test_store_in_its_own_task(db, name, &signer).await;
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let store = create_test_store_in_its_own_task(db, name, &signer, home.clone()).await;
     let journal = store
         .bind_device(db, &signer)
         .await
@@ -58,7 +64,7 @@ async fn persist_merge_operation(
         .insert_circle_operation(journal.clone())
         .await
         .expect("persist circle operation");
-    (store, signer, journal)
+    (store, home, signer, journal)
 }
 
 fn promote_store_member_access_without_adding_to_circle_roster(

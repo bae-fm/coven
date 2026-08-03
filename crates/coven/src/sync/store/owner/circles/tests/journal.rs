@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     let db = open_test_db();
-    let (_store, _signer, journal) =
+    let (_store, _home, _signer, journal) =
         persist_merge_operation(&db, "circle-operation-id-mismatch").await;
     let expected_operation_id = journal.operation_id.clone();
     let replacement_write_id =
@@ -31,7 +31,8 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
 #[tokio::test]
 async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
     let db = open_test_db();
-    let (_store, _signer, journal) = persist_merge_operation(&db, "circle-id-mismatch").await;
+    let (_store, _home, _signer, journal) =
+        persist_merge_operation(&db, "circle-id-mismatch").await;
     let expected_operation_id = journal.operation_id.clone();
     let replacement_circle_id = CircleId::from_bytes([7; 16]);
     let mut replacement = journal.clone();
@@ -54,7 +55,7 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
 #[tokio::test]
 async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
     let db = open_test_db();
-    let (store, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
+    let (store, _home, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
     let second = store
         .bind_device(&db, &signer)
         .await
@@ -99,7 +100,7 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
 #[tokio::test]
 async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
     let db = open_test_db();
-    let (store, signer, journal) = persist_merge_operation(&db, "circle-publish-id").await;
+    let (store, _home, signer, journal) = persist_merge_operation(&db, "circle-publish-id").await;
     let absent_operation_id = CircleOperationId::from_write_id(crate::WriteId::from_generated(
         "absent-circle-operation".to_string(),
     ));

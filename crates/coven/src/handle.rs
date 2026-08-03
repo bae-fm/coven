@@ -25,9 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::blob::transition::{
-    BlobTransitionJournal, LocalBlobTransitions, MakeLocalError, MakeRemoteError,
-};
+use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
 use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::clock::ClockRef;
@@ -143,7 +141,6 @@ impl CovenHandle {
     pub(crate) fn new(
         db: Database,
         read_db: Database,
-        stamper: crate::sync::hlc::UpdatedAtStamper,
         store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: StoreKeys,
@@ -169,10 +166,7 @@ impl CovenHandle {
         let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
         let local_blob_access =
             LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), blob_cache.clone());
-        let local_blob_transitions = LocalBlobTransitions::new(
-            BlobTransitionJournal::new(database.clone()),
-            store_dir.clone(),
-        );
+        let local_blob_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
         let sync = StoreSync::new(
             config_provider,
             security.clone(),
@@ -190,7 +184,6 @@ impl CovenHandle {
             database.clone(),
             read_database,
             store_dir.clone(),
-            stamper,
             security.clone(),
             sync.clone(),
         );
@@ -230,8 +223,9 @@ impl CovenHandle {
         &self,
         store_id: &str,
         signer: crate::keys::UserKeypair,
-    ) -> Result<crate::sync::test_helpers::TestStore, String> {
-        self.sync.create_test_store(store_id, signer).await
+        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+    ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
+        self.sync.create_test_store(store_id, signer, home).await
     }
 
     #[cfg(test)]
@@ -1487,7 +1481,6 @@ mod tests {
             // `:memory:` (unique per connection, no shareable read-only companion),
             // so the writer clone stands in.
             db.clone(),
-            db.stamper(),
             store_dir.clone(),
             config_provider,
             StoreKeys::bind("lib-setup-error".to_string()),
@@ -1565,7 +1558,6 @@ mod tests {
             // `:memory:` (unique per connection, no shareable read-only companion),
             // so the writer clone stands in.
             db.clone(),
-            db.stamper(),
             store_dir.clone(),
             config_provider,
             StoreKeys::bind(store_id.to_string()),
@@ -1852,21 +1844,20 @@ mod tests {
                 };
                 let upload_pause = Arc::new(PausedUploadDrain::new());
                 let signer = crate::keys::UserKeypair::generate();
-                let store = TestStore::create(&db, "lib-test", signer.clone())
+                let home = crate::sync::test_helpers::test_cloud_home();
+                TestStore::create(&db, "lib-test", signer.clone(), home.clone())
                     .await
                     .expect("create exact test Store");
                 let store_keys = test_store_keys("lib-test");
                 let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
                     .resolve(&store_keys, &store_dir);
 
-                let stamper = db.stamper();
                 let handle = CovenHandle::new(
                     db.clone(),
                     // `read_db`: this test never calls `sql_read`, and the test db is
                     // `:memory:` (no shareable read-only companion), so the writer clone
                     // stands in.
                     db.clone(),
-                    stamper,
                     store_dir.clone(),
                     config_provider,
                     store_keys,
@@ -1881,7 +1872,6 @@ mod tests {
                 );
 
                 // Inject the mock home; the host hands over only the home + cipher.
-                let home = store.home.clone();
                 handle
                     .connect_sync_with_test_home(
                         home.clone(),
@@ -1990,7 +1980,8 @@ mod tests {
                     Arc::new(move || config.clone())
                 };
                 let signer = crate::keys::UserKeypair::generate();
-                let store = TestStore::create(&db, "lib-caller-driven", signer.clone())
+                let home = crate::sync::test_helpers::test_cloud_home();
+                TestStore::create(&db, "lib-caller-driven", signer.clone(), home.clone())
                     .await
                     .expect("create exact test Store");
                 let store_keys = test_store_keys("lib-caller-driven");
@@ -2003,7 +1994,6 @@ mod tests {
                     // `:memory:` (no shareable read-only companion), so the writer clone
                     // stands in.
                     db.clone(),
-                    db.stamper(),
                     store_dir.clone(),
                     config_provider,
                     store_keys,
@@ -2019,7 +2009,6 @@ mod tests {
                     crate::storage::BlobChunking::DEFAULT,
                 );
 
-                let home = store.home.clone();
                 handle
                     .connect_sync_with_test_home_caller_driven(
                         home.clone(),
@@ -2140,7 +2129,8 @@ mod tests {
                     Arc::new(move || config.clone())
                 };
                 let signer = crate::keys::UserKeypair::generate();
-                let store = TestStore::create(&db, "lib-chunking", signer.clone())
+                let home = crate::sync::test_helpers::test_cloud_home();
+                TestStore::create(&db, "lib-chunking", signer.clone(), home.clone())
                     .await
                     .expect("create exact test Store");
                 let store_keys = test_store_keys("lib-chunking");
@@ -2156,7 +2146,6 @@ mod tests {
                     // `:memory:` (no shareable read-only companion), so the writer clone
                     // stands in.
                     db.clone(),
-                    db.stamper(),
                     store_dir.clone(),
                     config_provider,
                     store_keys,
@@ -2170,7 +2159,6 @@ mod tests {
                     chunking,
                 );
 
-                let home = store.home.clone();
                 handle
                     .connect_sync_with_test_home(
                         home.clone(),
@@ -2271,7 +2259,6 @@ mod tests {
             // `:memory:` (unique per connection, no shareable read-only companion),
             // so the writer clone stands in.
             db.clone(),
-            db.stamper(),
             store_dir.clone(),
             config_provider,
             StoreKeys::bind("lib-cloudkit-home-reuse".to_string()),
@@ -2343,7 +2330,6 @@ mod tests {
                 let writer = CovenHandle::new(
                     db.clone(),
                     db.clone(),
-                    db.stamper(),
                     store_dir.clone(),
                     config_provider,
                     key_service.clone(),
@@ -2481,7 +2467,6 @@ mod tests {
                 let handle = CovenHandle::new(
                     db.clone(),
                     db.clone(),
-                    db.stamper(),
                     store_dir.clone(),
                     config_provider,
                     store_keys,
@@ -2611,7 +2596,6 @@ mod tests {
         CovenHandle::new(
             db.clone(),
             db.clone(),
-            db.stamper(),
             store_dir.clone(),
             config_provider,
             store_keys,
@@ -2659,16 +2643,12 @@ mod tests {
         test_keyring::install();
         let (_tmp_a, store_dir_a) = temp_store_dir();
         let (_tmp_b, store_dir_b) = temp_store_dir();
-        let handle_a = test_handle_with_real_identity(
-            "lib-two-stores-identity-a",
-            store_dir_a,
-            read_test_db("images"),
-        );
-        let handle_b = test_handle_with_real_identity(
-            "lib-two-stores-identity-b",
-            store_dir_b,
-            read_test_db("images"),
-        );
+        let db_a = read_test_db("images");
+        let handle_a =
+            test_handle_with_real_identity("lib-two-stores-identity-a", store_dir_a, db_a);
+        let db_b = read_test_db("images");
+        let handle_b =
+            test_handle_with_real_identity("lib-two-stores-identity-b", store_dir_b, db_b);
 
         let pubkey_a = handle_a
             .initialize_identity()
@@ -2951,24 +2931,23 @@ mod tests {
                     .await
                     .expect("read active Circle members"),
                 vec![crate::CircleMemberInfo {
-                    pubkey: crate::keys::public_key_hex(
-                        &handle
-                            .security
-                            .require_identity()
-                            .expect("read test identity"),
-                    ),
+                    pubkey: handle
+                        .security
+                        .established_identity()
+                        .expect("read test identity")
+                        .public_key_hex(),
                     role: crate::CircleRole::Owner,
                     is_self: true,
                 }]
             );
             let identity = handle
                 .security
-                .require_identity()
+                .established_identity()
                 .expect("read test identity");
             assert!(StoreDatabase::from_database(db.clone())
                 .get_circle_members(
                     circle_id,
-                    &crate::keys::public_key_hex(&identity),
+                    &identity.public_key_hex(),
                     std::collections::BTreeSet::new(),
                 )
                 .await
@@ -3171,7 +3150,6 @@ mod tests {
                     let handle = CovenHandle::new(
                         db.clone(),
                         db.clone(),
-                        db.stamper(),
                         store_dir.clone(),
                         config_provider,
                         StoreKeys::bind("lib-reconnect-loop".to_string()),
@@ -3246,7 +3224,6 @@ mod tests {
                     let handle = CovenHandle::new(
                         db.clone(),
                         db.clone(),
-                        db.stamper(),
                         store_dir.clone(),
                         config_provider,
                         StoreKeys::bind("lib-stopped-loop-readiness".to_string()),
@@ -3320,7 +3297,6 @@ mod tests {
                         // `:memory:` (unique per connection, no shareable read-only companion),
                         // so the writer clone stands in.
                         db.clone(),
-                        db.stamper(),
                         store_dir.clone(),
                         config_provider,
                         StoreKeys::bind("lib-test".to_string()),
@@ -3357,7 +3333,7 @@ mod tests {
                     }
 
                     assert_eq!(loop_handle.config().store_id, "lib-test");
-                    assert_eq!(loop_handle.store_dir(), &store_dir);
+                    assert!(loop_handle.uses_store_dir_for_test(&store_dir));
                     assert!(matches!(
                         loop_handle.blob_path_scheme(),
                         BlobPathScheme::Hashed
@@ -3369,13 +3345,7 @@ mod tests {
                     loop_handle
                         .adopt_key_rotation_for_test(rotated)
                         .expect("adopt encrypted generation");
-                    assert_eq!(
-                        loop_handle
-                            .current_encryption()
-                            .expect("session remains encrypted")
-                            .current_generation(),
-                        2,
-                    );
+                    assert_eq!(loop_handle.encryption_generation_for_test(), Some(2));
 
                     let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
                     let blob = handle
@@ -3402,23 +3372,18 @@ mod tests {
                         context.extend_from_slice(cloud_key.as_bytes());
                         context
                     };
-                    let encryption = loop_handle
-                        .current_encryption()
-                        .expect("session remains encrypted");
-                    let (fingerprint, header, chunks) =
-                        crate::storage::split_sealed_blob(&stored).expect("stored blob layout");
-                    assert_eq!(fingerprint, encryption.seal_key_fingerprint());
-                    assert_eq!(
-                        encryption
-                            .blob_opener(header, &aad_context("lib-test"))
-                            .open_chunks(0..header.chunk_count(), chunks)
-                            .expect("open with the installed session binding"),
-                        plaintext,
-                    );
+                    let expected_fingerprint = EncryptionService::from_key([7u8; 32])
+                        .with_appended_generation(2, [8u8; 32])
+                        .expect("append expected generation")
+                        .seal_key_fingerprint();
+                    let (fingerprint, opened) = loop_handle
+                        .open_sealed_blob_for_test(&stored, &aad_context("lib-test"))
+                        .expect("open with the installed session binding");
+                    assert_eq!(fingerprint, expected_fingerprint);
+                    assert_eq!(opened, plaintext);
                     assert!(
-                        encryption
-                            .blob_opener(header, &aad_context("next-lib"))
-                            .open_chunks(0..header.chunk_count(), chunks)
+                        loop_handle
+                            .open_sealed_blob_for_test(&stored, &aad_context("next-lib"))
                             .is_err(),
                         "a later config must not change the installed session's store binding",
                     );
@@ -3449,7 +3414,6 @@ mod tests {
             // `:memory:` (unique per connection, no shareable read-only companion),
             // so the writer clone stands in.
             db.clone(),
-            db.stamper(),
             store_dir.clone(),
             config_provider,
             StoreKeys::bind(store_id.to_string()),

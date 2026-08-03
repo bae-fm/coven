@@ -24,7 +24,6 @@ use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess, PendingRotation};
 use crate::store_dir::StoreDir;
 use crate::sync::cycle::run_single_sync_cycle;
-use crate::sync::hlc::Hlc;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{
     open_test_db, pubkey_hex, temp_store_dir, test_store_security, TestCustody, TestStore,
@@ -37,7 +36,6 @@ trait RefreshTestStoreOps {
     async fn remove_member_with_local_state_for_test(
         &self,
         user_keypair: &UserKeypair,
-        hlc: &Hlc,
         public_key_hex: &str,
         current_encryption: &EncryptionService,
         security: &crate::store_security::StoreSecurity,
@@ -82,7 +80,6 @@ trait RefreshTestStoreOps {
         cipher: &RwLock<CloudCipher>,
         pending_rotation: &PendingRotation,
         keypair: &UserKeypair,
-        device_id: &str,
         store_dir: &StoreDir,
         security: Option<&crate::store_security::StoreSecurity>,
     ) -> Result<super::cycle::SyncCycleResult, String>;
@@ -95,17 +92,15 @@ trait RefreshTestStoreOps {
         cipher: &RwLock<CloudCipher>,
         pending_rotation: &PendingRotation,
         keypair: &UserKeypair,
-        device_id: &str,
         store_dir: &StoreDir,
         security: Option<&crate::store_security::StoreSecurity>,
     ) -> Result<super::cycle::SyncCycleResult, String>;
 }
 
-impl RefreshTestStoreOps for TestStore {
+impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
     async fn remove_member_with_local_state_for_test(
         &self,
         user_keypair: &UserKeypair,
-        hlc: &Hlc,
         public_key_hex: &str,
         current_encryption: &EncryptionService,
         security: &crate::store_security::StoreSecurity,
@@ -116,9 +111,7 @@ impl RefreshTestStoreOps for TestStore {
         self.bind_device(db, user_keypair)
             .await
             .map_err(|error| MembershipOpsError::Database(error.to_string()))?
-            .store
             .remove_member(
-                hlc,
                 public_key_hex,
                 current_encryption,
                 security,
@@ -142,7 +135,6 @@ impl RefreshTestStoreOps for TestStore {
             .await
             .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
         let mut writer = device
-            .store
             .authorize_writer()
             .await
             .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
@@ -167,10 +159,6 @@ impl RefreshTestStoreOps for TestStore {
         self.invite_member(
             owner_db,
             owner,
-            &Hlc::new(
-                "refresh-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &pubkey_hex(member),
             None,
             role,
@@ -217,14 +205,13 @@ impl RefreshTestStoreOps for TestStore {
         )
         .expect("seal wrapped Store key");
         let prepared = self
-            .bind_device(owner_db, &self.signer)
+            .bind_device(owner_db, signer)
             .await
             .expect("bind wrapped-key publication Store")
             .prepare_wrapped_key(&recipient_pubkey, wrapped)
             .await
             .expect("prepare exact wrapped Store key");
-        self.storage
-            .create_protocol_object(&prepared.object)
+        self.create_protocol_object(&prepared.object)
             .await
             .expect("create exact wrapped Store key");
         prepared.reference
@@ -236,17 +223,15 @@ impl RefreshTestStoreOps for TestStore {
         cipher: &RwLock<CloudCipher>,
         pending_rotation: &PendingRotation,
         keypair: &UserKeypair,
-        device_id: &str,
         store_dir: &StoreDir,
         security: Option<&crate::store_security::StoreSecurity>,
     ) -> Result<super::cycle::SyncCycleResult, String> {
         self.run_refresh_cycle_with_storage(
-            self.storage.clone(),
+            self.clone(),
             db,
             cipher,
             pending_rotation,
             keypair,
-            device_id,
             store_dir,
             security,
         )
@@ -260,7 +245,6 @@ impl RefreshTestStoreOps for TestStore {
         cipher: &RwLock<CloudCipher>,
         pending_rotation: &PendingRotation,
         keypair: &UserKeypair,
-        device_id: &str,
         store_dir: &StoreDir,
         security: Option<&crate::store_security::StoreSecurity>,
     ) -> Result<super::cycle::SyncCycleResult, String> {
@@ -269,14 +253,9 @@ impl RefreshTestStoreOps for TestStore {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "refresh device has no exact Store registration".to_string())?;
-        let hlc = Hlc::new(
-            device_id.to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
         run_single_sync_cycle(
             sync_storage,
             &exact_device_id,
-            &hlc,
             &SystemClock,
             db,
             cipher,
@@ -284,7 +263,7 @@ impl RefreshTestStoreOps for TestStore {
             keypair,
             security,
             store_dir,
-            Some(self.home.as_ref()),
+            true,
             None,
         )
         .await
@@ -292,11 +271,18 @@ impl RefreshTestStoreOps for TestStore {
     }
 }
 
-async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
+async fn exact_store(
+    owner: &UserKeypair,
+) -> (std::sync::Arc<TestStore>, crate::database::Database) {
     let owner_db = open_test_db();
-    let storage = Box::pin(TestStore::create(&owner_db, LIB_ID, owner.clone()))
-        .await
-        .expect("create exact refresh Store");
+    let storage = Box::pin(TestStore::create(
+        &owner_db,
+        LIB_ID,
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    ))
+    .await
+    .expect("create exact refresh Store");
     Box::pin(storage.open_into(&owner_db))
         .await
         .expect("open exact refresh Store on owner device");
@@ -389,7 +375,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -426,7 +411,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -505,10 +489,6 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new(
-                "refresh-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &pubkey_hex(&invited_member),
             None,
             MemberRole::Member,
@@ -518,7 +498,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .await
         .expect("publish post-rotation invitation");
     let invited_keyring = invitation
-        .open_keyring(&*storage.storage, &invited_member)
+        .open_keyring(&*storage, &invited_member)
         .await
         .expect("invited member opens the activated exact wrap");
     let sealed = rotated.seal_app_data(b"current Store data", b"post-rotation invite");
@@ -599,7 +579,6 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -616,13 +595,9 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         old_key,
         "an unreferenced key must not replace the live cipher",
     );
-    load_wrapped_store_key(
-        &storage.storage,
-        storage.root.store_root_hash,
-        &unreferenced,
-    )
-    .await
-    .expect("the ignored exact object remains readable by its exact reference");
+    load_wrapped_store_key(&storage, storage.root.store_root_hash, &unreferenced)
+        .await
+        .expect("the ignored exact object remains readable by its exact reference");
 }
 
 #[tokio::test]
@@ -681,7 +656,6 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -689,13 +663,9 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .expect("adopt generation 2");
     assert_eq!(cipher_generation(&cipher_b), new_key.current_generation());
 
-    load_wrapped_store_key(
-        &storage.storage,
-        storage.root.store_root_hash,
-        &old_reference,
-    )
-    .await
-    .expect("the retained pre-rotation object remains readable");
+    load_wrapped_store_key(&storage, storage.root.store_root_hash, &old_reference)
+        .await
+        .expect("the retained pre-rotation object remains readable");
 
     storage
         .run_refresh_cycle(
@@ -703,7 +673,6 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -772,7 +741,6 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -881,7 +849,6 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &cipher_b,
         &PendingRotation::none(),
         &device_b,
-        "B",
         &ld_b,
         Some(&security_b),
     ))
@@ -967,12 +934,10 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         .await
         .expect("bind second Owner before either concurrent rotation");
     let mut founder_writer = founder_device
-        .store
         .authorize_writer()
         .await
         .expect("authorize founder at the shared membership cut");
     let mut second_owner_writer = second_owner_device
-        .store
         .authorize_writer()
         .await
         .expect("authorize second Owner at the shared membership cut");
@@ -1114,7 +1079,6 @@ async fn removed_owner_key_is_not_adopted() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -1179,7 +1143,6 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -1197,7 +1160,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         forged_key,
         "the attacker's key was rejected",
     );
-    load_wrapped_store_key(&storage.storage, storage.root.store_root_hash, &forged)
+    load_wrapped_store_key(&storage, storage.root.store_root_hash, &forged)
         .await
         .expect("the ignored attacker object exists at its exact reference");
 }
@@ -1258,7 +1221,6 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -1323,7 +1285,7 @@ async fn one_cycle_loads_exact_membership_once() {
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     let counter = std::sync::Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.storage.clone(),
+        storage.clone(),
         MembershipReadCounter::new(),
     ));
     storage
@@ -1333,7 +1295,6 @@ async fn one_cycle_loads_exact_membership_once() {
             &cipher_b,
             &PendingRotation::none(),
             &device_b,
-            "B",
             &ld_b,
             Some(&security_b),
         )
@@ -1387,10 +1348,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     let security = test_store_security(LIB_ID, Arc::new(ks.clone()));
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let pending_rotation = PendingRotation::none();
-    let hlc = Hlc::new(
-        "A".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-    );
 
     // The keyring is momentarily unwritable, so local adoption fails after the
     // cloud rotation commits.
@@ -1399,7 +1356,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         RefreshTestStoreOps::remove_member_with_local_state_for_test(
             &storage,
             &owner,
-            &hlc,
             &pubkey_hex(&member),
             &encryption,
             &security,
@@ -1468,7 +1424,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             &cipher_refresh,
             &pending_rotation_refresh,
             &owner,
-            "A",
             &ld,
             Some(&security_refresh),
         ))
@@ -1494,7 +1449,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         RefreshTestStoreOps::remove_member_with_local_state_for_test(
             &storage,
             &owner,
-            &hlc,
             &pubkey_hex(&member),
             &encryption,
             &security,

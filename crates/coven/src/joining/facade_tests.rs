@@ -60,8 +60,9 @@ impl FacadeFixture {
         // The store's protocol root, founder registration, and the snapshot a
         // joining device bootstraps from are all fixture setup — the flow under
         // test starts once they exist.
+        let home = test_cloud_home();
         let store = handle
-            .create_test_store(store_id, owner.clone())
+            .create_test_store(store_id, owner.clone(), home.clone())
             .await
             .expect("create the owner's Store");
         let snapshot_tmp = tempfile::tempdir().expect("snapshot directory");
@@ -73,7 +74,7 @@ impl FacadeFixture {
 
         handle
             .connect_sync_with_test_home(
-                store.home.clone(),
+                home.clone(),
                 crate::storage::CloudCipher::Encrypted(encryption),
             )
             .await
@@ -82,7 +83,7 @@ impl FacadeFixture {
         let joiner_tmp = tempfile::tempdir().expect("joining device directory");
         Self {
             handle,
-            home: store.home.clone(),
+            home,
             layout: crate::StoreLayout::new(joiner_tmp.path()),
             tables,
             _store_tmp: store_tmp,

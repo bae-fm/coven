@@ -127,6 +127,10 @@ pub(crate) struct VerifiedReclaimReceipt {
 }
 
 impl<'a> StoreCommitVerifier<'a> {
+    pub(super) fn store_root_hash(&self) -> ObjectHash {
+        self.root.reference().store_root_hash
+    }
+
     pub(crate) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'a> {
         StoreMembershipObjectVerifier::new(self)
     }
@@ -665,7 +669,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn discover_owner_recoveries(
         &self,
         membership: &MembershipChain,
-    ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, StorePullError> {
+    ) -> Result<Vec<ReferencedStoreDeviceRegistration>, StorePullError> {
         let protocol = &self.root.protocol();
         if membership
             .active_owner_grant(&protocol.descriptor.founder_pubkey)
@@ -760,7 +764,13 @@ impl<'a> StoreCommitVerifier<'a> {
                     "Owner recovery readiness differs from its registration graph".into(),
                 ));
             }
-            recovered.push((node.readiness.registration.clone(), registration));
+            recovered.push(
+                ReferencedStoreDeviceRegistration::verified(
+                    node.readiness.registration.clone(),
+                    registration,
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?,
+            );
             slot = node.next_slot.clone();
             predecessor = Some(reference);
             sequence = sequence.checked_add(1).ok_or_else(|| {
@@ -773,10 +783,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn load_active_registrations(
         &self,
         state: &ResolvedStoreDeviceState,
-    ) -> Result<
-        BTreeMap<StoreDeviceId, (StoreDeviceRegistrationRef, StoreDeviceRegistration)>,
-        StorePullError,
-    > {
+    ) -> Result<BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>, StorePullError> {
         let mut active = BTreeMap::new();
         for (device_id, record) in &state.devices {
             if !matches!(record.status, StoreDeviceStatus::Active) {
@@ -790,7 +797,11 @@ impl<'a> StoreCommitVerifier<'a> {
             }
             active.insert(
                 *device_id,
-                (record.registration.clone(), registration.value),
+                ReferencedStoreDeviceRegistration::verified(
+                    record.registration.clone(),
+                    registration.value,
+                )
+                .map_err(|error| StorePullError::Database(error.to_string()))?,
             );
         }
         Ok(active)
@@ -805,8 +816,8 @@ impl<'a> StoreCommitVerifier<'a> {
         let active = self.load_active_registrations(state).await?;
         let canonical = active
             .values()
-            .filter(|(_, registration)| registration.author_pubkey == owner_pubkey)
-            .map(|(reference, _)| reference)
+            .filter(|registration| registration.value().author_pubkey == owner_pubkey)
+            .map(ReferencedStoreDeviceRegistration::reference)
             .min();
         if canonical != Some(selected) {
             return Err(StorePullError::Database(

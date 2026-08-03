@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use crate::blob::transition::{
-    BlobTransitionJournal, ConnectedBlobTransitions, LocalBlobTransitions,
-};
+use crate::blob::transition::{ConnectedBlobTransitions, LocalBlobTransitions};
 use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
@@ -36,10 +34,7 @@ pub(crate) fn local_blob_access(
 impl TestOwnerGraph {
     pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
         let (cache, local_access) = blob_owners(database.clone(), store_dir.clone());
-        let local_transitions = LocalBlobTransitions::new(
-            BlobTransitionJournal::new(database.clone()),
-            store_dir.clone(),
-        );
+        let local_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
         Self {
             database,
             store_dir,
@@ -77,7 +72,6 @@ impl TestOwnerGraph {
     pub(crate) async fn seed_remote_release(
         &self,
         store: &crate::sync::test_helpers::TestStore,
-        hlc: &crate::sync::hlc::Hlc,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         note_id: &str,
         photo_id: &str,
@@ -109,7 +103,6 @@ impl TestOwnerGraph {
                 &self.database,
                 &self.store_dir,
                 &crate::clock::SystemClock,
-                hlc,
                 routing_encryption,
                 None,
             )

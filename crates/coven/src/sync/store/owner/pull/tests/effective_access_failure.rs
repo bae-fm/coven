@@ -23,6 +23,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         &owner_database,
         "unresolved-effective-access",
         owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create unresolved-membership Store");
@@ -33,10 +34,6 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .invite_member(
             &owner_database,
             &owner,
-            &crate::sync::hlc::Hlc::new(
-                "unresolved-second-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &crate::keys::public_key_hex(&second_owner),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -85,30 +82,22 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     let target_pubkey = crate::keys::public_key_hex(&target);
     founder_writer
         .invite_member(
-            &crate::sync::hlc::Hlc::new(
-                "unresolved-founder-assignment".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &target_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,
             &encryption,
-            store.storage.store_id(),
+            "unresolved-effective-access",
             "Unresolved Membership Store",
         )
         .await
         .expect("publish the founder's assignment");
     second_writer
         .invite_member(
-            &crate::sync::hlc::Hlc::new(
-                "unresolved-second-assignment".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &target_pubkey,
             None,
             crate::protocol::membership::MemberRole::Follower,
             &encryption,
-            store.storage.store_id(),
+            "unresolved-effective-access",
             "Unresolved Membership Store",
         )
         .await
@@ -169,13 +158,12 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
         let unavailable_commit = fixture.load_commit(&unavailable).await;
         let unavailable_slot = exact_circle_package_slot(&unavailable_commit);
         match failure {
-            PackageFailure::Missing => fixture.store.home.remove_exact_object(&unavailable_slot),
+            PackageFailure::Missing => fixture.home.remove_exact_object(&unavailable_slot),
             PackageFailure::Corrupt => fixture
-                .store
                 .home
                 .replace_exact_object(&unavailable_slot, b"corrupt Circle package".to_vec()),
         }
-        fixture.store.home.clear_exact_reads();
+        fixture.home.clear_exact_reads();
         let pull = fixture
             .pull_member(&member_store_dir)
             .await
@@ -186,7 +174,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
                 .any(|held| held.coordinate.seq() == unavailable.coord.sequence()),
             "{failure:?}: {pull:?}"
         );
-        assert!(fixture.store.home.exact_reads().contains(&unavailable_slot));
+        assert!(fixture.home.exact_reads().contains(&unavailable_slot));
         let state = member_database
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await;

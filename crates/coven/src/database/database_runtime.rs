@@ -37,9 +37,8 @@ impl Database {
     /// contract in one transaction. A fresh database creates Coven metadata in
     /// that transaction; an initialized database commits only when the final
     /// contract exactly matches its pinned bytes. Then seeds the register clock
-    /// from on-disk rows. Returns the handle plus the non-optional `_updated_at`
-    /// stamper the host binds into every synced-row write.
-    ///
+    /// from on-disk rows. The `_updated_at` stamper remains inside the database
+    /// boundary and is used by every synced-row write.
     pub(crate) fn open(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
@@ -48,7 +47,7 @@ impl Database {
         device_id: String,
         clock: crate::clock::ClockRef,
         migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
+    ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock)
             .map_err(|e| DbError::Message(format!("device_id {e}")))?;
         Self::open_with_hlc_and_coven_metadata(
@@ -71,7 +70,7 @@ impl Database {
         device_id: String,
         clock: crate::clock::ClockRef,
         migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
+    ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock)
             .map_err(|e| DbError::Message(format!("device_id {e}")))?;
         Self::open_with_hlc_and_coven_metadata(
@@ -99,7 +98,7 @@ impl Database {
         transfer_limits: crate::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
+    ) -> Result<Database, OpenError> {
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
@@ -119,8 +118,8 @@ impl Database {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
-    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
-        let (core, state, stamper) = DatabaseCore::open(
+    ) -> Result<Database, OpenError> {
+        let (core, state) = DatabaseCore::open(
             path,
             synced_tables,
             blob_tombstone_grace,
@@ -135,7 +134,7 @@ impl Database {
             state,
         };
 
-        Ok((database, stamper))
+        Ok(database)
     }
 
     /// Open the store at `path` read-only for a same-store secondary reader
@@ -184,16 +183,6 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub(crate) fn gates(&self) -> Arc<Gates> {
-        self.state.gates.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn blob_decls(&self) -> Arc<BlobDecls> {
-        self.state.blob_decls.clone()
-    }
-
-    #[cfg(test)]
     pub(crate) fn schema_version(&self) -> u32 {
         self.state.schema_version
     }
@@ -201,16 +190,6 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn sync_routing_hash(&self) -> ObjectHash {
         self.state.sync_routing_hash
-    }
-
-    #[cfg(test)]
-    pub(crate) fn hlc(&self) -> Arc<Hlc> {
-        self.state.hlc.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn stamper(&self) -> UpdatedAtStamper {
-        UpdatedAtStamper::new(self.state.hlc.clone())
     }
 
     /// The receiver's current wall-clock millis, read from this database's

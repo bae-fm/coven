@@ -35,10 +35,17 @@ pub(crate) fn load_published_store_snapshot_on(
         let successor_slot = serde_json::from_str(&successor_slot).map_err(|error| {
             DbError::Message(format!("published Store snapshot successor slot: {error}"))
         })?;
-        let (root, author_ref, author) = local_store_authority_on(conn)?;
-        let meta = SnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, &author)
-            .map_err(|error| DbError::Message(format!("published Store snapshot: {error}")))?;
-        if meta.author_registration != author_ref || meta.successor.next_slot != successor_slot {
+        let authority = local_store_authority_on(conn)?;
+        let author_ref = authority.reference();
+        let author = authority.value();
+        let meta = SnapshotMeta::parse_at(
+            &bytes,
+            author.store_root.store_root_hash,
+            &reference,
+            author,
+        )
+        .map_err(|error| DbError::Message(format!("published Store snapshot: {error}")))?;
+        if &meta.author_registration != author_ref || meta.successor.next_slot != successor_slot {
             return Err(DbError::Message(
                 "published Store snapshot differs from its local stream state".to_string(),
             ));
@@ -105,13 +112,19 @@ pub(crate) fn load_outbound_store_snapshot_on(
                         .to_string(),
                 ));
             }
-            let (root, author_ref, author) = local_store_authority_on(conn)?;
-            let meta =
-                SnapshotMeta::parse_at(&meta_bytes, root.store_root_hash, &reference, &author)
+            let authority = local_store_authority_on(conn)?;
+            let author_ref = authority.reference();
+            let author = authority.value();
+            let meta = SnapshotMeta::parse_at(
+                &meta_bytes,
+                author.store_root.store_root_hash,
+                &reference,
+                author,
+            )
                     .map_err(|error| {
                         DbError::Message(format!("outbound Store snapshot: {error}"))
                     })?;
-            if meta.author_registration != author_ref || meta.image != image_reference {
+            if &meta.author_registration != author_ref || meta.image != image_reference {
                 return Err(DbError::Message(
                     "outbound Store snapshot metadata differs from its exact image".to_string(),
                 ));

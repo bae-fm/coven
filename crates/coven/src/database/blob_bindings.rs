@@ -166,7 +166,7 @@ impl Database {
             )));
         }
         let row_id = row_id.to_string();
-        let gates = self.gates();
+        let gates = self.state.gates.clone();
         self.call(move |conn| Self::row_blob_ref_on(conn, &gates, &table, &row_id))
             .await
     }

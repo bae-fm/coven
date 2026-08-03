@@ -132,7 +132,6 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
             &test_migrations(),
         )
         .expect("open founder rollback database")
-        .0
     };
     let db = open();
     let timestamp = "0000000000001-0000-founder";

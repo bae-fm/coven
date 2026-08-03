@@ -32,7 +32,7 @@ pub(crate) mod test_owner_graph;
 #[cfg(test)]
 mod tests;
 pub use crate::store_sync::SyncError;
-pub use hlc::{Hlc, Timestamp, UpdatedAtStamper};
+pub use hlc::{Hlc, Timestamp};
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use session::{BlobDecl, RowIdentity, SyncedTable};
 pub use status::DeviceActivity;

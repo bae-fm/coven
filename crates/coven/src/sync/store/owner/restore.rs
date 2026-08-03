@@ -31,6 +31,61 @@ pub(crate) struct RestoringStore<'storage> {
     identity: UserKeypair,
 }
 
+enum RecoveryProtocolObject<T, R> {
+    Existing {
+        exact: crate::database::ExactProtocolObject<T>,
+        reference: R,
+    },
+    Prepared {
+        exact: crate::database::ExactProtocolObject<T>,
+        reference: R,
+    },
+}
+
+impl<T, R> RecoveryProtocolObject<T, R> {
+    fn from_remote_state(
+        exact: crate::database::ExactProtocolObject<T>,
+        reference: R,
+        exists: bool,
+    ) -> Self {
+        if exists {
+            Self::Existing { exact, reference }
+        } else {
+            Self::Prepared { exact, reference }
+        }
+    }
+
+    fn exact(&self) -> &crate::database::ExactProtocolObject<T> {
+        match self {
+            Self::Existing { exact, .. } | Self::Prepared { exact, .. } => exact,
+        }
+    }
+
+    fn reference(&self) -> &R {
+        match self {
+            Self::Existing { reference, .. } | Self::Prepared { reference, .. } => reference,
+        }
+    }
+
+    fn prepared_for_creation(&self) -> Option<&PreparedExactObject> {
+        match self {
+            Self::Existing { .. } => None,
+            Self::Prepared { exact, .. } => Some(&exact.prepared),
+        }
+    }
+
+    fn into_exact(self) -> crate::database::ExactProtocolObject<T> {
+        match self {
+            Self::Existing { exact, .. } | Self::Prepared { exact, .. } => exact,
+        }
+    }
+}
+
+struct PreparedRecoveryReadiness {
+    registration: RecoveryProtocolObject<StoreDeviceRegistration, StoreDeviceRegistrationRef>,
+    initial_ack: RecoveryProtocolObject<StoreAck, StoreAckRef>,
+}
+
 impl<'storage> RestoringStore<'storage> {
     async fn prepare_or_load_recovery_registration(
         &self,
@@ -38,12 +93,7 @@ impl<'storage> RestoringStore<'storage> {
         slot: crate::storage::cloud::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<
-        (
-            StoreDeviceRegistration,
-            StoreDeviceRegistrationRef,
-            PreparedExactObject,
-            bool,
-        ),
+        RecoveryProtocolObject<StoreDeviceRegistration, StoreDeviceRegistrationRef>,
         StoreRegistrationError,
     > {
         let root = &self.root;
@@ -70,18 +120,37 @@ impl<'storage> RestoringStore<'storage> {
                     &registration,
                     prepared.reference().clone(),
                 );
-                Ok((registration, reference, prepared, true))
+                let object = prepared.reference().clone();
+                Ok(RecoveryProtocolObject::Existing {
+                    exact: crate::database::ExactProtocolObject {
+                        value: registration,
+                        bytes,
+                        object,
+                        prepared,
+                    },
+                    reference,
+                })
             }
             Err(crate::storage::StorageError::NotFound(_)) => {
+                let bytes = expected.to_bytes();
                 let prepared = self
                     .storage
-                    .prepare_protocol_object(&context, slot, semantic_prefix, expected.to_bytes())
+                    .prepare_protocol_object(&context, slot, semantic_prefix, bytes.clone())
                     .map_err(StoreObjectError::from)?;
                 let reference = StoreDeviceRegistrationRef::from_registration(
                     &expected,
                     prepared.reference().clone(),
                 );
-                Ok((expected, reference, prepared, false))
+                let object = prepared.reference().clone();
+                Ok(RecoveryProtocolObject::Prepared {
+                    exact: crate::database::ExactProtocolObject {
+                        value: expected,
+                        bytes,
+                        object,
+                        prepared,
+                    },
+                    reference,
+                })
             }
             Err(error) => Err(StoreObjectError::from(error).into()),
         }
@@ -121,8 +190,7 @@ impl<'storage> RestoringStore<'storage> {
         device_state: StoreDeviceStateRef,
         published_at: &str,
         device_signer: &UserKeypair,
-    ) -> Result<(StoreAck, Vec<u8>, StoreAckRef, PreparedExactObject, bool), StoreRegistrationError>
-    {
+    ) -> Result<RecoveryProtocolObject<StoreAck, StoreAckRef>, StoreRegistrationError> {
         let root = &self.root;
         let storage = self.storage;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
@@ -164,7 +232,16 @@ impl<'storage> RestoringStore<'storage> {
                             .into(),
                     ));
                 }
-                Ok((ack, bytes, reference, prepared, true))
+                let object = prepared.reference().clone();
+                Ok(RecoveryProtocolObject::Existing {
+                    exact: crate::database::ExactProtocolObject {
+                        value: ack,
+                        bytes,
+                        object,
+                        prepared,
+                    },
+                    reference,
+                })
             }
             Err(crate::storage::StorageError::NotFound(_)) => {
                 let next_slot = storage
@@ -207,7 +284,16 @@ impl<'storage> RestoringStore<'storage> {
                     ack_hash: ack.ack_hash(),
                     object: prepared.reference().clone(),
                 };
-                Ok((ack, bytes, reference, prepared, false))
+                let object = prepared.reference().clone();
+                Ok(RecoveryProtocolObject::Prepared {
+                    exact: crate::database::ExactProtocolObject {
+                        value: ack,
+                        bytes,
+                        object,
+                        prepared,
+                    },
+                    reference,
+                })
             }
             Err(error) => Err(StoreObjectError::from(error).into()),
         }
@@ -226,12 +312,7 @@ impl<'storage> RestoringStore<'storage> {
         readiness: &DeviceRecoveryReadiness,
         identity_signer: &UserKeypair,
     ) -> Result<
-        (
-            OwnerRecoveryNode,
-            OwnerRecoveryNodeRef,
-            PreparedExactObject,
-            bool,
-        ),
+        RecoveryProtocolObject<OwnerRecoveryNode, OwnerRecoveryNodeRef>,
         StoreRegistrationError,
     > {
         let root = &self.root;
@@ -271,7 +352,16 @@ impl<'storage> RestoringStore<'storage> {
                         "existing Owner recovery node differs from its exact authority".into(),
                     ));
                 }
-                Ok((node, reference, prepared, true))
+                let object = prepared.reference().clone();
+                Ok(RecoveryProtocolObject::Existing {
+                    exact: crate::database::ExactProtocolObject {
+                        value: node,
+                        bytes,
+                        object,
+                        prepared,
+                    },
+                    reference,
+                })
             }
             Err(crate::storage::StorageError::NotFound(_)) => {
                 let next_sequence = sequence.checked_add(1).ok_or_else(|| {
@@ -301,8 +391,9 @@ impl<'storage> RestoringStore<'storage> {
                     identity_signer,
                 )
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                let bytes = node.to_bytes();
                 let prepared = storage
-                    .prepare_protocol_object(&context, recovery_slot, &prefix, node.to_bytes())
+                    .prepare_protocol_object(&context, recovery_slot, &prefix, bytes.clone())
                     .map_err(StoreObjectError::from)?;
                 let reference = OwnerRecoveryNodeRef {
                     owner_pubkey: owner_pubkey.to_string(),
@@ -311,7 +402,16 @@ impl<'storage> RestoringStore<'storage> {
                     node_hash: node.node_hash(),
                     object: prepared.reference().clone(),
                 };
-                Ok((node, reference, prepared, false))
+                let object = prepared.reference().clone();
+                Ok(RecoveryProtocolObject::Prepared {
+                    exact: crate::database::ExactProtocolObject {
+                        value: node,
+                        bytes,
+                        object,
+                        prepared,
+                    },
+                    reference,
+                })
             }
             Err(error) => Err(StoreObjectError::from(error).into()),
         }
@@ -333,24 +433,25 @@ impl<'storage> RestoringStore<'storage> {
         let history = self.history.restore_history();
         let storage = self.storage;
         let root = &self.root;
-        let Some((registration_ref, registration, activation)) = database
+        let Some(registration) = database
             .activated_store_device_registration_for_device(device_id)
             .await
             .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
         else {
             return Ok(None);
         };
+        let registration_ref = registration.reference();
         let StoreDeviceRegistrationActivation::Recovery {
             recovery_id: activated_recovery_id,
             node: node_ref,
-        } = activation.clone()
+        } = registration.activation().clone()
         else {
             return Err(StoreRegistrationError::Invalid(
                 "derived Owner recovery device has a non-recovery activation".into(),
             ));
         };
-        if registration.origin != *origin
-            || registration.author_pubkey != owner_pubkey
+        if registration.value().origin != *origin
+            || registration.value().author_pubkey != owner_pubkey
             || activated_recovery_id != recovery_id
             || node_ref.owner_pubkey != owner_pubkey
             || node_ref.owner_grant != *owner_grant
@@ -366,7 +467,7 @@ impl<'storage> RestoringStore<'storage> {
             .await
             .map_err(StoreObjectError::from)?
             .device;
-        if registration.provider != provider {
+        if registration.value().provider != provider {
             return Err(StoreRegistrationError::Invalid(
                 "activated Owner recovery registration belongs to another provider principal"
                     .into(),
@@ -375,7 +476,7 @@ impl<'storage> RestoringStore<'storage> {
         let node = history.load_owner_recovery_node(&node_ref).await?;
         if node.value.recovery_id != recovery_id
             || node.value.predecessor != *predecessor
-            || node.value.readiness.registration != registration_ref
+            || &node.value.readiness.registration != registration_ref
         {
             return Err(StoreRegistrationError::Invalid(
                 "activated Owner recovery node differs from the requested authority".into(),
@@ -383,7 +484,7 @@ impl<'storage> RestoringStore<'storage> {
         }
         let initial_ack_ref = node.value.readiness.initial_ack;
         let initial_ack = history
-            .load_store_ack(&initial_ack_ref, &registration)
+            .load_store_ack(&initial_ack_ref, registration.value())
             .await?;
         if initial_ack.value.store_cut != node.value.readiness.bootstrap_cut {
             return Err(StoreRegistrationError::Invalid(
@@ -403,7 +504,7 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await
             .map_err(StoreObjectError::from)?;
-        if registration_bytes != registration.to_bytes()
+        if registration_bytes != registration.value().to_bytes()
             || registration_prepared.reference() != &registration_ref.object
         {
             return Err(StoreRegistrationError::Invalid(
@@ -437,7 +538,7 @@ impl<'storage> RestoringStore<'storage> {
         let already_activated = database
             .stage_owner_recovery_registration(
                 crate::database::ExactProtocolObject {
-                    value: registration,
+                    value: registration.value().clone(),
                     bytes: registration_bytes,
                     object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
@@ -449,7 +550,7 @@ impl<'storage> RestoringStore<'storage> {
                     object: initial_ack_prepared.reference().clone(),
                     prepared: initial_ack_prepared,
                 },
-                activation,
+                registration.activation().clone(),
             )
             .await
             .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
@@ -458,7 +559,7 @@ impl<'storage> RestoringStore<'storage> {
                 "activated Owner recovery disappeared while installing its local journal".into(),
             ));
         }
-        Ok(Some(registration_ref))
+        Ok(Some(registration.reference().clone()))
     }
 
     pub(crate) async fn recover_owner_device(
@@ -564,17 +665,7 @@ impl<'storage> RestoringStore<'storage> {
             .await
             .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
             .filter(|durable| durable.device_id == device_id);
-        let (
-            registration,
-            registration_ref,
-            registration_prepared,
-            registration_exists,
-            initial_ack,
-            initial_ack_bytes,
-            initial_ack_ref,
-            initial_ack_prepared,
-            initial_ack_exists,
-        ) = if let Some(durable) = staged {
+        let readiness = if let Some(durable) = staged {
             let registration = StoreDeviceRegistration::parse_at(
                 &durable.registration_bytes,
                 &root,
@@ -623,17 +714,24 @@ impl<'storage> RestoringStore<'storage> {
                     &durable.initial_ack.bytes,
                 )
                 .await?;
-            (
-                registration,
-                registration_ref,
-                durable.prepared,
-                registration_exists,
-                initial_ack,
-                durable.initial_ack.bytes,
-                durable.initial_ack_ref,
-                durable.initial_ack.prepared,
-                initial_ack_exists,
-            )
+            let registration_object = durable.prepared.reference().clone();
+            PreparedRecoveryReadiness {
+                registration: RecoveryProtocolObject::from_remote_state(
+                    crate::database::ExactProtocolObject {
+                        value: registration,
+                        bytes: durable.registration_bytes,
+                        object: registration_object,
+                        prepared: durable.prepared,
+                    },
+                    registration_ref,
+                    registration_exists,
+                ),
+                initial_ack: RecoveryProtocolObject::from_remote_state(
+                    durable.initial_ack,
+                    durable.initial_ack_ref,
+                    initial_ack_exists,
+                ),
+            }
         } else {
             let head_context = context(crate::storage::ProtocolObjectDomain::StoreHead);
             let ack_context = context(crate::storage::ProtocolObjectDomain::StoreAck);
@@ -690,7 +788,7 @@ impl<'storage> RestoringStore<'storage> {
                 identity_signer,
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            let (registration, registration_ref, registration_prepared, registration_exists) = self
+            let registration = self
                 .prepare_or_load_recovery_registration(
                     expected_registration,
                     registration_slot,
@@ -714,6 +812,8 @@ impl<'storage> RestoringStore<'storage> {
                 })
                 .collect::<Result<BTreeMap<_, _>, _>>()?;
             let device_signer = registration
+                .exact()
+                .value
                 .device_signer(identity_signer)
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             let bootstrap_cut = StoreHistoryCut(dependencies);
@@ -721,16 +821,10 @@ impl<'storage> RestoringStore<'storage> {
                 .store_device_state_for_history_cut(&bootstrap_cut)
                 .await
                 .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
-            let (
-                initial_ack,
-                initial_ack_bytes,
-                initial_ack_ref,
-                initial_ack_prepared,
-                initial_ack_exists,
-            ) = self
+            let initial_ack = self
                 .prepare_or_load_initial_recovery_ack(
-                    &registration,
-                    &registration_ref,
+                    &registration.exact().value,
+                    registration.reference(),
                     first_ack,
                     bootstrap_cut,
                     device_state,
@@ -738,23 +832,21 @@ impl<'storage> RestoringStore<'storage> {
                     &device_signer,
                 )
                 .await?;
-            (
+            PreparedRecoveryReadiness {
                 registration,
-                registration_ref,
-                registration_prepared,
-                registration_exists,
                 initial_ack,
-                initial_ack_bytes,
-                initial_ack_ref,
-                initial_ack_prepared,
-                initial_ack_exists,
-            )
+            }
         };
-        let dependencies = initial_ack.store_cut.0.clone();
-        let device_signer = registration
+        let registration_ref = readiness.registration.reference().clone();
+        let initial_ack_ref = readiness.initial_ack.reference().clone();
+        let dependencies = readiness.initial_ack.exact().value.store_cut.0.clone();
+        let device_signer = readiness
+            .registration
+            .exact()
+            .value
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let bootstrap_cut = initial_ack.store_cut.clone();
+        let bootstrap_cut = readiness.initial_ack.exact().value.store_cut.clone();
         let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(StoreRegistrationError::Invalid(
@@ -769,12 +861,12 @@ impl<'storage> RestoringStore<'storage> {
                 resolved.state_hash,
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let readiness = DeviceRecoveryReadiness {
+        let recovery_readiness = DeviceRecoveryReadiness {
             registration: registration_ref.clone(),
             initial_ack: initial_ack_ref.clone(),
             bootstrap_cut: bootstrap_cut.clone(),
         };
-        let (_node, node_ref, node_prepared, node_exists) = self
+        let node = self
             .prepare_or_load_owner_recovery_node(
                 recovery_slot,
                 &owner_pubkey,
@@ -783,29 +875,21 @@ impl<'storage> RestoringStore<'storage> {
                 recovery_id,
                 &membership_state,
                 &predecessor,
-                &readiness,
+                &recovery_readiness,
                 identity_signer,
             )
             .await?;
+        let node_ref = node.reference().clone();
         let registration_activation = StoreDeviceRegistrationActivation::Recovery {
             recovery_id,
             node: node_ref.clone(),
         };
+        let registration = readiness.registration.exact().value.clone();
         let already_activated = database
             .stage_owner_recovery_registration(
-                crate::database::ExactProtocolObject {
-                    value: registration.clone(),
-                    bytes: registration.to_bytes(),
-                    object: registration_prepared.reference().clone(),
-                    prepared: registration_prepared.clone(),
-                },
+                readiness.registration.exact().clone(),
                 initial_ack_ref.clone(),
-                crate::database::ExactProtocolObject {
-                    value: initial_ack.clone(),
-                    bytes: initial_ack.to_bytes(),
-                    object: initial_ack_prepared.reference().clone(),
-                    prepared: initial_ack_prepared.clone(),
-                },
+                readiness.initial_ack.exact().clone(),
                 registration_activation.clone(),
             )
             .await
@@ -813,39 +897,33 @@ impl<'storage> RestoringStore<'storage> {
         if already_activated {
             return Ok(registration_ref);
         }
-        if !registration_exists {
+        if let Some(prepared) = readiness.registration.prepared_for_creation() {
             storage
-                .create_protocol_object(&registration_prepared)
+                .create_protocol_object(prepared)
                 .await
                 .map_err(StoreObjectError::from)?;
         }
-        if !initial_ack_exists {
+        if let Some(prepared) = readiness.initial_ack.prepared_for_creation() {
             storage
-                .create_protocol_object(&initial_ack_prepared)
+                .create_protocol_object(prepared)
                 .await
                 .map_err(StoreObjectError::from)?;
         }
-        if !node_exists {
+        if let Some(prepared) = node.prepared_for_creation() {
             storage
-                .create_protocol_object(&node_prepared)
+                .create_protocol_object(prepared)
                 .await
                 .map_err(StoreObjectError::from)?;
         }
+        let PreparedRecoveryReadiness {
+            registration: prepared_registration,
+            initial_ack: prepared_initial_ack,
+        } = readiness;
         database
             .mark_local_store_device_registration_created(
-                crate::database::ExactProtocolObject {
-                    value: registration.clone(),
-                    bytes: registration.to_bytes(),
-                    object: registration_prepared.reference().clone(),
-                    prepared: registration_prepared,
-                },
+                prepared_registration.into_exact(),
                 initial_ack_ref,
-                crate::database::ExactProtocolObject {
-                    value: initial_ack,
-                    bytes: initial_ack_bytes,
-                    object: initial_ack_prepared.reference().clone(),
-                    prepared: initial_ack_prepared,
-                },
+                prepared_initial_ack.into_exact(),
             )
             .await
             .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
@@ -948,10 +1026,11 @@ impl<'storage> RestoringStore<'storage> {
                 state_after,
                 crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence {
                     registrations: vec![
-                        crate::protocol::store_commit::RetainedVerifiedRegistration {
-                            reference: registration_ref.clone(),
-                            value: registration.clone(),
-                        },
+                        crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                            registration_ref.clone(),
+                            registration.clone(),
+                        )
+                        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
                     ],
                     acknowledgement: None,
                     membership_proof: None,
@@ -1006,6 +1085,18 @@ impl<'storage> RestoringStore<'storage> {
             .create_protocol_object(&head_prepared)
             .await
             .map_err(StoreObjectError::from)?;
+        let registration =
+            crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                registration_ref.clone(),
+                registration,
+            )
+            .and_then(|registration| {
+                crate::protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
+                    registration,
+                    registration_activation,
+                )
+            })
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         database
             .complete_owner_recovery(
                 verified_commit,
@@ -1013,7 +1104,6 @@ impl<'storage> RestoringStore<'storage> {
                 head_prepared.reference().clone(),
                 prepared_history.summary,
                 registration,
-                registration_activation,
             )
             .await
             .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;

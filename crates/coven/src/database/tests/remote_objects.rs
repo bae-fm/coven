@@ -8,7 +8,7 @@ use super::fixtures::*;
 
 #[tokio::test]
 async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
-    let (db, _stamper) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,

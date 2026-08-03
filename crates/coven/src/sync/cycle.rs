@@ -16,16 +16,14 @@ use crate::changeset::RowChange;
 use crate::database::DbError;
 #[cfg(test)]
 use crate::keys::UserKeypair;
-use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 
-use super::hlc::Hlc;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
 use super::store::{AuthorizedWriterOperation, Store};
 use crate::storage::{
-    BlobPathScheme, CloudCipherAccess, CloudCipherState, CloudSyncStorage, PendingRotation,
-    RotationPending,
+    BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, RotationPending,
+    SyncStorage,
 };
 
 /// Result of a single sync cycle.
@@ -222,15 +220,14 @@ pub(crate) struct DeferredLocalBlobDrop {
 pub(crate) async fn run_single_sync_cycle(
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     device_id: &str,
-    hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
     db: &crate::database::Database,
     cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
+    pending_rotation: &dyn CloudRotationAccess,
     user_keypair: &UserKeypair,
     security: Option<&crate::store_security::StoreSecurity>,
     store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
+    manage_tombstones: bool,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
     let store_database = crate::database::StoreDatabase::new(db);
@@ -250,7 +247,6 @@ pub(crate) async fn run_single_sync_cycle(
     );
     AuthorizedSyncCycle {
         device_id,
-        hlc,
         clock,
         cipher,
         pending_rotation,
@@ -258,7 +254,7 @@ pub(crate) async fn run_single_sync_cycle(
         routing_encryption: None,
         store_dir,
         local_blob_access: &local_blob_access,
-        cloud_home,
+        manage_tombstones,
         observer,
         authorization,
     }
@@ -287,15 +283,14 @@ struct CompletedPullCycle {
 
 struct AuthorizedSyncCycle<'cycle, 'store> {
     device_id: &'cycle str,
-    hlc: &'cycle Hlc,
     clock: &'cycle dyn crate::clock::Clock,
     cipher: &'cycle dyn CloudCipherAccess,
-    pending_rotation: &'cycle PendingRotation,
+    pending_rotation: &'cycle dyn CloudRotationAccess,
     security: Option<&'cycle crate::store_security::StoreSecurity>,
     routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
     store_dir: &'cycle StoreDir,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
-    cloud_home: Option<&'cycle dyn CloudHome>,
+    manage_tombstones: bool,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
     authorization: AuthorizedWriterOperation<'store>,
 }
@@ -393,11 +388,11 @@ impl AuthorizedSyncCycle<'_, '_> {
             );
         }
 
-        if let Some(home) = self.cloud_home {
+        if self.manage_tombstones {
             if rotation_pending.is_none() {
                 let drained = self
                     .authorization
-                    .drain_tombstones(home, self.cipher, self.pending_rotation, self.clock)
+                    .drain_tombstones(self.cipher, self.pending_rotation, self.clock)
                     .await
                     .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
                 if drained > 0 {
@@ -406,7 +401,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             }
             let reclaimed = self
                 .authorization
-                .gc_tombstones(home, self.cipher, self.clock)
+                .gc_tombstones(self.cipher, self.clock)
                 .await
                 .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
             if reclaimed > 0 {
@@ -436,7 +431,6 @@ impl AuthorizedSyncCycle<'_, '_> {
                 .drain_uploads(
                     self.store_dir,
                     self.clock,
-                    self.hlc,
                     self.routing_encryption,
                     self.observer,
                 )
@@ -540,7 +534,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         // `high_water` reflects remote commits and host stamps minted this cycle. A
         // persist error aborts the cycle rather than risking a backward jump.
         self.authorization
-            .persist_hlc_high_water(self.hlc)
+            .persist_hlc_high_water()
             .await
             .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
@@ -616,10 +610,7 @@ pub(crate) struct PreparedSyncComponents {
     storage: std::sync::Arc<CloudSyncStorage>,
     identity: crate::keys::UserKeypair,
     initialization: StoreInitialization,
-    hlc: std::sync::Arc<Hlc>,
     store_id: String,
-    cipher: std::sync::Arc<CloudCipherState>,
-    pending_rotation: std::sync::Arc<PendingRotation>,
     routing_encryption: Option<crate::encryption::EncryptionService>,
 }
 
@@ -647,8 +638,7 @@ impl PreparedSyncComponents {
             .validate_store_write_routing(routing_encryption.as_ref())
             .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
 
-        let cipher = storage.cipher_state().clone();
-        let cipher_is_plaintext = cipher.is_plaintext();
+        let cipher_is_plaintext = storage.is_plaintext();
         let representation_is_coherent = matches!(
             (cipher_is_plaintext, storage.blob_path_scheme()),
             (true, BlobPathScheme::Plain) | (false, BlobPathScheme::Hashed)
@@ -660,15 +650,13 @@ impl PreparedSyncComponents {
         // Restore the durable marker before Store creation or opening performs
         // protocol work, so malformed local rotation state cannot accompany new
         // remote state from a failed initialization.
-        let pending_rotation = storage.shared_pending_rotation();
         if !cipher_is_plaintext {
-            pending_rotation
-                .restore_from(&database)
+            storage
+                .restore_pending_rotation(&database)
                 .await
                 .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
         }
 
-        let hlc = database.hlc();
         let store_id = storage.store_id().to_string();
         Ok(Self {
             database,
@@ -676,10 +664,7 @@ impl PreparedSyncComponents {
             storage,
             identity,
             initialization,
-            hlc,
             store_id,
-            cipher,
-            pending_rotation,
             routing_encryption,
         })
     }
@@ -691,7 +676,7 @@ impl PreparedSyncComponents {
                 Store::create(
                     self.database.clone(),
                     store_storage.clone(),
-                    &self.hlc.now().to_string(),
+                    &self.database.stamp(),
                     &self.identity,
                 )
                 .await
@@ -722,12 +707,9 @@ impl PreparedSyncComponents {
             store: std::sync::Arc::new(initialized.store),
             database: self.database,
             local_blob_access: self.local_blob_access,
-            storage: store_storage,
-            hlc: self.hlc,
+            storage: self.storage,
             store_id: self.store_id,
             device_id: initialized.device_id,
-            cipher: self.cipher,
-            pending_rotation: self.pending_rotation,
             routing_encryption: self.routing_encryption,
         })
     }
@@ -742,29 +724,18 @@ pub(crate) struct SyncComponents {
     store: std::sync::Arc<Store>,
     database: crate::database::StoreDatabase,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
-    storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-    hlc: std::sync::Arc<Hlc>,
+    storage: std::sync::Arc<CloudSyncStorage>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
     /// other's.
     store_id: String,
     device_id: String,
-    cipher: std::sync::Arc<CloudCipherState>,
-    pending_rotation: std::sync::Arc<PendingRotation>,
     routing_encryption: Option<crate::encryption::EncryptionService>,
 }
 
 impl SyncComponents {
-    pub(crate) fn store(&self) -> std::sync::Arc<Store> {
-        self.store.clone()
-    }
-
     pub(crate) async fn probe_storage(&self) -> Result<(), crate::storage::StorageError> {
-        self.storage
-            .cloud_home()
-            .probe()
-            .await
-            .map_err(crate::storage::StorageError::from)
+        self.storage.probe_provider().await
     }
 
     pub(crate) async fn pending_blocked_writes(
@@ -786,16 +757,230 @@ impl SyncComponents {
         self.store.discard_blocked_write(write_id).await
     }
 
+    pub(crate) fn host_write_blob_staging(
+        &self,
+        runtime: tokio::runtime::Handle,
+        store_dir: StoreDir,
+    ) -> super::store::HostWriteBlobStaging {
+        self.store.host_write_blob_staging(runtime, store_dir)
+    }
+
+    pub(crate) async fn propose_device_exclusion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
+        self.store
+            .propose_device_exclusion_for_device(device_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn cancel_device_exclusion(
+        &self,
+        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), String> {
+        self.store
+            .cancel_device_exclusion_proposal(proposal)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn finalize_device_exclusion(
+        &self,
+        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), String> {
+        self.store
+            .finalize_device_exclusion_proposal(proposal)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn begin_owner_promotion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, String> {
+        self.store
+            .begin_owner_promotion_for_device(device_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn accept_owner_promotion(
+        &self,
+        request: crate::protocol::store_commit::OwnerPromotionRequest,
+    ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, String> {
+        self.store
+            .accept_owner_promotion(request)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn finalize_owner_promotion(
+        &self,
+        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+    ) -> Result<(), String> {
+        let encryption = self
+            .current_encryption()
+            .ok_or_else(|| "owner promotion requires an encrypted cloud home".to_string())?;
+        self.store
+            .finalize_owner_promotion(&encryption, acceptance)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn begin_device_join_bundle(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOfferBundle, super::store::DeviceJoinTransportError> {
+        self.store.begin_device_join_bundle(member_pubkey).await
+    }
+
+    pub(crate) async fn drive_device_join(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        policy: crate::DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinDriveOutcome, super::store::DeviceJoinTransportError> {
+        self.store
+            .device_join_transport()
+            .drive(bundle, policy, access_administrator, timing)
+            .await
+    }
+
+    pub(crate) async fn cancel_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinCleanupActivation, super::store::DeviceJoinTransportError> {
+        self.store
+            .device_join_transport()
+            .cancel(bundle, timing)
+            .await
+    }
+
+    pub(crate) async fn abandon_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+    ) -> Result<crate::DeviceJoinAbandonment, super::store::DeviceJoinTransportError> {
+        self.store.device_join_transport().abandon(bundle).await
+    }
+
+    pub(crate) async fn begin_device_join(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOffer, crate::DeviceJoinError> {
+        self.store.begin_device_join(member_pubkey).await
+    }
+
+    pub(crate) async fn abandon_device_join(
+        &self,
+        offer: crate::DeviceJoinOffer,
+    ) -> Result<crate::DeviceJoinAbandonment, crate::DeviceJoinError> {
+        self.store.abandon_device_join(offer).await
+    }
+
+    pub(crate) async fn authorize_device_provider_access(
+        &self,
+        request: crate::DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+    ) -> Result<crate::DeviceProviderAdmissionApproval, crate::DeviceJoinError> {
+        self.store
+            .authorize_device_provider_access(request, access_administrator)
+            .await
+    }
+
+    pub(crate) async fn accept_device_registration(
+        &self,
+        request: crate::DeviceRegistrationRequest,
+    ) -> Result<crate::ProvisionalDeviceBootstrap, crate::DeviceJoinError> {
+        self.store.accept_device_registration_request(request).await
+    }
+
+    pub(crate) async fn publish_device_provider_challenge(
+        &self,
+        bootstrap: crate::ProvisionalDeviceBootstrap,
+    ) -> Result<crate::ProviderReadyDeviceBootstrap, crate::DeviceJoinError> {
+        self.store
+            .publish_device_provider_challenge(bootstrap)
+            .await
+    }
+
+    pub(crate) async fn complete_device_provider_admission(
+        &self,
+        readiness: crate::DeviceJoinReadiness,
+    ) -> Result<crate::DeviceProviderAdmissionCompletion, crate::DeviceJoinError> {
+        self.store
+            .complete_device_provider_admission(readiness)
+            .await
+    }
+
+    pub(crate) async fn finalize_device_join(
+        &self,
+        completion: crate::DeviceProviderAdmissionCompletion,
+    ) -> Result<crate::DeviceJoinActivation, crate::DeviceJoinError> {
+        self.store.finalize_device_join(completion).await
+    }
+
+    pub(crate) async fn cancel_device_join(
+        &self,
+        attempt: crate::DeviceJoinAttemptRef,
+    ) -> Result<crate::DeviceJoinCancellation, crate::DeviceJoinError> {
+        self.store.cancel_device_join(attempt).await
+    }
+
+    pub(crate) async fn close_device_provider_admission(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+    ) -> Result<crate::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        self.store
+            .close_device_provider_admission(cancellation)
+            .await
+    }
+
+    pub(crate) async fn revoke_device_provider_admission_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        self.store
+            .revoke_device_provider_admission_writes(cancellation, executor)
+            .await
+    }
+
+    pub(crate) async fn revoke_joining_device_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::JoinerJoinTerminal, crate::DeviceJoinError> {
+        self.store
+            .revoke_joining_device_writes(cancellation, executor)
+            .await
+    }
+
+    pub(crate) async fn activate_device_join_cleanup(
+        &self,
+        receipt: crate::DeviceJoinCleanupReceipt,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::DeviceJoinError> {
+        self.store.activate_device_join_cleanup(receipt).await
+    }
+
+    pub(crate) async fn complete_owner_device_join_cleanup(
+        &self,
+        activation: crate::DeviceJoinCleanupActivation,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::DeviceJoinError> {
+        self.store
+            .complete_owner_device_join_cleanup(activation)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn list_storage_objects_for_test(
         &self,
         prefix: &str,
     ) -> Result<Vec<String>, crate::storage::StorageError> {
-        self.storage
-            .cloud_home()
-            .list(prefix)
-            .await
-            .map_err(crate::storage::StorageError::from)
+        self.storage.list_provider_objects_for_test(prefix).await
     }
 
     #[cfg(test)]
@@ -803,7 +988,8 @@ impl SyncComponents {
         &self,
         expected: &std::sync::Arc<dyn crate::storage::SyncStorage>,
     ) -> bool {
-        std::sync::Arc::ptr_eq(&self.storage, expected)
+        let actual: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
+        std::sync::Arc::ptr_eq(&actual, expected)
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -811,7 +997,7 @@ impl SyncComponents {
     }
 
     pub(crate) fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
-        self.cipher.encryption()
+        self.storage.current_encryption()
     }
 
     pub(crate) fn self_uploader(&self) -> String {
@@ -828,13 +1014,7 @@ impl SyncComponents {
             .authorize_writer()
             .await
             .map_err(|error| DbError::Message(error.to_string()))?
-            .drain_uploads(
-                store_dir,
-                clock,
-                &self.hlc,
-                self.routing_encryption.as_ref(),
-                observer,
-            )
+            .drain_uploads(store_dir, clock, self.routing_encryption.as_ref(), observer)
             .await
     }
 
@@ -850,7 +1030,6 @@ impl SyncComponents {
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .invite_member(
-                &self.hlc,
                 public_key_hex,
                 invitee_email,
                 role,
@@ -871,12 +1050,11 @@ impl SyncComponents {
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .remove_member(
-                &self.hlc,
                 public_key_hex,
                 &encryption,
                 security,
-                &self.cipher,
-                &self.pending_rotation,
+                self.storage.as_ref(),
+                self.storage.as_ref(),
             )
             .await
     }
@@ -886,7 +1064,7 @@ impl SyncComponents {
         choice: &crate::protocol::membership::MembershipConflictChoice,
     ) -> Result<(), super::store::MembershipOpsError> {
         self.store
-            .resolve_membership_conflict(choice, &self.hlc.now().to_string())
+            .resolve_membership_conflict(choice, &self.database.stamp())
             .await?;
         Ok(())
     }
@@ -897,7 +1075,7 @@ impl SyncComponents {
         encryption: crate::encryption::EncryptionService,
         security: &crate::store_security::StoreSecurity,
     ) -> Result<String, crate::keys::KeyError> {
-        security.adopt_key_rotation(&self.cipher, &encryption)
+        security.adopt_key_rotation(self.storage.as_ref(), &encryption)
     }
 
     pub(crate) async fn create_circle(
@@ -906,7 +1084,7 @@ impl SyncComponents {
     ) -> Result<crate::protocol::circle::CircleId, super::store::CircleOperationError> {
         self.store
             .circles()
-            .create_circle(&self.hlc.now().to_string(), name)
+            .create_circle(&self.database.stamp(), name)
             .await
     }
 
@@ -917,7 +1095,7 @@ impl SyncComponents {
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
             .circles()
-            .rename_circle(&self.hlc.now().to_string(), circle_id, name)
+            .rename_circle(&self.database.stamp(), circle_id, name)
             .await
     }
 
@@ -1057,15 +1235,14 @@ impl SyncComponents {
             })?;
         AuthorizedSyncCycle {
             device_id: &self.device_id,
-            hlc: &self.hlc,
             clock,
-            cipher: &self.cipher,
-            pending_rotation: &self.pending_rotation,
+            cipher: self.storage.as_ref(),
+            pending_rotation: self.storage.as_ref(),
             security,
             routing_encryption: self.routing_encryption.as_ref(),
             store_dir,
             local_blob_access: &self.local_blob_access,
-            cloud_home: Some(self.storage.cloud_home()),
+            manage_tombstones: true,
             observer,
             authorization,
         }

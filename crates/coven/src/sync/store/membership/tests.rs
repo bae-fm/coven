@@ -10,12 +10,13 @@ use crate::protocol::membership::{
 use crate::storage::cloud::ObjectSlot;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
-use crate::sync::hlc::Hlc;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestCustody, TestStore};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
+    home: Arc<crate::InMemoryCloudHome>,
+    store_id: String,
     device: crate::sync::test_helpers::TestDevice,
     db: Database,
     database: StoreDatabase,
@@ -28,7 +29,8 @@ impl MergeFixture {
         let db = open_test_db();
         let owner = UserKeypair::generate();
         let owner_pubkey = pubkey_hex(&owner);
-        let store = TestStore::create(&db, store_id, owner.clone())
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let store = TestStore::create(&db, store_id, owner.clone(), home.clone())
             .await
             .expect("create exact Store");
         let device = store
@@ -38,6 +40,8 @@ impl MergeFixture {
         let database = crate::database::StoreDatabase::new(&db);
         Self {
             store,
+            home,
+            store_id: store_id.to_string(),
             device,
             db,
             database,
@@ -66,10 +70,6 @@ impl MergeFixture {
             .invite_member(
                 &self.db,
                 &self.owner,
-                &Hlc::new(
-                    "owner-device".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &pubkey_hex(member),
                 None,
                 role,
@@ -90,10 +90,6 @@ impl MergeFixture {
             .remove_member(
                 &self.db,
                 &self.owner,
-                &Hlc::new(
-                    "owner-device".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &pubkey_hex(member),
                 &EncryptionService::from_key([42; 32]),
                 &security,
@@ -164,7 +160,6 @@ async fn current_floor_requires_every_exact_entry() {
         .expect("load exact head");
     fixture
         .store
-        .storage
         .delete_protocol_object(&loaded_head.body.entry.object)
         .await
         .expect("remove exact selected entry");
@@ -184,7 +179,6 @@ async fn persisted_author_floor_requires_readable_head() {
     let head = chain.head_refs().last().expect("current head").clone();
     fixture
         .store
-        .storage
         .delete_protocol_object(&head.object)
         .await
         .expect("remove exact head");
@@ -313,7 +307,6 @@ async fn missing_membership_head_is_rejected() {
     let head = chain.head_refs().first().expect("founder head");
     fixture
         .store
-        .storage
         .delete_protocol_object(&head.object)
         .await
         .expect("remove founder head");
@@ -342,7 +335,7 @@ async fn entry_beyond_membership_head_is_not_committed() {
         )
         .expect("sign entry after exact head");
     let (prepared, _) = crate::storage::prepare_membership_entry(
-        &fixture.store.storage,
+        &fixture.store,
         fixture.store.root.store_root_hash,
         &entry,
     )
@@ -350,7 +343,6 @@ async fn entry_beyond_membership_head_is_not_committed() {
     .expect("prepare unheaded entry");
     fixture
         .store
-        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish unheaded entry");
@@ -373,10 +365,10 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
     let fixture = MergeFixture::new("store-membership-conflict-boundary").await;
     let storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
-            fixture.store.home.clone(),
+            fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             crate::storage::BlobPathScheme::Hashed,
-            fixture.store.storage.store_id(),
+            &fixture.store_id,
             fixture.owner.clone(),
         )
         .expect("open a Store-owned storage session"),
@@ -430,10 +422,10 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
     let fixture = MergeFixture::new("store-membership-owner-anchor").await;
     let storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
-            fixture.store.home.clone(),
+            fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             crate::storage::BlobPathScheme::Hashed,
-            fixture.store.storage.store_id(),
+            &fixture.store_id,
             fixture.owner.clone(),
         )
         .expect("open a Store-owned storage session"),
@@ -467,10 +459,10 @@ async fn store_membership_reads_reject_tampered_founder_state() {
     let fixture = MergeFixture::new("store-membership-founder-state").await;
     let storage = Arc::new(
         crate::storage::CloudSyncStorage::new(
-            fixture.store.home.clone(),
+            fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             crate::storage::BlobPathScheme::Hashed,
-            fixture.store.storage.store_id(),
+            &fixture.store_id,
             fixture.owner.clone(),
         )
         .expect("open a Store-owned storage session"),
@@ -577,6 +569,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         .await
         .expect("load founder device registration");
     let signer = registration
+        .value()
         .device_signer(&fixture.owner)
         .expect("derive founder device signer");
     let relocated = AuthorHead::signed(
@@ -597,13 +590,11 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
     );
     let slot = fixture
         .store
-        .storage
         .allocate_protocol_slot(&context, &prefix, ".json")
         .await
         .expect("allocate relocated membership head slot");
     let prepared = fixture
         .store
-        .storage
         .prepare_protocol_object(
             &context,
             slot,
@@ -613,7 +604,6 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         .expect("prepare relocated membership head");
     fixture
         .store
-        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish relocated membership head");
@@ -652,10 +642,6 @@ async fn inviting_yourself_is_a_typed_self_invite_error() {
         .invite_member(
             &fixture.db,
             &fixture.owner,
-            &Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &fixture.owner_pubkey,
             None,
             MemberRole::Member,
@@ -687,7 +673,6 @@ async fn suppressed_remove_is_detected_by_the_exact_cursor() {
     let remove_head = chain.head_refs().last().expect("remove head").clone();
     fixture
         .store
-        .storage
         .delete_protocol_object(&remove_head.object)
         .await
         .expect("suppress exact remove head");
@@ -912,7 +897,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
 
     assert!(crate::sync::store::Store::open(
         crate::database::StoreDatabase::new(&db),
-        fixture.store.storage.clone(),
+        fixture.store.clone(),
         &fixture.store.root,
         &fixture.owner,
     )
@@ -946,7 +931,6 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
     let predecessor = latest_head.body.predecessor.expect("remove predecessor");
     fixture
         .store
-        .storage
         .delete_protocol_object(&latest.object)
         .await
         .expect("remove latest exact head");
@@ -1026,7 +1010,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
 
     // Stop the removal before it publishes anything, leaving its candidate
     // durable and bound to the position it composed against.
-    fixture.store.home.fail_exact_create_before_call(1);
+    fixture.home.fail_exact_create_before_call(1);
     Box::pin(fixture.try_remove_member(&member))
         .await
         .expect_err("the interrupted removal cannot publish its membership authority");

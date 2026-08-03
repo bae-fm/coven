@@ -27,7 +27,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit_ref: &StoreBatchCommitRef,
         consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
     ) -> Result<CircleMetadata, CircleOperationError> {
-        let root = self.root.clone();
+        let root = self.root().clone();
         commit_ref
             .verify_commit(commit)
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;

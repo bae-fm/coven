@@ -236,7 +236,7 @@ mod tests {
         let live_locator = ObjectHash::digest(b"live locator");
         let removed_object = ObjectHash::digest(b"removed object");
         let live_object = ObjectHash::digest(b"live object");
-        let decls = db.blob_decls();
+        let decls = StoreDatabase::new(&db).blob_decls();
 
         db.call(move |conn| {
             conn.execute_batch(&format!(

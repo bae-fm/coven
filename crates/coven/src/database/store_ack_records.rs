@@ -8,10 +8,13 @@ pub(crate) fn verify_next_local_store_ack_on(
     bytes: &[u8],
     prepared: &PreparedExactObject,
 ) -> Result<(StoreAckRef, StoreAck), DbError> {
-    let (root, registration_ref, registration) = local_store_authority_on(conn)?;
+    let authority = local_store_authority_on(conn)?;
+    let registration_ref = authority.reference();
+    let registration = authority.value();
+    let root = &registration.store_root;
     let unverified: StoreAck = serde_json::from_slice(bytes)
         .map_err(|error| DbError::Message(format!("parse Store acknowledgement: {error}")))?;
-    if unverified.registration != registration_ref {
+    if &unverified.registration != registration_ref {
         return Err(DbError::Message(
             "Store acknowledgement author differs from local activation".to_string(),
         ));
@@ -22,7 +25,7 @@ pub(crate) fn verify_next_local_store_ack_on(
         ack_hash: unverified.ack_hash(),
         object: prepared.reference().clone(),
     };
-    let ack = StoreAck::parse_at(bytes, &root, &reference, &registration)
+    let ack = StoreAck::parse_at(bytes, root, &reference, registration)
         .map_err(|error| DbError::Message(format!("verify Store acknowledgement: {error}")))?;
     let previous = load_published_store_ack_on(conn)?;
     let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
@@ -33,7 +36,7 @@ pub(crate) fn verify_next_local_store_ack_on(
             Some(previous.reference.object.clone()),
             previous.successor_slot.clone(),
         ),
-        None => (1, None, store_ack_first_slot(&registration)?.clone()),
+        None => (1, None, store_ack_first_slot(registration)?.clone()),
     };
     if ack.sequence != expected_sequence
         || ack.successor.predecessor != expected_predecessor
@@ -49,7 +52,7 @@ pub(crate) fn verify_next_local_store_ack_on(
         .ok_or_else(|| DbError::Message("Store acknowledgement sequence overflow".to_string()))?;
     if ack.successor.activation
         != registration
-            .store_acknowledgement_activation(&registration_ref)
+            .store_acknowledgement_activation(registration_ref)
             .map_err(|error| DbError::Message(error.to_string()))?
             .activation_id()
         || ack.successor.next_slot.logical_key()
@@ -166,7 +169,9 @@ pub(crate) fn finish_outbound_store_ack_on(
 pub(crate) fn load_outbound_circle_acks_on(
     conn: &Connection,
 ) -> Result<Vec<crate::sync::store::CircleAckActivation>, DbError> {
-    let (root, _, registration) = local_store_authority_on(conn)?;
+    let authority = local_store_authority_on(conn)?;
+    let registration = authority.value();
+    let root = &registration.store_root;
     let mut statement = conn
         .prepare(
             "SELECT ack_ref, ack_bytes, prepared_object FROM outbound_circle_acks
@@ -200,7 +205,7 @@ pub(crate) fn load_outbound_circle_acks_on(
             ));
         }
         let value =
-            CircleAck::parse_at(&bytes, &root, &reference, &registration).map_err(|error| {
+            CircleAck::parse_at(&bytes, root, &reference, registration).map_err(|error| {
                 DbError::Message(format!("outbound Circle acknowledgement: {error}"))
             })?;
         activations.push(crate::sync::store::CircleAckActivation {
@@ -252,11 +257,13 @@ pub(crate) fn load_outbound_store_ack_on(
                 "outbound Store acknowledgement ref differs from its prepared object".to_string(),
             ));
         }
-        let (root, author_ref, author) = local_store_authority_on(conn)?;
-        let value = StoreAck::parse_at(&bytes, &root, &reference, &author).map_err(|error| {
-            DbError::Message(format!("outbound Store acknowledgement: {error}"))
-        })?;
-        if value.registration != author_ref {
+        let authority = local_store_authority_on(conn)?;
+        let author_ref = authority.reference();
+        let author = authority.value();
+        let value = StoreAck::parse_at(&bytes, &author.store_root, &reference, author).map_err(
+            |error| DbError::Message(format!("outbound Store acknowledgement: {error}")),
+        )?;
+        if &value.registration != author_ref {
             return Err(DbError::Message(
                 "outbound Store acknowledgement author differs from local activation".to_string(),
             ));

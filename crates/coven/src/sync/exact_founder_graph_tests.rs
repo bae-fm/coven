@@ -17,9 +17,14 @@ impl ExactFounderGraphDatabaseOps for crate::database::Database {
 async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&db, "exact-founder-graph", founder.clone())
-        .await
-        .expect("create Store with founder graph");
+    let store = TestStore::create(
+        &db,
+        "exact-founder-graph",
+        founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store with founder graph");
     store
         .open_into(&db)
         .await
@@ -30,9 +35,15 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
 async fn opened_store_persists_the_exact_root_needed_by_membership_pull() {
     let creator_db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&creator_db, "opened-exact-root", founder.clone())
-        .await
-        .expect("create source Store");
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let store = TestStore::create(
+        &creator_db,
+        "opened-exact-root",
+        founder.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create source Store");
     let opened_db = open_test_db();
     store
         .open_into(&opened_db)
@@ -44,17 +55,23 @@ async fn opened_store_persists_the_exact_root_needed_by_membership_pull() {
 async fn opened_store_cannot_mint_a_second_founder_registration() {
     let creator_db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&creator_db, "one-founder-registration", founder.clone())
-        .await
-        .expect("create source Store");
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let store = TestStore::create(
+        &creator_db,
+        "one-founder-registration",
+        founder.clone(),
+        home.clone(),
+    )
+    .await
+    .expect("create source Store");
     let opened_db = open_test_db();
-    let creates_before = store.home.exact_create_count();
+    let creates_before = home.exact_create_count();
     let opened = store
         .open_into(&opened_db)
         .await
         .expect("open existing Store through its founder registration");
 
-    assert_eq!(store.home.exact_create_count(), creates_before);
+    assert_eq!(home.exact_create_count(), creates_before);
     let local_registrations = opened_db
         .table_count(crate::database::DatabaseTestTable::named(
             "local_store_device_registration",
@@ -73,7 +90,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
         .await
         .expect("bind the installed founder registration");
     assert_eq!(rebound.device_id, opened.device_id);
-    assert_eq!(store.home.exact_create_count(), creates_before);
+    assert_eq!(home.exact_create_count(), creates_before);
     assert_eq!(
         opened_db
             .table_count(crate::database::DatabaseTestTable::named(
@@ -96,9 +113,14 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
 async fn opened_store_pulls_a_production_commit_through_exact_refs() {
     let source = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&source, "opened-exact-pull", founder)
-        .await
-        .expect("create source Store");
+    let store = TestStore::create(
+        &source,
+        "opened-exact-pull",
+        founder,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create source Store");
     source
         .execute_test_host_write(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \

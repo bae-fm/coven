@@ -423,7 +423,7 @@ impl StoreDatabase {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+    ) -> Result<crate::sync::CirclePackageAccess, DbError> {
         self.connection
             .call(move |conn| {
                 Self::circle_publication_context_on(conn, circle_id, &expected_control)
@@ -479,7 +479,7 @@ impl StoreDatabase {
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+    ) -> Result<crate::sync::CirclePackageAccess, DbError> {
         // An exclusion blocks publication until this device's bootstrap coverage
         // records the exact successor commit that excluded it. The gate derives
         // clear from that coverage; no reset flag is mutated.
@@ -522,7 +522,7 @@ impl StoreDatabase {
             .ok_or_else(|| {
                 DbError::Message(format!("Circle {circle_id} has no active publication key"))
             })?;
-        Ok(access.into_encryption_and_fingerprint())
+        Ok(access)
     }
 
     /// Record this device's own exclusion from a Circle epoch close, derived from

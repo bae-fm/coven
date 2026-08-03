@@ -56,7 +56,7 @@ impl InviteCode {
         self.membership_floor
             .validate()
             .map_err(crate::sync::store::InviteError::Crypto)?;
-        let (_, mut history) = crate::sync::store::HistoryConstructionAuthority::invitation()
+        let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
             .open_pinned(storage, &self.store_root)
             .await
             .map_err(|error| {

@@ -27,7 +27,6 @@ fn open(path: &Path, device_id: &str) -> Database {
         &crate::sync::test_helpers::test_migrations(),
     )
     .expect("open exclusion test database")
-    .0
 }
 
 #[tokio::test]
@@ -191,6 +190,7 @@ async fn remaining_device_freezes_and_acknowledges_before_owner_exclusion() {
                 &owner_db,
                 "device-exclusion-two-device-store",
                 signer.clone(),
+                crate::sync::test_helpers::test_cloud_home(),
             ))
             .await
             .expect("create two-device exclusion Store"),
@@ -214,7 +214,7 @@ async fn remaining_device_freezes_and_acknowledges_before_owner_exclusion() {
             .await
             .expect("list active Store registrations")
             .into_iter()
-            .map(|(reference, _)| reference)
+            .map(|registration| registration.reference().clone())
             .find(|reference| reference.device_id.to_string() != local_device_id)
             .expect("peer Store registration");
         finalize_peer_exclusion_detached(owner_device, &target).await;
@@ -226,11 +226,13 @@ async fn remaining_device_freezes_and_acknowledges_before_owner_exclusion() {
 async fn snapshot_preserves_author_exclusion_activation_evidence() {
     let signer = UserKeypair::generate();
     let owner_db = open_test_db();
+    let home = crate::sync::test_helpers::test_cloud_home();
     let store = Arc::new(
         Box::pin(TestStore::create(
             &owner_db,
             "snapshot-author-exclusion-store",
             signer.clone(),
+            home.clone(),
         ))
         .await
         .expect("create snapshot exclusion Store"),
@@ -256,7 +258,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         .await
         .expect("list snapshot exclusion registrations")
         .into_iter()
-        .map(|(reference, _)| reference)
+        .map(|registration| registration.reference().clone())
         .find(|reference| reference.device_id.to_string() != owner_device_id)
         .expect("snapshot exclusion peer registration");
     let exclusion = owner_device.finalize_peer_exclusion(&target).await;
@@ -406,6 +408,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
                 &owner_db,
                 "bootstrap-author-exclusion-store",
                 signer.clone(),
+                crate::sync::test_helpers::test_cloud_home(),
             ))
             .await
             .expect("create bootstrap exclusion Store"),
@@ -432,7 +435,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             .await
             .expect("list bootstrap exclusion registrations")
             .into_iter()
-            .map(|(reference, _)| reference)
+            .map(|registration| registration.reference().clone())
             .find(|reference| reference.device_id.to_string() != owner_device_id)
             .expect("bootstrap exclusion peer registration");
         let proposal = Box::pin(owner_device.prepare_peer_exclusion(&target)).await;
@@ -952,11 +955,13 @@ async fn run_excluded_author_candidate_cleanup_case(
 ) {
     let signer = UserKeypair::generate();
     let owner_db = open_test_db();
+    let home = crate::sync::test_helpers::test_cloud_home();
     let store = Arc::new(
         Box::pin(TestStore::create(
             &owner_db,
             "excluded-author-candidate-store",
             signer.clone(),
+            home.clone(),
         ))
         .await
         .expect("create excluded-author Store"),
@@ -1056,7 +1061,6 @@ async fn run_excluded_author_candidate_cleanup_case(
     .expect("derive excluded candidate commit prefix");
     let write_id = candidate.commit.value.write_id.clone();
     store
-        .storage
         .create_protocol_object(&candidate.commit.prepared)
         .await
         .expect("upload excluded peer candidate commit");
@@ -1064,13 +1068,14 @@ async fn run_excluded_author_candidate_cleanup_case(
         .mark_candidate_commit_uploaded(candidate_ref.clone())
         .await
         .expect("record uploaded excluded peer commit");
-    let (target, target_registration) = store_database(&peer_db)
+    let target_registration = store_database(&peer_db)
         .activated_store_device_registration_records()
         .await
         .expect("load excluded peer registration")
         .into_iter()
-        .find(|(reference, _)| reference.device_id.to_string() == peer_device_id)
+        .find(|registration| registration.reference().device_id.to_string() == peer_device_id)
         .expect("exact excluded peer registration");
+    let target = target_registration.reference().clone();
     let prepared_abandonment = if prepare_abandonment {
         crate::database::StoreDatabase::new(&peer_db)
             .set_write_status(
@@ -1218,7 +1223,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                 return;
             }
         }
-        store.home.fail_exact_delete_on_call(1);
+        home.fail_exact_delete_on_call(1);
         assert!(store.pull_into_result(&peer_db, &store_dir).await.is_err());
         let witness = match crate::database::StoreDatabase::new(&peer_db)
             .write_status(&write_id)
@@ -1335,9 +1340,10 @@ async fn run_excluded_author_candidate_cleanup_case(
         let (commit_uploaded, resume) = peer_db.arm_test_pause(point);
         let drain_db = peer_db.clone();
         let drain_store = store.clone();
+        let drain_signer = signer.clone();
         let drain = tokio::spawn(async move {
             let device = drain_store
-                .bind_device(&drain_db, &drain_store.signer)
+                .bind_device(&drain_db, &drain_signer)
                 .await
                 .expect("bind paused excluded-author Store");
             device.drain_store_writes().await
@@ -1376,13 +1382,11 @@ async fn run_excluded_author_candidate_cleanup_case(
             ExcludedCandidateHeadPublication::ExactLate
         ) {
             store
-                .storage
                 .create_protocol_object(&candidate.head.prepared)
                 .await
                 .expect("publish exact late excluded-author head");
             assert_eq!(
                 store
-                    .storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1398,13 +1402,9 @@ async fn run_excluded_author_candidate_cleanup_case(
             .await
             .expect_err("excluded peer cannot activate its late candidate")
     };
-    let peer_store = Store::load(
-        StoreDatabase::new(&peer_db),
-        store.storage.clone(),
-        signer.clone(),
-    )
-    .await
-    .expect("bind excluded peer Store");
+    let peer_store = Store::load(StoreDatabase::new(&peer_db), store.clone(), signer.clone())
+        .await
+        .expect("bind excluded peer Store");
     let local_position = peer_store
         .latest_local_store_position()
         .await
@@ -1443,6 +1443,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         let snapshot_owner = crate::protocol::remote_object::SharedObjectOwner::Snapshot(
             crate::protocol::remote_object::SnapshotObjectOwner {
                 activation: target_registration
+                    .value()
                     .store_snapshot_activation(&target)
                     .expect("derive shared blob snapshot activation")
                     .activation_id(),
@@ -1486,7 +1487,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .await
         .expect("load excluded peer cleanup state");
     if cleanup_pending {
-        store.home.fail_exact_delete_on_call(1);
+        home.fail_exact_delete_on_call(1);
         assert!(store
             .bind_device(&reopened, &signer)
             .await
@@ -1562,7 +1563,6 @@ async fn run_excluded_author_candidate_cleanup_case(
         match head_publication {
             ExcludedCandidateHeadPublication::AfterAbsentProofExactLate => {
                 post_proof_store
-                    .storage
                     .create_protocol_object(&candidate.head.prepared)
                     .await
                     .expect("publish candidate head after absent proof");
@@ -1656,13 +1656,9 @@ async fn run_excluded_author_candidate_cleanup_case(
     } else {
         reopened
     };
-    let retried_store = Store::load(
-        StoreDatabase::new(&retried),
-        store.storage.clone(),
-        signer.clone(),
-    )
-    .await
-    .expect("bind retried excluded peer Store");
+    let retried_store = Store::load(StoreDatabase::new(&retried), store.clone(), signer.clone())
+        .await
+        .expect("bind retried excluded peer Store");
     assert_eq!(
         retried_store
             .latest_local_store_position()
@@ -1674,7 +1670,6 @@ async fn run_excluded_author_candidate_cleanup_case(
         ExcludedCandidateHeadPublication::Absent => {
             assert!(matches!(
                 store
-                    .storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1694,7 +1689,6 @@ async fn run_excluded_author_candidate_cleanup_case(
         | ExcludedCandidateHeadPublication::AfterHeadReadBack => {
             assert_eq!(
                 store
-                    .storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1732,7 +1726,6 @@ async fn run_excluded_author_candidate_cleanup_case(
                 candidate_ref.coord.sequence(),
             );
             let mismatched_prepared = store
-                .storage
                 .prepare_protocol_object(
                     &head_context,
                     candidate_head.slot().clone(),
@@ -1761,7 +1754,6 @@ async fn run_excluded_author_candidate_cleanup_case(
         ExcludedCandidateHeadPublication::AfterCommitUpload => {
             assert!(matches!(
                 store
-                    .storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1781,7 +1773,6 @@ async fn run_excluded_author_candidate_cleanup_case(
     }
     assert!(matches!(
         store
-            .storage
             .read_protocol_object(
                 &candidate_commit_context,
                 &candidate_ref.object,
@@ -1802,7 +1793,6 @@ async fn run_excluded_author_candidate_cleanup_case(
         .expect("bind retried exclusion Store");
     assert!(matches!(
         retried_store
-            .store
             .load_store_package_for_test(candidate.commit.value.reference())
             .await,
         Err(StoreError::Object(
@@ -1939,7 +1929,6 @@ impl ExcludedPeer<'_> {
             if commit.store_package().is_some() {
                 assert!(matches!(
                     peer_store
-                        .store
                         .load_store_package_for_test(commit.reference())
                         .await,
                     Err(StoreError::Object(

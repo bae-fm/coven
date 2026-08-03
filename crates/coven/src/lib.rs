@@ -157,7 +157,7 @@ pub use sync::{
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap, RowIdentity, SyncError, SyncLoopAlerts, SyncLoopStatus,
-    SyncLoopSuccess, SyncedTable, Timestamp, UpdatedAtStamper,
+    SyncLoopSuccess, SyncedTable, Timestamp,
 };
 pub use write::{
     AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,

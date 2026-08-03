@@ -29,11 +29,11 @@ impl StoreCircles {
     async fn query_inputs(
         &self,
     ) -> Result<(String, std::collections::BTreeSet<String>), crate::CircleError> {
-        let identity = self
+        let identity_pubkey = self
             .security
-            .require_identity()
-            .map_err(|error| crate::CircleError::Identity(error.to_string()))?;
-        let identity_pubkey = crate::keys::public_key_hex(&identity);
+            .established_identity()
+            .map_err(|error| crate::CircleError::Identity(error.to_string()))?
+            .public_key_hex();
         let store_members = self
             .membership
             .members()

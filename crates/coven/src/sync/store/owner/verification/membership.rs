@@ -33,7 +33,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             coord.entry_hash,
         );
         let context = ProtocolObjectContext::signed_plaintext(
-            self.commit_verifier.root.reference().store_root_hash,
+            self.commit_verifier.store_root_hash(),
             ProtocolObjectDomain::StoreMembershipEntry,
         );
         let expected_coord = coord.clone();
@@ -68,11 +68,11 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             reference.resolution_hash,
         );
         let context = ProtocolObjectContext::signed_plaintext(
-            self.commit_verifier.root.reference().store_root_hash,
+            self.commit_verifier.store_root_hash(),
             ProtocolObjectDomain::StoreMembershipResolution,
         );
         let expected = reference.clone();
-        let store_root_hash = self.commit_verifier.root.reference().store_root_hash;
+        let store_root_hash = self.commit_verifier.store_root_hash();
         self.commit_verifier
             .load_exact_object(
                 &context,
@@ -116,7 +116,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
                 )),
             })?;
         let context = ProtocolObjectContext::signed_plaintext(
-            self.commit_verifier.root.reference().store_root_hash,
+            self.commit_verifier.store_root_hash(),
             ProtocolObjectDomain::StoreMembershipHead,
         );
         let expected_coord = reference.coord.clone();
@@ -160,10 +160,9 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             })?;
         let bytes = self
             .commit_verifier
-            .storage
             .read_protocol_object(
                 &ProtocolObjectContext::signed_plaintext(
-                    self.commit_verifier.root.reference().store_root_hash,
+                    self.commit_verifier.store_root_hash(),
                     ProtocolObjectDomain::StoreMembershipHead,
                 ),
                 &reference.object,
@@ -218,12 +217,11 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             }
         })?;
         let context = ProtocolObjectContext::signed_plaintext(
-            self.commit_verifier.root.reference().store_root_hash,
+            self.commit_verifier.store_root_hash(),
             ProtocolObjectDomain::StoreMembershipHead,
         );
         let (bytes, object) = self
             .commit_verifier
-            .storage
             .read_protocol_slot(&context, slot, semantic_prefix)
             .await?;
         let parse_bytes = bytes.clone();

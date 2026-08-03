@@ -11,12 +11,13 @@ use crate::database::{DbError, ValidatedChangeset};
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
-    CirclePackageRef, CommitFrontier, ObjectHash, OwnerRecoveryCursor, OwnerRecoveryPosition,
-    ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, RetainedVerifiedRegistration,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationActivation, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
-    StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
+    OwnerRecoveryCursor, OwnerRecoveryPosition, ResolvedStoreDeviceState,
+    RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
+    VerifiedStoreDeviceOperations,
 };
 use crate::protocol::{circle, membership, remote_object, store_commit};
 use crate::storage::StoreObjectError;
@@ -50,7 +51,7 @@ pub(super) struct MergeCandidate {
 pub(super) struct VerifiedPullCandidate {
     pub(super) verified: VerifiedStoreBatchCommit,
     pub(super) predecessor_membership: MembershipChain,
-    pub(super) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(super) registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub(super) operations: VerifiedStoreDeviceOperations,
     pub(super) membership_control: Option<VerifiedCircleActivations>,
 }

@@ -45,8 +45,10 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
-                validate_snapshot_author(&meta.author_registration, &registration_ref, "Circle")?;
+                let authority = local_store_authority_on(&tx)?;
+                let registration_ref = authority.reference();
+                let registration = authority.value();
+                validate_snapshot_author(&meta.author_registration, registration_ref, "Circle")?;
                 let device_id = registration.device_id.to_string();
                 validate_snapshot_image(
                     &meta.bootstrap.image,
@@ -69,9 +71,9 @@ impl StoreDatabase {
                 };
                 let verified = CircleSnapshotMeta::parse_at(
                     &meta.to_bytes(),
-                    root.store_root_hash,
+                    registration.store_root.store_root_hash,
                     &reference,
-                    &registration,
+                    registration,
                 )
                 .map_err(|error| {
                     DbError::Message(format!("verify staged Circle snapshot metadata: {error}"))
@@ -115,8 +117,8 @@ impl StoreDatabase {
                     DbError::Message("Circle snapshot generation overflow".to_string())
                 })?;
                 let activation = crate::protocol::store_commit::circle_snapshot_stream_activation(
-                    root.store_root_hash,
-                    &registration_ref,
+                    registration.store_root.store_root_hash,
+                    registration_ref,
                     meta.circle_id,
                     &device_id,
                 )

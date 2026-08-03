@@ -16,6 +16,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         &db,
         "closed-reclaimed-package",
         crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Store");
@@ -52,7 +53,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .publish_changeset("founder", 3, &receipt_changeset, db.schema_version())
         .await
         .expect("publish receipt Store position");
-    let (_, founder, _) = store
+    let founder_authority = store
         .founder_device_authority()
         .await
         .expect("load founder authority");
@@ -63,7 +64,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .load_commit_for_test(&target_activation)
         .await
         .expect("load target commit");
-    assert_eq!(target_commit.author(), &founder);
+    assert_eq!(target_commit.author(), founder_authority.registration());
     let target = target_commit
         .store_package()
         .expect("target commit has a package")

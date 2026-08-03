@@ -38,7 +38,6 @@ use crate::sync::store::circle_controls::activation::{
 pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,
     storage: &'storage dyn SyncStorage,
-    root: &'operation StoreRootRef,
     history:
         &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
@@ -47,7 +46,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
         storage: &'storage dyn SyncStorage,
-        root: &'operation StoreRootRef,
         history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
@@ -55,9 +53,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         Self {
             database,
             storage,
-            root,
             history,
         }
+    }
+
+    fn root(&self) -> &StoreRootRef {
+        self.history.verified_root().reference()
     }
 
     async fn load_access_pairs(
@@ -340,7 +341,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .database
                 .activated_store_device_registration(record.registration.clone())
                 .await?;
-            if remaining_members.contains_key(&registration.author_pubkey) {
+            if remaining_members.contains_key(&registration.value().author_pubkey) {
                 expected.push(record.registration.clone());
             }
         }
@@ -365,7 +366,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         objects: &CircleActivationObjects,
         encryption: EncryptionService,
     ) -> Result<crate::protocol::circle::CircleEpochCloseIntent, CircleOperationError> {
-        let store_root_hash = self.root.store_root_hash;
+        let store_root_hash = self.root().store_root_hash;
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleOperationError::InvalidState(
                 "Circle epoch-close intent has no close control".to_string(),
@@ -438,7 +439,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             Some(_) => {
                 let coord = Self::reopen_predecessor_coord(control)?;
                 self.database
-                    .verified_circle_activation(self.root.clone(), control.value.circle_id, coord)
+                    .verified_circle_activation(self.root().clone(), control.value.circle_id, coord)
                     .await?
             }
         };
@@ -518,7 +519,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let predecessor = self
             .database
             .verified_circle_activation(
-                self.root.clone(),
+                self.root().clone(),
                 control.value.circle_id,
                 close_control.clone(),
             )
@@ -635,7 +636,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         .database
                         .activated_store_device_registration(participant.registration.clone())
                         .await?;
-                    if !response.verify_for(&predecessor.control, &registration) {
+                    if !response.verify_for(&predecessor.control, registration.value()) {
                         return Err(CircleOperationError::InvalidState(
                             "Circle epoch-close response failed exact verification".to_string(),
                         ));
@@ -750,7 +751,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let predecessor = self
             .database
             .verified_circle_activation(
-                self.root.clone(),
+                self.root().clone(),
                 control.value.circle_id,
                 close_coord.clone(),
             )
@@ -1155,7 +1156,7 @@ impl CircleActivationVerifier<'_, '_> {
         grant_id: &crate::protocol::membership::MembershipGrantId,
         expected_anchor: fn(CircleId, crate::storage::cloud::ObjectSlot) -> GrantStreamAnchor,
     ) -> Result<CircleStreamAuthority, CircleOperationError> {
-        let root = self.root.clone();
+        let root = self.root().clone();
         let current = commit
             .stream_activations()
             .iter()
@@ -1376,7 +1377,7 @@ impl CircleActivationVerifier<'_, '_> {
         let image_bytes = read_exact_circle_object(
             self.storage,
             &ProtocolObjectContext::circle(
-                self.root.store_root_hash,
+                self.root().store_root_hash,
                 ProtocolObjectDomain::CircleBootstrapImage,
                 epoch_encryption,
             ),
@@ -1407,7 +1408,7 @@ impl CircleActivationVerifier<'_, '_> {
             };
             let blob_activation = self
                 .database
-                .verified_circle_activation(self.root.clone(), *circle_id, blob_control.clone())
+                .verified_circle_activation(self.root().clone(), *circle_id, blob_control.clone())
                 .await?
                 .ok_or_else(|| {
                     CircleOperationError::InvalidState(
@@ -1417,7 +1418,7 @@ impl CircleActivationVerifier<'_, '_> {
             let current_control = control.clone();
             let historical_control = blob_control.clone();
             let lineage_circle_id = *circle_id;
-            let lineage_root = self.root.clone();
+            let lineage_root = self.root().clone();
             let is_in_control_history = self
                 .database
                 .verified_circle_control_covers(
@@ -1596,7 +1597,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let commit_ref = verified.reference();
         let commit = verified.value();
         let author = verified.author();
-        if self.root.store_root_hash != commit.store_root_hash
+        if self.root().store_root_hash != commit.store_root_hash
             || commit
                 .author_registration
                 .verify_registration(author)

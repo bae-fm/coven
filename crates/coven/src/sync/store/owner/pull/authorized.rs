@@ -91,7 +91,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         {
             if active
                 .iter()
-                .all(|(reference, _)| reference != &recovered.0)
+                .all(|registration| registration.reference() != recovered.reference())
             {
                 active.push(recovered);
             }
@@ -99,12 +99,13 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let mut candidates = BTreeMap::new();
         let mut visible_heads = Vec::new();
         let mut held = Vec::new();
-        for (registration_ref, registration) in active {
+        for registration in active {
+            let registration_ref = registration.reference();
             let inactive_cut = match discovery_device_state
                 .devices
                 .get(&registration_ref.device_id)
             {
-                Some(record) if record.registration != registration_ref => {
+                Some(record) if record.registration != *registration_ref => {
                     return Err(StorePullError::Database(format!(
                         "discovery device state names another registration for {}",
                         registration_ref.device_id
@@ -118,18 +119,18 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             };
             let discovered = self
                 .history
-                .discover_pull_stream(&registration_ref, &registration, inactive_cut)
+                .discover_pull_stream(registration_ref, registration.value(), inactive_cut)
                 .await
                 .map_err(|error| {
                     StorePullError::Database(format!(
                         "discover Merge stream for {}: {error}",
-                        registration.device_id
+                        registration.value().device_id
                     ))
                 })?;
             if let Some(head) = discovered.latest_head {
                 visible_heads.push(VerifiedStoreDeviceHead {
                     head,
-                    author: registration.clone(),
+                    author: registration.value().clone(),
                 });
             }
             if let Some(block) = discovered.block {
@@ -692,14 +693,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .history
             .retain_pull_acknowledgement(commit_ref, commit, author)
             .await?;
-        let registrations = commit
-            .device_registrations()
+        let registrations = candidate
+            .registrations
             .iter()
-            .zip(&candidate.registrations)
-            .map(|(activation, (value, _))| RetainedVerifiedRegistration {
-                reference: activation.registration.clone(),
-                value: value.clone(),
-            })
+            .map(|registration| registration.registration().clone())
             .collect();
         let prepared_history = self
             .history

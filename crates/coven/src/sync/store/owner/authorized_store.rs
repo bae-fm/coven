@@ -2,16 +2,15 @@ use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
-    StoreDeviceRegistration, StoreDeviceRegistrationActivation, StoreDeviceRegistrationRef,
-    StoreRootRef,
+    ReferencedStoreDeviceRegistration, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
+    StoreDeviceRegistrationRef, StoreRootRef,
 };
 use crate::sync::store::StoreError;
 
 use super::history::AuthorizedStoreHistory;
 
 pub(super) struct LocalStoreDevice {
-    registration_ref: StoreDeviceRegistrationRef,
-    registration: StoreDeviceRegistration,
+    registration: ReferencedStoreDeviceRegistration,
     activation: Option<StoreDeviceRegistrationActivation>,
 }
 
@@ -53,7 +52,7 @@ impl LocalStoreDevice {
                         registration_ref.clone(),
                     )
                     .await?;
-                if activated != (registration.clone(), authority.clone()) {
+                if activated.value() != &registration || activated.activation() != &authority {
                     return Err(StoreError::InvalidOutbound(
                         "local registration differs from its exact activation authority"
                             .to_string(),
@@ -65,8 +64,11 @@ impl LocalStoreDevice {
             | crate::database::LocalDeviceRegistrationState::Created => None,
         };
         Ok(Self {
-            registration_ref,
-            registration,
+            registration: ReferencedStoreDeviceRegistration::verified(
+                registration_ref,
+                registration,
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             activation,
         })
     }
@@ -286,7 +288,8 @@ impl<'storage> AuthorizedStore<'storage> {
                     "retained outbound test Store has no local device".to_string(),
                 )
             })?
-            .registration_ref
+            .registration
+            .reference()
             .clone();
         self.history
             .authorize_retained_outbound(order, candidate_membership_heads, &author_registration)
@@ -329,7 +332,7 @@ impl<'storage> AuthorizedStore<'storage> {
         if local_device.activation.is_none() {
             return Err(super::StoreRegistrationError::ActivationRequired);
         }
-        if &local_device.registration.store_root != history.root() {
+        if &local_device.registration.value().store_root != history.root() {
             return Err(crate::sync::store::StoreError::InvalidOutbound(
                 "local Store writer belongs to another Store root".to_string(),
             )
@@ -340,19 +343,19 @@ impl<'storage> AuthorizedStore<'storage> {
             .await
             .map_err(crate::storage::StoreObjectError::from)
             .map_err(crate::sync::store::StoreError::from)?;
-        if live_provider.device != local_device.registration.provider {
+        if live_provider.device != local_device.registration.value().provider {
             return Err(super::StoreRegistrationError::Invalid(
                 "live provider principal differs from the local registration".to_string(),
             ));
         }
         let device_signer = local_device
             .registration
+            .value()
             .device_signer(identity)
             .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
         Ok(history.authorize_writer(
             membership,
             identity,
-            local_device.registration_ref,
             local_device.registration,
             device_signer,
         ))

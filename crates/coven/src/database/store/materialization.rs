@@ -6,7 +6,7 @@ use crate::database::{
     VerifiedMergeMaterialization,
 };
 use crate::protocol::store_commit::{
-    StoreDeviceHead, StoreDeviceRegistration, VerifiedStoreBatchCommit,
+    ActivatedStoreDeviceRegistration, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
 use crate::storage::ExactObjectRef;
@@ -248,10 +248,7 @@ impl StoreDatabase {
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
         verified_commit: VerifiedStoreBatchCommit,
-        registrations: Vec<(
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )>,
+        registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         circle_activations: VerifiedCircleActivations,
         activation_head: StoreDeviceHead,
@@ -311,10 +308,7 @@ impl StoreDatabase {
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
         verified_commit: VerifiedStoreBatchCommit,
-        registrations: Vec<(
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )>,
+        registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
@@ -501,14 +495,13 @@ impl StoreDatabase {
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
         history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-        registration: StoreDeviceRegistration,
-        authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation,
+        registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let root = required_store_root_authority_on(&tx)?;
-                let registrations = vec![(registration, authority)];
+                let registrations = vec![registration];
                 let commit = verified_commit.value();
                 crate::database::StoreDatabase::record_activated_store_device_registrations_on(
                     &tx,

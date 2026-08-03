@@ -131,16 +131,16 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        crate::protocol::provider::settle_cross_principal_challenge(
-            self.storage.exact_slot_storage(),
-            &self.database,
-            authorization,
-            challenge,
-            context,
-            store,
-        )
-        .await
-        .map_err(provider_error)
+        self.storage
+            .settle_cross_principal_challenge(
+                &self.database,
+                authorization,
+                challenge,
+                context,
+                store,
+            )
+            .await
+            .map_err(provider_error)
     }
 
     pub(super) async fn authorize_access(
@@ -286,22 +286,21 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         let admission = if provider_admin.provider == request.peer_provider {
             DeviceProviderAdmissionChallenge::SamePrincipal
         } else {
-            let exact = self.storage.exact_slot_storage();
             let challenge_context = request.cross_challenge_context();
             let probe_id = crate::protocol::provider::ProviderProbeId::from_bytes(
                 *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes()).as_bytes(),
             );
             DeviceProviderAdmissionChallenge::CrossPrincipal(
-                crate::protocol::provider::prepare_cross_principal_challenge(
-                    exact,
-                    &database,
-                    probe_id,
-                    &request.offer.provider,
-                    &challenge_context,
-                    &administrator_signer,
-                )
-                .await
-                .map_err(provider_error)?,
+                self.storage
+                    .prepare_cross_principal_challenge(
+                        &database,
+                        probe_id,
+                        &request.offer.provider,
+                        &challenge_context,
+                        &administrator_signer,
+                    )
+                    .await
+                    .map_err(provider_error)?,
             )
         };
         let approval = self.sign_device_admission_approval(
@@ -484,18 +483,18 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                     response_slot: response_slot.clone(),
                 };
                 DeviceProviderAdmission::CrossPrincipal(
-                    crate::protocol::provider::complete_cross_principal_probe(
-                        self.storage.exact_slot_storage(),
-                        &database,
-                        challenge,
-                        response,
-                        &context,
-                        &offer.provider,
-                        &administrator_signer,
-                        &offer.member_pubkey,
-                    )
-                    .await
-                    .map_err(provider_error)?,
+                    self.storage
+                        .complete_cross_principal_probe(
+                            &database,
+                            challenge,
+                            response,
+                            &context,
+                            &offer.provider,
+                            &administrator_signer,
+                            &offer.member_pubkey,
+                        )
+                        .await
+                        .map_err(provider_error)?,
                 )
             }
             _ => return Err(DeviceJoinError::AttemptMismatch),
@@ -593,8 +592,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                     DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
                         match self
                             .storage
-                            .exact_slot_storage()
-                            .observe_at(&challenge.administrator_object.slot)
+                            .observe_exact_slot(&challenge.administrator_object.slot)
                             .await
                         {
                             Ok(None) => ProviderChallengeDisposition::NeverCreated,
@@ -628,8 +626,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
             &attempt.value.provider_approval.admission
         {
             self.storage
-                .exact_slot_storage()
-                .delete_and_verify_absent(&probe.administrator_object.slot)
+                .delete_exact_slot_and_verify_absent(&probe.administrator_object.slot)
                 .await
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }

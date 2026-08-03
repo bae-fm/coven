@@ -325,7 +325,7 @@ impl RetainedStoreDeviceRegistrationActivations {
     pub(crate) fn from_verified(
         root: &StoreRootRef,
         commit: &StoreBatchCommit,
-        registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
+        registrations: &[ActivatedStoreDeviceRegistration],
     ) -> Result<Self, StoreProtocolError> {
         if registrations.len() != commit.device_registrations().len() {
             return Err(StoreProtocolError::DeviceStateMismatch);
@@ -333,12 +333,10 @@ impl RetainedStoreDeviceRegistrationActivations {
         let retained = Self {
             registrations: registrations
                 .iter()
-                .map(
-                    |(registration, authority)| RetainedStoreDeviceRegistrationActivation {
-                        canonical_registration: registration.to_bytes(),
-                        authority: authority.clone(),
-                    },
-                )
+                .map(|registration| RetainedStoreDeviceRegistrationActivation {
+                    canonical_registration: registration.value().to_bytes(),
+                    authority: registration.activation().clone(),
+                })
                 .collect(),
         };
         retained.verify_for(root, commit)?;
@@ -349,8 +347,7 @@ impl RetainedStoreDeviceRegistrationActivations {
         &self,
         root: &StoreRootRef,
         commit: &StoreBatchCommit,
-    ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, StoreProtocolError>
-    {
+    ) -> Result<Vec<ActivatedStoreDeviceRegistration>, StoreProtocolError> {
         if self.registrations.len() != commit.device_registrations().len() {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
@@ -368,15 +365,20 @@ impl RetainedStoreDeviceRegistrationActivation {
         &self,
         root: &StoreRootRef,
         activated: &ActivatedStoreDeviceRegistrationRef,
-    ) -> Result<(StoreDeviceRegistration, StoreDeviceRegistrationActivation), StoreProtocolError>
-    {
+    ) -> Result<ActivatedStoreDeviceRegistration, StoreProtocolError> {
         let registration = verify_retained_registration(
             root,
             &activated.registration,
             &self.canonical_registration,
         )?;
-        verify_registration_activation_binding(activated, &registration, &self.authority)?;
-        Ok((registration, self.authority.clone()))
+        let registration = ReferencedStoreDeviceRegistration::verified(
+            activated.registration.clone(),
+            registration,
+        )?;
+        let registration =
+            ActivatedStoreDeviceRegistration::verified(registration, self.authority.clone())?;
+        registration.verify_reference(activated)?;
+        Ok(registration)
     }
 }
 
@@ -418,9 +420,8 @@ impl RetainedStoreDeviceExclusionProposal {
             canonical_target_registration: target.to_bytes(),
             canonical_owner_registration: owner.to_bytes(),
         };
-        let (opened_proposal, opened_target, opened_owner) =
-            retained.verify_with_registrations(&target.store_root)?;
-        if opened_proposal != *proposal || opened_target != *target || opened_owner != *owner {
+        let opened = retained.verify_with_registrations(&target.store_root)?;
+        if opened.object.value != *proposal || opened.target != *target || opened.owner != *owner {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         Ok(retained)
@@ -444,20 +445,13 @@ impl RetainedStoreDeviceExclusionProposal {
         root: &StoreRootRef,
     ) -> Result<StoreDeviceExclusionProposal, StoreProtocolError> {
         self.verify_with_registrations(root)
-            .map(|(proposal, _, _)| proposal)
+            .map(|proposal| proposal.object.value)
     }
 
     fn verify_with_registrations(
         &self,
         root: &StoreRootRef,
-    ) -> Result<
-        (
-            StoreDeviceExclusionProposal,
-            StoreDeviceRegistration,
-            StoreDeviceRegistration,
-        ),
-        StoreProtocolError,
-    > {
+    ) -> Result<VerifiedDeviceExclusionProposal, StoreProtocolError> {
         self.reference
             .object
             .verify(&self.canonical_proposal)
@@ -486,7 +480,17 @@ impl RetainedStoreDeviceExclusionProposal {
             &target,
             &owner,
         )?;
-        Ok((proposal, target, owner))
+        Ok(VerifiedDeviceExclusionProposal {
+            reference: self.reference.clone(),
+            object: crate::storage::VerifiedObject {
+                value: proposal,
+                bytes: self.canonical_proposal.clone(),
+                semantic_hash: self.reference.proposal_hash,
+                object: self.reference.object.clone(),
+            },
+            target,
+            owner,
+        })
     }
 }
 
@@ -616,7 +620,7 @@ impl RetainedStoreDeviceExclusionOutcome {
             .object()
             .verify(canonical_outcome)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        let (proposal, target, _) = proposal_source.verify_with_registrations(root)?;
+        let proposal = proposal_source.verify_with_registrations(root)?;
         let unverified: StoreDeviceExclusionOutcome = serde_json::from_slice(canonical_outcome)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         if unverified.to_bytes() != *canonical_outcome {
@@ -635,13 +639,14 @@ impl RetainedStoreDeviceExclusionOutcome {
         let outcome = StoreDeviceExclusionOutcome::parse_at(
             canonical_outcome,
             &reference,
-            &proposal,
-            &target,
+            &proposal.object.value,
+            &proposal.target,
             &owner,
         )?;
         match (&self, outcome) {
             (Self::Excluded { .. }, StoreDeviceExclusionOutcome::Excluded(exclusion)) => {
-                if exclusion.proof.frozen_device_state != proposal.frozen_device_state {
+                if exclusion.proof.frozen_device_state != proposal.object.value.frozen_device_state
+                {
                     return Err(StoreProtocolError::DeviceStateMismatch);
                 }
                 Ok(VerifiedStoreDeviceExclusionOutcome::Excluded {
@@ -675,55 +680,6 @@ fn verify_retained_registration(
     }
     reference.verify_registration(&registration)?;
     Ok(registration)
-}
-
-fn verify_registration_activation_binding(
-    activated: &ActivatedStoreDeviceRegistrationRef,
-    registration: &StoreDeviceRegistration,
-    authority: &StoreDeviceRegistrationActivation,
-) -> Result<(), StoreProtocolError> {
-    match (&registration.origin, &activated.authority, authority) {
-        (
-            StoreDeviceRegistrationOrigin::Join {
-                attempt_id: origin_attempt,
-                outcome_slot,
-                ..
-            },
-            StoreDeviceRegistrationActivationRef::Join {
-                attempt_id,
-                outcome,
-            },
-            StoreDeviceRegistrationActivation::Join {
-                attempt_id: retained_attempt,
-                outcome: retained_outcome,
-            },
-        ) if origin_attempt == attempt_id
-            && attempt_id == retained_attempt
-            && outcome_slot == outcome.slot()
-            && outcome == retained_outcome =>
-        {
-            Ok(())
-        }
-        (
-            StoreDeviceRegistrationOrigin::Recovery {
-                recovery_id: origin_recovery,
-                recovery_slot,
-                ..
-            },
-            StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
-            StoreDeviceRegistrationActivation::Recovery {
-                recovery_id: retained_recovery,
-                node: retained_node,
-            },
-        ) if origin_recovery == recovery_id
-            && recovery_id == retained_recovery
-            && recovery_slot == node.slot()
-            && node == retained_node =>
-        {
-            Ok(())
-        }
-        _ => Err(StoreProtocolError::DeviceStateMismatch),
-    }
 }
 
 impl VerifiedStoreDeviceExclusionOutcome {

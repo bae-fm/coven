@@ -34,8 +34,10 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
-                validate_snapshot_author(&meta.author_registration, &registration_ref, "Store")?;
+                let authority = local_store_authority_on(&tx)?;
+                let registration_ref = authority.reference();
+                let registration = authority.value();
+                validate_snapshot_author(&meta.author_registration, registration_ref, "Store")?;
                 validate_snapshot_image(
                     &meta.image,
                     &image_prepared,
@@ -56,9 +58,9 @@ impl StoreDatabase {
                 };
                 let verified = SnapshotMeta::parse_at(
                     &meta.to_bytes(),
-                    root.store_root_hash,
+                    registration.store_root.store_root_hash,
                     &reference,
-                    &registration,
+                    registration,
                 )
                 .map_err(|error| {
                     DbError::Message(format!("verify staged Store snapshot metadata: {error}"))
@@ -81,7 +83,7 @@ impl StoreDatabase {
                         Some(previous.reference.clone()),
                         previous.successor_slot.clone(),
                     ),
-                    None => (0, None, store_snapshot_first_slot(&registration)?.clone()),
+                    None => (0, None, store_snapshot_first_slot(registration)?.clone()),
                 };
                 if meta.generation != expected_generation
                     || meta.predecessor != expected_predecessor
@@ -98,7 +100,7 @@ impl StoreDatabase {
                 })?;
                 if meta.successor.activation
                     != registration
-                        .store_snapshot_activation(&registration_ref)
+                        .store_snapshot_activation(registration_ref)
                         .map_err(|error| DbError::Message(error.to_string()))?
                         .activation_id()
                     || meta.successor.next_slot.logical_key()

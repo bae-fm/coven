@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     let db = open_test_db();
-    let (store, signer, journal) =
+    let (store, _home, signer, journal) =
         persist_merge_operation(&db, "circle-invented-access-refs").await;
     let device = store
         .bind_device(&db, &signer)
@@ -12,7 +12,6 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     let old_commit = journal.commit().expect("parse prepared Store commit");
     for object in journal.operation().prepared_objects.values() {
         store
-            .storage
             .create_protocol_object(object)
             .await
             .expect("publish original exact Circle activation object");
@@ -68,12 +67,10 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("prepare invented access envelope path");
     store
-        .storage
         .create_protocol_object(&leaf)
         .await
         .expect("publish invented access leaf path");
     store
-        .storage
         .create_protocol_object(&envelope)
         .await
         .expect("publish invented access envelope path");
@@ -96,6 +93,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("load exact Circle commit author");
     let device_signer = author
+        .value()
         .device_signer(&signer)
         .expect("derive Circle commit device signer");
     let commit_coord = journal.operation().commit_ref.coord.clone();
@@ -110,7 +108,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         old_commit.write_id.clone(),
         commit_coord.clone(),
         old_commit.author_registration.clone(),
-        &author,
+        author.value(),
         old_commit.order.clone(),
         old_commit.membership_state.clone(),
         old_commit.device_state.clone(),
@@ -141,7 +139,6 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("prepare re-signed Store commit");
     store
-        .storage
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish re-signed Store commit");
@@ -156,7 +153,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .bind_device(&db, &signer)
         .await
         .expect("bind invented-access Circle Store")
-        .load_circle_activations(&commit_ref, &commit, &author)
+        .load_circle_activations(&commit_ref, &commit, author.value())
         .await
         .expect_err("invented access references must fail activation");
     assert!(
@@ -170,7 +167,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         &commit.to_bytes(),
         store.root.store_root_hash,
         &commit_ref,
-        &author,
+        author.value(),
     )
     .expect("authenticate re-signed Store commit");
     let history = store
@@ -204,7 +201,6 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         ProtocolObjectDomain::StoreHead,
     );
     let forged_head_object = store
-        .storage
         .prepare_protocol_object(
             &head_context,
             original_head_object.reference().slot().clone(),
@@ -215,7 +211,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
             forged_head.to_bytes(),
         )
         .expect("prepare Store head naming the re-signed commit");
-    store.home.replace_exact_object(
+    _home.replace_exact_object(
         original_head_object.reference().slot(),
         forged_head_object.stored_bytes().to_vec(),
     );
@@ -261,9 +257,14 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
 async fn remote_activation_rejects_active_access_for_a_nonmember() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&db, "circle-active-access-nonmember", founder.clone())
-        .await
-        .expect("create exact Circle test Store");
+    let store = TestStore::create(
+        &db,
+        "circle-active-access-nonmember",
+        founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact Circle test Store");
     let device = store
         .bind_device(&db, &founder)
         .await
@@ -274,10 +275,6 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &peer_pubkey,
             None,
             MemberRole::Member,
@@ -300,6 +297,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .await
         .expect("load exact Circle commit author");
     let device_signer = author
+        .value()
         .device_signer(&founder)
         .expect("derive Circle commit device signer");
     let mut draft = draft_from_transition(&journal.operation().creation);
@@ -310,7 +308,6 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .expect("prepare exact promoted access objects");
     for object in prepared.values() {
         store
-            .storage
             .create_protocol_object(object)
             .await
             .expect("publish exact promoted access object");
@@ -322,7 +319,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         old_commit.write_id.clone(),
         commit_coord.clone(),
         old_commit.author_registration.clone(),
-        &author,
+        author.value(),
         old_commit.order.clone(),
         old_commit.membership_state.clone(),
         old_commit.device_state.clone(),
@@ -353,7 +350,6 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .await
         .expect("prepare promoted access Store commit");
     store
-        .storage
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish promoted access Store commit");
@@ -368,7 +364,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .bind_device(&db, &peer)
         .await
         .expect("bind promoted-access Circle Store")
-        .load_circle_activations(&commit_ref, &commit, &author)
+        .load_circle_activations(&commit_ref, &commit, author.value())
         .await
         .expect_err("Active access must name a resolved Circle member");
     assert!(
@@ -383,9 +379,14 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
 async fn candidate_graph_rejects_partial_circle_access_ownership() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&db, "circle-partial-access-graph", founder.clone())
-        .await
-        .expect("create exact Circle test Store");
+    let store = TestStore::create(
+        &db,
+        "circle-partial-access-graph",
+        founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact Circle test Store");
     let mut journal = store
         .bind_device(&db, &founder)
         .await
@@ -420,19 +421,20 @@ async fn candidate_graph_rejects_partial_circle_access_ownership() {
 async fn inactive_circle_member_verifies_public_first_head_activations() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&db, "circle-inactive-member", founder.clone())
-        .await
-        .expect("create Circle Store");
+    let store = TestStore::create(
+        &db,
+        "circle-inactive-member",
+        founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Circle Store");
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &peer_pubkey,
             None,
             MemberRole::Member,
@@ -469,7 +471,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .bind_device(&db, &peer)
         .await
         .expect("bind inactive-member Circle Store")
-        .load_circle_activations(&commit_ref, &commit, &author)
+        .load_circle_activations(&commit_ref, &commit, author.value())
         .await
         .expect("inactive Circle member verifies the public activation graph");
     let [circle] = verified.circles() else {
@@ -490,12 +492,11 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
 #[tokio::test]
 async fn remote_activation_rejects_metadata_with_a_different_historical_roster() {
     let baseline_db = open_test_db();
-    let (baseline_store, baseline_signer, baseline) =
+    let (baseline_store, _home, baseline_signer, baseline) =
         persist_merge_operation(&baseline_db, "circle-remote-metadata-baseline").await;
     let baseline_commit = baseline.commit().expect("parse baseline Store commit");
     for object in baseline.operation().prepared_objects.values() {
         baseline_store
-            .storage
             .create_protocol_object(object)
             .await
             .expect("publish baseline exact Circle activation object");
@@ -511,13 +512,13 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .load_circle_activations(
             &baseline.operation().commit_ref,
             &baseline_commit,
-            &baseline_author,
+            baseline_author.value(),
         )
         .await
         .expect("baseline exact Circle activation verifies remotely");
 
     let db = open_test_db();
-    let (store, signer, founder_journal) =
+    let (store, _home, signer, founder_journal) =
         persist_merge_operation(&db, "circle-remote-metadata-roster").await;
     let device = store
         .bind_device(&db, &signer)
@@ -531,7 +532,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .resume_circle_operations()
         .await
         .expect("publish exact founder Circle");
-    store.home.fail_exact_create_before_call(1);
+    _home.fail_exact_create_before_call(1);
     device
         .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
         .await
@@ -561,6 +562,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .await
         .expect("load exact Circle commit author");
     let device_signer = author
+        .value()
         .device_signer(&signer)
         .expect("derive Circle commit device signer");
     let (creation, objects, prepared, control_head_object, stream_activations) = device
@@ -569,7 +571,6 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .expect("prepare forged exact Circle activation objects");
     for object in prepared.values() {
         store
-            .storage
             .create_protocol_object(object)
             .await
             .expect("publish forged exact Circle activation object");
@@ -580,7 +581,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         old_commit.write_id.clone(),
         commit_coord.clone(),
         old_commit.author_registration.clone(),
-        &author,
+        author.value(),
         old_commit.order.clone(),
         old_commit.membership_state.clone(),
         old_commit.device_state.clone(),
@@ -611,7 +612,6 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .await
         .expect("prepare forged exact Store commit");
     store
-        .storage
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish forged exact Store commit");
@@ -626,7 +626,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .bind_device(&db, &signer)
         .await
         .expect("bind mismatched-roster Circle Store")
-        .load_circle_activations(&commit_ref, &commit, &author)
+        .load_circle_activations(&commit_ref, &commit, author.value())
         .await
         .expect_err("metadata cannot borrow authority from a different roster state");
     assert!(

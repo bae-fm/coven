@@ -281,6 +281,188 @@ pub struct StoreDeviceRegistration {
     pub identity_signature: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ReferencedStoreDeviceRegistration {
+    reference: StoreDeviceRegistrationRef,
+    value: StoreDeviceRegistration,
+}
+
+impl ReferencedStoreDeviceRegistration {
+    pub(crate) fn verified(
+        reference: StoreDeviceRegistrationRef,
+        value: StoreDeviceRegistration,
+    ) -> Result<Self, StoreProtocolError> {
+        reference.verify_registration(&value)?;
+        Ok(Self { reference, value })
+    }
+
+    pub(crate) fn reference(&self) -> &StoreDeviceRegistrationRef {
+        &self.reference
+    }
+
+    pub(crate) fn value(&self) -> &StoreDeviceRegistration {
+        &self.value
+    }
+}
+
+impl<'de> Deserialize<'de> for ReferencedStoreDeviceRegistration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EncodedRegistration {
+            reference: StoreDeviceRegistrationRef,
+            value: StoreDeviceRegistration,
+        }
+
+        let encoded = EncodedRegistration::deserialize(deserializer)?;
+        Self::verified(encoded.reference, encoded.value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ActivatedStoreDeviceRegistration {
+    registration: ReferencedStoreDeviceRegistration,
+    activation: StoreDeviceRegistrationActivation,
+}
+
+impl ActivatedStoreDeviceRegistration {
+    pub(crate) fn verified(
+        registration: ReferencedStoreDeviceRegistration,
+        activation: StoreDeviceRegistrationActivation,
+    ) -> Result<Self, StoreProtocolError> {
+        let value = registration.value();
+        let matches = match (&value.origin, &activation) {
+            (
+                StoreDeviceRegistrationOrigin::Founder { .. },
+                StoreDeviceRegistrationActivation::Founder { root },
+            ) => &value.store_root == root,
+            (
+                StoreDeviceRegistrationOrigin::Join {
+                    attempt_id: origin_attempt,
+                    outcome_slot,
+                    ..
+                },
+                StoreDeviceRegistrationActivation::Join {
+                    attempt_id,
+                    outcome,
+                },
+            ) => origin_attempt == attempt_id && outcome_slot == outcome.slot(),
+            (
+                StoreDeviceRegistrationOrigin::Recovery {
+                    recovery_id: origin_recovery,
+                    recovery_slot,
+                    ..
+                },
+                StoreDeviceRegistrationActivation::Recovery { recovery_id, node },
+            ) => origin_recovery == recovery_id && recovery_slot == node.slot(),
+            _ => false,
+        };
+        if !matches {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(Self {
+            registration,
+            activation,
+        })
+    }
+
+    pub(crate) fn verify_reference(
+        &self,
+        reference: &ActivatedStoreDeviceRegistrationRef,
+    ) -> Result<(), StoreProtocolError> {
+        if self.registration.reference() != &reference.registration {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        let matches = match (&reference.authority, &self.activation) {
+            (
+                StoreDeviceRegistrationActivationRef::Join {
+                    attempt_id,
+                    outcome,
+                },
+                StoreDeviceRegistrationActivation::Join {
+                    attempt_id: activated_attempt,
+                    outcome: activated_outcome,
+                },
+            ) => attempt_id == activated_attempt && outcome == activated_outcome,
+            (
+                StoreDeviceRegistrationActivationRef::Recovery { recovery_id, node },
+                StoreDeviceRegistrationActivation::Recovery {
+                    recovery_id: activated_recovery,
+                    node: activated_node,
+                },
+            ) => recovery_id == activated_recovery && node == activated_node,
+            _ => false,
+        };
+        if !matches {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn activated_reference(
+        &self,
+    ) -> Result<ActivatedStoreDeviceRegistrationRef, StoreProtocolError> {
+        let authority = match &self.activation {
+            StoreDeviceRegistrationActivation::Founder { .. } => {
+                return Err(StoreProtocolError::DeviceStateMismatch)
+            }
+            StoreDeviceRegistrationActivation::Join {
+                attempt_id,
+                outcome,
+            } => StoreDeviceRegistrationActivationRef::Join {
+                attempt_id: *attempt_id,
+                outcome: outcome.clone(),
+            },
+            StoreDeviceRegistrationActivation::Recovery { recovery_id, node } => {
+                StoreDeviceRegistrationActivationRef::Recovery {
+                    recovery_id: *recovery_id,
+                    node: node.clone(),
+                }
+            }
+        };
+        Ok(ActivatedStoreDeviceRegistrationRef {
+            registration: self.registration.reference().clone(),
+            authority,
+        })
+    }
+
+    pub(crate) fn registration(&self) -> &ReferencedStoreDeviceRegistration {
+        &self.registration
+    }
+
+    pub(crate) fn reference(&self) -> &StoreDeviceRegistrationRef {
+        self.registration.reference()
+    }
+
+    pub(crate) fn value(&self) -> &StoreDeviceRegistration {
+        self.registration.value()
+    }
+
+    pub(crate) fn activation(&self) -> &StoreDeviceRegistrationActivation {
+        &self.activation
+    }
+}
+
+impl<'de> Deserialize<'de> for ActivatedStoreDeviceRegistration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EncodedActivation {
+            registration: ReferencedStoreDeviceRegistration,
+            activation: StoreDeviceRegistrationActivation,
+        }
+
+        let encoded = EncodedActivation::deserialize(deserializer)?;
+        Self::verified(encoded.registration, encoded.activation).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Serialize)]
 struct RegistrationSignedFields<'a> {
     version: u32,

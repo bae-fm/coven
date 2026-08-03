@@ -564,6 +564,21 @@ impl RotationGate {
 
 pub(crate) struct PendingRotation(std::sync::RwLock<Option<RotationGate>>);
 
+pub(crate) trait CloudRotationAccess: Send + Sync {
+    fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
+    fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
+    fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
+    fn replace_candidate_mutation(
+        &self,
+        generation: u64,
+        previous: ObjectHash,
+        replacement: ObjectHash,
+    ) -> Result<(), String>;
+    fn gate(&self) -> Option<RotationGate>;
+    fn install_durable_gate(&self, gate: Option<RotationGate>);
+    fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending>;
+}
+
 impl Default for PendingRotation {
     fn default() -> Self {
         Self(std::sync::RwLock::new(None))
@@ -697,6 +712,41 @@ impl PendingRotation {
     }
 }
 
+impl CloudRotationAccess for PendingRotation {
+    fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+        PendingRotation::mark_candidate(self, generation, mutation)
+    }
+
+    fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+        PendingRotation::mark_committed_mutation(self, generation, mutation)
+    }
+
+    fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+        PendingRotation::remove_candidate(self, generation, mutation)
+    }
+
+    fn replace_candidate_mutation(
+        &self,
+        generation: u64,
+        previous: ObjectHash,
+        replacement: ObjectHash,
+    ) -> Result<(), String> {
+        PendingRotation::replace_candidate_mutation(self, generation, previous, replacement)
+    }
+
+    fn gate(&self) -> Option<RotationGate> {
+        PendingRotation::gate(self)
+    }
+
+    fn install_durable_gate(&self, gate: Option<RotationGate>) {
+        PendingRotation::install_durable_gate(self, gate);
+    }
+
+    fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending> {
+        PendingRotation::check(self, cipher)
+    }
+}
+
 /// The `protocol_state` key for the serialized `RotationGate`. Restored before
 /// the first cycle so a restart cannot forget an unfinished candidate or an
 /// unadopted committed rotation and resume sealing under an unauthorized key.
@@ -782,9 +832,7 @@ impl CloudCipher {
     ) -> Vec<u8> {
         match self {
             CloudCipher::Encrypted(master) => {
-                let (encryption, mut stored) = sealing_encryption_for_scope(scope, master);
-                stored.extend(encryption.encrypt(&plaintext, aad_context));
-                stored
+                ScopedBlobSealing::new(scope, master).seal(plaintext, aad_context)
             }
             CloudCipher::Plaintext => plaintext,
         }
@@ -844,20 +892,14 @@ impl CloudCipher {
         let plaintext_len = crate::storage::local_file::file_len(file_path).await?;
         let header = SealedBlobHeader::new(chunk_size, plaintext_len);
         let reader = crate::storage::local_file::open_reader(file_path).await?;
-        let (sealer, prefix) = match self {
-            CloudCipher::Encrypted(e) => {
-                let (encryption, mut prefix) = sealing_encryption_for_scope(scope, e);
-                prefix.extend_from_slice(&header.to_bytes());
-                (Some(encryption.blob_sealer(header, aad_context)), prefix)
+        Ok(match self {
+            CloudCipher::Encrypted(encryption) => {
+                ScopedBlobSealing::new(scope, encryption).into_body(header, reader, aad_context)
             }
-            CloudCipher::Plaintext => (None, Vec::new()),
-        };
-        Ok(BlobBody::from_file_with_prefix(
-            self.body_len(header),
-            reader,
-            sealer,
-            prefix,
-        ))
+            CloudCipher::Plaintext => {
+                BlobBody::from_file_with_prefix(self.body_len(header), reader, None, Vec::new())
+            }
+        })
     }
 }
 
@@ -1049,16 +1091,6 @@ impl CloudSyncStorage {
         self
     }
 
-    pub(crate) fn exact_slot_probe_clients(
-        &self,
-    ) -> (&dyn ExactSlotStorage, &dyn ExactSlotStorage) {
-        (self.exact.as_ref(), self.exact_probe_peer.as_ref())
-    }
-
-    pub(crate) fn exact_slot_storage(&self) -> &dyn ExactSlotStorage {
-        self.exact.as_ref()
-    }
-
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
         self.blob_paths
     }
@@ -1134,10 +1166,7 @@ impl CloudSyncStorage {
     async fn blob_write_registration(
         &self,
         label: &str,
-    ) -> (
-        crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        crate::protocol::store_commit::StoreDeviceRegistration,
-    ) {
+    ) -> crate::protocol::store_commit::ReferencedStoreDeviceRegistration {
         use crate::protocol::store_commit::{
             DeviceStreamAnchor, StoreCreationId, StoreDeviceRegistration,
             StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
@@ -1191,27 +1220,50 @@ impl CloudSyncStorage {
                 ObjectHash::digest(&bytes),
             ),
         );
-        (reference, registration)
+        crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+            reference,
+            registration,
+        )
+        .expect("construct test blob write registration")
     }
 
-    /// The session's fixed-mode cipher state. The state exposes key-generation
-    /// merging but no operation that can replace encrypted mode with plaintext.
-    pub(crate) fn cipher_state(&self) -> &Arc<CloudCipherState> {
-        &self.cipher
+    pub(crate) fn is_plaintext(&self) -> bool {
+        self.cipher.is_plaintext()
     }
 
-    /// Return a shared reference to the rotation-pending marker for external use
-    /// — the same instance a member removal (or a refresh cycle) marks when it
-    /// commits a rotation this device has not adopted, so every seal path (this
-    /// storage's own, plus the blob upload/tombstone drains, which seal directly
-    /// against a `CloudCipher` rather than through this trait) refuses together.
-    pub(crate) fn shared_pending_rotation(&self) -> Arc<PendingRotation> {
-        self.pending_rotation.clone()
+    pub(crate) fn current_encryption(&self) -> Option<EncryptionService> {
+        self.cipher.encryption()
     }
 
-    /// Borrow the underlying CloudHome for direct access (e.g., set_access).
-    pub(crate) fn cloud_home(&self) -> &dyn CloudHome {
-        &*self.home
+    #[cfg(test)]
+    pub(crate) fn cipher_snapshot(&self) -> CloudCipher {
+        self.cipher.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adopt_key_rotation_for_test(
+        &self,
+        encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<String, crate::keys::KeyError> {
+        CloudCipherAccess::adopt_key_rotation(self, encryption, custody)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_rotation_committed_for_test(&self, generation: u64) -> Result<(), String> {
+        self.pending_rotation.mark_committed(generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_rotation_generation_for_test(&self) -> Option<u64> {
+        self.pending_rotation.pending_generation()
+    }
+
+    pub(crate) async fn restore_pending_rotation(
+        &self,
+        database: &crate::database::StoreDatabase,
+    ) -> Result<(), crate::database::DbError> {
+        self.pending_rotation.restore_from(database).await
     }
 
     fn cipher(&self) -> CloudCipher {
@@ -1318,6 +1370,57 @@ impl CloudSyncStorage {
     }
 }
 
+impl CloudCipherAccess for CloudSyncStorage {
+    fn snapshot(&self) -> CloudCipher {
+        self.cipher.snapshot()
+    }
+
+    fn merge_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError> {
+        self.cipher.merge_key_rotation(new_encryption, custody)
+    }
+}
+
+impl CloudRotationAccess for CloudSyncStorage {
+    fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+        self.pending_rotation.mark_candidate(generation, mutation)
+    }
+
+    fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+        self.pending_rotation
+            .mark_committed_mutation(generation, mutation)
+    }
+
+    fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+        self.pending_rotation.remove_candidate(generation, mutation)
+    }
+
+    fn replace_candidate_mutation(
+        &self,
+        generation: u64,
+        previous: ObjectHash,
+        replacement: ObjectHash,
+    ) -> Result<(), String> {
+        self.pending_rotation
+            .replace_candidate_mutation(generation, previous, replacement)
+    }
+
+    fn gate(&self) -> Option<RotationGate> {
+        self.pending_rotation.gate()
+    }
+
+    fn install_durable_gate(&self, gate: Option<RotationGate>) {
+        self.pending_rotation.install_durable_gate(gate);
+    }
+
+    fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending> {
+        self.pending_rotation.check(cipher)
+    }
+}
+
 /// The `EncryptionService` a blob's `scope` selects, against `master`: the
 /// store master itself, or a per-scope key derived from it. The blob storage
 /// methods and the outbox drain both turn a [`crate::blob::BlobScope`] into a
@@ -1399,14 +1502,40 @@ fn read_key_tag(stored: &[u8]) -> Result<([u8; KEY_FINGERPRINT_LEN], &[u8]), Enc
 /// object carries (the master seal key's fingerprint, so a later read resolves
 /// the exact key to open with — for a derived scope it re-derives from that
 /// master key).
-fn sealing_encryption_for_scope(
-    scope: crate::blob::BlobScope,
-    master: &EncryptionService,
-) -> (EncryptionService, Vec<u8>) {
-    (
-        encryption_for_scope(scope, master),
-        key_tag(&master.seal_fingerprint()),
-    )
+struct ScopedBlobSealing {
+    encryption: EncryptionService,
+    key_tag: Vec<u8>,
+}
+
+impl ScopedBlobSealing {
+    fn new(scope: crate::blob::BlobScope, master: &EncryptionService) -> Self {
+        Self {
+            encryption: encryption_for_scope(scope, master),
+            key_tag: key_tag(&master.seal_fingerprint()),
+        }
+    }
+
+    fn seal(self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
+        let mut stored = self.key_tag;
+        stored.extend(self.encryption.encrypt(&plaintext, aad_context));
+        stored
+    }
+
+    fn into_body(
+        self,
+        header: SealedBlobHeader,
+        reader: crate::storage::local_file::PlaintextReader,
+        aad_context: &[u8],
+    ) -> BlobBody {
+        let mut prefix = self.key_tag;
+        prefix.extend_from_slice(&header.to_bytes());
+        BlobBody::from_file_with_prefix(
+            KEY_TAG_LEN as u64 + header.sealed_len(),
+            reader,
+            Some(self.encryption.blob_sealer(header, aad_context)),
+            prefix,
+        )
+    }
 }
 
 fn opening_encryption_for_scope(
@@ -1480,14 +1609,16 @@ impl ExactBlobPlaintextReader {
                     locator.locator_hash(),
                 )
                 .await?;
-                let (encryption, header) =
-                    open_sealed_blob_prefix(&prefix, locator, key_fingerprint, scope, &master)?;
-                check_stored_blob_length(blob, KEY_TAG_LEN as u64 + header.sealed_len())?;
+                let opener = verified_sealed_blob_opener(
+                    &prefix,
+                    blob,
+                    key_fingerprint,
+                    scope,
+                    &master,
+                    &cloud_aad_context(store_id, &locator.semantic_key()),
+                )?;
                 ExactBlobOpening::Opaque {
-                    opener: encryption.blob_opener(
-                        header,
-                        &cloud_aad_context(store_id, &locator.semantic_key()),
-                    ),
+                    opener,
                     next_chunk: 0,
                 }
             }
@@ -1586,13 +1717,15 @@ pub(crate) fn split_sealed_blob(
 /// it and the layout it declares. The fingerprint must be the one the row's
 /// locator names — a blob sealed under any other key is not this row's blob,
 /// whatever it decrypts to.
-fn open_sealed_blob_prefix(
+fn verified_sealed_blob_opener(
     prefix: &[u8],
-    locator: &crate::blob::locator::BlobLocator,
+    blob: &crate::blob::locator::StoredBlobRef,
     key_fingerprint: &crate::encryption::KeyFingerprint,
     scope: &crate::blob::BlobScope,
     master: &EncryptionService,
-) -> Result<(EncryptionService, SealedBlobHeader), StorageError> {
+    aad_context: &[u8],
+) -> Result<crate::encryption::SealedBlobOpener, StorageError> {
+    let locator = blob.locator();
     let (fingerprint, header, _) = split_sealed_blob(prefix).map_err(|error| {
         StorageError::Decryption(format!("blob {}: {error}", locator.locator_hash()))
     })?;
@@ -1617,7 +1750,8 @@ fn open_sealed_blob_prefix(
             locator.plaintext_size()
         )));
     }
-    Ok((encryption, header))
+    check_stored_blob_length(blob, KEY_TAG_LEN as u64 + header.sealed_len())?;
+    Ok(encryption.blob_opener(header, aad_context))
 }
 
 /// Check a stored blob's length against what its own framing implies. The row
@@ -1746,16 +1880,212 @@ impl SyncStorage for CloudSyncStorage {
         self.self_uploader()
     }
 
-    fn cloud_home(&self) -> &dyn CloudHome {
-        self.cloud_home()
+    async fn probe_provider(&self) -> Result<(), StorageError> {
+        self.home.probe().await.map_err(Into::into)
     }
 
-    fn exact_slot_storage(&self) -> &dyn ExactSlotStorage {
-        self.exact_slot_storage()
+    async fn set_member_access(
+        &self,
+        state: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, StorageError> {
+        self.home.set_access(state).await.map_err(Into::into)
     }
 
-    fn exact_slot_probe_clients(&self) -> (&dyn ExactSlotStorage, &dyn ExactSlotStorage) {
-        self.exact_slot_probe_clients()
+    async fn read_blob_tombstone(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        self.home.read(key).await.map_err(Into::into)
+    }
+
+    async fn write_blob_tombstone(
+        &self,
+        key: &str,
+        stored_bytes: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.home
+            .write(
+                key,
+                BlobBody::from_bytes(stored_bytes),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn list_blob_tombstones(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        self.home.list(prefix).await.map_err(Into::into)
+    }
+
+    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, StorageError> {
+        self.home.exists(key).await.map_err(Into::into)
+    }
+
+    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), StorageError> {
+        self.home.delete(key).await.map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    async fn list_provider_objects_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.home.list(prefix).await.map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        self.home.read(key).await.map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
+        self.home.exists(key).await.map_err(Into::into)
+    }
+
+    async fn probe_exact_slots(
+        &self,
+        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
+        probe_id: crate::protocol::provider::ProviderProbeId,
+        binding: &ResolvedProviderBinding,
+    ) -> Result<
+        crate::protocol::provider::ExactSlotProbeReceipt,
+        crate::protocol::provider::ProviderProbeError,
+    > {
+        crate::protocol::provider::probe_exact_slots(
+            self.exact.as_ref(),
+            self.exact_probe_peer.as_ref(),
+            journal,
+            probe_id,
+            binding,
+        )
+        .await
+    }
+
+    async fn reserve_cross_principal_response_slot(
+        &self,
+        probe_id: crate::protocol::provider::ProviderProbeId,
+    ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError> {
+        let logical = crate::protocol::provider::cross_peer_logical_key(probe_id);
+        let slot = self
+            .exact
+            .allocate_slot(&logical)
+            .await
+            .map_err(StorageError::from)?;
+        if slot.logical_key() != logical {
+            return Err(
+                crate::protocol::provider::ProviderProbeError::InvalidReceipt(
+                    "cross-principal response slot changed its logical key".to_string(),
+                ),
+            );
+        }
+        Ok(slot)
+    }
+
+    async fn observe_exact_slot(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<Option<ExactObjectRef>, StorageError> {
+        self.exact.observe_at(slot).await.map_err(Into::into)
+    }
+
+    async fn delete_exact_slot_and_verify_absent(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<(), StorageError> {
+        self.exact
+            .delete_and_verify_absent(slot)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn prepare_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
+        probe_id: crate::protocol::provider::ProviderProbeId,
+        store: &crate::storage::StoreProviderBinding,
+        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
+        administrator_signer: &UserKeypair,
+    ) -> Result<
+        crate::protocol::provider::CrossPrincipalProbeChallenge,
+        crate::protocol::provider::ProviderProbeError,
+    > {
+        crate::protocol::provider::prepare_cross_principal_challenge(
+            self.exact.as_ref(),
+            publication_journal,
+            probe_id,
+            store,
+            context,
+            administrator_signer,
+        )
+        .await
+    }
+
+    async fn settle_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
+        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
+        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
+        store: &crate::storage::StoreProviderBinding,
+    ) -> Result<
+        crate::protocol::provider::CrossPrincipalProbeChallenge,
+        crate::protocol::provider::ProviderProbeError,
+    > {
+        crate::protocol::provider::settle_cross_principal_challenge(
+            self.exact.as_ref(),
+            publication_journal,
+            authorization,
+            challenge,
+            context,
+            store,
+        )
+        .await
+    }
+
+    async fn create_cross_principal_response(
+        &self,
+        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
+        context: &crate::protocol::provider::CrossPrincipalResponseContext,
+        store: &crate::storage::StoreProviderBinding,
+        administrator_signing_pubkey: &str,
+        peer_signer: &UserKeypair,
+    ) -> Result<
+        crate::protocol::provider::CrossPrincipalProbeResponse,
+        crate::protocol::provider::ProviderProbeError,
+    > {
+        crate::protocol::provider::create_cross_principal_response(
+            self.exact.as_ref(),
+            challenge,
+            context,
+            store,
+            administrator_signing_pubkey,
+            peer_signer,
+        )
+        .await
+    }
+
+    async fn complete_cross_principal_probe(
+        &self,
+        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
+        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
+        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
+        context: &crate::protocol::provider::CrossPrincipalResponseContext,
+        store: &crate::storage::StoreProviderBinding,
+        administrator_signer: &UserKeypair,
+        peer_signing_pubkey: &str,
+    ) -> Result<
+        crate::protocol::provider::CrossPrincipalProbeReceipt,
+        crate::protocol::provider::ProviderProbeError,
+    > {
+        crate::protocol::provider::complete_cross_principal_probe(
+            self.exact.as_ref(),
+            journal,
+            challenge,
+            response,
+            context,
+            store,
+            administrator_signer,
+            peer_signing_pubkey,
+        )
+        .await
     }
 
     fn store_blob_protection(&self) -> Result<crate::storage::BlobSpoolProtection, StorageError> {
@@ -2369,16 +2699,18 @@ impl SyncStorage for CloudSyncStorage {
             .read_range_at(&slot, 0, (KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN) as u64)
             .await
             .map_err(StorageError::from)?;
-        let (encryption, header) =
-            open_sealed_blob_prefix(&prefix, locator, key_fingerprint, scope, &master)?;
-        check_stored_blob_length(blob, KEY_TAG_LEN as u64 + header.sealed_len())?;
+        let opener = verified_sealed_blob_opener(
+            &prefix,
+            blob,
+            key_fingerprint,
+            scope,
+            &master,
+            &cloud_aad_context(&self.store_id, &locator.semantic_key()),
+        )?;
         Ok(BlobRangeReader {
             exact: self.exact.clone(),
             slot,
-            opener: encryption.blob_opener(
-                header,
-                &cloud_aad_context(&self.store_id, &locator.semantic_key()),
-            ),
+            opener,
             plaintext_size: locator.plaintext_size(),
             window: self.blob_chunking.window(),
         })
@@ -2561,13 +2893,13 @@ mod tests {
         )
         .expect("test cloud storage supports exact slots")
         .with_blob_chunking(chunking);
-        let (uploader, registration) = storage.blob_write_registration(store_id).await;
-        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let registration = storage.blob_write_registration(store_id).await;
+        let authority = BlobWriteAuthority::new(&registration);
         let audience_key = EncryptionService::from_key([9u8; 32]);
         let locator = BlobLocator::opaque(
             "audio",
             blob_id,
-            uploader.clone(),
+            registration.reference().clone(),
             RemoteAudience::Store,
             BlobScope::Master,
             audience_key.seal_key_fingerprint(),
@@ -2713,13 +3045,13 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = storage.blob_write_registration("browsable-range").await;
-        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let registration = storage.blob_write_registration("browsable-range").await;
+        let authority = BlobWriteAuthority::new(&registration);
         let plaintext = ramp(4096);
         let locator = BlobLocator::browsable(
             "audio",
             "readable-track",
-            uploader.clone(),
+            registration.reference().clone(),
             "Artist/Album/track.flac",
             plaintext.len() as u64,
             ObjectHash::digest(&plaintext),
@@ -3158,14 +3490,14 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = storage.blob_write_registration("circle-blob-spool").await;
-        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let registration = storage.blob_write_registration("circle-blob-spool").await;
+        let authority = BlobWriteAuthority::new(&registration);
         let circle_key = EncryptionService::from_key([9u8; 32]);
         let plaintext = b"circle audience blob";
         let locator = BlobLocator::opaque(
             "covers",
             "circle-cover",
-            uploader.clone(),
+            registration.reference().clone(),
             RemoteAudience::Circle(crate::protocol::circle::CircleId::from_bytes([8; 16])),
             BlobScope::Master,
             circle_key.seal_key_fingerprint(),
@@ -3192,23 +3524,15 @@ mod tests {
             .expect("seal Circle blob spool");
 
         let stored = tokio::fs::read(&spool).await.expect("read exact spool");
-        let (_, header) = open_sealed_blob_prefix(
-            &stored,
-            &locator,
-            &circle_key.seal_key_fingerprint(),
-            &BlobScope::Master,
-            &circle_key,
-        )
-        .expect("the spool names the supplied audience key");
+        let (fingerprint, header, sealed) =
+            split_sealed_blob(&stored).expect("parse sealed Circle blob");
+        assert_eq!(fingerprint, circle_key.seal_key_fingerprint());
         let opened = circle_key
             .blob_opener(
                 header,
                 &cloud_aad_context("circle-blob-spool", &locator.semantic_key()),
             )
-            .open_chunks(
-                0..header.chunk_count(),
-                &stored[KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN..],
-            )
+            .open_chunks(0..header.chunk_count(), sealed)
             .expect("open Circle blob with supplied key");
         assert_eq!(opened, plaintext);
     }
@@ -3225,16 +3549,16 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = storage
+        let registration = storage
             .blob_write_registration("blob-spool-key-mismatch")
             .await;
-        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let authority = BlobWriteAuthority::new(&registration);
         let declared_key = EncryptionService::from_key([9u8; 32]);
         let plaintext = b"audience blob";
         let locator = BlobLocator::opaque(
             "covers",
             "mismatched-cover",
-            uploader.clone(),
+            registration.reference().clone(),
             RemoteAudience::Store,
             BlobScope::Master,
             declared_key.seal_key_fingerprint(),
@@ -3278,16 +3602,16 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = storage
+        let registration = storage
             .blob_write_registration("verified-blob-download")
             .await;
-        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let authority = BlobWriteAuthority::new(&registration);
         let audience_key = EncryptionService::from_key([9u8; 32]);
         let plaintext: Vec<u8> = (0..150_000u32).map(|value| (value % 251) as u8).collect();
         let locator = BlobLocator::opaque(
             "audio",
             "verified-track",
-            uploader.clone(),
+            registration.reference().clone(),
             RemoteAudience::Store,
             BlobScope::Derived("album-a".to_string()),
             audience_key.seal_key_fingerprint(),
@@ -3356,16 +3680,16 @@ mod tests {
             identity,
         )
         .expect("test cloud storage supports exact slots");
-        let (uploader, registration) = storage
+        let registration = storage
             .blob_write_registration("corrupt-blob-download")
             .await;
-        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let authority = BlobWriteAuthority::new(&registration);
         let audience_key = EncryptionService::from_key([9u8; 32]);
         let plaintext = b"signed blob plaintext";
         let locator = BlobLocator::opaque(
             "covers",
             "corrupt-cover",
-            uploader.clone(),
+            registration.reference().clone(),
             RemoteAudience::Store,
             BlobScope::Master,
             audience_key.seal_key_fingerprint(),
@@ -3741,7 +4065,6 @@ mod tests {
                 &crate::sync::test_helpers::test_migrations(),
             )
             .expect("open pending-rotation database")
-            .0
         };
         let home = InMemoryCloudHome::new();
         let signer = UserKeypair::generate();

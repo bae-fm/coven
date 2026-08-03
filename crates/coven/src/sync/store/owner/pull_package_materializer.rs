@@ -74,13 +74,12 @@ impl<'storage> PullPackageMaterializer<'storage> {
             Ok(changes) => changes,
             Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
         };
-        let blob_decls = self.database.blob_decls();
         let mut eager = Vec::new();
         for change in &changes {
             if change.op == crate::changeset::ChangeOp::Delete {
                 continue;
             }
-            let blob = match blob_decls.ref_from_change(change) {
+            let blob = match self.database.blob_ref_from_change(change) {
                 Ok(blob) => blob,
                 Err(error) => {
                     return Ok(Err(HeldStorePositionReason::InvalidChangeset(
@@ -156,8 +155,9 @@ impl<'storage> PullPackageMaterializer<'storage> {
             }
             return Ok(Err(HeldStorePositionReason::BlobDownloadFailed));
         }
-        if let Err(error) =
-            crate::blob::local_cleanup::intents_from_changes(&blob_decls, &old_changes, &changes)
+        if let Err(error) = self
+            .database
+            .validate_local_blob_cleanup_changes(&old_changes, &changes)
         {
             return Ok(Err(HeldStorePositionReason::InvalidChangeset(
                 error.to_string(),

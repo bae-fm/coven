@@ -522,6 +522,7 @@ mod tests {
             &db,
             "wrapped-key-exact-objects",
             owner.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
         )
         .await
         .expect("create exact wrapped-key Store");
@@ -547,33 +548,23 @@ mod tests {
 
         assert_ne!(first.reference, second.reference);
         store
-            .storage
             .create_protocol_object(&first.object)
             .await
             .expect("create first exact wrap");
         store
-            .storage
             .create_protocol_object(&second.object)
             .await
             .expect("create second exact wrap");
         assert_eq!(
-            load_wrapped_store_key(
-                &*store.storage,
-                store.root.store_root_hash,
-                &first.reference,
-            )
-            .await
-            .expect("load first exact wrap"),
+            load_wrapped_store_key(&*store, store.root.store_root_hash, &first.reference,)
+                .await
+                .expect("load first exact wrap"),
             first.validate().expect("validate first prepared wrap"),
         );
         assert_eq!(
-            load_wrapped_store_key(
-                &*store.storage,
-                store.root.store_root_hash,
-                &second.reference,
-            )
-            .await
-            .expect("load second exact wrap"),
+            load_wrapped_store_key(&*store, store.root.store_root_hash, &second.reference,)
+                .await
+                .expect("load second exact wrap"),
             second.validate().expect("validate second prepared wrap"),
         );
     }
@@ -588,6 +579,7 @@ mod tests {
             &db,
             "wrapped-key-relocation",
             owner.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
         )
         .await
         .expect("create relocation Store");
@@ -609,7 +601,6 @@ mod tests {
             .await
             .expect("prepare exact wrap");
         store
-            .storage
             .create_protocol_object(&prepared.object)
             .await
             .expect("create exact wrap");
@@ -617,7 +608,7 @@ mod tests {
         relocated.recipient_pubkey = hex::encode(UserKeypair::generate().public_key());
 
         assert!(
-            load_wrapped_store_key(&*store.storage, store.root.store_root_hash, &relocated)
+            load_wrapped_store_key(&*store, store.root.store_root_hash, &relocated)
                 .await
                 .is_err()
         );

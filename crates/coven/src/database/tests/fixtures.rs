@@ -166,7 +166,6 @@ pub(super) fn open_outbox_database(device_id: &str) -> Database {
         &[],
     )
     .expect("open outbox database")
-    .0
 }
 
 pub(super) fn test_candidate_family() -> crate::protocol::store_commit::CandidateFamilyId {

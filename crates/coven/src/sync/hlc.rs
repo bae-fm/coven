@@ -237,36 +237,29 @@ impl Hlc {
     }
 }
 
-/// A cloneable handle that mints `_updated_at` register values from a shared
-/// [`Hlc`] — the register-stamping capability, sliced off the whole
-/// sync manager.
+/// The database-owned `_updated_at` stamping capability over its shared [`Hlc`].
 ///
-/// coven creates this handle during open and injects it into the write path
-/// before any sync manager exists. The manager,
-/// built later, borrows the same `Arc<Hlc>`: coven advances that clock past every
-/// pulled row, and because the stamper shares the instance, that advance reaches
-/// every `SqlContext::stamp` call, so a later local write never
-/// sorts behind a pulled row and loses last-writer-wins. Every clone shares one
-/// `Arc<Hlc>`, so coven's seeding and advance-on-pull are reflected in every
-/// stamp.
+/// The database creates it only while executing a host write. Pull advances the
+/// same `Arc<Hlc>`, so every later `SqlContext::stamp` observes that advance and
+/// cannot sort behind a pulled row.
 ///
 /// It exposes only [`UpdatedAtStamper::stamp`] — never `seed`/`advance_past`/
 /// `high_water`. Those drive the clock and are coven's alone; the host write
 /// path is a pure consumer of stamps and must not poke clock state.
 #[derive(Clone)]
-pub struct UpdatedAtStamper {
+pub(crate) struct UpdatedAtStamper {
     hlc: Arc<Hlc>,
 }
 
 impl UpdatedAtStamper {
-    pub fn new(hlc: Arc<Hlc>) -> Self {
+    pub(crate) fn new(hlc: Arc<Hlc>) -> Self {
         Self { hlc }
     }
 
     /// Mint the next `_updated_at` register value for a synced-row write. The
     /// returned string is an opaque HLC stamp; the host binds it into the write
     /// and must not parse or compare it as a wall-clock time.
-    pub fn stamp(&self) -> String {
+    pub(crate) fn stamp(&self) -> String {
         self.hlc.now().to_string()
     }
 }

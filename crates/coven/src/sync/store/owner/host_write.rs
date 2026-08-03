@@ -127,11 +127,10 @@ impl HostWriteBlobStaging {
                     fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
                 }
                 destination => {
-                    let (registration_ref, registration) = registration
+                    let registration = registration
                         .as_ref()
                         .expect("remote destination loads authority");
-                    let authority = BlobWriteAuthority::new(registration_ref, registration)
-                        .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+                    let authority = BlobWriteAuthority::new(registration);
                     let (audience, protection) =
                         self.destination_protection(transaction, destination, partitions, fact)?;
                     let locator = super::writer::blob_preparation::prepare_partition_blob_locator(
@@ -203,9 +202,10 @@ impl HostWriteBlobStaging {
                         format!("destination Circle {circle_id} has no exact control"),
                     )
                 })?;
-                let (encryption, _) = transaction
+                let encryption = transaction
                     .circle_publication_context(*circle_id, control.coordinate())
-                    .map_err(|error| move_materialization_error(fact, error))?;
+                    .map_err(|error| move_materialization_error(fact, error))?
+                    .into_encryption();
                 Ok((
                     RemoteAudience::Circle(*circle_id),
                     BlobSpoolProtection::Opaque(encryption),

@@ -46,10 +46,10 @@ use crate::database::{
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
 use crate::protocol::store_commit::{
-    CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
-    StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
-    VerifiedStoreDeviceOperations,
+    ActivatedStoreDeviceRegistration, CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
+    StoreDeviceProposalState, StoreDeviceRegistrationRef, StoreHistoryCut,
+    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::storage::ExactObjectRef;
 use crate::sync::{
@@ -636,10 +636,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         &self,
         root: &crate::protocol::store_commit::StoreRootRef,
         verified_commit: &VerifiedStoreBatchCommit,
-        registrations: &[(
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )],
+        registrations: &[ActivatedStoreDeviceRegistration],
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
         history_summary: &crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,

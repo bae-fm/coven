@@ -63,7 +63,7 @@ pub(crate) struct PreparedMergeMaterialization {
     pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
     pub(crate) membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
     pub(crate) membership_remote_objects: Vec<super::remote_object::RemoteObjectRecord>,
-    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub(crate) packages: Vec<PreparedMergeMaterializationPackage>,
     pub(crate) device_operations: VerifiedStoreDeviceOperations,
     pub(crate) circle_activations: VerifiedCircleActivations,

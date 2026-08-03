@@ -147,6 +147,30 @@ pub(crate) struct OpenedCirclePackage {
     pub(crate) blob_protection: crate::storage::BlobSpoolProtection,
 }
 
+struct VerifiedCircleKeyring {
+    keyring: EncryptionService,
+    key_fingerprint: KeyFingerprint,
+}
+
+impl VerifiedCircleKeyring {
+    fn into_keyring(self) -> EncryptionService {
+        self.keyring
+    }
+
+    fn package_encryption(
+        &self,
+        circle_id: CircleId,
+    ) -> Result<EncryptionService, CircleOperationError> {
+        self.keyring
+            .service_for_fingerprint(self.key_fingerprint.as_bytes())
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "select Circle package key for {circle_id}: {error}"
+                ))
+            })
+    }
+}
+
 impl CirclePackageAccess {
     #[cfg(test)]
     pub(crate) fn authorizes_writer(&self, author_pubkey: &str) -> bool {
@@ -157,8 +181,8 @@ impl CirclePackageAccess {
         self.encryption
     }
 
-    pub(crate) fn into_encryption_and_fingerprint(self) -> (EncryptionService, KeyFingerprint) {
-        (self.encryption, self.key_fingerprint)
+    pub(crate) fn key_fingerprint(&self) -> KeyFingerprint {
+        self.key_fingerprint
     }
 
     pub(crate) fn from_historical(
@@ -289,7 +313,7 @@ impl VerifiedCircleReference {
             &access.leaf.value.disposition,
             &active.roster,
         )
-        .map(|(keyring, _)| Some(keyring))
+        .map(|keyring| Some(keyring.into_keyring()))
     }
 
     pub(crate) fn package_access(
@@ -317,15 +341,9 @@ fn package_access_from(
     disposition: &CircleAccessDisposition,
     roster: &CircleMaterializedRoster,
 ) -> Result<CirclePackageAccess, CircleOperationError> {
-    let (keyring, key_fingerprint) =
-        verified_keyring_from(circle_id, control, disposition, roster)?;
-    let encryption = keyring
-        .service_for_fingerprint(key_fingerprint.as_bytes())
-        .map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "select Circle package key for {circle_id}: {error}"
-            ))
-        })?;
+    let verified = verified_keyring_from(circle_id, control, disposition, roster)?;
+    let encryption = verified.package_encryption(circle_id)?;
+    let key_fingerprint = verified.key_fingerprint;
     Ok(CirclePackageAccess {
         circle_id,
         encryption,
@@ -339,7 +357,7 @@ fn verified_keyring_from(
     control: &CircleControl,
     disposition: &CircleAccessDisposition,
     roster: &CircleMaterializedRoster,
-) -> Result<(EncryptionService, KeyFingerprint), CircleOperationError> {
+) -> Result<VerifiedCircleKeyring, CircleOperationError> {
     if control.circle_id != circle_id
         || !roster.verify()
         || roster.state_hash() != control.roster_state_ref().state_hash
@@ -376,7 +394,10 @@ fn verified_keyring_from(
                 "select Circle package key for {circle_id}: {error}"
             ))
         })?;
-    Ok((keyring, *key_fingerprint))
+    Ok(VerifiedCircleKeyring {
+        keyring,
+        key_fingerprint: *key_fingerprint,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

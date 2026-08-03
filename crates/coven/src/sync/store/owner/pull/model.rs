@@ -247,7 +247,7 @@ impl From<DbError> for StorePullError {
 pub(crate) struct Candidate {
     pub(crate) verified: VerifiedStoreBatchCommit,
     pub(crate) package: Option<Vec<u8>>,
-    pub(crate) registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
 }
 
 impl Candidate {

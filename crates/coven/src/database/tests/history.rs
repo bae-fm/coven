@@ -8,6 +8,7 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
         &db,
         "retained-replay-genesis",
         crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Store");

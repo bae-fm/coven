@@ -66,13 +66,6 @@ impl MembershipCausalFloor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RetainedVerifiedRegistration {
-    pub reference: StoreDeviceRegistrationRef,
-    pub value: StoreDeviceRegistration,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct RetainedVerifiedActivatedAck {
     #[serde(with = "ordered_map_entries")]
     pub chain: BTreeMap<u64, (StoreAckRef, StoreAck)>,
@@ -97,7 +90,7 @@ impl RetainedVerifiedActivatedAck {
     pub(crate) fn validate_chain(
         &self,
         root: &StoreRootRef,
-        registration: &RetainedVerifiedRegistration,
+        registration: &ReferencedStoreDeviceRegistration,
     ) -> Result<(), StoreProtocolError> {
         if self.chain.is_empty() {
             return Err(StoreProtocolError::DeviceStateMismatch);
@@ -108,8 +101,8 @@ impl RetainedVerifiedActivatedAck {
             if *sequence != expected_sequence
                 || reference.sequence != expected_sequence
                 || value.sequence != expected_sequence
-                || reference.registration != registration.reference
-                || value.registration != registration.reference
+                || reference.registration != *registration.reference()
+                || value.registration != *registration.reference()
                 || value.successor.predecessor.as_ref()
                     != predecessor.map(|reference| &reference.object)
             {
@@ -119,7 +112,7 @@ impl RetainedVerifiedActivatedAck {
                 .object
                 .verify(&value.to_bytes())
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-            StoreAck::parse_at(&value.to_bytes(), root, reference, &registration.value)?;
+            StoreAck::parse_at(&value.to_bytes(), root, reference, registration.value())?;
             predecessor = Some(reference);
         }
         Ok(())
@@ -157,7 +150,7 @@ pub(crate) struct RetainedVerifiedMergeHistorySummary {
     pub post_state: StoreDeviceStateRef,
     pub membership_floor: MembershipCausalFloor,
     #[serde(with = "ordered_map_entries")]
-    pub registrations: BTreeMap<StoreDeviceId, RetainedVerifiedRegistration>,
+    pub registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
     #[serde(with = "ordered_map_entries")]
     pub acknowledgements: BTreeMap<StoreDeviceId, RetainedVerifiedActivatedAck>,
     #[serde(with = "ordered_map_entries")]
@@ -214,22 +207,22 @@ impl RetainedVerifiedMergeHistorySummary {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         for (device_id, registration) in &self.registrations {
-            if device_id != &registration.reference.device_id
-                || registration.value.store_root.store_root_hash != self.store_root_hash
+            if device_id != &registration.reference().device_id
+                || registration.value().store_root.store_root_hash != self.store_root_hash
             {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
             registration
-                .reference
-                .verify_registration(&registration.value)?;
+                .reference()
+                .verify_registration(registration.value())?;
             registration
-                .reference
+                .reference()
                 .object
-                .verify(&registration.value.to_bytes())
+                .verify(&registration.value().to_bytes())
                 .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
             StoreDeviceRegistration::parse_at(
-                &registration.value.to_bytes(),
-                &registration.value.store_root,
+                &registration.value().to_bytes(),
+                &registration.value().store_root,
                 *device_id,
             )?;
         }
@@ -238,7 +231,7 @@ impl RetainedVerifiedMergeHistorySummary {
                 .registrations
                 .get(device_id)
                 .ok_or(StoreProtocolError::DeviceStateMismatch)?;
-            acknowledgement.validate_chain(&registration.value.store_root, registration)?;
+            acknowledgement.validate_chain(&registration.value().store_root, registration)?;
             let (acknowledgement_ref, acknowledgement_value) = acknowledgement
                 .latest()
                 .ok_or(StoreProtocolError::DeviceStateMismatch)?;
@@ -249,7 +242,7 @@ impl RetainedVerifiedMergeHistorySummary {
                 || acknowledgement.activating_commit_value.acknowledgement()
                     != Some(acknowledgement_ref)
                 || acknowledgement.activating_commit_value.author_registration
-                    != registration.reference
+                    != *registration.reference()
                 || self
                     .causal_cut
                     .get(&acknowledgement.activating_commit.coord)
@@ -298,7 +291,7 @@ impl RetainedVerifiedMergeHistorySummary {
                 .get(&proof.head_value.body.author_registration.device_id)
                 .ok_or(StoreProtocolError::DeviceStateMismatch)?;
             if !transition.matches_head(&proof.head_value, &proof.head)
-                || !proof.head_value.verify(&head_author.value)
+                || !proof.head_value.verify(head_author.value())
                 || !matches!(
                     &proof.head_value.activation,
                     crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit }
@@ -396,7 +389,7 @@ impl RetainedVerifiedMergeHistorySummary {
             .get(&announcement.value.author_registration.device_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
         if announcement.value.store_root_hash != self.store_root_hash
-            || announcement.value.author_registration != registration.reference
+            || announcement.value.author_registration != *registration.reference()
             || announcement.reference.head_hash != announcement.value.head_hash()
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
@@ -409,7 +402,7 @@ impl RetainedVerifiedMergeHistorySummary {
         StoreDeviceHead::parse_at(
             &announcement.value.to_bytes(),
             self.store_root_hash,
-            &registration.value,
+            registration.value(),
             &announcement.value.commit,
         )?;
         Ok(())
@@ -445,18 +438,18 @@ impl RetainedVerifiedMergeHistorySummary {
             .registrations
             .get(&commit.author_registration.device_id)
             .ok_or(StoreProtocolError::DeviceStateMismatch)?;
-        if registration.reference != commit.author_registration
-            || registration.value.store_root.store_root_hash != self.store_root_hash
+        if *registration.reference() != commit.author_registration
+            || registration.value().store_root.store_root_hash != self.store_root_hash
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         registration
-            .reference
-            .verify_registration(&registration.value)?;
+            .reference()
+            .verify_registration(registration.value())?;
         StoreDeviceHead::parse_at(
             &head.to_bytes(),
             self.store_root_hash,
-            &registration.value,
+            registration.value(),
             commit_ref,
         )?;
         let stream_id = commit_ref.coord.stream_id;
@@ -511,13 +504,13 @@ impl RetainedVerifiedMergeHistorySummary {
             || commit.device_registrations().iter().any(|activation| {
                 self.registrations
                     .get(&activation.registration.device_id)
-                    .is_none_or(|registration| registration.reference != activation.registration)
+                    .is_none_or(|registration| registration.reference() != &activation.registration)
             })
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         let predecessor = self.announcement_frontier.get(&stream_id);
-        let first_slot = match &registration.value.store_commits {
+        let first_slot = match &registration.value().store_commits {
             DeviceStreamAnchor::StoreAnnouncements { first_slot } => first_slot,
             _ => return Err(StoreProtocolError::DeviceStateMismatch),
         };

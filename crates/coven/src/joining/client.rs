@@ -569,14 +569,12 @@ impl DeviceJoinClient {
         std::fs::create_dir_all(&*store_dir)?;
         on_status("Downloading store snapshot...");
         let db_path = store_dir.db_path();
-        let (root, history_verifier) =
-            crate::sync::store::HistoryConstructionAuthority::for_snapshot()
-                .open_pinned(join.storage.as_ref(), &offer.store_root)
-                .await
-                .map_err(SnapshotError::from)?;
+        let history_verifier = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
+            .open_pinned(join.storage.as_ref(), &offer.store_root)
+            .await
+            .map_err(SnapshotError::from)?;
         let snapshot = PreparedSnapshotBootstrap::prepare(
             &join.storage,
-            root,
             history_verifier,
             &self.code.membership_floor,
             supported_version(&self.migrations),
@@ -655,7 +653,7 @@ impl DeviceJoinClient {
             (None, None) => return Err(crate::DeviceJoinError::JournalConflict.into()),
         };
         let db_path = store_dir.db_path();
-        let (db, _stamper) = Database::open(
+        let db = Database::open(
             &db_path,
             self.synced_tables.clone(),
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
@@ -752,14 +750,13 @@ impl DeviceJoinClient {
         root: &crate::protocol::store_commit::StoreRootRef,
         attempt_id: crate::DeviceJoinAttemptId,
     ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'storage>, BootstrapError> {
-        let (root, history_verifier) =
+        let history_verifier =
             crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
                 .open_pinned(storage.as_ref(), root)
                 .await?;
         Ok(crate::sync::store::PendingDeviceJoinObservation::new(
             pending,
             storage,
-            root,
             history_verifier,
             attempt_id,
         ))

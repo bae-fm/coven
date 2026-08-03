@@ -71,12 +71,12 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/reclaim/tests.rs",
+        "crates/coven/src/sync/store/owner/writer/operation/reclaim/tests.rs",
         "ReclaimJourneyFixture",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operations/tests/merge_fixture.rs",
+        "crates/coven/src/sync/store/owner/writer/operation/operations/tests/merge_fixture.rs",
         "PreparedWriteFixture",
         "prepare",
     ),
@@ -156,7 +156,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "create",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/snapshot/image.rs",
+        "crates/coven/src/sync/store/owner/writer/operation/snapshot/image.rs",
         "PublishedScopedSnapshot",
         "publish",
     ),

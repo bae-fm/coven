@@ -423,12 +423,6 @@ impl SyncLoopHandle {
         }
     }
 
-    // -- Accessors for membership operations --
-
-    pub(crate) fn store(&self) -> Arc<crate::sync::store::Store> {
-        self.inner.components.store()
-    }
-
     #[cfg(test)]
     pub(crate) fn uses_storage_for_test(
         &self,
@@ -444,9 +438,239 @@ impl SyncLoopHandle {
         self.inner.components.discard_blocked_write(write_id).await
     }
 
+    pub(crate) fn host_write_blob_staging(
+        &self,
+        runtime: tokio::runtime::Handle,
+        store_dir: crate::store_dir::StoreDir,
+    ) -> crate::sync::store::HostWriteBlobStaging {
+        self.inner
+            .components
+            .host_write_blob_staging(runtime, store_dir)
+    }
+
+    pub(crate) async fn propose_device_exclusion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
+        self.inner
+            .components
+            .propose_device_exclusion(device_id)
+            .await
+    }
+
+    pub(crate) async fn cancel_device_exclusion(
+        &self,
+        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), String> {
+        self.inner
+            .components
+            .cancel_device_exclusion(proposal)
+            .await
+    }
+
+    pub(crate) async fn finalize_device_exclusion(
+        &self,
+        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), String> {
+        self.inner
+            .components
+            .finalize_device_exclusion(proposal)
+            .await
+    }
+
+    pub(crate) async fn begin_owner_promotion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, String> {
+        self.inner.components.begin_owner_promotion(device_id).await
+    }
+
+    pub(crate) async fn accept_owner_promotion(
+        &self,
+        request: crate::protocol::store_commit::OwnerPromotionRequest,
+    ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, String> {
+        self.inner.components.accept_owner_promotion(request).await
+    }
+
+    pub(crate) async fn finalize_owner_promotion(
+        &self,
+        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+    ) -> Result<(), String> {
+        self.inner
+            .components
+            .finalize_owner_promotion(acceptance)
+            .await
+    }
+
+    pub(crate) async fn begin_device_join_bundle(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOfferBundle, crate::sync::store::DeviceJoinTransportError> {
+        self.inner
+            .components
+            .begin_device_join_bundle(member_pubkey)
+            .await
+    }
+
+    pub(crate) async fn drive_device_join(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        policy: crate::DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinDriveOutcome, crate::sync::store::DeviceJoinTransportError> {
+        self.inner
+            .components
+            .drive_device_join(bundle, policy, access_administrator, timing)
+            .await
+    }
+
+    pub(crate) async fn cancel_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::sync::store::DeviceJoinTransportError>
+    {
+        self.inner
+            .components
+            .cancel_device_join_transport(bundle, timing)
+            .await
+    }
+
+    pub(crate) async fn abandon_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+    ) -> Result<crate::DeviceJoinAbandonment, crate::sync::store::DeviceJoinTransportError> {
+        self.inner
+            .components
+            .abandon_device_join_transport(bundle)
+            .await
+    }
+
+    pub(crate) async fn begin_device_join(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOffer, crate::DeviceJoinError> {
+        self.inner.components.begin_device_join(member_pubkey).await
+    }
+
+    pub(crate) async fn abandon_device_join(
+        &self,
+        offer: crate::DeviceJoinOffer,
+    ) -> Result<crate::DeviceJoinAbandonment, crate::DeviceJoinError> {
+        self.inner.components.abandon_device_join(offer).await
+    }
+
+    pub(crate) async fn authorize_device_provider_access(
+        &self,
+        request: crate::DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+    ) -> Result<crate::DeviceProviderAdmissionApproval, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .authorize_device_provider_access(request, access_administrator)
+            .await
+    }
+
+    pub(crate) async fn accept_device_registration(
+        &self,
+        request: crate::DeviceRegistrationRequest,
+    ) -> Result<crate::ProvisionalDeviceBootstrap, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .accept_device_registration(request)
+            .await
+    }
+
+    pub(crate) async fn publish_device_provider_challenge(
+        &self,
+        bootstrap: crate::ProvisionalDeviceBootstrap,
+    ) -> Result<crate::ProviderReadyDeviceBootstrap, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .publish_device_provider_challenge(bootstrap)
+            .await
+    }
+
+    pub(crate) async fn complete_device_provider_admission(
+        &self,
+        readiness: crate::DeviceJoinReadiness,
+    ) -> Result<crate::DeviceProviderAdmissionCompletion, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .complete_device_provider_admission(readiness)
+            .await
+    }
+
+    pub(crate) async fn finalize_device_join(
+        &self,
+        completion: crate::DeviceProviderAdmissionCompletion,
+    ) -> Result<crate::DeviceJoinActivation, crate::DeviceJoinError> {
+        self.inner.components.finalize_device_join(completion).await
+    }
+
+    pub(crate) async fn cancel_device_join(
+        &self,
+        attempt: crate::DeviceJoinAttemptRef,
+    ) -> Result<crate::DeviceJoinCancellation, crate::DeviceJoinError> {
+        self.inner.components.cancel_device_join(attempt).await
+    }
+
+    pub(crate) async fn close_device_provider_admission(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+    ) -> Result<crate::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .close_device_provider_admission(cancellation)
+            .await
+    }
+
+    pub(crate) async fn revoke_device_provider_admission_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .revoke_device_provider_admission_writes(cancellation, executor)
+            .await
+    }
+
+    pub(crate) async fn revoke_joining_device_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::JoinerJoinTerminal, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .revoke_joining_device_writes(cancellation, executor)
+            .await
+    }
+
+    pub(crate) async fn activate_device_join_cleanup(
+        &self,
+        receipt: crate::DeviceJoinCleanupReceipt,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .activate_device_join_cleanup(receipt)
+            .await
+    }
+
+    pub(crate) async fn complete_owner_device_join_cleanup(
+        &self,
+        activation: crate::DeviceJoinCleanupActivation,
+    ) -> Result<crate::DeviceJoinCleanupActivation, crate::DeviceJoinError> {
+        self.inner
+            .components
+            .complete_owner_device_join_cleanup(activation)
+            .await
+    }
+
     #[cfg(test)]
-    pub(crate) fn store_dir(&self) -> &StoreDir {
-        &self.inner.config.store_dir
+    pub(crate) fn uses_store_dir_for_test(&self, expected: &StoreDir) -> bool {
+        &self.inner.config.store_dir == expected
     }
 
     pub(crate) fn config(&self) -> &Config {
@@ -461,8 +685,36 @@ impl SyncLoopHandle {
         self.inner.components.self_uploader()
     }
 
-    pub(crate) fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
-        self.inner.components.current_encryption()
+    pub(crate) fn is_encrypted(&self) -> bool {
+        self.inner.components.current_encryption().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
+        self.inner
+            .components
+            .current_encryption()
+            .map(|encryption| encryption.current_generation())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
+        let encryption = self
+            .inner
+            .components
+            .current_encryption()
+            .ok_or_else(|| "session is not encrypted".to_string())?;
+        let (fingerprint, header, chunks) =
+            crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
+        let plaintext = encryption
+            .blob_opener(header, aad_context)
+            .open_chunks(0..header.chunk_count(), chunks)
+            .map_err(|error| error.to_string())?;
+        Ok((fingerprint, plaintext))
     }
 
     pub(crate) async fn invite_member(
@@ -884,8 +1136,7 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
             &[],
         )
-        .expect("open status test database")
-        .0;
+        .expect("open status test database");
         crate::database::StoreDatabase::new(&database)
     }
 

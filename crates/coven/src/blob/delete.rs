@@ -46,8 +46,7 @@ use crate::database::StoredBlobReferenceState;
 use crate::database::{OutboxEntry, OutboxOperation};
 use crate::keys::{self, UserKeypair};
 use crate::protocol::membership::MembershipChain;
-use crate::storage::cloud::{no_progress, CloudHome};
-use crate::storage::{CloudCipherAccess, PendingRotation};
+use crate::storage::{CloudCipherAccess, CloudRotationAccess};
 use crate::storage::{StorageError, SyncStorage};
 
 /// The default convergence window a host gets if it configures none: how long a
@@ -117,9 +116,9 @@ enum ExistingTombstone {
 /// and retry recording.
 pub(crate) struct TombstoneDrain<'a> {
     db: &'a crate::database::StoreDatabase,
-    cloud_home: &'a dyn CloudHome,
+    storage: &'a dyn SyncStorage,
     cipher: &'a dyn CloudCipherAccess,
-    pending_rotation: &'a PendingRotation,
+    pending_rotation: &'a dyn CloudRotationAccess,
     store_id: &'a str,
     keypair: &'a UserKeypair,
     clock: &'a dyn crate::clock::Clock,
@@ -221,11 +220,9 @@ impl<'a> TombstoneDrain<'a> {
         key: &str,
         expected_stored: &StoredBlobRef,
     ) -> Result<ExistingTombstone, String> {
-        let stored = match self.cloud_home.read(key).await {
+        let stored = match self.storage.read_blob_tombstone(key).await {
             Ok(stored) => stored,
-            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) => {
-                return Ok(ExistingTombstone::Absent)
-            }
+            Err(StorageError::NotFound(_)) => return Ok(ExistingTombstone::Absent),
             Err(e) => return Err(format!("tombstone read failed: {e}")),
         };
         let aad_context = crate::storage::cloud_aad_context(self.store_id, key);
@@ -271,12 +268,8 @@ impl<'a> TombstoneDrain<'a> {
             .check(&cipher)
             .map_err(|e| e.to_string())?;
         let sealed = cipher.seal(bytes, &aad_context);
-        self.cloud_home
-            .write(
-                key,
-                crate::storage::cloud::BlobBody::from_bytes(sealed),
-                &no_progress(),
-            )
+        self.storage
+            .write_blob_tombstone(key, sealed)
             .await
             .map_err(|e| format!("tombstone write failed: {e}"))
     }
@@ -304,16 +297,16 @@ impl<'a> TombstoneDrain<'a> {
     /// Bind every dependency used by one deletion-drain pass.
     pub(crate) fn new(
         db: &'a crate::database::StoreDatabase,
-        cloud_home: &'a dyn CloudHome,
+        storage: &'a dyn SyncStorage,
         cipher: &'a dyn CloudCipherAccess,
-        pending_rotation: &'a PendingRotation,
+        pending_rotation: &'a dyn CloudRotationAccess,
         store_id: &'a str,
         keypair: &'a UserKeypair,
         clock: &'a dyn crate::clock::Clock,
     ) -> Self {
         TombstoneDrain {
             db,
-            cloud_home,
+            storage,
             cipher,
             pending_rotation,
             store_id,
@@ -460,15 +453,11 @@ impl<'a> TombstoneDrain<'a> {
 /// fail the pass; invalid or unauthorized bucket objects remain non-actionable.
 pub(crate) struct TombstoneCollection<'a> {
     db: &'a crate::database::StoreDatabase,
-    cloud_home: &'a dyn CloudHome,
     storage: &'a dyn SyncStorage,
     cipher: &'a dyn CloudCipherAccess,
     store_id: &'a str,
     self_pubkey: &'a str,
-    activated_uploaders: &'a std::collections::BTreeMap<
-        crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        crate::protocol::store_commit::StoreDeviceRegistration,
-    >,
+    activated_uploaders: &'a [crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
     membership_chain: &'a MembershipChain,
     clock: &'a dyn crate::clock::Clock,
     grace: chrono::Duration,
@@ -477,22 +466,17 @@ pub(crate) struct TombstoneCollection<'a> {
 impl<'a> TombstoneCollection<'a> {
     pub(crate) fn new(
         db: &'a crate::database::StoreDatabase,
-        cloud_home: &'a dyn CloudHome,
         storage: &'a dyn SyncStorage,
         cipher: &'a dyn CloudCipherAccess,
         store_id: &'a str,
         self_pubkey: &'a str,
-        activated_uploaders: &'a std::collections::BTreeMap<
-            crate::protocol::store_commit::StoreDeviceRegistrationRef,
-            crate::protocol::store_commit::StoreDeviceRegistration,
-        >,
+        activated_uploaders: &'a [crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
         membership_chain: &'a MembershipChain,
         clock: &'a dyn crate::clock::Clock,
         grace: chrono::Duration,
     ) -> Self {
         Self {
             db,
-            cloud_home,
             storage,
             cipher,
             store_id,
@@ -506,7 +490,6 @@ impl<'a> TombstoneCollection<'a> {
 
     pub(crate) async fn collect(&self) -> Result<usize, String> {
         let db = self.db;
-        let cloud_home = self.cloud_home;
         let storage = self.storage;
         let cipher = self.cipher;
         let store_id = self.store_id;
@@ -516,8 +499,8 @@ impl<'a> TombstoneCollection<'a> {
         let clock = self.clock;
         let grace = self.grace;
         let suffix = cipher.snapshot().suffix();
-        let keys = cloud_home
-            .list(TOMBSTONE_PREFIX)
+        let keys = storage
+            .list_blob_tombstones(TOMBSTONE_PREFIX)
             .await
             .map_err(|e| format!("Failed to list tombstones: {e}"))?;
 
@@ -544,7 +527,7 @@ impl<'a> TombstoneCollection<'a> {
                 }
             };
 
-            let stored = match cloud_home.read(&key).await {
+            let stored = match storage.read_blob_tombstone(&key).await {
                 Ok(s) => s,
                 Err(e) => return Err(format!("Failed to read tombstone {key}: {e}")),
             };
@@ -641,8 +624,8 @@ impl<'a> TombstoneCollection<'a> {
                 .map_err(|e| format!("Failed to check live blob references: {e}"))?;
             match row_reference {
                 StoredBlobReferenceState::LiveRemote => {
-                    cloud_home
-                        .delete(&key)
+                    storage
+                        .delete_blob_tombstone(&key)
                         .await
                         .map_err(|e| format!("Failed to cancel stale tombstone {key}: {e}"))?;
                     debug!(
@@ -662,17 +645,20 @@ impl<'a> TombstoneCollection<'a> {
             // The exact locator names the activated device registration that uploaded
             // this object. Its author, or a current owner, may reclaim it.
             let uploader = activated_uploaders
-                .get(tombstone.stored.locator().uploader())
+                .iter()
+                .find(|registration| {
+                    registration.reference() == tombstone.stored.locator().uploader()
+                })
                 .ok_or_else(|| {
                     format!(
                         "tombstone {key} names an unactivated blob uploader {}",
                         tombstone.stored.locator().uploader().device_id
                     )
                 })?;
-            if uploader.author_pubkey != self_pubkey && !is_owner {
+            if uploader.value().author_pubkey != self_pubkey && !is_owner {
                 debug!(
                     tombstone = %key,
-                    uploader = %uploader.author_pubkey,
+                    uploader = %uploader.value().author_pubkey,
                     "skipping reclaim of an object uploaded by another member",
                 );
                 continue;
@@ -680,7 +666,7 @@ impl<'a> TombstoneCollection<'a> {
 
             // Re-check the tombstone still exists before reclaiming. Another GC worker
             // may have completed this exact deletion after our listing.
-            match cloud_home.exists(&key).await {
+            match storage.blob_tombstone_exists(&key).await {
                 Ok(true) => {}
                 Ok(false) => {
                     debug!("tombstone {key} disappeared before reclaim; skipping");
@@ -731,8 +717,8 @@ impl<'a> TombstoneCollection<'a> {
 
             // The blob is gone (deleted now or already absent); removing the durable
             // tombstone completes this idempotent reclaim operation.
-            cloud_home
-                .delete(&key)
+            storage
+                .delete_blob_tombstone(&key)
                 .await
                 .map_err(|e| format!("Failed to delete tombstone {key} after reclaim: {e}"))?;
         }

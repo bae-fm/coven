@@ -7,7 +7,6 @@ use crate::protocol::store_commit::{
 pub(crate) struct ReclaimHistory<'operation, 'storage> {
     database: StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
-    root: &'operation crate::protocol::store_commit::StoreRootRef,
     history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
 }
 
@@ -32,15 +31,17 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
-        root: &'operation crate::protocol::store_commit::StoreRootRef,
         history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
             storage,
-            root,
             history,
         }
+    }
+
+    fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+        self.history.verified_root().reference()
     }
 
     pub(crate) fn circle_acknowledgements(
@@ -49,7 +50,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         super::super::circles::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
             self.storage,
-            self.root,
+            self.root(),
         )
     }
 
@@ -59,7 +60,6 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         super::super::circles::snapshots::CircleSnapshotReader::new(
             &self.database,
             self.storage,
-            self.root,
             self.history,
         )
     }
@@ -164,11 +164,11 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         circle_id: crate::protocol::circle::CircleId,
         current_control: &crate::protocol::circle::CircleControlCoord,
-        registrations: &[(StoreDeviceRegistrationRef, StoreDeviceRegistration)],
+        registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<Vec<CircleSnapshotStream>, crate::sync::store::StoreReclaimError> {
         let encryption = self
             .database
-            .circle_package_access(self.root.clone(), circle_id, current_control.clone())
+            .circle_package_access(self.root().clone(), circle_id, current_control.clone())
             .await?
             .ok_or_else(|| {
                 crate::sync::store::StoreReclaimError::Authorization(format!(
@@ -177,7 +177,9 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             })?
             .into_encryption();
         let mut streams = Vec::new();
-        for (registration_ref, registration) in registrations {
+        for registration in registrations {
+            let registration_ref = registration.reference();
+            let registration = registration.value();
             // A device's stream can span epochs. If this reader cannot resolve one
             // generation's key, that stream cannot establish current coverage.
             let generations = match self

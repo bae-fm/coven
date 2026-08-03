@@ -14,11 +14,12 @@ use crate::database::{DbError, StoreDatabase};
 use crate::encryption::EncryptionService;
 use crate::keys::KeyError;
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
+#[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
-use crate::store_security::StoreSecurity;
-use crate::sync::cycle::{InitSyncError, PreparedSyncComponents, SyncComponents};
+use crate::store_security::{EstablishedStoreIdentity, StoreSecurity};
+use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 use crate::sync::BlobCacheError;
@@ -273,19 +274,16 @@ impl StoreSync {
         let cipher = self
             .security
             .resolve_cloud_cipher(config.cloud_home.storage)?;
-        let cloud_home = self
-            .security
-            .create_cloud_home(&config, self.clock.clone(), cloudkit_ops)
-            .await?;
-        let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
         let storage = Arc::new(
             self.security
-                .create_sync_storage_with_home(
+                .create_sync_storage(
                     &config,
-                    cloud_home.clone(),
                     Some(cipher),
+                    self.clock.clone(),
+                    cloudkit_ops,
                     self.blob_chunking,
                 )
+                .await
                 .map_err(|error| match error {
                     crate::storage::cloud::setup::StorageSetupError::Key(error) => {
                         SyncError::Key(error)
@@ -315,19 +313,17 @@ impl StoreSync {
             },
             None => crate::sync::cycle::StoreInitialization::CreateStore,
         };
-        PreparedSyncComponents::prepare(
-            self.database.clone(),
-            self.local_blob_access.clone(),
-            storage,
-            self.security.require_identity()?,
-            initialization,
-            routing_encryption,
-        )
-        .await
-        .map_err(SyncError::from)?
-        .initialize()
-        .await
-        .map_err(SyncError::from)
+        self.security
+            .established_identity()?
+            .initialize_sync_components(
+                self.database.clone(),
+                self.local_blob_access.clone(),
+                storage,
+                initialization,
+                routing_encryption,
+            )
+            .await
+            .map_err(SyncError::from)
     }
 
     /// Assemble the connected sync over `storage`. The loop thread is a separate
@@ -539,9 +535,8 @@ impl StoreSync {
     pub(crate) fn host_write_blob_staging(
         &self,
     ) -> Option<crate::sync::store::HostWriteBlobStaging> {
-        let store = self.cloud_sync()?.store();
         Some(
-            store
+            self.cloud_sync()?
                 .host_write_blob_staging(tokio::runtime::Handle::current(), self.store_dir.clone()),
         )
     }
@@ -551,11 +546,13 @@ impl StoreSync {
         &self,
         store_id: &str,
         signer: crate::keys::UserKeypair,
-    ) -> Result<crate::sync::test_helpers::TestStore, String> {
+        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+    ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
         crate::sync::test_helpers::TestStore::create_with_database(
             self.database.clone(),
             store_id,
             signer,
+            home,
         )
         .await
     }
@@ -591,7 +588,6 @@ impl StoreSync {
             })?;
         let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
         let mut authorization = device
-            .store
             .authorize_writer()
             .await
             .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
@@ -760,7 +756,7 @@ impl StoreSync {
 
     pub(crate) async fn store_for_command(
         &self,
-        identity: &crate::keys::UserKeypair,
+        identity: &EstablishedStoreIdentity,
     ) -> Result<Store, SyncError> {
         let config = self.command_config();
         let storage = match self.storage() {
@@ -780,7 +776,8 @@ impl StoreSync {
                 Arc::new(storage)
             }
         };
-        Store::load(self.database.clone(), storage, identity.clone())
+        identity
+            .load_store(self.database.clone(), storage)
             .await
             .map_err(SyncError::from)
     }
@@ -796,10 +793,6 @@ impl StoreSync {
     #[cfg(test)]
     pub(crate) fn has_remote_storage_for_test(&self) -> bool {
         self.storage().is_some()
-    }
-
-    pub(crate) fn active_store(&self) -> Result<Arc<Store>, SyncError> {
-        Ok(self.driven_sync().ok_or(SyncError::LoopNotRunning)?.store())
     }
 
     pub(crate) fn active_membership(&self) -> Result<ActiveMembershipSync, SyncError> {
@@ -818,6 +811,200 @@ impl StoreSync {
         }
         Ok(ActiveCircleSync { loop_handle: sync })
     }
+
+    pub(crate) async fn begin_device_join_bundle(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOfferBundle, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .begin_device_join_bundle(member_pubkey)
+            .await?)
+    }
+
+    pub(crate) async fn drive_device_join(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        policy: crate::DeviceJoinApprovalPolicy<'_>,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .drive_device_join(bundle, policy, access_administrator, timing)
+            .await?)
+    }
+
+    pub(crate) async fn cancel_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .cancel_device_join_transport(bundle, timing)
+            .await?)
+    }
+
+    pub(crate) async fn abandon_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .abandon_device_join_transport(bundle)
+            .await?)
+    }
+
+    pub(crate) async fn begin_device_join(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<crate::DeviceJoinOffer, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .begin_device_join(member_pubkey)
+            .await?)
+    }
+
+    pub(crate) async fn abandon_device_join(
+        &self,
+        offer: crate::DeviceJoinOffer,
+    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .abandon_device_join(offer)
+            .await?)
+    }
+
+    pub(crate) async fn authorize_device_provider_access(
+        &self,
+        request: crate::DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+    ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .authorize_device_provider_access(request, access_administrator)
+            .await?)
+    }
+
+    pub(crate) async fn accept_device_registration(
+        &self,
+        request: crate::DeviceRegistrationRequest,
+    ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .accept_device_registration(request)
+            .await?)
+    }
+
+    pub(crate) async fn publish_device_provider_challenge(
+        &self,
+        bootstrap: crate::ProvisionalDeviceBootstrap,
+    ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .publish_device_provider_challenge(bootstrap)
+            .await?)
+    }
+
+    pub(crate) async fn complete_device_provider_admission(
+        &self,
+        readiness: crate::DeviceJoinReadiness,
+    ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .complete_device_provider_admission(readiness)
+            .await?)
+    }
+
+    pub(crate) async fn finalize_device_join(
+        &self,
+        completion: crate::DeviceProviderAdmissionCompletion,
+    ) -> Result<crate::DeviceJoinActivation, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .finalize_device_join(completion)
+            .await?)
+    }
+
+    pub(crate) async fn cancel_device_join(
+        &self,
+        attempt: crate::DeviceJoinAttemptRef,
+    ) -> Result<crate::DeviceJoinCancellation, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .cancel_device_join(attempt)
+            .await?)
+    }
+
+    pub(crate) async fn close_device_provider_admission(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .close_device_provider_admission(cancellation)
+            .await?)
+    }
+
+    pub(crate) async fn revoke_device_provider_admission_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .revoke_device_provider_admission_writes(cancellation, executor)
+            .await?)
+    }
+
+    pub(crate) async fn revoke_joining_device_writes(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
+    ) -> Result<crate::JoinerJoinTerminal, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .revoke_joining_device_writes(cancellation, executor)
+            .await?)
+    }
+
+    pub(crate) async fn activate_device_join_cleanup(
+        &self,
+        receipt: crate::DeviceJoinCleanupReceipt,
+    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
+        Ok(self
+            .driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .activate_device_join_cleanup(receipt)
+            .await?)
+    }
+
+    pub(crate) async fn complete_owner_device_join_cleanup(
+        &self,
+        activation: crate::DeviceJoinCleanupActivation,
+    ) -> Result<(), SyncError> {
+        self.driven_sync()
+            .ok_or(SyncError::LoopNotRunning)?
+            .complete_owner_device_join_cleanup(activation)
+            .await?;
+        Ok(())
+    }
 }
 
 pub(crate) struct ActiveMembershipSync {
@@ -826,7 +1013,7 @@ pub(crate) struct ActiveMembershipSync {
 
 impl ActiveMembershipSync {
     pub(crate) fn is_encrypted(&self) -> bool {
-        self.loop_handle.current_encryption().is_some()
+        self.loop_handle.is_encrypted()
     }
 
     pub(crate) fn store_name(&self) -> &str {
@@ -863,8 +1050,7 @@ impl ActiveMembershipSync {
         device_id: crate::StoreDeviceId,
     ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, SyncError> {
         self.loop_handle
-            .store()
-            .propose_device_exclusion_for_device(device_id)
+            .propose_device_exclusion(device_id)
             .await
             .map_err(|error| SyncError::DeviceExclusion(error.to_string()))
     }
@@ -874,8 +1060,7 @@ impl ActiveMembershipSync {
         proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), SyncError> {
         self.loop_handle
-            .store()
-            .cancel_device_exclusion_proposal(proposal)
+            .cancel_device_exclusion(proposal)
             .await
             .map_err(|error| SyncError::DeviceExclusion(error.to_string()))
     }
@@ -885,8 +1070,7 @@ impl ActiveMembershipSync {
         proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), SyncError> {
         self.loop_handle
-            .store()
-            .finalize_device_exclusion_proposal(proposal)
+            .finalize_device_exclusion(proposal)
             .await
             .map_err(|error| SyncError::DeviceExclusion(error.to_string()))
     }
@@ -896,8 +1080,7 @@ impl ActiveMembershipSync {
         device_id: crate::StoreDeviceId,
     ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, SyncError> {
         self.loop_handle
-            .store()
-            .begin_owner_promotion_for_device(device_id)
+            .begin_owner_promotion(device_id)
             .await
             .map_err(|error| SyncError::OwnerPromotion(error.to_string()))
     }
@@ -907,7 +1090,6 @@ impl ActiveMembershipSync {
         request: crate::protocol::store_commit::OwnerPromotionRequest,
     ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, SyncError> {
         self.loop_handle
-            .store()
             .accept_owner_promotion(request)
             .await
             .map_err(|error| SyncError::OwnerPromotion(error.to_string()))
@@ -917,15 +1099,9 @@ impl ActiveMembershipSync {
         &self,
         acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<(), SyncError> {
-        let encryption = self
-            .loop_handle
-            .current_encryption()
-            .ok_or(SyncError::NotEncryptedHome)?;
         self.loop_handle
-            .store()
-            .finalize_owner_promotion(&encryption, acceptance)
+            .finalize_owner_promotion(acceptance)
             .await
-            .map(|_| ())
             .map_err(|error| SyncError::OwnerPromotion(error.to_string()))
     }
 }

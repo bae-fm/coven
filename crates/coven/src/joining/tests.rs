@@ -8,7 +8,6 @@ use crate::encryption::EncryptionService;
 use crate::joining::encode;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
-use crate::sync::hlc::Hlc;
 use crate::sync::test_helpers::*;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
@@ -30,10 +29,18 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
     let owner_database = crate::database::StoreDatabase::from_database(owner_db.clone());
+    let home = test_cloud_home();
     let create_store_db = owner_db.clone();
     let create_store_owner = owner.clone();
+    let create_store_home = home.clone();
     let store = tokio::spawn(async move {
-        TestStore::create(&create_store_db, store_id, create_store_owner).await
+        TestStore::create(
+            &create_store_db,
+            store_id,
+            create_store_owner,
+            create_store_home,
+        )
+        .await
     })
     .await
     .expect("join Owner Store creation task")
@@ -46,10 +53,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &member_pubkey,
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -78,7 +81,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .publish_acknowledgement(snapshot_coverage)
         .await
         .expect("publish join snapshot acknowledgement");
-    let owner_store = owner_device.store;
+    let owner_store = owner_device;
     let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
     let layout = crate::store_dir::StoreLayout::new(app.path());
@@ -98,7 +101,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             Arc::new(SystemClock),
         )
         .expect("construct DeviceJoinClient")
-        .with_test_bootstrap_home(store.home.clone())
+        .with_test_bootstrap_home(home.clone())
     };
     let offer = owner_store
         .begin_device_join(&member_pubkey)
@@ -166,7 +169,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .complete_device_provider_admission(readiness)
         .await
         .expect("complete provider admission");
-    store.home.fail_exact_create_before_call(1);
+    home.fail_exact_create_before_call(1);
     let interrupted = owner_store.finalize_device_join(completion.clone()).await;
     assert!(
         interrupted.is_err(),
@@ -196,14 +199,11 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("resume finalization from the durable completion");
     let activation_slot = activation.outcome_activation.object.slot();
-    let activation_bytes = store
-        .home
+    let activation_bytes = home
         .read_at(activation_slot)
         .await
         .expect("activation commit is stored");
-    store
-        .home
-        .delete_at(activation_slot)
+    home.delete_at(activation_slot)
         .await
         .expect("remove activation commit");
     let interrupted_completion = new_client()
@@ -226,15 +226,13 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             .expect("enumerate interrupted completion"),
         vec![crate::DeviceJoinAction::CompleteJoin(activation.clone())],
     );
-    store
-        .home
-        .create_at(
-            activation_slot,
-            BlobBody::from_bytes(activation_bytes),
-            &no_progress(),
-        )
-        .await
-        .expect("restore activation commit after interruption");
+    home.create_at(
+        activation_slot,
+        BlobBody::from_bytes(activation_bytes),
+        &no_progress(),
+    )
+    .await
+    .expect("restore activation commit after interruption");
     let config = new_client()
         .complete_device_join(activation.clone(), |_status| {})
         .await

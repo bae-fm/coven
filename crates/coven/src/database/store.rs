@@ -298,7 +298,7 @@ impl StoreDatabase {
         self.blob_tombstone_grace
     }
 
-    pub(crate) fn gates(&self) -> std::sync::Arc<crate::database::Gates> {
+    fn gates(&self) -> std::sync::Arc<crate::database::Gates> {
         self.gates.clone()
     }
 
@@ -306,11 +306,11 @@ impl StoreDatabase {
         self.gates.has_scoped_graph()
     }
 
-    pub(crate) fn blob_decls(&self) -> std::sync::Arc<crate::database::BlobDecls> {
+    fn blob_decls(&self) -> std::sync::Arc<crate::database::BlobDecls> {
         self.blob_decls.clone()
     }
 
-    pub(crate) fn hlc(&self) -> std::sync::Arc<crate::sync::hlc::Hlc> {
+    fn hlc(&self) -> std::sync::Arc<crate::sync::hlc::Hlc> {
         self.hlc.clone()
     }
 
@@ -318,8 +318,32 @@ impl StoreDatabase {
         self.hlc.now().to_string()
     }
 
-    pub(crate) fn id_provider(&self) -> &dyn crate::id_provider::IdProvider {
-        self.ids.as_ref()
+    pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), DbError> {
+        self.set_protocol_state(
+            crate::sync::hlc::HIGHWATER_STATE_KEY,
+            &self.hlc.high_water().to_string(),
+        )
+        .await
+    }
+
+    pub(crate) fn blob_ref_from_change(
+        &self,
+        change: &crate::changeset::RowChange,
+    ) -> Result<Option<crate::blob::BlobRef>, crate::database::BlobDeclError> {
+        self.blob_decls.ref_from_change(change)
+    }
+
+    pub(crate) fn validate_local_blob_cleanup_changes(
+        &self,
+        old_changes: &[crate::changeset::RowChange],
+        new_changes: &[crate::changeset::RowChange],
+    ) -> Result<(), crate::database::BlobDeclError> {
+        crate::blob::local_cleanup::intents_from_changes(
+            self.blob_decls.as_ref(),
+            old_changes,
+            new_changes,
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn receive_wall_ms(&self) -> u64 {
@@ -682,5 +706,11 @@ impl StoreDatabase {
                     .map_err(DbError::from)
             })
             .await
+    }
+}
+
+impl crate::id_provider::IdProvider for StoreDatabase {
+    fn new_id(&self) -> String {
+        self.ids.new_id()
     }
 }

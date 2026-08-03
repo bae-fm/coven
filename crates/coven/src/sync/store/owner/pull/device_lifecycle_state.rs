@@ -3,7 +3,7 @@ use super::*;
 pub(crate) struct DeviceJoinBootstrapCommit {
     pub reference: StoreBatchCommitRef,
     pub commit: VerifiedStoreBatchCommit,
-    pub registrations: Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>,
+    pub registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub device_operations: VerifiedStoreDeviceOperations,
     pub activation: DeviceJoinBootstrapActivation,
 }
@@ -97,19 +97,20 @@ pub(crate) fn registration_recovery_cursor(
 pub(crate) fn predecessor_with_recovery_author(
     mut predecessor: ResolvedStoreDeviceState,
     commit: &StoreBatchCommit,
-    registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
+    registrations: &[ActivatedStoreDeviceRegistration],
 ) -> Result<(ResolvedStoreDeviceState, Option<StoreDeviceRegistrationRef>), StoreProtocolError> {
     if commit.device_registrations().len() != registrations.len() {
         return Err(StoreProtocolError::Malformed(
             "verified registrations do not cover every activation".to_string(),
         ));
     }
-    for (activated, (registration, authority)) in
-        commit.device_registrations().iter().zip(registrations)
-    {
-        activated.registration.verify_registration(registration)?;
+    for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
+        registration.verify_reference(activated)?;
         if activated.registration == commit.author_registration {
-            if let Some(cursor) = registration_recovery_cursor(&registration.origin, authority)? {
+            if let Some(cursor) = registration_recovery_cursor(
+                &registration.value().origin,
+                registration.activation(),
+            )? {
                 predecessor = predecessor
                     .activate_registration(activated.registration.clone(), Some(cursor))?;
                 return Ok((predecessor, Some(activated.registration.clone())));
@@ -122,7 +123,7 @@ pub(crate) fn predecessor_with_recovery_author(
 pub(crate) fn apply_verified_device_lifecycle(
     mut state: ResolvedStoreDeviceState,
     commit: &StoreBatchCommit,
-    registrations: &[(StoreDeviceRegistration, StoreDeviceRegistrationActivation)],
+    registrations: &[ActivatedStoreDeviceRegistration],
     preactivated: Option<&StoreDeviceRegistrationRef>,
     owner_recovery: Option<(
         super::membership::MembershipGrantId,
@@ -134,14 +135,15 @@ pub(crate) fn apply_verified_device_lifecycle(
             "verified registrations do not cover every activation".to_string(),
         ));
     }
-    for (activated, (registration, authority)) in
-        commit.device_registrations().iter().zip(registrations)
-    {
-        activated.registration.verify_registration(registration)?;
+    for (activated, registration) in commit.device_registrations().iter().zip(registrations) {
+        registration.verify_reference(activated)?;
         if preactivated != Some(&activated.registration) {
             state = state.activate_registration(
                 activated.registration.clone(),
-                registration_recovery_cursor(&registration.origin, authority)?,
+                registration_recovery_cursor(
+                    &registration.value().origin,
+                    registration.activation(),
+                )?,
             )?;
         }
     }

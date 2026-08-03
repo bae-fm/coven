@@ -86,7 +86,7 @@ use crate::protocol::store_commit::{
     StoreSnapshotRef,
 };
 use crate::storage::{ExactObjectRef, PreparedExactObject};
-use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
+use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
 use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};

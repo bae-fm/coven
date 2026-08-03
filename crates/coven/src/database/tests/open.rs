@@ -7,7 +7,7 @@ use crate::blob::BLOB_TOMBSTONE_GRACE;
 
 #[tokio::test]
 async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {
-    let (db, _) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
@@ -177,7 +177,7 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
     let directory = tempfile::tempdir().expect("temp dir");
     let path = directory.path().join("ordinary-migration.sqlite");
     let migrations = [things_migration()];
-    let (database, _) = Database::open(
+    let database = Database::open(
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
@@ -199,7 +199,7 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
              CREATE INDEX things_ordinary ON things(ordinary);",
         ),
     ];
-    let (database, _) = Database::open(
+    let database = Database::open(
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
@@ -243,7 +243,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey)
             .gated_by("audience")
     };
-    let (database, _) = Database::open(
+    let database = Database::open(
         &path,
         vec![table()],
         BLOB_TOMBSTONE_GRACE,
@@ -343,7 +343,7 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
         let path = directory.path().join(format!("{name}.sqlite"));
         let tables = vec![scoped_things_table()];
         let migrations = vec![scoped_things_migration()];
-        let (database, _) = Database::open(
+        let database = Database::open(
             &path,
             tables.clone(),
             BLOB_TOMBSTONE_GRACE,
@@ -555,7 +555,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
 
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("read-only-invalid.sqlite");
-    let (writer, _) = Database::open(
+    let writer = Database::open(
         &path,
         vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
         BLOB_TOMBSTONE_GRACE,
@@ -624,7 +624,7 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     let tables = vec![things_table(
         crate::sync::session::RowIdentity::IndependentUuid,
     )];
-    let (db, _) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -694,7 +694,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     let tables = vec![things_table(
         crate::sync::session::RowIdentity::IndependentUuid,
     )];
-    let (db, _) = Database::open(
+    let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,

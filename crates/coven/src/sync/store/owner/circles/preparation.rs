@@ -1193,7 +1193,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         let current = &current;
         let root = &root;
         let storage = storage.as_ref();
-        let db = &database;
+        let db = database;
         let author_registration = &author_registration;
         let author = &author;
         let device_signer = &device_signer;
@@ -1311,7 +1311,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         membership_state.clone(),
                         membership_authority.clone(),
                         members,
-                        db.id_provider(),
+                        db,
                         signer,
                     )?,
                     Vec::new(),
@@ -1343,7 +1343,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.current.roster,
                             &request.current.metadata,
                             keyring,
-                            db.id_provider(),
+                            db,
                             signer,
                         )?,
                         Vec::new(),
@@ -1451,7 +1451,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             request.member_pubkey.clone(),
                             request.role,
                             bootstrap,
-                            db.id_provider(),
+                            db,
                             signer,
                         )?,
                         vec![("bootstrap-image".to_string(), bootstrap_prepared)],
@@ -1582,7 +1582,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let registration = database
                             .activated_store_device_registration(record.registration.clone())
                             .await?;
-                        if !remaining_members.contains_key(&registration.author_pubkey) {
+                        if !remaining_members.contains_key(&registration.value().author_pubkey) {
                             continue;
                         }
                         let response_prefix =
@@ -1632,7 +1632,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             participants,
                             provisional_frontier,
                             outcome_slot,
-                            db.id_provider(),
+                            db,
                             signer,
                         )?,
                         vec![("epoch-close-intent".to_string(), intent_prepared)],
@@ -1698,7 +1698,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.chosen.metadata,
                             keyring,
                             losing_branches,
-                            db.id_provider(),
+                            db,
                             signer,
                         )?,
                         Vec::new(),
@@ -1728,7 +1728,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.current.roster,
                             &request.current.metadata,
                             keyring,
-                            db.id_provider(),
+                            db,
                             signer,
                         )?,
                         Vec::new(),
@@ -1765,7 +1765,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         keyring,
                         request.intent.clone(),
                         request.responses.clone(),
-                        db.id_provider(),
+                        db,
                         signer,
                     )?;
                     let bootstrap_blobs = bootstrap_verifier
@@ -1856,7 +1856,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &request.current.roster,
                             &request.current.metadata,
                             keyring,
-                            db.id_provider(),
+                            db,
                             signer,
                         )?,
                         Vec::new(),

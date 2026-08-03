@@ -28,7 +28,7 @@ impl StoreMembership {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        let identity = self.security.require_identity()?;
+        let identity = self.security.established_identity()?;
         self.sync
             .store_for_command(&identity)
             .await?
@@ -43,7 +43,7 @@ impl StoreMembership {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        let identity = self.security.require_identity()?;
+        let identity = self.security.established_identity()?;
         self.sync
             .store_for_command(&identity)
             .await?

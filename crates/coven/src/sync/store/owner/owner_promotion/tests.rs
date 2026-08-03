@@ -16,6 +16,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         &founder_db,
         "successive-owner-promotions",
         founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Merge Store");
@@ -27,10 +28,6 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
             .invite_member(
                 &founder_db,
                 &founder,
-                &crate::sync::hlc::Hlc::new(
-                    "successive-owner-promotions".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &keys::public_key_hex(member),
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -117,6 +114,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         &owner_db,
         "merge-owner-promotion",
         owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Merge Store");
@@ -126,10 +124,6 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -235,10 +229,12 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
 async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     let owner_db = crate::sync::test_helpers::open_test_db();
     let owner = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
     let store = crate::sync::test_helpers::TestStore::create(
         &owner_db,
         "corrupt-owner-promotion-request",
         owner.clone(),
+        home.clone(),
     )
     .await
     .expect("create Merge Store");
@@ -248,10 +244,6 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -272,7 +264,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .owner_promotion_target_for_test()
         .await
         .expect("load Member promotion target");
-    store.home.fail_exact_create_before_call(1);
+    home.fail_exact_create_before_call(1);
     store
         .bind_device(&owner_db, &owner)
         .await
@@ -359,10 +351,12 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
 async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() {
     let owner_db = crate::sync::test_helpers::open_test_db();
     let owner = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
     let store = crate::sync::test_helpers::TestStore::create(
         &owner_db,
         "owner-promotion-loses-its-position",
         owner.clone(),
+        home.clone(),
     )
     .await
     .expect("create Merge Store");
@@ -372,10 +366,6 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         .invite_member(
             &owner_db,
             &owner,
-            &crate::sync::hlc::Hlc::new(
-                "owner-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &keys::public_key_hex(&member),
             None,
             crate::protocol::membership::MemberRole::Member,
@@ -436,7 +426,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
 
     // Stop the finalization after it journals its composed candidate and before
     // it publishes the head that would take the position.
-    store.home.fail_exact_create_before_call(5);
+    home.fail_exact_create_before_call(5);
     Box::pin(
         store
             .bind_device(&owner_db, &owner)

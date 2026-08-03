@@ -42,12 +42,19 @@ pub(crate) fn load_published_circle_snapshot_on(
         let successor_slot = serde_json::from_str(&successor_slot).map_err(|error| {
             DbError::Message(format!("published Circle snapshot successor slot: {error}"))
         })?;
-        let (root, author_ref, author) = local_store_authority_on(conn)?;
-        let meta = CircleSnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, &author)
-            .map_err(|error| DbError::Message(format!("published Circle snapshot: {error}")))?;
+        let authority = local_store_authority_on(conn)?;
+        let author_ref = authority.reference();
+        let author = authority.value();
+        let meta = CircleSnapshotMeta::parse_at(
+            &bytes,
+            author.store_root.store_root_hash,
+            &reference,
+            author,
+        )
+        .map_err(|error| DbError::Message(format!("published Circle snapshot: {error}")))?;
         let cut: crate::protocol::store_commit::CommitFrontier = serde_json::from_str(&cut)
             .map_err(|error| DbError::Message(format!("published Circle snapshot cut: {error}")))?;
-        if meta.author_registration != author_ref
+        if &meta.author_registration != author_ref
             || meta.circle_id != circle_id
             || meta.successor.next_slot != successor_slot
             || meta.bootstrap.coverage != cut
@@ -116,15 +123,17 @@ pub(crate) fn load_outbound_circle_snapshot_on(
                         .to_string(),
                 ));
             }
-            let (root, author_ref, author) = local_store_authority_on(conn)?;
+            let authority = local_store_authority_on(conn)?;
+            let author_ref = authority.reference();
+            let author = authority.value();
             let meta = CircleSnapshotMeta::parse_at(
                 &meta_bytes,
-                root.store_root_hash,
+                author.store_root.store_root_hash,
                 &reference,
-                &author,
+                author,
             )
             .map_err(|error| DbError::Message(format!("outbound Circle snapshot: {error}")))?;
-            if meta.author_registration != author_ref
+            if &meta.author_registration != author_ref
                 || meta.circle_id != circle_id
                 || meta.bootstrap.image != image_reference
             {

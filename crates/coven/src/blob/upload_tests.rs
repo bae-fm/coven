@@ -20,7 +20,6 @@ use crate::storage::cloud::{
 };
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreDir;
-use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 
@@ -276,7 +275,7 @@ impl UploadFixture {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
         };
-        let (db, _stamper) = Database::open(
+        let db = Database::open(
             std::path::Path::new(":memory:"),
             test_synced_tables_with_blob(BlobDecl::new(
                 "photos",
@@ -325,19 +324,14 @@ impl UploadFixture {
         clock: &dyn Clock,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<DrainOutcome, DbError> {
-        let (registration_ref, registration) = self.database.local_blob_write_authority().await?;
-        let authority = crate::storage::BlobWriteAuthority::new(&registration_ref, &registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let registration = self.database.local_blob_write_authority().await?;
+        let authority = crate::storage::BlobWriteAuthority::new(&registration);
         BlobUploadQueue::new(
             &self.database,
             &self.storage,
             authority,
             store_dir,
             clock,
-            &Hlc::new(
-                "test-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             None,
             observer,
         )
@@ -662,11 +656,7 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
     fixture
         .plant_uploads(&store_dir, &[("rotate01", b"bytes")], false)
         .await;
-    fixture
-        .storage
-        .shared_pending_rotation()
-        .mark_committed(2)
-        .unwrap();
+    fixture.storage.mark_rotation_committed_for_test(2).unwrap();
 
     let outcome = fixture
         .drain(&store_dir, &fixed_clock(T0), None)

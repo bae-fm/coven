@@ -52,9 +52,14 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     let db_a = open_test_db_with_hlc(a_hlc.clone(), |_conn| Ok(()));
     let store_database_a = crate::database::StoreDatabase::new(&db_a);
     let keypair = UserKeypair::generate();
-    let storage = TestStore::create(&db_a, "test-store", keypair.clone())
-        .await
-        .expect("create exact HLC test Store");
+    let storage = TestStore::create(
+        &db_a,
+        "test-store",
+        keypair.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact HLC test Store");
     let (_a_temp, a_store_dir) = temp_store_dir();
     storage
         .open_into(&db_a)
@@ -173,9 +178,14 @@ async fn pull_advances_register_as_each_changeset_applies() {
 
     let a_stamp = a_hlc.now().to_string();
     let db_a = open_test_db();
-    let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
-        .await
-        .expect("create exact test Store for the test database");
+    let storage = TestStore::create(
+        &db_a,
+        "test-store",
+        UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact test Store for the test database");
     let cs_a = db_a
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
@@ -210,9 +220,14 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let remote_stamp = remote_hlc.now().to_string();
     let source = open_test_db();
     let storage = Arc::new(
-        TestStore::create(&source, "test-store", UserKeypair::generate())
-            .await
-            .expect("create exact test Store for the test database"),
+        TestStore::create(
+            &source,
+            "test-store",
+            UserKeypair::generate(),
+            crate::sync::test_helpers::test_cloud_home(),
+        )
+        .await
+        .expect("create exact test Store for the test database"),
     );
     let changeset = source
         .capture_test_changeset(&[&format!(
@@ -243,17 +258,16 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let pull = tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     commit_reached.notified().await;
-    let stamper = target.stamper();
+    let queued_stamp = crate::database::StoreDatabase::new(&target).stamp();
     let host_stamp = crate::database::StoreDatabase::new(&target)
         .run_host_store_write_for_test(None, None, move |tx| {
-            let stamp = stamper.stamp();
             tx.execute(
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                          VALUES ('local-boundary', 'Local', NULL, ?1, '2026-01-01')",
-                [stamp.as_str()],
+                [queued_stamp.as_str()],
             )
             .map_err(crate::database::DbError::from)?;
-            Ok::<String, crate::database::DbError>(stamp)
+            Ok::<String, crate::database::DbError>(queued_stamp)
         })
         .await
         .expect("queued host write commits")
@@ -320,18 +334,19 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = TestStore::create(&owner_db, "test-store", owner.clone())
-        .await
-        .expect("create exact revocation test Store");
+    let storage = TestStore::create(
+        &owner_db,
+        "test-store",
+        owner.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact revocation test Store");
     let encryption = EncryptionService::from_key([42; 32]);
     storage
         .invite_member(
             &owner_db,
             &owner,
-            &Hlc::new(
-                "owner".to_string(),
-                crate::clock::clock_from_millis(|| 2_000),
-            ),
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
@@ -366,7 +381,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let (_member_temp, member_store_dir) = temp_store_dir();
     let member_store = crate::sync::store::Store::load(
         crate::database::StoreDatabase::new(&member_db),
-        storage.storage.clone(),
+        storage.clone(),
         member.clone(),
     )
     .await
@@ -397,10 +412,6 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .remove_member(
             &owner_db,
             &owner,
-            &Hlc::new(
-                "owner".to_string(),
-                crate::clock::clock_from_millis(|| 4_000),
-            ),
             &pubkey_hex(&member),
             &encryption,
             &security,
@@ -428,7 +439,7 @@ async fn register_seeds_from_persisted_high_water() {
     let temp = tempfile::tempdir().expect("create register restart directory");
     let path = temp.path().join("register.sqlite");
     let migrations = test_migrations();
-    let (before_restart, _stamper) = crate::database::Database::open(
+    let before_restart = crate::database::Database::open(
         &path,
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
@@ -444,7 +455,7 @@ async fn register_seeds_from_persisted_high_water() {
         .expect("persist high-water before restart");
     drop(before_restart);
 
-    let (db, _stamper) = crate::database::Database::open_with_hlc(
+    let db = crate::database::Database::open_with_hlc(
         &path,
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
@@ -457,7 +468,7 @@ async fn register_seeds_from_persisted_high_water() {
     )
     .expect("reopen register database with persisted high-water");
 
-    let stamp = db.hlc().now().to_string();
+    let stamp = crate::database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > high,
         "first stamp {stamp} must sort after the seeded high-water {high}",
@@ -487,7 +498,7 @@ async fn register_seeds_from_on_disk_rows_above_high_water() {
         },
     );
 
-    let stamp = db.hlc().now().to_string();
+    let stamp = crate::database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > row_stamp,
         "first stamp {stamp} must sort after the on-disk row {row_stamp}; \
@@ -528,7 +539,7 @@ async fn restart_does_not_seed_past_grossly_future_synced_row() {
         },
     );
 
-    let stamp = db.hlc().now().to_string();
+    let stamp = crate::database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > honest.as_str(),
         "first stamp {stamp} must sort after honest on-disk row {honest}",
@@ -561,56 +572,11 @@ async fn restart_seeds_past_within_bound_synced_row() {
         },
     );
 
-    let stamp = db.hlc().now().to_string();
+    let stamp = crate::database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > within.as_str(),
         "first stamp {stamp} must sort after within-bound on-disk row {within}",
     );
-}
-
-/// The [`UpdatedAtStamper`] `Database::open` returns mints from the same seeded,
-/// advancing clock the database holds — the point of handing the host a stamper
-/// rather than letting its writes carry a separate clock. A synced row far ahead
-/// of any plausible wall millis seeds the register at open (standing in for an
-/// advance-on-pull push); the returned stamper must mint above that floor and be
-/// strictly monotonic.
-#[tokio::test]
-async fn returned_stamper_shares_seeded_clock() {
-    let seeded_floor = "9000000000000-0005-dev-a";
-    let migrations = vec![crate::Migration::run(1, "test-schema", move |conn| {
-        create_synced_schema(conn)?;
-        conn.execute(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
-            [seeded_floor],
-        )
-        .map(|_| ())
-        .map_err(crate::database::DbError::from)
-    })];
-    let (db, stamper) = crate::database::Database::open_with_hlc(
-        std::path::Path::new(":memory:"),
-        test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
-        Arc::new(Hlc::new(
-            "dev-a".into(),
-            crate::clock::clock_from_millis(|| 9_000_000_000_000),
-        )),
-        &migrations,
-    )
-    .expect("open db");
-
-    let s1 = stamper.stamp();
-    assert!(
-        s1.as_str() > seeded_floor,
-        "stamper minted {s1} below the seeded floor {seeded_floor}; it is not \
-         sharing the database's seeded clock",
-    );
-    // Monotonic across the stamper and the database's own clock handle.
-    let s2 = db.hlc().now().to_string();
-    let s3 = stamper.stamp();
-    assert!(s2 > s1, "clock {s2} must outrank prior stamper {s1}");
-    assert!(s3 > s2, "stamper {s3} must outrank prior clock {s2}");
 }
 
 /// A grossly-future incoming `_updated_at` must neither win last-writer-wins nor
@@ -647,9 +613,14 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     let a_future_ms = b_wall + 10 * 365 * 24 * 60 * 60 * 1000;
     let a_future_stamp = format!("{a_future_ms:013}-0000-dev-a");
     let db_a = open_test_db();
-    let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
-        .await
-        .expect("create exact test Store for the test database");
+    let storage = TestStore::create(
+        &db_a,
+        "test-store",
+        UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact test Store for the test database");
     let cs_a = db_a
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
@@ -710,9 +681,14 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     let a_ms = b_wall + 3 * 24 * 60 * 60 * 1000;
     let a_stamp = format!("{a_ms:013}-0000-dev-a");
     let db_a = open_test_db();
-    let storage = TestStore::create(&db_a, "test-store", UserKeypair::generate())
-        .await
-        .expect("create exact test Store for the test database");
+    let storage = TestStore::create(
+        &db_a,
+        "test-store",
+        UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact test Store for the test database");
     let cs_a = db_a
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
@@ -761,7 +737,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // Open normally, then make `protocol_state` reject every INSERT so a
     // `set_protocol_state` inside the cycle fails. Reads remain available.
     let migrations = test_migrations();
-    let (db, _stamper) = crate::database::Database::open(
+    let db = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::BLOB_TOMBSTONE_GRACE,
@@ -772,9 +748,14 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     )
     .expect("open database before installing protocol_state fault");
     let keypair = UserKeypair::generate();
-    let storage = TestStore::create(&db, "test-store", keypair.clone())
-        .await
-        .expect("create exact Store before installing protocol_state fault");
+    let storage = TestStore::create(
+        &db,
+        "test-store",
+        keypair.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact Store before installing protocol_state fault");
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
@@ -797,12 +778,9 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [42; 32],
     )));
-    let hlc = db.hlc();
-
     let result = run_single_sync_cycle(
-        storage.storage.clone(),
+        storage.clone(),
         &device_id,
-        &hlc,
         &SystemClock,
         &db,
         &encryption,
@@ -810,7 +788,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         &keypair,
         None,
         &ld,
-        None,
+        false,
         None,
     )
     .await;

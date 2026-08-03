@@ -86,8 +86,9 @@ impl StoreDatabase {
             };
             let control = authoring.control.coord.clone();
             let epoch_id = authoring.control.value.epoch_id();
-            let (epoch_encryption, key_fingerprint) =
-                Self::circle_publication_context_on(conn, circle_id, &control)?;
+            let access = Self::circle_publication_context_on(conn, circle_id, &control)?;
+            let key_fingerprint = access.key_fingerprint();
+            let epoch_encryption = access.into_encryption();
             let seeded_from = Self::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
             inputs.push(CircleAckPublicationInput {
                 circle_id,
@@ -159,7 +160,12 @@ impl StoreDatabase {
             .activated_store_device_registration_records()
             .await?
             .into_iter()
-            .map(|(_, registration)| (registration.device_id, registration.author_pubkey))
+            .map(|registration| {
+                (
+                    registration.value().device_id,
+                    registration.value().author_pubkey.clone(),
+                )
+            })
             .collect();
         let mut devices = BTreeSet::new();
         for (device_id, record) in device_state.devices {
@@ -299,7 +305,8 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let bytes = ack.to_bytes();
-                let (root, _, registration) = local_store_authority_on(&tx)?;
+                let authority = local_store_authority_on(&tx)?;
+                let registration = authority.value();
                 let reference = CircleAckRef {
                     registration: ack.registration.clone(),
                     circle_id: ack.circle_id,
@@ -308,7 +315,12 @@ impl StoreDatabase {
                     ack_hash: ack.ack_hash(),
                     object: prepared.reference().clone(),
                 };
-                let verified = CircleAck::parse_at(&bytes, &root, &reference, &registration)
+                let verified = CircleAck::parse_at(
+                    &bytes,
+                    &registration.store_root,
+                    &reference,
+                    registration,
+                )
                     .map_err(|error| {
                         DbError::Message(format!("stage Circle acknowledgement: {error}"))
                     })?;

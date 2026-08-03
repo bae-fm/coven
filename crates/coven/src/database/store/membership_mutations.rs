@@ -68,7 +68,7 @@ impl StoreDatabase {
         reusable: std::collections::BTreeSet<crate::protocol::membership::AuthorStreamId>,
     ) -> Result<crate::protocol::membership::AuthorStreamId, DbError> {
         let candidate = crate::protocol::membership::AuthorStreamId::from_digest(
-            ObjectHash::digest(self.id_provider().new_id().as_bytes()),
+            ObjectHash::digest(self.ids.new_id().as_bytes()),
         );
         self.connection
             .call(move |conn| {

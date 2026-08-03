@@ -2,7 +2,7 @@ use super::*;
 #[tokio::test]
 async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
     let db = open_test_db();
-    let (store, signer, mut journal) =
+    let (store, _home, signer, mut journal) =
         persist_merge_operation(&db, "circle-mismatched-local-keyring").await;
     let author = keys::public_key_hex(&signer);
     let own_access = journal
@@ -47,7 +47,7 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
 #[tokio::test]
 async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() {
     let db = open_test_db();
-    let (store, signer, mut journal) =
+    let (store, _home, signer, mut journal) =
         persist_merge_operation(&db, "circle-substituted-local-object-ref").await;
     let original = journal
         .operation()
@@ -97,7 +97,7 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
 #[tokio::test]
 async fn local_activation_rejects_substituted_exact_circle_edges() {
     let db = open_test_db();
-    let (store, signer, mut journal) =
+    let (store, _home, signer, mut journal) =
         persist_merge_operation(&db, "circle-substituted-signed-edges").await;
     let old_commit = journal.commit().expect("parse prepared Circle commit");
     let [old_reference] = old_commit.circle_controls() else {
@@ -173,8 +173,8 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
             .expect("count circle activations"),
         0
     );
-    assert!(!store.home.contains_exact_object(&store_commit));
-    assert!(!store.home.contains_exact_object(&store_head));
+    assert!(!_home.contains_exact_object(&store_commit));
+    assert!(!_home.contains_exact_object(&store_head));
 }
 
 #[tokio::test]
@@ -186,7 +186,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
         } else {
             "circle-wrong-stream-circle"
         };
-        let (store, signer, mut journal) = persist_merge_operation(&db, label).await;
+        let (store, _home, signer, mut journal) = persist_merge_operation(&db, label).await;
         let commit = journal.commit().expect("parse Circle commit");
         let [reference] = commit.circle_controls() else {
             panic!("Circle commit carries one control")
@@ -280,15 +280,15 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .await
             .expect("read rejected Circle Store position")
             .is_none());
-        assert!(!store.home.contains_exact_object(&store_commit));
-        assert!(!store.home.contains_exact_object(&store_head));
+        assert!(!_home.contains_exact_object(&store_commit));
+        assert!(!_home.contains_exact_object(&store_head));
     }
 }
 
 #[tokio::test]
 async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     let db = open_test_db();
-    let (store, signer, mut journal) =
+    let (store, _home, signer, mut journal) =
         persist_merge_operation(&db, "circle-unexpected-acknowledgement").await;
     let device = store
         .bind_device(&db, &signer)
@@ -374,14 +374,14 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .await
         .expect("read rejected Circle Store position")
         .is_none());
-    assert!(!store.home.contains_exact_object(&store_commit));
-    assert!(!store.home.contains_exact_object(&store_head));
+    assert!(!_home.contains_exact_object(&store_commit));
+    assert!(!_home.contains_exact_object(&store_head));
 }
 
 #[tokio::test]
 async fn local_successor_rejects_an_unreserved_circle_predecessor() {
     let db = open_test_db();
-    let (store, signer, founder) =
+    let (store, _home, signer, founder) =
         persist_merge_operation(&db, "circle-unreserved-predecessor").await;
     let circle_id = founder.circle_id();
     store
@@ -391,7 +391,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .resume_circle_operations()
         .await
         .expect("publish founder Circle");
-    store.home.fail_exact_create_before_call(1);
+    _home.fail_exact_create_before_call(1);
     store
         .bind_device(&db, &signer)
         .await
@@ -418,6 +418,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .await
         .expect("load rename author");
     let device_signer = author
+        .value()
         .device_signer(&signer)
         .expect("derive rename device signer");
     let original_slot = journal
@@ -509,14 +510,14 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
             .expect("count circle activations"),
         1
     );
-    assert!(!store.home.contains_exact_object(&store_commit));
-    assert!(!store.home.contains_exact_object(&store_head));
+    assert!(!_home.contains_exact_object(&store_commit));
+    assert!(!_home.contains_exact_object(&store_head));
 }
 
 #[tokio::test]
 async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
     let db = open_test_db();
-    let (store, signer, mut journal) =
+    let (store, _home, signer, mut journal) =
         persist_merge_operation(&db, "circle-substituted-local-head-slot").await;
     let original = journal
         .operation()
@@ -575,7 +576,7 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
 #[tokio::test]
 async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
     let db = open_test_db();
-    let (store, signer, journal) =
+    let (store, _home, signer, journal) =
         persist_merge_operation(&db, "circle-roster-kind-crossing").await;
     let author = keys::public_key_hex(&signer);
     let access = journal
@@ -625,12 +626,10 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .expect("the operation carries its sealed roster entry");
     assert_eq!(entry_prepared.reference(), &entry_object);
     store
-        .storage
         .create_protocol_object(entry_prepared)
         .await
         .expect("publish the founder roster entry");
     let entry_plaintext = store
-        .storage
         .read_protocol_object(&entry_context, &entry_object, &entry_prefix)
         .await
         .expect("open the founder roster entry where it belongs");
@@ -661,12 +660,10 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         resolution: &resolution_ref,
     });
     let resolution_slot = store
-        .storage
         .allocate_protocol_slot(&resolution_context, &resolution_prefix, ".json")
         .await
         .expect("allocate the roster resolution slot");
     let resolution_object = store
-        .storage
         .prepare_protocol_object(
             &resolution_context,
             resolution_slot,
@@ -675,13 +672,11 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         )
         .expect("seal the roster resolution");
     store
-        .storage
         .create_protocol_object(&resolution_object)
         .await
         .expect("publish the roster resolution");
     assert_eq!(
         store
-            .storage
             .read_protocol_object(
                 &resolution_context,
                 resolution_object.reference(),
@@ -694,12 +689,10 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
 
     // Neither domain accepts the other's path at all.
     store
-        .storage
         .allocate_protocol_slot(&entry_context, &resolution_prefix, ".json")
         .await
         .expect_err("the roster entry domain must refuse a resolution path");
     store
-        .storage
         .allocate_protocol_slot(&resolution_context, &entry_prefix, ".json")
         .await
         .expect_err("the roster resolution domain must refuse an entry path");
@@ -718,17 +711,14 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
             entry_prefix.clone(),
         ),
     ] {
-        let sealed = store
-            .home
+        let sealed = _home
             .stored_exact_bytes(&sealed_from)
             .expect("read the sealed bytes to move");
-        let moved_slot = store
-            .home
-            .insert_exact_object(&format!("{target_prefix}.json"), sealed.clone());
+        let moved_slot =
+            _home.insert_exact_object(&format!("{target_prefix}.json"), sealed.clone());
         let moved =
             ExactObjectRef::new(moved_slot, sealed.len() as u64, ObjectHash::digest(&sealed));
         let error = store
-            .storage
             .read_protocol_object(target_context, &moved, &target_prefix)
             .await
             .expect_err("sealed roster bytes must not open under another kind");

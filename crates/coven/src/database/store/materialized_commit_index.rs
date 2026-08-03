@@ -1,8 +1,9 @@
 use crate::database::*;
 use crate::protocol::store_commit::{
-    CommitFrontier, ResolvedStoreDeviceState, StoreAck, StoreAckRef, StoreBatchCommit,
-    StoreBatchCommitRef, StoreDeviceProposalAck, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, VerifiedStoreBatchCommit,
+    ActivatedStoreDeviceRegistration, CommitFrontier, ReferencedStoreDeviceRegistration,
+    ResolvedStoreDeviceState, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
+    StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreDeviceStateRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
 use crate::storage::PreparedExactObject;
 use rusqlite::{Connection, OptionalExtension};
@@ -379,10 +380,7 @@ impl StoreDatabase {
     pub(crate) fn record_activated_store_device_registrations_on(
         conn: &Connection,
         commit: &StoreBatchCommit,
-        registrations: &[(
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )],
+        registrations: &[ActivatedStoreDeviceRegistration],
     ) -> Result<(), DbError> {
         if registrations.len() != commit.device_registrations().len() {
             return Err(DbError::Message(
@@ -391,15 +389,19 @@ impl StoreDatabase {
             ));
         }
         for signed in commit.device_registrations() {
-            let (registration, authority) = registrations
+            let activated = registrations
                 .iter()
-                .find(|(registration, _)| registration.device_id == signed.registration.device_id)
+                .find(|registration| {
+                    registration.value().device_id == signed.registration.device_id
+                })
                 .ok_or_else(|| {
                     DbError::Message(format!(
                         "Store commit is missing registration bytes for {}",
                         signed.registration.device_id
                     ))
                 })?;
+            let registration = activated.value();
+            let authority = activated.activation();
             signed
                 .registration
                 .verify_registration(registration)
@@ -704,7 +706,7 @@ impl StoreDatabase {
             .activated_store_device_registration_records()
             .await?
             .into_iter()
-            .map(|(_, registration)| registration)
+            .map(|registration| registration.value().clone())
             .collect())
     }
 
@@ -757,7 +759,8 @@ impl StoreDatabase {
 
     pub(crate) async fn activated_store_device_registration_records(
         &self,
-    ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, DbError> {
+    ) -> Result<Vec<crate::protocol::store_commit::ReferencedStoreDeviceRegistration>, DbError>
+    {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading activated devices".to_string())
         })?;
@@ -811,12 +814,15 @@ impl StoreDatabase {
                                 "activated Store device registration {device_id}: {error}"
                             ))
                         })?;
-                    reference.verify_registration(&registration).map_err(|error| {
+                    crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                        reference,
+                        registration,
+                    )
+                    .map_err(|error| {
                         DbError::Message(format!(
                             "activated Store device registration {device_id} exact reference: {error}"
                         ))
-                    })?;
-                    Ok((reference, registration))
+                    })
                 })
                 .collect::<Result<Vec<_>, DbError>>()
         })
@@ -826,12 +832,19 @@ impl StoreDatabase {
     pub(crate) async fn activated_store_device_registration(
         &self,
         reference: StoreDeviceRegistrationRef,
-    ) -> Result<StoreDeviceRegistration, DbError> {
+    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.connection
-            .call(move |conn| load_activated_registration_on(conn, &root, &reference))
+            .call(move |conn| {
+                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                    reference,
+                    registration,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))
+            })
             .await
     }
 
@@ -848,26 +861,15 @@ impl StoreDatabase {
 
     pub(crate) async fn local_blob_write_authority(
         &self,
-    ) -> Result<(StoreDeviceRegistrationRef, StoreDeviceRegistration), DbError> {
-        self.connection
-            .call(|conn| {
-                local_store_authority_on(conn)
-                    .map(|(_, reference, registration)| (reference, registration))
-            })
-            .await
+    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+        self.connection.call(local_store_authority_on).await
     }
 
     pub(crate) async fn activated_store_device_registration_with_authority(
         &self,
         root: &crate::protocol::store_commit::StoreRootRef,
         reference: StoreDeviceRegistrationRef,
-    ) -> Result<
-        (
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        ),
-        DbError,
-    > {
+    ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
         let root = root.clone();
         self.connection
             .call(move |conn| {
@@ -886,7 +888,11 @@ impl StoreDatabase {
                 let authority = serde_json::from_str(&authority).map_err(|error| {
                     DbError::Message(format!("activated Store registration authority: {error}"))
                 })?;
-                Ok((registration, authority))
+                let registration =
+                    ReferencedStoreDeviceRegistration::verified(reference, registration)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                ActivatedStoreDeviceRegistration::verified(registration, authority)
+                    .map_err(|error| DbError::Message(error.to_string()))
             })
             .await
     }
@@ -894,14 +900,7 @@ impl StoreDatabase {
     pub(crate) async fn activated_store_device_registration_for_device(
         &self,
         device_id: crate::protocol::store_commit::StoreDeviceId,
-    ) -> Result<
-        Option<(
-            StoreDeviceRegistrationRef,
-            StoreDeviceRegistration,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation,
-        )>,
-        DbError,
-    > {
+    ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
@@ -932,7 +931,12 @@ impl StoreDatabase {
                 let authority = serde_json::from_str(&authority).map_err(|error| {
                     DbError::Message(format!("activated Store registration authority: {error}"))
                 })?;
-                Ok(Some((reference, registration, authority)))
+                let registration =
+                    ReferencedStoreDeviceRegistration::verified(reference, registration)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                ActivatedStoreDeviceRegistration::verified(registration, authority)
+                    .map(Some)
+                    .map_err(|error| DbError::Message(error.to_string()))
             })
             .await
     }

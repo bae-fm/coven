@@ -14,7 +14,6 @@ use crate::encryption::EncryptionService;
 use crate::joining::encode;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage, ObjectSlot};
-use crate::sync::hlc::Hlc;
 use crate::sync::store::{
     DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
@@ -40,10 +39,9 @@ struct TransportFixture {
     owner_store: TestDevice,
     owner_db: crate::database::Database,
     owner_database: crate::database::StoreDatabase,
-    owner_storage: Arc<crate::storage::CloudSyncStorage>,
     /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
     /// commit of the owner's while a join is mid-flight.
-    owner_test_store: TestStore,
+    owner_test_store: std::sync::Arc<TestStore>,
     owner_store_dir: crate::store_dir::StoreDir,
     home: Arc<crate::InMemoryCloudHome>,
     member_pubkey: String,
@@ -98,27 +96,29 @@ impl TransportFixture {
         let create_store_owner = owner.clone();
         let store_id_owned = store_id.to_string();
         let cross_principal = joiner_principal.is_some();
-        let store = tokio::spawn(async move {
-            if cross_principal {
-                TestStore::create_with_provider_binding(
-                    &create_store_db,
-                    &store_id_owned,
-                    create_store_owner,
-                    crate::ResolvedProviderBinding {
-                        store: crate::StoreProviderBinding::Dropbox {
-                            namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
-                        },
-                        device: crate::ProviderDeviceBinding {
-                            principal: crate::ProviderPrincipalId::Dropbox {
-                                account_id: "owner-device-account".to_string(),
-                            },
-                        },
+        let home = if cross_principal {
+            test_cloud_home_with_binding(crate::ResolvedProviderBinding {
+                store: crate::StoreProviderBinding::Dropbox {
+                    namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
+                },
+                device: crate::ProviderDeviceBinding {
+                    principal: crate::ProviderPrincipalId::Dropbox {
+                        account_id: "owner-device-account".to_string(),
                     },
-                )
-                .await
-            } else {
-                TestStore::create(&create_store_db, &store_id_owned, create_store_owner).await
-            }
+                },
+            })
+        } else {
+            test_cloud_home()
+        };
+        let create_store_home = home.clone();
+        let store = tokio::spawn(async move {
+            TestStore::create(
+                &create_store_db,
+                &store_id_owned,
+                create_store_owner,
+                create_store_home,
+            )
+            .await
         })
         .await
         .expect("Store creation task")
@@ -131,10 +131,6 @@ impl TransportFixture {
             .invite_member(
                 &owner_db,
                 &owner,
-                &Hlc::new(
-                    "owner-device".to_string(),
-                    std::sync::Arc::new(crate::clock::SystemClock),
-                ),
                 &member_pubkey,
                 None,
                 crate::protocol::membership::MemberRole::Member,
@@ -163,21 +159,20 @@ impl TransportFixture {
             .publish_acknowledgement(snapshot_coverage)
             .await
             .expect("publish join snapshot acknowledgement");
-        let owner_storage = store.storage.clone();
         let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
         let layout = crate::store_dir::StoreLayout::new(app.path());
-        let provider_binding = crate::storage::SyncStorage::provider_binding(&*store.storage)
+        let provider_binding = crate::storage::SyncStorage::provider_binding(&store)
             .await
             .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
-            Some(principal) => Arc::new(store.home.as_ref().clone().with_provider_binding(
+            Some(principal) => Arc::new(home.as_ref().clone().with_provider_binding(
                 crate::ResolvedProviderBinding {
                     store: provider_binding.store,
                     device: crate::ProviderDeviceBinding { principal },
                 },
             )),
-            None => store.home.clone(),
+            None => home.clone(),
         };
         let access_administrator =
             cross_principal.then(
@@ -186,12 +181,10 @@ impl TransportFixture {
                 },
             );
         let (owner_store_tmp, owner_store_dir) = temp_store_dir();
-        let home = store.home.clone();
         Self {
             owner_store,
             owner_db,
             owner_database,
-            owner_storage,
             owner_test_store: store,
             owner_store_dir,
             home,
@@ -312,7 +305,7 @@ impl TransportFixture {
 
     fn transport<'a>(&'a self, bundle: &'a DeviceJoinOfferBundle) -> DeviceJoinTransport<'a> {
         DeviceJoinTransport::open(
-            &*self.owner_storage,
+            &self.owner_test_store,
             bundle,
             DeviceJoinRoles::admitting(true, true),
         )

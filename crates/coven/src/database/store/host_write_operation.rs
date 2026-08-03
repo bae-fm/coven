@@ -3,7 +3,6 @@ use crate::blob::BlobRef;
 use crate::database::DbError;
 use crate::encryption::EncryptionService;
 use crate::store_dir::{PathTokenError, StoreDir};
-use crate::sync::hlc::UpdatedAtStamper;
 use crate::WriteReceipt;
 
 use super::host_sql_transaction::HostSqlTransaction;
@@ -281,7 +280,6 @@ impl StoreDatabase {
         &self,
         operation: HostWriteOperation<R, E>,
         store_dir: StoreDir,
-        stamper: UpdatedAtStamper,
         routing_encryption: Option<EncryptionService>,
         blob_staging: Option<crate::sync::HostWriteBlobStaging>,
     ) -> Result<WriteReceipt<R>, HostWriteError<E>>
@@ -297,6 +295,7 @@ impl StoreDatabase {
         let write_id = self.new_store_write_id();
         let deleted = batch.deleted_blobs;
         let cleanup_store_dir = store_dir.clone();
+        let stamper = crate::sync::hlc::UpdatedAtStamper::new(self.hlc.clone());
 
         let outcome = self
             .connection

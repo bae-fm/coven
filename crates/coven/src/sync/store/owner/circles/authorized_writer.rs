@@ -139,11 +139,14 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .database
             .activated_store_device_registration(old_commit.author_registration.clone())
             .await?;
-        let device_signer = author.device_signer(self.identity).map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "derive Circle commit device signer: {error}"
-            ))
-        })?;
+        let device_signer = author
+            .value()
+            .device_signer(self.identity)
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "derive Circle commit device signer: {error}"
+                ))
+            })?;
         let coord = journal.operation().commit_ref.coord.clone();
         let stream_activations = old_commit.stream_activations().to_vec();
         let mut commit = super::preparation::signed_circle_commit(
@@ -151,7 +154,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             old_commit.write_id.clone(),
             coord.clone(),
             old_commit.author_registration.clone(),
-            &author,
+            author.value(),
             old_commit.order.clone(),
             old_commit.membership_state.clone(),
             old_commit.device_state.clone(),
@@ -839,7 +842,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     .database
                     .activated_store_device_registration(participant.registration.clone())
                     .await?;
-                if !response.verify_for(&current.control, &registration) {
+                if !response.verify_for(&current.control, registration.value()) {
                     return Err(CircleOperationError::InvalidState(
                         "Circle epoch-close response slot holds an unverifiable response"
                             .to_string(),

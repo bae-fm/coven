@@ -1,10 +1,7 @@
-use std::sync::Arc;
-
 use crate::database::StoreDatabase;
 use crate::protocol::membership::MemberRole;
 use crate::store_membership::StoreMembership;
 use crate::store_sync::{StoreSync, SyncError};
-use crate::sync::Store;
 
 #[derive(Clone)]
 pub(crate) struct StoreJoining {
@@ -26,10 +23,6 @@ impl StoreJoining {
         }
     }
 
-    fn store(&self) -> Result<Arc<Store>, SyncError> {
-        self.sync.active_store()
-    }
-
     pub(crate) async fn begin_invite(
         &self,
         join_request_code: &str,
@@ -39,10 +32,7 @@ impl StoreJoining {
             .map_err(|error| SyncError::InvalidJoinRequest(error.to_string()))?
             .public_key;
         let invite_code = self.membership.invite(&member_pubkey, None, role).await?;
-        let bundle = self
-            .store()?
-            .begin_device_join_bundle(&member_pubkey)
-            .await?;
+        let bundle = self.sync.begin_device_join_bundle(&member_pubkey).await?;
         Ok(crate::joining::DeviceJoinInvite::new(invite_code, bundle))
     }
 
@@ -53,11 +43,9 @@ impl StoreJoining {
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        let store = self.store()?;
-        Ok(store
-            .device_join_transport()
-            .drive(&invite.bundle, policy, access_administrator, timing)
-            .await?)
+        self.sync
+            .drive_device_join(&invite.bundle, policy, access_administrator, timing)
+            .await
     }
 
     pub(crate) async fn cancel_invite(
@@ -65,36 +53,32 @@ impl StoreJoining {
         invite: &crate::joining::DeviceJoinInvite,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        let store = self.store()?;
-        Ok(store
-            .device_join_transport()
-            .cancel(&invite.bundle, timing)
-            .await?)
+        self.sync
+            .cancel_device_join_transport(&invite.bundle, timing)
+            .await
     }
 
     pub(crate) async fn abandon_invite(
         &self,
         invite: &crate::joining::DeviceJoinInvite,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        let store = self.store()?;
-        Ok(store
-            .device_join_transport()
-            .abandon(&invite.bundle)
-            .await?)
+        self.sync
+            .abandon_device_join_transport(&invite.bundle)
+            .await
     }
 
     pub(crate) async fn begin(
         &self,
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        Ok(self.store()?.begin_device_join(member_pubkey).await?)
+        self.sync.begin_device_join(member_pubkey).await
     }
 
     pub(crate) async fn abandon(
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        Ok(self.store()?.abandon_device_join(offer).await?)
+        self.sync.abandon_device_join(offer).await
     }
 
     pub(crate) async fn authorize_provider_access(
@@ -102,64 +86,55 @@ impl StoreJoining {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        Ok(self
-            .store()?
+        self.sync
             .authorize_device_provider_access(request, access_administrator)
-            .await?)
+            .await
     }
 
     pub(crate) async fn accept_registration(
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        Ok(self
-            .store()?
-            .accept_device_registration_request(request)
-            .await?)
+        self.sync.accept_device_registration(request).await
     }
 
     pub(crate) async fn publish_provider_challenge(
         &self,
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        Ok(self
-            .store()?
-            .publish_device_provider_challenge(bootstrap)
-            .await?)
+        self.sync.publish_device_provider_challenge(bootstrap).await
     }
 
     pub(crate) async fn complete_provider_admission(
         &self,
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        Ok(self
-            .store()?
+        self.sync
             .complete_device_provider_admission(readiness)
-            .await?)
+            .await
     }
 
     pub(crate) async fn finalize(
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        Ok(self.store()?.finalize_device_join(completion).await?)
+        self.sync.finalize_device_join(completion).await
     }
 
     pub(crate) async fn cancel(
         &self,
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        Ok(self.store()?.cancel_device_join(attempt).await?)
+        self.sync.cancel_device_join(attempt).await
     }
 
     pub(crate) async fn close_provider_admission(
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(self
-            .store()?
+        self.sync
             .close_device_provider_admission(cancellation)
-            .await?)
+            .await
     }
 
     pub(crate) async fn revoke_provider_writes(
@@ -167,10 +142,9 @@ impl StoreJoining {
         cancellation: crate::DeviceJoinCancellation,
         executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(self
-            .store()?
+        self.sync
             .revoke_device_provider_admission_writes(cancellation, executor)
-            .await?)
+            .await
     }
 
     pub(crate) async fn revoke_joiner_writes(
@@ -178,27 +152,25 @@ impl StoreJoining {
         cancellation: crate::DeviceJoinCancellation,
         executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        Ok(self
-            .store()?
+        self.sync
             .revoke_joining_device_writes(cancellation, executor)
-            .await?)
+            .await
     }
 
     pub(crate) async fn activate_cleanup(
         &self,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        Ok(self.store()?.activate_device_join_cleanup(receipt).await?)
+        self.sync.activate_device_join_cleanup(receipt).await
     }
 
     pub(crate) async fn complete_cancelled(
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        self.store()?
+        self.sync
             .complete_owner_device_join_cleanup(activation)
-            .await?;
-        Ok(())
+            .await
     }
 
     pub(crate) async fn status(

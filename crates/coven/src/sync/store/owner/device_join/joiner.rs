@@ -13,7 +13,6 @@ pub(crate) struct PendingDeviceJoinAuthority<'storage> {
 pub(crate) struct PendingDeviceJoinObservation<'storage> {
     journal: PendingJoinJournal,
     storage: &'storage std::sync::Arc<dyn SyncStorage>,
-    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
 }
 
@@ -248,7 +247,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     pub(crate) fn new(
         pending: &DeviceJoinJournalDatabase,
         storage: &'storage std::sync::Arc<dyn SyncStorage>,
-        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
@@ -257,7 +255,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         Self {
             journal: PendingJoinJournal::new(pending, attempt_id),
             storage,
-            root,
             history_verifier,
         }
     }
@@ -270,9 +267,9 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         let Self {
             journal,
             storage,
-            root,
             history_verifier,
         } = self;
+        let root = history_verifier.verified_root().clone();
         let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             database.clone(),
             storage.as_ref(),
@@ -284,7 +281,6 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             PendingDeviceJoinHistoryConstruction,
             database,
             storage,
-            root.clone(),
             history_verifier,
             blob_source,
             keyrings,
@@ -314,8 +310,14 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     ) -> Result<(), DeviceJoinError> {
         if crate::keys::public_key_hex(identity) != offer.member_pubkey
             || self.storage.provider_binding().await?.store != offer.provider
-            || self.root.protocol().descriptor.provider != offer.provider
-            || self.root.reference() != &offer.store_root
+            || self
+                .history_verifier
+                .verified_root()
+                .protocol()
+                .descriptor
+                .provider
+                != offer.provider
+            || self.history_verifier.verified_root().reference() != &offer.store_root
         {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -379,7 +381,10 @@ impl PendingDeviceJoinObservation<'_> {
             return Ok(abandonment);
         }
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            self.root.reference().store_root_hash,
+            self.history_verifier
+                .verified_root()
+                .reference()
+                .store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
         );
         let prefix = crate::protocol::store_commit::device_join_abandonment_semantic_prefix(
@@ -534,7 +539,11 @@ impl PendingDeviceJoinObservation<'_> {
             .load_registration(&approval.request.offer.provider_admin.administrator)
             .await?
             .value;
-        approval.verify(self.root.object(), &owner, &administrator)?;
+        approval.verify(
+            self.history_verifier.verified_root().object(),
+            &owner,
+            &administrator,
+        )?;
         self.history_verifier
             .verify_accepted_provider_access_activation(
                 &approval.access_grant,
@@ -643,15 +652,10 @@ impl PendingDeviceJoinObservation<'_> {
                 DeviceProviderResponseReservation::SamePrincipal
             }
             DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
-                let exact = storage.exact_slot_storage();
-                let logical = crate::protocol::provider::cross_peer_logical_key(challenge.probe_id);
-                let slot = exact
-                    .allocate_slot(&logical)
+                let slot = storage
+                    .reserve_cross_principal_response_slot(challenge.probe_id)
                     .await
                     .map_err(provider_error)?;
-                if slot.logical_key() != logical {
-                    return Err(DeviceJoinError::RegistrationRequestMismatch);
-                }
                 DeviceProviderResponseReservation::CrossPrincipal {
                     response_slot: slot,
                 }
@@ -972,7 +976,6 @@ impl PendingDeviceJoinObservation<'_> {
             .value
             .expected_registration
             .device_signer(identity)?;
-        let peer_exact = self.storage.exact_slot_storage();
         let (registration, initial_ack, response, prior_state_hash, intent) = match &*current
             .progress
         {
@@ -990,13 +993,15 @@ impl PendingDeviceJoinObservation<'_> {
                 current.clone(),
             ),
             _ => {
-                let registration = peer_exact
-                    .observe_at(&attempt.value.registration_slot)
+                let registration = self
+                    .storage
+                    .observe_exact_slot(&attempt.value.registration_slot)
                     .await
                     .map(SlotDisposition::from)
                     .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
-                let initial_ack = peer_exact
-                    .observe_at(
+                let initial_ack = self
+                    .storage
+                    .observe_exact_slot(
                         attempt
                             .value
                             .expected_registration
@@ -1012,8 +1017,8 @@ impl PendingDeviceJoinObservation<'_> {
                     }
                     DeviceProviderResponseReservation::CrossPrincipal { response_slot } => {
                         JoinerResponseDisposition::Slot(
-                            peer_exact
-                                .observe_at(response_slot)
+                            self.storage
+                                .observe_exact_slot(response_slot)
                                 .await
                                 .map(SlotDisposition::from)
                                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?,
@@ -1044,8 +1049,8 @@ impl PendingDeviceJoinObservation<'_> {
             }
         };
         for slot in canonical_cleanup_slots(&attempt.value)? {
-            peer_exact
-                .delete_and_verify_absent(&slot)
+            self.storage
+                .delete_exact_slot_and_verify_absent(&slot)
                 .await
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }

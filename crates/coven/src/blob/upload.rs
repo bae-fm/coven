@@ -17,7 +17,6 @@ use crate::database::DbError;
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use crate::encryption::EncryptionService;
 use crate::store_dir::StoreDir;
-use crate::sync::hlc::Hlc;
 
 const PROGRESS_TICK: Duration = Duration::from_millis(300);
 
@@ -172,7 +171,6 @@ struct BlobUploadAttempt<'operation, 'authority> {
     authority: crate::storage::BlobWriteAuthority<'authority>,
     store_dir: &'operation StoreDir,
     now: chrono::DateTime<chrono::Utc>,
-    hlc: &'operation Hlc,
     routing_encryption: Option<EncryptionService>,
     observer: Option<&'operation dyn BlobTransitionObserver>,
     entry: OutboxEntry,
@@ -184,7 +182,6 @@ pub(crate) struct BlobUploadQueue<'operation, 'authority> {
     authority: crate::storage::BlobWriteAuthority<'authority>,
     store_dir: &'operation StoreDir,
     clock: &'operation dyn crate::clock::Clock,
-    hlc: &'operation Hlc,
     routing_encryption: Option<&'operation EncryptionService>,
     observer: Option<&'operation dyn BlobTransitionObserver>,
 }
@@ -197,7 +194,6 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
         authority: crate::storage::BlobWriteAuthority<'authority>,
         store_dir: &'operation StoreDir,
         clock: &'operation dyn crate::clock::Clock,
-        hlc: &'operation Hlc,
         routing_encryption: Option<&'operation EncryptionService>,
         observer: Option<&'operation dyn BlobTransitionObserver>,
     ) -> Self {
@@ -207,7 +203,6 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
             authority,
             store_dir,
             clock,
-            hlc,
             routing_encryption,
             observer,
         }
@@ -289,7 +284,6 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
                         self.authority,
                         self.store_dir,
                         now,
-                        self.hlc,
                         self.routing_encryption.cloned(),
                         self.observer,
                         entry,
@@ -355,7 +349,6 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
         authority: crate::storage::BlobWriteAuthority<'authority>,
         store_dir: &'operation StoreDir,
         now: chrono::DateTime<chrono::Utc>,
-        hlc: &'operation Hlc,
         routing_encryption: Option<EncryptionService>,
         observer: Option<&'operation dyn BlobTransitionObserver>,
         entry: OutboxEntry,
@@ -366,7 +359,6 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
             authority,
             store_dir,
             now,
-            hlc,
             routing_encryption,
             observer,
             entry,
@@ -582,7 +574,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
             }
         }
 
-        let stamp = self.hlc.now().to_string();
+        let stamp = self.database.stamp();
         match self
             .database
             .finalize_created_blob_upload(&self.entry, stamp, self.routing_encryption.clone())

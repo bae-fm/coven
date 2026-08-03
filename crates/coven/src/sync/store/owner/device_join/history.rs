@@ -9,7 +9,6 @@ use crate::sync::store::StoreRegistrationError;
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
     database: StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
-    root: &'operation crate::sync::store::protocol_root::VerifiedStoreRoot,
     history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
 }
 
@@ -17,15 +16,17 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
-        root: &'operation crate::sync::store::protocol_root::VerifiedStoreRoot,
         history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
             storage,
-            root,
             history,
         }
+    }
+
+    fn root(&self) -> &crate::sync::store::protocol_root::VerifiedStoreRoot {
+        self.history.verified_root()
     }
 
     pub(super) async fn verify_offer(
@@ -35,8 +36,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     ) -> Result<(), DeviceJoinError> {
         if crate::keys::public_key_hex(identity) != offer.member_pubkey
             || self.storage.provider_binding().await?.store != offer.provider
-            || self.root.protocol().descriptor.provider != offer.provider
-            || self.root.reference() != &offer.store_root
+            || self.root().protocol().descriptor.provider != offer.provider
+            || self.root().reference() != &offer.store_root
         {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -50,7 +51,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 
     pub(super) async fn validate_store_owner(&self) -> Result<(), crate::database::DbError> {
         self.database
-            .validated_store_owner(self.root.reference())
+            .validated_store_owner(self.root().reference())
             .await
             .map(|_| ())
     }
@@ -442,15 +443,15 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         administrator_signing_pubkey: &str,
         identity: &UserKeypair,
     ) -> Result<CrossPrincipalProbeResponse, crate::protocol::provider::ProviderProbeError> {
-        crate::protocol::provider::create_cross_principal_response(
-            self.storage.exact_slot_storage(),
-            challenge,
-            context,
-            store,
-            administrator_signing_pubkey,
-            identity,
-        )
-        .await
+        self.storage
+            .create_cross_principal_response(
+                challenge,
+                context,
+                store,
+                administrator_signing_pubkey,
+                identity,
+            )
+            .await
     }
 }
 

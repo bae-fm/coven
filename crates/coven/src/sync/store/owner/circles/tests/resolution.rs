@@ -19,7 +19,8 @@ struct ConflictFixture {
     db1: Database,
     device1: String,
     db2: Database,
-    store: TestStore,
+    store: std::sync::Arc<TestStore>,
+    home: std::sync::Arc<crate::InMemoryCloudHome>,
     founder: UserKeypair,
     founder_pubkey: String,
     circle_id: CircleId,
@@ -32,7 +33,7 @@ struct ConflictFixture {
 impl ConflictFixture {
     async fn build(label: &str) -> Self {
         let db1 = open_test_db();
-        let (store, founder, journal) = persist_merge_operation(&db1, label).await;
+        let (store, _home, founder, journal) = persist_merge_operation(&db1, label).await;
         let circle_id = journal.circle_id();
         let device1 = db1
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -61,6 +62,7 @@ impl ConflictFixture {
             device1,
             db2,
             store,
+            home: _home,
             founder,
             founder_pubkey,
             circle_id,
@@ -78,7 +80,7 @@ impl ConflictFixture {
     async fn store1(&self) -> Store {
         Store::load(
             StoreDatabase::new(&self.db1),
-            self.store.storage.clone(),
+            self.store.clone(),
             self.founder.clone(),
         )
         .await
@@ -88,7 +90,7 @@ impl ConflictFixture {
     async fn store2(&self) -> Store {
         Store::load(
             StoreDatabase::new(&self.db2),
-            self.store.storage.clone(),
+            self.store.clone(),
             self.founder.clone(),
         )
         .await
@@ -514,7 +516,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     use crate::sync::cycle::{PreparedSyncComponents, StoreInitialization};
 
     let db1 = open_routing_db();
-    let (store, founder, journal) = persist_merge_operation(&db1, "resolve-closing").await;
+    let (store, _home, founder, journal) = persist_merge_operation(&db1, "resolve-closing").await;
     let circle_id = journal.circle_id();
     store
         .bind_device(&db1, &founder)
@@ -531,10 +533,6 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .invite_member(
             &db1,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "resolve-closing-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &member_pubkey,
             None,
             MemberRole::Member,
@@ -551,10 +549,10 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
 
     let (_store_temp, store_dir) = temp_store_dir();
     let owner_storage = crate::storage::CloudSyncStorage::new(
-        store.home.clone(),
+        _home.clone(),
         crate::storage::CloudCipher::Encrypted(routing()),
         crate::storage::BlobPathScheme::Hashed,
-        store.storage.store_id(),
+        "resolve-closing",
         founder.clone(),
     )
     .expect("open Circle owner storage");
@@ -594,59 +592,43 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .await
         .expect("register the founder's second device");
     let (_dir2, dir2) = temp_store_dir();
-    Store::load(
-        StoreDatabase::new(&db2),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 2 Store")
-    .authorize_writer()
-    .await
-    .expect("authorize device 2 pull")
-    .pull(&dir2, Some(&routing()))
-    .await
-    .expect("device 2 pulls the with-member Circle");
+    Store::load(StoreDatabase::new(&db2), store.clone(), founder.clone())
+        .await
+        .expect("load device 2 Store")
+        .authorize_writer()
+        .await
+        .expect("authorize device 2 pull")
+        .pull(&dir2, Some(&routing()))
+        .await
+        .expect("device 2 pulls the with-member Circle");
 
     // Each founder device removes the same member from the shared predecessor
     // without seeing the other's close, producing two concurrent close controls.
-    Store::load(
-        StoreDatabase::new(&db1),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 1 Store")
-    .circles()
-    .remove_circle_member(circle_id, member_pubkey.clone())
-    .await
-    .expect("device 1 authors an epoch close");
-    Store::load(
-        StoreDatabase::new(&db2),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 2 Store")
-    .circles()
-    .remove_circle_member(circle_id, member_pubkey)
-    .await
-    .expect("device 2 authors a concurrent epoch close");
+    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
+        .await
+        .expect("load device 1 Store")
+        .circles()
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("device 1 authors an epoch close");
+    Store::load(StoreDatabase::new(&db2), store.clone(), founder.clone())
+        .await
+        .expect("load device 2 Store")
+        .circles()
+        .remove_circle_member(circle_id, member_pubkey)
+        .await
+        .expect("device 2 authors a concurrent epoch close");
 
     let (_dir1, dir1) = temp_store_dir();
-    Store::load(
-        StoreDatabase::new(&db1),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 1 Store")
-    .authorize_writer()
-    .await
-    .expect("authorize device 1 pull")
-    .pull(&dir1, Some(&routing()))
-    .await
-    .expect("device 1 pulls the concurrent close");
+    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
+        .await
+        .expect("load device 1 Store")
+        .authorize_writer()
+        .await
+        .expect("authorize device 1 pull")
+        .pull(&dir1, Some(&routing()))
+        .await
+        .expect("device 1 pulls the concurrent close");
     let branches = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
@@ -677,17 +659,13 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // resolution successor under a new control coordinate would strand the close's
     // participant responses, which bind to the closing control at create-once
     // slots.
-    let error = Store::load(
-        StoreDatabase::new(&db1),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 1 Store")
-    .circles()
-    .resolve_circle_control(circle_id, closing[0].clone())
-    .await
-    .expect_err("resolving to the closing branch is refused");
+    let error = Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
+        .await
+        .expect("load device 1 Store")
+        .circles()
+        .resolve_circle_control(circle_id, closing[0].clone())
+        .await
+        .expect_err("resolving to the closing branch is refused");
     assert!(
         matches!(&error, CircleOperationError::ResolveToClosingBranch { circle_id: id }
             if *id == circle_id),
@@ -698,17 +676,13 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // The cancellation reopens that branch without covering the other close, so
     // the Circle remains conflicted until the Owner explicitly selects the
     // reopened branch.
-    Store::load(
-        StoreDatabase::new(&db1),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 1 Store")
-    .circles()
-    .cancel_circle_epoch_close(circle_id)
-    .await
-    .expect("cancel device 1's close while conflicted");
+    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
+        .await
+        .expect("load device 1 Store")
+        .circles()
+        .cancel_circle_epoch_close(circle_id)
+        .await
+        .expect("cancel device 1's close while conflicted");
     let after_cancel = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
@@ -740,17 +714,13 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     }
     let reopened = reopened.expect("one branch is the cancelled close's active successor");
     assert_eq!(closing_count, 1, "the concurrent close remains retained");
-    Store::load(
-        StoreDatabase::new(&db1),
-        store.storage.clone(),
-        founder.clone(),
-    )
-    .await
-    .expect("load device 1 Store")
-    .circles()
-    .resolve_circle_control(circle_id, reopened)
-    .await
-    .expect("resolve to the reopened branch");
+    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
+        .await
+        .expect("load device 1 Store")
+        .circles()
+        .resolve_circle_control(circle_id, reopened)
+        .await
+        .expect("resolve to the reopened branch");
     let circles = StoreDatabase::new(&db1)
         .get_circles(
             &keys::public_key_hex(&founder),
@@ -802,10 +772,6 @@ async fn non_owner_resolution_is_refused() {
         .invite_member(
             &fixture.db1,
             &fixture.founder,
-            &crate::sync::hlc::Hlc::new(
-                "resolve-non-owner".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &outsider_pubkey,
             None,
             MemberRole::Member,
@@ -831,7 +797,7 @@ async fn non_owner_resolution_is_refused() {
     let (_outsider_dir_temp, outsider_dir) = temp_store_dir();
     Store::load(
         StoreDatabase::new(&outsider_db),
-        fixture.store.storage.clone(),
+        fixture.store.clone(),
         outsider.clone(),
     )
     .await
@@ -853,7 +819,7 @@ async fn non_owner_resolution_is_refused() {
 
     let error = Store::load(
         StoreDatabase::new(&outsider_db),
-        fixture.store.storage.clone(),
+        fixture.store.clone(),
         outsider.clone(),
     )
     .await
@@ -914,7 +880,6 @@ async fn resolution_resumes_idempotently_after_a_restart() {
         .expect("count circle activations");
     let head_create_call = 2 * journal.operation().creation.access.len() + 4;
     after_publication
-        .store
         .home
         .fail_exact_create_before_call(head_create_call);
 

@@ -1,31 +1,18 @@
 use super::*;
 use std::sync::Arc;
 
-mod abandonment;
-mod acknowledgements;
-mod blob_lifecycle;
-pub(crate) mod blob_preparation;
-mod membership_mutation;
-mod membership_mutation_journal;
 mod operation;
-pub(crate) mod operations;
-mod preparation;
-pub(crate) mod reclaim;
-pub(crate) mod snapshot;
 
-pub(crate) use acknowledgements::StoreAckError;
-pub(super) use membership_mutation::{validate_prepared_publication, validate_prepared_transition};
-use membership_mutation_journal::{
-    decode_membership_mutation, encode_membership_mutation, encode_membership_progress,
-    exact_owned_remote, InviteMutationPlan, MembershipMutationPlan, MembershipMutationProgress,
-    MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan, RevokeMembershipPublication,
-    RevokeMutationPlan,
+pub(crate) use operation::acknowledgements::StoreAckError;
+pub(super) use operation::membership_mutation::{
+    validate_prepared_publication, validate_prepared_transition,
 };
-pub(super) use membership_mutation_journal::{
+pub(super) use operation::membership_mutation_journal::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
 pub(crate) use operation::AuthorizedWriterOperation;
 pub(super) use operation::StoreWriterAuthorizationError;
+pub(crate) use operation::{blob_preparation, operations, reclaim, snapshot};
 
 #[derive(Clone, Copy)]
 pub(super) struct SnapshotHistoryConstruction;
@@ -37,8 +24,7 @@ pub(super) fn authorize<'storage>(
     storage: &'storage Arc<dyn SyncStorage>,
     membership: crate::protocol::membership::MembershipChain,
     identity: &'storage UserKeypair,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
+    registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
     device_signer: UserKeypair,
 ) -> AuthorizedWriterOperation<'storage> {
     operation::AuthorizedWriterOperation::from_parts(
@@ -47,7 +33,6 @@ pub(super) fn authorize<'storage>(
         storage,
         membership,
         identity,
-        registration_ref,
         registration,
         device_signer,
     )

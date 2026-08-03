@@ -4,8 +4,13 @@ use super::*;
 async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store =
-        create_test_store_in_its_own_task(&db, "circle-merge-revoked-grant", &founder).await;
+    let store = create_test_store_in_its_own_task(
+        &db,
+        "circle-merge-revoked-grant",
+        &founder,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let successor = UserKeypair::generate();
     let successor_pubkey = keys::public_key_hex(&successor);
     let encryption = EncryptionService::from_key([42; 32]);
@@ -13,10 +18,6 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &successor_pubkey,
             None,
             MemberRole::Member,
@@ -53,33 +54,18 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         "circle-retained-operation-test",
         std::sync::Arc::new(custody),
     );
-    let cipher = store.storage.cipher_state().clone();
     store
-        .remove_member(
-            &db,
-            &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
-            &successor_pubkey,
-            &encryption,
-            &security,
-        )
+        .remove_member(&db, &founder, &successor_pubkey, &encryption, &security)
         .await
         .expect("remove successor through the production membership path");
-    let rotated_encryption = match cipher.snapshot() {
-        CloudCipher::Encrypted(encryption) => encryption,
-        CloudCipher::Plaintext => panic!("member removal requires encrypted storage"),
-    };
+    let rotated_encryption = security
+        .routing_encryption(true)
+        .expect("load rotated Store keyring")
+        .expect("scoped Store has routing encryption");
     store
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &successor_pubkey,
             None,
             MemberRole::Member,
@@ -170,19 +156,20 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
 
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(&db, "retained-circle-activation", founder.clone())
-        .await
-        .expect("create retained Circle Store");
+    let store = TestStore::create(
+        &db,
+        "retained-circle-activation",
+        founder.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create retained Circle Store");
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
         .invite_member(
             &db,
             &founder,
-            &crate::sync::hlc::Hlc::new(
-                "founder-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
-            ),
             &peer_pubkey,
             None,
             MemberRole::Member,
@@ -200,7 +187,6 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .expect("prepare retained Circle activation");
     for object in journal.operation().prepared_objects.values() {
         store
-            .storage
             .create_protocol_object(object)
             .await
             .expect("publish retained Circle activation object");
@@ -215,7 +201,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .bind_device(&db, &founder)
         .await
         .expect("bind retained Circle activation Store")
-        .load_circle_activations(commit_ref, &commit, &author)
+        .load_circle_activations(commit_ref, &commit, author.value())
         .await
         .expect("verify retained Circle activation fixture");
     let retained = verified
@@ -227,15 +213,21 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
             &retained,
             &commit,
             commit_ref,
-            &author,
+            author.value(),
             Some(&founder_pubkey),
         )
         .expect("parse retained Circle activation"),
         verified
     );
     assert_eq!(
-        VerifiedCircleActivations::parse_retained(&retained, &commit, commit_ref, &author, None,)
-            .expect("parse retained Circle activation before local registration"),
+        VerifiedCircleActivations::parse_retained(
+            &retained,
+            &commit,
+            commit_ref,
+            author.value(),
+            None,
+        )
+        .expect("parse retained Circle activation before local registration"),
         verified
     );
 
@@ -252,7 +244,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         &omitted,
         &commit,
         commit_ref,
-        &author,
+        author.value(),
         Some(&founder_pubkey),
     )
     .expect_err("retained Circle access cannot omit its envelope");
@@ -279,7 +271,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         &substituted,
         &commit,
         commit_ref,
-        &author,
+        author.value(),
         Some(&founder_pubkey),
     )
     .expect_err("retained Circle access cannot substitute another signed access pair");
@@ -299,7 +291,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         &tampered,
         &commit,
         commit_ref,
-        &author,
+        author.value(),
         Some(&founder_pubkey),
     )
     .expect_err("retained Circle access cannot alter a signed envelope");
@@ -316,7 +308,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         &noncanonical,
         &commit,
         commit_ref,
-        &author,
+        author.value(),
         Some(&founder_pubkey),
     )
     .expect_err("retained Circle activation bytes must be canonical");
