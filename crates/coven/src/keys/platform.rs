@@ -458,10 +458,6 @@ impl StoreKeys {
         &self.store_id
     }
 
-    pub(crate) fn device_identity_custody(&self) -> std::sync::Arc<dyn DeviceIdentityCustody> {
-        std::sync::Arc::new(KeyringIdentityCustody { keys: self.clone() })
-    }
-
     pub fn get_encryption_key(&self) -> Result<Option<String>, KeyError> {
         self.keyring
             .service()?
@@ -604,14 +600,10 @@ impl StoreKeys {
     }
 }
 
-struct KeyringIdentityCustody {
-    keys: StoreKeys,
-}
-
-impl DeviceIdentityCustody for KeyringIdentityCustody {
+impl DeviceIdentityCustody for StoreKeys {
     fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
-        let slot = KeyringSlot::DeviceSigningKey(self.keys.store_id.clone());
-        let Some(signing_key_hex) = self.keys.keyring.service()?.read(&slot)? else {
+        let slot = KeyringSlot::DeviceSigningKey(self.store_id.clone());
+        let Some(signing_key_hex) = self.keyring.service()?.read(&slot)? else {
             return Ok(None);
         };
         let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&signing_key_hex)
@@ -622,17 +614,16 @@ impl DeviceIdentityCustody for KeyringIdentityCustody {
     }
 
     fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
-        self.keys.keyring.service()?.write(
-            &KeyringSlot::DeviceSigningKey(self.keys.store_id.clone()),
+        self.keyring.service()?.write(
+            &KeyringSlot::DeviceSigningKey(self.store_id.clone()),
             &hex::encode(keypair.to_keypair_bytes()),
         )
     }
 
     fn forget(&self) -> Result<(), KeyError> {
-        self.keys
-            .keyring
+        self.keyring
             .service()?
-            .delete(&KeyringSlot::DeviceSigningKey(self.keys.store_id.clone()))
+            .delete(&KeyringSlot::DeviceSigningKey(self.store_id.clone()))
             .map(|_| ())
     }
 }
@@ -916,7 +907,7 @@ mod tests {
             )
             .expect("write signing key to the raw keyring");
 
-        let custody = StoreKeys::bind(store_id.to_string()).device_identity_custody();
+        let custody = std::sync::Arc::new(StoreKeys::bind(store_id.to_string()));
         let read = require_identity(custody.as_ref()).expect("read the identity back");
         assert_eq!(
             read.public_key(),
@@ -932,7 +923,7 @@ mod tests {
     fn require_identity_maps_absence_to_no_device_identity() {
         test_keyring::install();
         let custody =
-            StoreKeys::bind("require-identity-absent-test".to_string()).device_identity_custody();
+            std::sync::Arc::new(StoreKeys::bind("require-identity-absent-test".to_string()));
 
         match require_identity(custody.as_ref()) {
             Err(error) => assert!(matches!(error, KeyError::NoDeviceIdentity), "got {error:?}"),
@@ -947,8 +938,9 @@ mod tests {
     #[test]
     fn establishing_the_same_identity_again_is_idempotent() {
         test_keyring::install();
-        let custody = StoreKeys::bind("import-identity-idempotent-test".to_string())
-            .device_identity_custody();
+        let custody = std::sync::Arc::new(StoreKeys::bind(
+            "import-identity-idempotent-test".to_string(),
+        ));
 
         let keypair = UserKeypair::generate();
         custody
@@ -973,7 +965,7 @@ mod tests {
     fn establishing_identity_refuses_to_overwrite_a_different_identity() {
         test_keyring::install();
         let custody =
-            StoreKeys::bind("import-identity-mismatch-test".to_string()).device_identity_custody();
+            std::sync::Arc::new(StoreKeys::bind("import-identity-mismatch-test".to_string()));
 
         let established = UserKeypair::generate();
         custody
@@ -1015,8 +1007,9 @@ mod tests {
         test_keyring::install();
         let pending = mint_pending_identity().expect("mint pending identity");
         let request_pubkey = public_key_hex(&pending);
-        let custody = StoreKeys::bind("pending-identity-establish-test".to_string())
-            .device_identity_custody();
+        let custody = std::sync::Arc::new(StoreKeys::bind(
+            "pending-identity-establish-test".to_string(),
+        ));
 
         custody
             .establish(&pending)
@@ -1083,9 +1076,9 @@ mod tests {
         assert_ne!(pending_a.public_key(), pending_b.public_key());
 
         let custody_a =
-            StoreKeys::bind("two-concurrent-joins-store-a".to_string()).device_identity_custody();
+            std::sync::Arc::new(StoreKeys::bind("two-concurrent-joins-store-a".to_string()));
         let custody_b =
-            StoreKeys::bind("two-concurrent-joins-store-b".to_string()).device_identity_custody();
+            std::sync::Arc::new(StoreKeys::bind("two-concurrent-joins-store-b".to_string()));
         custody_a
             .establish(&pending_a)
             .expect("establish a into store a");

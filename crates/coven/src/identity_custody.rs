@@ -44,7 +44,7 @@ impl IdentityCustody {
         store_dir: &StoreDir,
     ) -> Arc<dyn DeviceIdentityCustody> {
         match self {
-            IdentityCustody::Keyring => store_keys.device_identity_custody(),
+            IdentityCustody::Keyring => Arc::new(store_keys.clone()),
             IdentityCustody::Passphrase(passphrase) => {
                 Arc::new(PassphraseIdentityCustody::new(passphrase, store_dir))
             }
@@ -191,9 +191,9 @@ mod tests {
         );
     }
 
-    /// Two stores' keyring identities never collide: each `KeyringIdentityCustody`
-    /// is scoped by its own `store_id`, the identity sibling of the master
-    /// key's per-store keyring account.
+    /// Two stores' keyring identities never collide: each `StoreKeys` custody
+    /// is scoped by its own `store_id`, the identity sibling of the master key's
+    /// per-store keyring account.
     #[test]
     fn keyring_preset_is_scoped_to_its_store() {
         test_keyring::install();
