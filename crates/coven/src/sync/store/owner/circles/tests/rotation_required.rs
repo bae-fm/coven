@@ -332,7 +332,7 @@ impl RotationFixture {
         StoreDatabase::new(&self.db)
             .run_host_store_write_for_test(
                 Some(EncryptionService::from_key([42; 32])),
-                Some(staging),
+                Some(Box::new(staging) as Box<dyn crate::database::AudienceBlobMoveStaging>),
                 move |transaction| {
                     transaction
                         .execute(

@@ -129,7 +129,7 @@ impl StoreDatabase {
     pub(crate) async fn run_host_store_write_for_test<R>(
         &self,
         routing_encryption: Option<crate::encryption::EncryptionService>,
-        blob_staging: Option<crate::sync::HostWriteBlobStaging>,
+        blob_staging: Option<Box<dyn crate::database::AudienceBlobMoveStaging>>,
         operation: impl for<'transaction, 'connection> FnOnce(
                 crate::database::DatabaseTestTransaction<'transaction, 'connection>,
             ) -> Result<R, DbError>
@@ -151,7 +151,7 @@ impl StoreDatabase {
                     &gates,
                     &blob_decls,
                     routing_encryption.as_ref(),
-                    blob_staging.as_ref(),
+                    blob_staging.as_deref(),
                     write_id,
                 )?
                 .execute(|transaction| {

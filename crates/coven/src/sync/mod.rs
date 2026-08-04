@@ -35,6 +35,7 @@ pub(crate) use cycle::RotationKeyAdoption;
 pub use error::SyncError;
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use status::DeviceActivity;
+pub(crate) use store::Store;
 pub use store::{BlobCacheError, BlobStream};
 pub use store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval,
@@ -50,5 +51,4 @@ pub use store::{
     ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
     ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap,
 };
-pub(crate) use store::{HostWriteBlobStaging, Store};
 pub use sync_loop::SyncLoopStatus;

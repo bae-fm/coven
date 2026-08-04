@@ -78,7 +78,10 @@ pub(crate) use candidate_records::select_author_exclusion_activation_locator;
 pub(crate) use candidate_records::CandidateCleanupObject;
 pub(crate) use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
-pub(crate) use host_write_capture::HostWriteBlobTransaction;
+pub(crate) use host_write_capture::{
+    audience_moves_by_row, AudienceBlobMoveStaging, HostWriteBlobTransaction,
+    StagedAudienceBlobRollback,
+};
 pub(crate) use host_write_operation::StoreRowWrites;
 pub use host_write_operation::WriteBatch;
 pub(crate) use host_write_operation::{HostWriteError, HostWriteOperation};

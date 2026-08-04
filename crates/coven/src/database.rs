@@ -221,6 +221,10 @@ pub(crate) use store::{
     VerifiedStoreSnapshotStability,
 };
 pub(crate) use store::{
+    audience_moves_by_row, local_blob_cleanup_intents, AudienceBlobMoveStaging, PostUpload,
+    StagedAudienceBlobRollback,
+};
+pub(crate) use store::{
     copy_table_with_conflicts, install_circle_bootstrap_image_on,
     install_circle_bootstrap_remote_objects_on, projection_table_names,
     verify_circle_bootstrap_image, BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot,
@@ -236,7 +240,6 @@ pub(crate) use store::{
     StoreRowWrites, StoreWritePreparation, TableSchema, ValidatedChangeset,
     VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
 };
-pub(crate) use store::{local_blob_cleanup_intents, PostUpload};
 #[cfg(test)]
 pub(crate) use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};
 #[cfg(test)]

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::database::{AudienceMove, AudiencePartition};
@@ -59,36 +58,6 @@ impl HostWriteBlobStaging {
         })
     }
 
-    pub(crate) fn rollback_staged_audience_blobs(
-        &self,
-        files: StagedAudienceBlobFiles,
-        operation: DbError,
-    ) -> DbError {
-        match self.runtime.block_on(files.rollback()) {
-            Ok(()) => operation,
-            Err(cleanup) => DbError::Message(format!(
-                "{operation}; audience blob rollback failed: {cleanup}"
-            )),
-        }
-    }
-
-    pub(crate) fn record_prepared_transition_local_blob_moves(
-        facts: &mut StoreWriteBlobFacts,
-        moves: &[AudienceMove],
-    ) -> Result<(), DbError> {
-        let moved_rows = audience_moves_by_row(moves)?;
-        for fact in &mut facts.blobs {
-            let Some(audience_move) = moved_rows.get(&(fact.table.clone(), fact.row_id.clone()))
-            else {
-                continue;
-            };
-            if audience_move.destination == crate::protocol::circle::Audience::Local {
-                fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
-            }
-        }
-        Ok(())
-    }
-
     async fn stage_audience_move_blobs_inner(
         &self,
         transaction: &HostWriteBlobTransaction<'_, '_>,
@@ -97,7 +66,7 @@ impl HostWriteBlobStaging {
         partitions: &[AudiencePartition],
         files: &mut StagedAudienceBlobFiles,
     ) -> Result<(), DbError> {
-        let moved_rows = audience_moves_by_row(moves)?;
+        let moved_rows = crate::database::audience_moves_by_row(moves)?;
         if moved_rows.is_empty() {
             return Ok(());
         }
@@ -439,27 +408,6 @@ impl StagedAudienceBlobFile {
     }
 }
 
-fn audience_moves_by_row(
-    moves: &[AudienceMove],
-) -> Result<BTreeMap<(String, String), &AudienceMove>, DbError> {
-    let mut moved_rows = BTreeMap::new();
-    for audience_move in moves {
-        for row in &audience_move.rows {
-            if let Some(prior) = moved_rows.insert(row.clone(), audience_move) {
-                if prior.source != audience_move.source
-                    || prior.destination != audience_move.destination
-                {
-                    return Err(DbError::Message(format!(
-                        "row {}/{} belongs to conflicting audience moves",
-                        row.0, row.1
-                    )));
-                }
-            }
-        }
-    }
-    Ok(moved_rows)
-}
-
 fn source_authority(
     fact: &StoreWriteBlobFact,
     source: &crate::protocol::circle::Audience,
@@ -558,4 +506,31 @@ fn move_materialization_error(
         "BlobMoveRequiresMaterialization: {}/{}/{} at {}: {reason}",
         fact.table, fact.row_id, fact.column, fact.row_stamp
     ))
+}
+
+impl crate::database::AudienceBlobMoveStaging for HostWriteBlobStaging {
+    fn stage_audience_move_blobs_on(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        facts: &mut StoreWriteBlobFacts,
+        moves: &[AudienceMove],
+        partitions: &[AudiencePartition],
+    ) -> Result<crate::database::StagedAudienceBlobRollback, DbError> {
+        let files = HostWriteBlobStaging::stage_audience_move_blobs_on(
+            self,
+            transaction,
+            facts,
+            moves,
+            partitions,
+        )?;
+        let runtime = self.runtime.clone();
+        Ok(Box::new(move |operation: DbError| {
+            match runtime.block_on(files.rollback()) {
+                Ok(()) => operation,
+                Err(cleanup) => DbError::Message(format!(
+                    "{operation}; audience blob rollback failed: {cleanup}"
+                )),
+            }
+        }))
+    }
 }

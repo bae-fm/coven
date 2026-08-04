@@ -333,7 +333,7 @@ impl StoreRowWrites {
         &self,
         operation: HostWriteOperation<R, E>,
         routing_encryption: Option<EncryptionService>,
-        blob_staging: Option<crate::sync::HostWriteBlobStaging>,
+        blob_staging: Option<Box<dyn crate::database::AudienceBlobMoveStaging>>,
     ) -> Result<WriteReceipt<R>, HostWriteError<E>>
     where
         R: Send + 'static,
@@ -360,7 +360,7 @@ impl StoreRowWrites {
                     &gates,
                     &blob_decls,
                     routing_encryption.as_ref(),
-                    blob_staging.as_ref(),
+                    blob_staging.as_deref(),
                     write_id,
                 )
                 .map_err(HostWriteError::from)

@@ -329,7 +329,7 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn execute_sql_with_blob_staging_for_test(
         &self,
-        blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,
+        blob_staging: Option<Box<dyn crate::database::AudienceBlobMoveStaging>>,
         sql: String,
     ) -> crate::CovenResult<crate::WriteReceipt<()>> {
         self.rows

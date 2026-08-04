@@ -86,8 +86,10 @@ impl StoreRows {
             .routing_encryption(self.writes.requires_routing_encryption())
     }
 
-    fn host_write_blob_staging(&self) -> Option<crate::sync::store::HostWriteBlobStaging> {
-        self.sync.host_write_blob_staging()
+    fn host_write_blob_staging(&self) -> Option<Box<dyn crate::database::AudienceBlobMoveStaging>> {
+        self.sync
+            .host_write_blob_staging()
+            .map(|staging| Box::new(staging) as Box<dyn crate::database::AudienceBlobMoveStaging>)
     }
 
     pub(crate) async fn pending_writes(
@@ -211,7 +213,7 @@ impl StoreRows {
     #[cfg(test)]
     pub(crate) async fn execute_sql_with_blob_staging_for_test(
         &self,
-        blob_staging: Option<crate::sync::store::HostWriteBlobStaging>,
+        blob_staging: Option<Box<dyn crate::database::AudienceBlobMoveStaging>>,
         sql: String,
     ) -> CovenResult<WriteReceipt<()>> {
         let operation = HostWriteOperation::new(WriteBatch::new(), move |context| {

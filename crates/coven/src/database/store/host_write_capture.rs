@@ -17,8 +17,25 @@ use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteSt
 
 use super::*;
 
+/// Rolls back the staged audience blob files after a failed capture,
+/// folding any cleanup failure into the operation error it returns.
+pub(crate) type StagedAudienceBlobRollback = Box<dyn FnOnce(DbError) -> DbError + Send>;
+
+/// Staging audience-move blobs into the spool needs the connected staging
+/// owner replication composes. The capture transaction names only this port;
+/// the returned rollback closure is consumed on failure.
+pub(crate) trait AudienceBlobMoveStaging: Send + Sync {
+    fn stage_audience_move_blobs_on(
+        &self,
+        transaction: &HostWriteBlobTransaction<'_, '_>,
+        facts: &mut StoreWriteBlobFacts,
+        moves: &[AudienceMove],
+        partitions: &[AudiencePartition],
+    ) -> Result<StagedAudienceBlobRollback, DbError>;
+}
+
 enum AudienceBlobMoveMaterialization<'a> {
-    Host(&'a crate::sync::HostWriteBlobStaging),
+    Host(&'a dyn AudienceBlobMoveStaging),
     PreparedTransition,
 }
 
@@ -528,7 +545,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         gates: &'operation Gates,
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
-        blob_staging: Option<&'operation crate::sync::HostWriteBlobStaging>,
+        blob_staging: Option<&'operation dyn AudienceBlobMoveStaging>,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         Self::begin(
@@ -707,7 +724,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     )
                 }
                 (true, Some(AudienceBlobMoveMaterialization::PreparedTransition)) => {
-                    crate::sync::HostWriteBlobStaging::record_prepared_transition_local_blob_moves(
+                    record_prepared_transition_local_blob_moves(
                         &mut blob_facts,
                         &partitioned.moves,
                     )
@@ -747,8 +764,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 Ok(status) => status,
                 Err(error) => {
                     let error = match (&blob_materialization, staged_files) {
-                        (Some(AudienceBlobMoveMaterialization::Host(staging)), Some(files)) => {
-                            staging.rollback_staged_audience_blobs(files, error)
+                        (Some(AudienceBlobMoveMaterialization::Host(_)), Some(rollback)) => {
+                            rollback(error)
                         }
                         (_, None) => error,
                         (_, Some(_)) => unreachable!("staged files require host staging"),
@@ -925,4 +942,41 @@ impl StoreDatabase {
             local,
         })
     }
+}
+
+pub(crate) fn record_prepared_transition_local_blob_moves(
+    facts: &mut StoreWriteBlobFacts,
+    moves: &[AudienceMove],
+) -> Result<(), DbError> {
+    let moved_rows = audience_moves_by_row(moves)?;
+    for fact in &mut facts.blobs {
+        let Some(audience_move) = moved_rows.get(&(fact.table.clone(), fact.row_id.clone())) else {
+            continue;
+        };
+        if audience_move.destination == crate::protocol::circle::Audience::Local {
+            fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn audience_moves_by_row(
+    moves: &[AudienceMove],
+) -> Result<BTreeMap<(String, String), &AudienceMove>, DbError> {
+    let mut moved_rows = BTreeMap::new();
+    for audience_move in moves {
+        for row in &audience_move.rows {
+            if let Some(prior) = moved_rows.insert(row.clone(), audience_move) {
+                if prior.source != audience_move.source
+                    || prior.destination != audience_move.destination
+                {
+                    return Err(DbError::Message(format!(
+                        "row {}/{} belongs to conflicting audience moves",
+                        row.0, row.1
+                    )));
+                }
+            }
+        }
+    }
+    Ok(moved_rows)
 }
