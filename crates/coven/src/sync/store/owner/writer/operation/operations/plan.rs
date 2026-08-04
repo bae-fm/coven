@@ -9,12 +9,12 @@ pub(crate) enum StoreOperationBatch {
 
     ProviderAccessGrant(super::provider::StoreMemberProviderAccessGrantRef),
     Attempt(DeviceJoinAttemptRef),
-    Abandonment(super::device_join::DeviceJoinAbandonmentRef),
+    Abandonment(crate::protocol::store_commit::DeviceJoinAbandonmentRef),
     Outcome {
         outcome: DeviceJoinOutcomeRef,
         registration: Option<Box<ActivatedStoreDeviceRegistration>>,
     },
-    CleanupReceipt(super::device_join::DeviceJoinCleanupReceiptRef),
+    CleanupReceipt(crate::protocol::store_commit::DeviceJoinCleanupReceiptRef),
     DeviceExclusionProposal(super::store_commit::RetainedStoreDeviceExclusionProposal),
     DeviceExclusionOutcome(super::store_commit::RetainedStoreDeviceExclusionOutcome),
     ReclaimAuthorization(Box<crate::protocol::reclaim::ReclaimAuthorizationRef>),

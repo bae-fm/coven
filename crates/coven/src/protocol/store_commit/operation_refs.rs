@@ -129,7 +129,7 @@ pub(super) fn validate_device_join_outcome_refs(
 }
 
 pub(super) fn validate_device_join_cleanup_receipt_refs(
-    receipts: &[crate::sync::store::DeviceJoinCleanupReceiptRef],
+    receipts: &[crate::protocol::store_commit::DeviceJoinCleanupReceiptRef],
 ) -> Result<(), StoreProtocolError> {
     if receipts.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(StoreProtocolError::JoinOutcomeMismatch);

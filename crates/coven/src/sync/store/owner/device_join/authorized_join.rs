@@ -1,6 +1,7 @@
 use super::cleanup::require_cancelled_outcome;
 use super::journal::{database_error, provider_error};
 use super::*;
+use crate::protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
 mod provider_administrator;
 

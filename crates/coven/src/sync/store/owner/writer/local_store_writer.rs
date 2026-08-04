@@ -417,7 +417,7 @@ impl LocalStoreWriter {
 
     pub(crate) fn verify_device_join_abandonment(
         &self,
-        reference: &crate::sync::store::owner::device_join::DeviceJoinAbandonmentRef,
+        reference: &crate::protocol::store_commit::DeviceJoinAbandonmentRef,
         value: &crate::sync::store::owner::device_join::DeviceJoinAbandonmentObject,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
         reference.verify(value, self.registration.value())
@@ -555,7 +555,7 @@ impl LocalStoreWriter {
 
     pub(crate) fn verify_device_join_cleanup_receipt(
         &self,
-        reference: &crate::sync::store::owner::device_join::DeviceJoinCleanupReceiptRef,
+        reference: &crate::protocol::store_commit::DeviceJoinCleanupReceiptRef,
         receipt: &crate::sync::store::owner::device_join::DeviceJoinCleanupReceiptObject,
         attempt: &crate::protocol::store_commit::DeviceJoinAttempt,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {

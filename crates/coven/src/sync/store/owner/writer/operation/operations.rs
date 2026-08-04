@@ -9,7 +9,6 @@ use crate::protocol::store_commit::{
     StoreOperationMembershipAuthority, StoreRootRef,
 };
 use crate::protocol::{circle_control, membership, provider, remote_object, store_commit};
-use crate::sync::store::owner::device_join;
 use crate::sync::store::StoreError;
 mod candidate;
 mod plan;

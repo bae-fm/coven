@@ -1302,7 +1302,7 @@ fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
             b"attempt body",
         ),
     };
-    let abandonment = crate::sync::store::DeviceJoinAbandonmentRef {
+    let abandonment = crate::protocol::store_commit::DeviceJoinAbandonmentRef {
         attempt_id,
         abandonment_hash: ObjectHash::digest(b"abandonment body"),
         object: exact(

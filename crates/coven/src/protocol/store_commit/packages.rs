@@ -607,7 +607,7 @@ pub enum CandidateExclusiveObjectRef {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceJoinAttemptDecisionRef {
     Attempt(DeviceJoinAttemptRef),
-    Abandoned(crate::sync::store::DeviceJoinAbandonmentRef),
+    Abandoned(crate::protocol::store_commit::DeviceJoinAbandonmentRef),
 }
 
 impl DeviceJoinAttemptDecisionRef {
@@ -627,7 +627,8 @@ pub struct StoreCommitOperations {
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_cleanup_receipts: Vec<crate::sync::store::DeviceJoinCleanupReceiptRef>,
+    pub device_join_cleanup_receipts:
+        Vec<crate::protocol::store_commit::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<crate::protocol::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
@@ -700,7 +701,8 @@ pub struct StoreCommitOperationsInput<'a> {
     pub control: Option<StoreControl>,
     pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_cleanup_receipts: Vec<crate::sync::store::DeviceJoinCleanupReceiptRef>,
+    pub device_join_cleanup_receipts:
+        Vec<crate::protocol::store_commit::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<crate::protocol::provider::StoreMemberProviderAccessGrantRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
     pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,

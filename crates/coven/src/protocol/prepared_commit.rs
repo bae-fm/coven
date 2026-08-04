@@ -376,7 +376,9 @@ impl PreparedStoreOperationCommit {
 
     pub(crate) fn acknowledgement_remote_objects(
         &self,
-        acknowledgement: &crate::database::ExactProtocolObject<super::store_commit::StoreAck>,
+        acknowledgement: &crate::protocol::objects::ExactProtocolObject<
+            super::store_commit::StoreAck,
+        >,
     ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, PreparedCommitError> {
         let reference = self.commit.acknowledgement().ok_or_else(|| {
             PreparedCommitError(
@@ -405,7 +407,9 @@ impl PreparedStoreOperationCommit {
 
     pub(crate) fn circle_acknowledgement_remote_objects(
         &self,
-        acknowledgement: &crate::database::ExactProtocolObject<super::store_commit::CircleAck>,
+        acknowledgement: &crate::protocol::objects::ExactProtocolObject<
+            super::store_commit::CircleAck,
+        >,
     ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, PreparedCommitError> {
         let reference = self
             .commit

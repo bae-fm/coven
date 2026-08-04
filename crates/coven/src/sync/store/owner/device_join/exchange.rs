@@ -1,6 +1,7 @@
 use super::cleanup::{require_cancelled_outcome, validate_terminals};
 use super::journal::require_distinct_slots;
 use super::*;
+use crate::protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
 const OFFER_DOMAIN: &[u8] = b"coven.device-join-offer.v1\0";
 const ACCESS_REQUEST_DOMAIN: &[u8] = b"coven.device-provider-access-request.v1\0";
@@ -522,35 +523,6 @@ pub struct DeviceJoinCancellation {
     pub outcome_activation: StoreBatchCommitRef,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceJoinAbandonmentRef {
-    pub attempt_id: DeviceJoinAttemptId,
-    pub abandonment_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-impl DeviceJoinAbandonmentRef {
-    pub(crate) fn verify(
-        &self,
-        abandonment: &DeviceJoinAbandonmentObject,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<(), DeviceJoinError> {
-        abandonment.owner_registration.verify_registration(owner)?;
-        if self.attempt_id != abandonment.attempt_id
-            || self.abandonment_hash != abandonment.abandonment_hash()
-        {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        verify_signature(
-            &owner.device_signing_pubkey,
-            &abandonment.signature,
-            ABANDONMENT_DOMAIN,
-            &abandonment.signed_fields(),
-        )
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeviceJoinAbandonmentObject {
@@ -913,35 +885,6 @@ pub enum JoinerJoinTerminal {
     WriteRevoked(DeviceJoinProducerWriteRevocation),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceJoinCleanupReceiptRef {
-    pub attempt_id: DeviceJoinAttemptId,
-    pub receipt_hash: ObjectHash,
-    pub object: ExactObjectRef,
-}
-
-impl DeviceJoinCleanupReceiptRef {
-    pub(crate) fn verify(
-        &self,
-        receipt: &DeviceJoinCleanupReceiptObject,
-        executor: &StoreDeviceRegistration,
-    ) -> Result<(), DeviceJoinError> {
-        receipt.executor.verify_registration(executor)?;
-        if self.attempt_id != receipt.cancellation.attempt().attempt_id
-            || self.receipt_hash != receipt.receipt_hash()
-        {
-            return Err(DeviceJoinError::CleanupMismatch);
-        }
-        verify_signature(
-            &executor.device_signing_pubkey,
-            &receipt.signature,
-            CLEANUP_RECEIPT_DOMAIN,
-            &receipt.signed_fields(),
-        )
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeviceJoinCleanupReceiptObject {
@@ -1115,4 +1058,46 @@ fn domain_json<T: Serialize>(domain: &[u8], value: &T) -> Vec<u8> {
     let mut bytes = domain.to_vec();
     bytes.extend(serde_json::to_vec(value).expect("closed device join serialization cannot fail"));
     bytes
+}
+
+impl DeviceJoinAbandonmentRef {
+    pub(crate) fn verify(
+        &self,
+        abandonment: &DeviceJoinAbandonmentObject,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<(), DeviceJoinError> {
+        abandonment.owner_registration.verify_registration(owner)?;
+        if self.attempt_id != abandonment.attempt_id
+            || self.abandonment_hash != abandonment.abandonment_hash()
+        {
+            return Err(DeviceJoinError::AttemptMismatch);
+        }
+        verify_signature(
+            &owner.device_signing_pubkey,
+            &abandonment.signature,
+            ABANDONMENT_DOMAIN,
+            &abandonment.signed_fields(),
+        )
+    }
+}
+
+impl DeviceJoinCleanupReceiptRef {
+    pub(crate) fn verify(
+        &self,
+        receipt: &DeviceJoinCleanupReceiptObject,
+        executor: &StoreDeviceRegistration,
+    ) -> Result<(), DeviceJoinError> {
+        receipt.executor.verify_registration(executor)?;
+        if self.attempt_id != receipt.cancellation.attempt().attempt_id
+            || self.receipt_hash != receipt.receipt_hash()
+        {
+            return Err(DeviceJoinError::CleanupMismatch);
+        }
+        verify_signature(
+            &executor.device_signing_pubkey,
+            &receipt.signature,
+            CLEANUP_RECEIPT_DOMAIN,
+            &receipt.signed_fields(),
+        )
+    }
 }

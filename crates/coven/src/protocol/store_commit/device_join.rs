@@ -606,3 +606,19 @@ pub struct OwnerRecoveryCursor {
     pub owner_grant: MembershipGrantId,
     pub position: OwnerRecoveryPosition,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinAbandonmentRef {
+    pub attempt_id: DeviceJoinAttemptId,
+    pub abandonment_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinCleanupReceiptRef {
+    pub attempt_id: DeviceJoinAttemptId,
+    pub receipt_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
