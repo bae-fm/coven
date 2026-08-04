@@ -23,3 +23,14 @@ internal so another layer can perform its work.
 
 Coven's Cargo dev and test profiles compile incrementally. Do not set
 `CARGO_INCREMENTAL=0` when building or testing this repository.
+
+## File and impl layout
+
+- Keep files at or under 1,000 lines, ideally. When a file's test module
+  pushes it past that, split the tests into a sibling `*_test.rs` (or
+  `tests.rs`) file rather than growing the production file.
+- Never split a type's inherent impl across separate blocks in one file:
+  all of a type's methods live in one `impl` block. Within an impl,
+  `#[cfg(test)]` methods come after the production methods.
+- When a type carries many test-only methods and its tests are split out,
+  those test-only methods move to an `impl` block in the test file.
