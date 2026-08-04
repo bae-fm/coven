@@ -231,9 +231,7 @@ impl AuthorizedWriterOperation<'_> {
     }
 
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, crate::database::DbError> {
-        crate::database::LocalBlobCleanup::new(&self.database, self.store_dir)
-            .drain()
-            .await
+        self.history.drain_local_blob_cleanup().await
     }
 
     pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), crate::database::DbError> {

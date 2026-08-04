@@ -443,9 +443,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }))
     }
 
-    pub(super) async fn finish_pull_package_cleanup(
-        &self,
-    ) -> Result<bool, crate::database::DbError> {
+    pub(super) async fn drain_local_blob_cleanup(&self) -> Result<bool, crate::database::DbError> {
         crate::database::LocalBlobCleanup::new(&self.database, self.store_dir)
             .drain()
             .await

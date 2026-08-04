@@ -395,7 +395,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         });
         let local_blob_cleanup_pending =
             self.history
-                .finish_pull_package_cleanup()
+                .drain_local_blob_cleanup()
                 .await
                 .map_err(|error| {
                     StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
