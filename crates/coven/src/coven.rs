@@ -333,7 +333,7 @@ impl CovenBuilder {
             downloads: self.max_concurrent_downloads,
         };
         let open_guard = Arc::new(StoreOpenGuard::acquire(&store_dir)?);
-        store_dir.remove_orphaned_blob_temps(std::time::SystemTime::now())?;
+        store_dir.remove_orphaned_blob_temps(self.clock.now().into())?;
         let db = Database::open(
             &db_path,
             tables.clone(),

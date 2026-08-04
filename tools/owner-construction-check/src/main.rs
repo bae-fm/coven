@@ -5,6 +5,13 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+mod capability_boundaries;
+use capability_boundaries::{
+    find_capability_boundary_violations, CapabilityBoundaryViolation, GatedCapability,
+    AMBIENT_BOUNDARY, CRYPTO_BOUNDARY, FILESYSTEM_BOUNDARY, KEYRING_BOUNDARY, NETWORK_BOUNDARY,
+    RUNTIME_BOUNDARY,
+};
+
 const CAPABILITY_TYPES: &[&str] = &[
     "CircleEpochAccess",
     "ClockRef",
@@ -288,9 +295,9 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
 ];
 
 #[derive(Clone)]
-struct RustFile {
-    relative_path: String,
-    syntax: syn::File,
+pub(crate) struct RustFile {
+    pub(crate) relative_path: String,
+    pub(crate) syntax: syn::File,
 }
 
 #[derive(Default)]
@@ -552,13 +559,24 @@ struct CheckResult {
     retained_service_construction: Vec<RetainedServiceConstructionViolation>,
     retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
     deep_parent_paths: Vec<DeepParentPathViolation>,
+    capability_boundaries: Vec<CapabilityBoundaryViolation>,
 }
+
+const CAPABILITY_BOUNDARY_FLAGS: &[(&str, &[GatedCapability])] = &[
+    ("--network-boundary", NETWORK_BOUNDARY),
+    ("--crypto-boundary", CRYPTO_BOUNDARY),
+    ("--keyring-boundary", KEYRING_BOUNDARY),
+    ("--runtime-boundary", RUNTIME_BOUNDARY),
+    ("--ambient-boundary", AMBIENT_BOUNDARY),
+    ("--filesystem-boundary", FILESYSTEM_BOUNDARY),
+];
 
 fn main() {
     let mut database_boundary = false;
     let mut retained_service_returns = false;
     let mut retained_service_construction = false;
     let mut retained_capability_parameters = false;
+    let mut capability_boundaries: Vec<&'static [GatedCapability]> = Vec::new();
     let mut root = None;
     for argument in std::env::args_os().skip(1) {
         if argument == "--database-boundary" {
@@ -569,11 +587,16 @@ fn main() {
             retained_service_construction = true;
         } else if argument == "--retained-capability-parameters" {
             retained_capability_parameters = true;
+        } else if let Some((_, boundary)) = CAPABILITY_BOUNDARY_FLAGS
+            .iter()
+            .find(|(flag, _)| argument == *flag)
+        {
+            capability_boundaries.push(boundary);
         } else if root.is_none() {
             root = Some(PathBuf::from(argument));
         } else {
             eprintln!(
-                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [root]"
+                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [root]"
             );
             std::process::exit(2);
         }
@@ -585,6 +608,7 @@ fn main() {
         retained_service_returns,
         retained_service_construction,
         retained_capability_parameters,
+        &capability_boundaries,
     ) {
         Ok(result)
             if result.owner_construction.is_empty()
@@ -592,7 +616,8 @@ fn main() {
                 && result.service_returns.is_empty()
                 && result.retained_service_construction.is_empty()
                 && result.retained_capability_parameters.is_empty()
-                && result.deep_parent_paths.is_empty() => {}
+                && result.deep_parent_paths.is_empty()
+                && result.capability_boundaries.is_empty() => {}
         Ok(result) => {
             for violation in &result.owner_construction {
                 eprintln!(
@@ -653,6 +678,15 @@ fn main() {
                     violation.path, violation.line
                 );
             }
+            for violation in &result.capability_boundaries {
+                eprintln!(
+                    "{}:{}: {} is confined to {}",
+                    violation.path,
+                    violation.line,
+                    violation.kind,
+                    violation.homes.join(", ")
+                );
+            }
             if !result.owner_construction.is_empty() {
                 eprintln!(
                     "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
@@ -683,6 +717,11 @@ fn main() {
                     "import the capability from the immediate parent or from its domain boundary"
                 );
             }
+            if !result.capability_boundaries.is_empty() {
+                eprintln!(
+                    "raw capabilities live with their declared owners; compose the owner that retains the capability instead of naming its crates or construction paths"
+                );
+            }
             std::process::exit(1);
         }
         Err(error) => {
@@ -698,6 +737,7 @@ fn check(
     check_retained_service_returns: bool,
     check_retained_service_construction: bool,
     check_retained_capability_parameters: bool,
+    capability_boundaries: &[&'static [GatedCapability]],
 ) -> Result<CheckResult, String> {
     let files = rust_files(root)?;
     let structs = collect_structs(&files);
@@ -744,6 +784,10 @@ fn check(
             Vec::new()
         },
         deep_parent_paths: find_deep_parent_path_violations(&files),
+        capability_boundaries: capability_boundaries
+            .iter()
+            .flat_map(|boundary| find_capability_boundary_violations(&files, boundary))
+            .collect(),
     })
 }
 
@@ -1651,7 +1695,7 @@ fn find_retained_service_construction_violations(
     violations.into_iter().collect()
 }
 
-fn is_test_source(path: &str) -> bool {
+pub(crate) fn is_test_source(path: &str) -> bool {
     path.contains("/tests/")
         || path.ends_with("/tests.rs")
         || path.ends_with("_tests.rs")
@@ -1663,7 +1707,7 @@ fn is_test_source(path: &str) -> bool {
         || path.ends_with("/test_support.rs")
 }
 
-fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+pub(crate) fn is_test_only(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attribute| {
         attribute.path().is_ident("test")
             || (attribute.path().is_ident("cfg")

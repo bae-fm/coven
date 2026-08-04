@@ -49,7 +49,7 @@ run_check "restricted-path Rust visibility" scripts/check-rust-visibility.sh || 
     exit 1
 }
 
-run_check "owner construction boundaries" cargo run --quiet -p owner-construction-check -- --database-boundary --retained-service-construction --retained-service-returns --retained-capability-parameters . || {
+run_check "owner construction boundaries" scripts/check-owner-boundaries.sh || {
     echo "Inject retained owners; construct the owner graph only at approved roots"
     exit 1
 }

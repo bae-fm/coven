@@ -17,6 +17,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Restricted-path Rust visibility
         run: scripts/check-rust-visibility.sh
+      - name: Owner construction and capability boundaries
+        run: scripts/check-owner-boundaries.sh
       - name: No new #[allow(dead_code)]
         # dead_code is denied workspace-wide (see Cargo.toml); an `allow` here
         # is a silent, permanent way back around that deny at the item it

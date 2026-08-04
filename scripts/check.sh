@@ -17,6 +17,9 @@ step() { echo ""; echo "── $1"; }
 step "restricted-path Rust visibility"
 scripts/check-rust-visibility.sh
 
+step "owner construction and capability boundaries"
+scripts/check-owner-boundaries.sh
+
 step "cargo fmt --all --check"
 cargo fmt --all --check
 

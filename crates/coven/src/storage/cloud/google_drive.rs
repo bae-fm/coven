@@ -245,7 +245,7 @@ impl GoogleDriveCloudHome {
         key: &str,
         encoded: &str,
     ) -> Result<DriveFileIdentity, CloudHomeError> {
-        let create_token = uuid::Uuid::new_v4().to_string();
+        let create_token = self.ids.new_id();
         let metadata = create_file_metadata_body(encoded, &self.folder_id, &create_token);
         let resp = self
             .session
