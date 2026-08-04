@@ -485,28 +485,6 @@ impl DurableStoreDeviceExclusionOperation {
         }
         Ok(())
     }
-
-    pub(crate) async fn create_exact_object(
-        &self,
-        storage: &dyn SyncStorage,
-    ) -> Result<(), StoreDeviceExclusionJournalError> {
-        storage
-            .create_protocol_object(self.object().prepared())
-            .await
-            .map_err(StoreDeviceExclusionJournalError::Storage)?;
-        let context = self.object().context();
-        let prefix = self.object().semantic_prefix()?;
-        let opened = storage
-            .read_protocol_object(&context, self.object().object(), prefix)
-            .await
-            .map_err(StoreDeviceExclusionJournalError::Storage)?;
-        if opened != self.object().semantic_bytes() {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "exclusion exact readback differs from its signed bytes".to_string(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -667,7 +645,10 @@ impl Store {
             .database
             .begin_outbound_store_device_exclusion(operation)
             .await?;
-        durable.create_exact_object(self.storage.as_ref()).await?;
+        writer
+            .device_exclusion()
+            .create_exact_object(&durable)
+            .await?;
         self.database
             .mark_store_device_exclusion_authority_uploaded(durable)
             .await?;
@@ -772,6 +753,29 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             database,
             storage,
         }
+    }
+
+    async fn create_exact_object(
+        &self,
+        operation: &DurableStoreDeviceExclusionOperation,
+    ) -> Result<(), StoreDeviceExclusionJournalError> {
+        self.storage
+            .create_protocol_object(operation.object().prepared())
+            .await
+            .map_err(StoreDeviceExclusionJournalError::Storage)?;
+        let context = operation.object().context();
+        let prefix = operation.object().semantic_prefix()?;
+        let opened = self
+            .storage
+            .read_protocol_object(&context, operation.object().object(), prefix)
+            .await
+            .map_err(StoreDeviceExclusionJournalError::Storage)?;
+        if opened != operation.object().semantic_bytes() {
+            return Err(StoreDeviceExclusionJournalError::Invalid(
+                "exclusion exact readback differs from its signed bytes".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn resume(
@@ -1141,7 +1145,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         operation: &DurableStoreDeviceExclusionOperation,
     ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
         let database = self.database.clone();
-        match Box::pin(operation.create_exact_object(self.storage.as_ref())).await {
+        match Box::pin(self.create_exact_object(operation)).await {
             Ok(()) => {}
             Err(StoreDeviceExclusionJournalError::Storage(
                 crate::storage::StorageError::SlotCollision(_),

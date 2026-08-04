@@ -1251,13 +1251,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 },
             )
             .await?;
-        candidate
-            .attach_merge_membership_proof(
-                self.storage.as_ref(),
-                &publication,
-                Some(&resolution),
-                &signer,
-            )
+        self.attach_merge_membership_proof(&mut candidate, &publication, Some(&resolution))
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
         let plan = ResolveMutationPlan {
             resolution,
@@ -1724,18 +1718,30 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(InviteError::from)
     }
 
+    pub(crate) fn attach_merge_membership_proof(
+        &self,
+        candidate: &mut operations::PreparedStoreOperationCommit,
+        publication: &PreparedMembershipPublication,
+        resolution: Option<&membership::StoreMembershipConflictResolution>,
+    ) -> Result<(), StoreError> {
+        candidate.attach_merge_membership_proof_with(
+            publication,
+            resolution,
+            self.writer.identity,
+            |context, slot, prefix, bytes| {
+                self.storage
+                    .prepare_protocol_object(context, slot, prefix, bytes)
+                    .map_err(StoreObjectError::from)
+            },
+        )
+    }
+
     fn attach_membership_proof(
         &self,
         candidate: &mut operations::PreparedStoreOperationCommit,
         publication: &PreparedMembershipPublication,
     ) -> Result<(), InviteError> {
-        candidate
-            .attach_merge_membership_proof(
-                self.storage.as_ref(),
-                publication,
-                None,
-                self.writer.identity,
-            )
+        self.attach_merge_membership_proof(candidate, publication, None)
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
     }
 

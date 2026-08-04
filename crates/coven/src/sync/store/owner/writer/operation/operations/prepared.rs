@@ -467,12 +467,17 @@ impl PreparedStoreOperationCommit {
         Ok(())
     }
 
-    pub(crate) fn attach_merge_membership_proof(
+    pub(crate) fn attach_merge_membership_proof_with(
         &mut self,
-        storage: &dyn SyncStorage,
         publication: &PreparedMembershipPublication,
         resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
         identity_signer: &UserKeypair,
+        prepare_head: impl FnOnce(
+            &ProtocolObjectContext,
+            crate::storage::ObjectSlot,
+            &str,
+            Vec<u8>,
+        ) -> Result<PreparedExactObject, StoreObjectError>,
     ) -> Result<(), StoreError> {
         publication
             .validate()
@@ -569,14 +574,12 @@ impl PreparedStoreOperationCommit {
             &head.author_registration.device_id.to_string(),
             head.commit.coord.sequence(),
         );
-        *prepared = storage
-            .prepare_protocol_object(
-                &context,
-                prepared.reference().slot().clone(),
-                &prefix,
-                replacement.to_bytes(),
-            )
-            .map_err(StoreObjectError::from)?;
+        *prepared = prepare_head(
+            &context,
+            prepared.reference().slot().clone(),
+            &prefix,
+            replacement.to_bytes(),
+        )?;
         *head = replacement;
         self.validate_closed_shape()
             .map_err(StoreError::InvalidOutbound)?;

@@ -590,13 +590,8 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             )
             .await
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        candidate
-            .attach_merge_membership_proof(
-                self.storage.as_ref(),
-                &publication,
-                None,
-                &self.identity,
-            )
+        self.writer
+            .attach_merge_membership_proof(&mut candidate, &publication, None)
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         Ok(OwnerPromotionJournal {
             promotion_id: journal.promotion_id,
