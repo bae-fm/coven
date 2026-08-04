@@ -10,6 +10,7 @@ pub(crate) mod store;
 // Exercises the register clock through `Database::hlc()`.
 #[cfg(test)]
 mod cycle_tests;
+mod error;
 #[cfg(test)]
 mod exact_founder_graph_tests;
 #[cfg(test)]
@@ -27,10 +28,11 @@ pub(crate) mod sync_loop;
 pub(crate) mod test_helpers;
 #[cfg(test)]
 pub(crate) mod test_owner_graph;
+
 #[cfg(test)]
 mod tests;
 pub use crate::protocol::hlc::Hlc;
-pub use crate::store_sync::SyncError;
+pub use error::SyncError;
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use status::DeviceActivity;
 pub use store::{BlobCacheError, BlobStream};

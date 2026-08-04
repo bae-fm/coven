@@ -520,7 +520,7 @@ impl StoreKeys {
     #[cfg(feature = "oauth-providers")]
     pub fn get_cloud_home_oauth_tokens(
         &self,
-    ) -> Result<Option<crate::oauth::OAuthTokens>, KeyError> {
+    ) -> Result<Option<crate::keys::OAuthTokens>, KeyError> {
         Ok(match self.get_cloud_home_credentials()? {
             Some(CloudHomeCredentials::OAuth { tokens }) => Some(tokens),
             _ => None,
@@ -530,7 +530,7 @@ impl StoreKeys {
     #[cfg(feature = "oauth-providers")]
     pub fn set_cloud_home_oauth_tokens(
         &self,
-        tokens: &crate::oauth::OAuthTokens,
+        tokens: &crate::keys::OAuthTokens,
     ) -> Result<(), KeyError> {
         self.set_cloud_home_credentials(&CloudHomeCredentials::OAuth {
             tokens: tokens.clone(),

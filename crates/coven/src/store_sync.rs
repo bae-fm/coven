@@ -10,80 +10,26 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::{DbError, StoreDatabase};
 use crate::encryption::EncryptionService;
-use crate::keys::KeyError;
 use crate::protocol::blob::{BlobRef, BlobTransitionObserver};
 use crate::protocol::objects::StorageError;
-use crate::storage::cloud::setup::{SetupError, StorageSetupError};
+use crate::storage::cloud::setup::StorageSetupError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
-use crate::storage::cloud::CloudHomeError;
 #[cfg(test)]
 use crate::storage::BlobChunking;
 use crate::storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_dir::StoreOpenGuard;
 use crate::store_security::StoreSecurity;
-use crate::sync::cycle::{InitSyncError, SyncComponents};
+use crate::sync::cycle::SyncComponents;
 use crate::sync::store::blob::LocalStoreBlobAccess;
-use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
+use crate::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
 use crate::sync::BlobCacheError;
 use crate::sync::Store;
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
-#[derive(Debug, thiserror::Error)]
-pub enum SyncError {
-    #[error("sync is not configured")]
-    NotConfigured,
-    #[error("sync loop is not running")]
-    LoopNotRunning,
-    #[error("sharing requires an encrypted cloud home")]
-    NotEncryptedHome,
-    #[error("no master key is established for this opaque store (locked, or never initialized)")]
-    MasterKeyNotEstablished,
-    #[error("failed to build cloud home: {0}")]
-    CloudHome(#[from] CloudHomeError),
-    #[error("failed to create sync storage: {0}")]
-    StorageSetup(StorageSetupError),
-    #[error("key error: {0}")]
-    Key(#[from] KeyError),
-    #[error("sync initialization error: {0}")]
-    Init(#[from] InitSyncError),
-    #[error("Store protocol state: {0}")]
-    Protocol(String),
-    #[error("Store operation: {0}")]
-    Store(#[from] crate::sync::store::StoreError),
-    #[error("{0}")]
-    Setup(#[from] SetupError),
-    #[error("membership error: {0}")]
-    Membership(Box<crate::sync::store::MembershipOpsError>),
-    #[error("circle operation: {0}")]
-    Circle(#[from] crate::sync::store::CircleOperationError),
-    #[error("device join: {0}")]
-    DeviceJoin(#[from] crate::DeviceJoinError),
-    #[error("device join transport: {0}")]
-    DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
-    #[error("invalid join request code: {0}")]
-    InvalidJoinRequest(String),
-    #[error("invalid Store membership operation code: {0}")]
-    InvalidMembershipOperationCode(String),
-    #[error("Store device exclusion: {0}")]
-    DeviceExclusion(String),
-    #[error("Store Owner promotion: {0}")]
-    OwnerPromotion(String),
-    #[error("{0}")]
-    Database(#[from] DbError),
-    #[error("blob upload drain failed: {0}")]
-    BlobUpload(DbError),
-    #[error("sync loop error: {0}")]
-    Loop(SyncLoopError),
-}
-
-impl From<crate::sync::store::MembershipOpsError> for SyncError {
-    fn from(error: crate::sync::store::MembershipOpsError) -> Self {
-        Self::Membership(Box::new(error))
-    }
-}
+pub(crate) use crate::sync::SyncError;
 
 /// Who runs sync cycles for a connected cloud.
 ///

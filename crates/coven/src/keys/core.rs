@@ -81,7 +81,7 @@ pub enum CloudHomeCredentials {
         secret_key: String,
     },
     /// Consumer cloud providers (Google Drive, Dropbox, OneDrive).
-    OAuth { tokens: crate::oauth::OAuthTokens },
+    OAuth { tokens: crate::keys::OAuthTokens },
     /// iCloud: no credentials needed (macOS handles auth).
     None,
 }
@@ -622,7 +622,7 @@ mod tests {
         );
 
         let oauth = CloudHomeCredentials::OAuth {
-            tokens: crate::oauth::OAuthTokens {
+            tokens: crate::keys::OAuthTokens {
                 access_token: "oauth-token-do-not-print".to_string(),
                 refresh_token: None,
                 expires_at: None,
