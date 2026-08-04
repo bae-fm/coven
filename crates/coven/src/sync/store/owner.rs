@@ -126,6 +126,95 @@ impl Store {
         device_join_transport::StoreDeviceJoinTransport::new(self)
     }
 
+    async fn allocate_device_join_transport_bundle(
+        &self,
+        offer: crate::sync::store::DeviceJoinOffer,
+    ) -> Result<
+        device_join_transport::DeviceJoinOfferBundle,
+        device_join_transport::DeviceJoinTransportError,
+    > {
+        let attempt_namespace = device_join_transport::attempt_namespace(offer.attempt_id);
+        let context = device_join_transport::slot_context(offer.store_root.store_root_hash);
+        let mut slots = std::collections::BTreeMap::new();
+        for kind in device_join_transport::DeviceJoinTransportKind::ALL {
+            let slot = self
+                .storage
+                .allocate_protocol_slot(
+                    &context,
+                    &device_join_transport::semantic_prefix(&attempt_namespace, kind),
+                    ".json",
+                )
+                .await?;
+            slots.insert(kind, slot);
+        }
+        Ok(device_join_transport::DeviceJoinOfferBundle {
+            version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
+            offer,
+            transport: device_join_transport::DeviceJoinTransportParams {
+                version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
+                attempt_namespace,
+                slots,
+                seal_key: crate::encryption::MasterKeyring::generate(),
+            },
+        })
+    }
+
+    async fn publish_device_join_transport_artifact(
+        &self,
+        bundle: &device_join_transport::DeviceJoinOfferBundle,
+        roles: device_join_transport::DeviceJoinRoles,
+        action: &crate::sync::store::DeviceJoinAction,
+    ) -> Result<(), device_join_transport::DeviceJoinTransportError> {
+        device_join_transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
+            .publish(action)
+            .await
+    }
+
+    async fn await_device_join_transport_artifact<T: device_join_transport::DeviceJoinArtifact>(
+        &self,
+        bundle: &device_join_transport::DeviceJoinOfferBundle,
+        roles: device_join_transport::DeviceJoinRoles,
+        timing: device_join_transport::DeviceJoinTransportTiming,
+    ) -> Result<T, device_join_transport::DeviceJoinTransportError> {
+        device_join_transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
+            .await_artifact::<T>(timing)
+            .await
+    }
+
+    async fn device_join_transport_status(
+        &self,
+        attempt_id: crate::protocol::store_commit::DeviceJoinAttemptId,
+        role: crate::sync::store::DeviceJoinRole,
+    ) -> Result<
+        Option<crate::sync::store::DeviceJoinStatus>,
+        device_join_transport::DeviceJoinTransportError,
+    > {
+        Ok(self.database.device_join_status(attempt_id, role).await?)
+    }
+
+    async fn device_join_transport_roles(
+        &self,
+        offer: &crate::sync::store::DeviceJoinOffer,
+    ) -> Result<
+        device_join_transport::DeviceJoinRoles,
+        device_join_transport::DeviceJoinTransportError,
+    > {
+        let local = self
+            .database
+            .local_activated_registration_ref()
+            .await
+            .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?
+            .ok_or(crate::sync::store::DeviceJoinError::ActiveDeviceRequired)?;
+        let roles = device_join_transport::DeviceJoinRoles::admitting(
+            local == offer.owner_registration,
+            local == offer.provider_admin.administrator,
+        );
+        if !roles.any() {
+            return Err(crate::sync::store::DeviceJoinError::ActiveDeviceRequired.into());
+        }
+        Ok(roles)
+    }
+
     pub(crate) fn circles(&self) -> StoreCircleCommands<'_> {
         StoreCircleCommands::new(self)
     }
