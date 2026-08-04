@@ -651,9 +651,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         state: ResolvedStoreDeviceState,
     ) -> Result<crate::protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
     {
+        let resolver = super::verification::DeviceStateResolver::Database(&self.database);
         self.history_verifier
-            .load_local_device_operations(
-                &self.database,
+            .load_local_device_operations_with_resolver(
+                &resolver,
                 verified_commit,
                 membership,
                 state_ref,

@@ -1114,9 +1114,9 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
     }
 
-    pub(crate) async fn load_local_device_operations(
+    pub(super) async fn load_local_device_operations_with_resolver(
         &mut self,
-        database: &StoreDatabase,
+        resolver: &DeviceStateResolver<'_>,
         verified_commit: &VerifiedStoreBatchCommit,
         membership: &MembershipChain,
         state_ref: &StoreDeviceStateRef,
@@ -1141,9 +1141,8 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
         verify_merge_membership_state_ref(&commit.membership_state, membership, &state)?;
-        let resolver = DeviceStateResolver::Database(database);
         Box::pin(self.commit_verifier.load_commit_device_operations(
-            Some(&resolver),
+            Some(resolver),
             commit,
             &state,
             Some(membership),
