@@ -18,7 +18,7 @@ pub(crate) async fn run_blocking_object_verification<T>(
 where
     T: Send + 'static,
 {
-    crate::sync::blocking::run(verify)
+    crate::blocking::run(verify)
         .await
         .map_err(|error| {
             StoreObjectError::Storage(StorageError::Storage(format!(

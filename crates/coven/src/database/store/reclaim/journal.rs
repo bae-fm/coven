@@ -2,18 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::objects::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
+use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
 use crate::protocol::reclaim::{
-    reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
-    reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
-    ReclaimEvidence, ReclaimEvidenceRef, ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
+    ReclaimAuthorization, ReclaimAuthorizationRef, ReclaimEvidence, ReclaimEvidenceRef,
+    ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
 };
 use crate::protocol::remote_object::{
     CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
 };
 use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
-use crate::storage::SyncStorage;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -148,80 +146,6 @@ impl DurableStoreReclaimObject {
             .retained_authority_remote_objects(authorities)
             .map_err(StoreReclaimJournalError::Outbound)
     }
-
-    pub(crate) async fn create_exact_objects(
-        &self,
-        storage: &dyn SyncStorage,
-    ) -> Result<(), StoreReclaimJournalError> {
-        match self {
-            Self::Authorization {
-                evidence,
-                evidence_prepared,
-                authorization,
-                authorization_prepared,
-                ..
-            } => {
-                create_and_verify(
-                    storage,
-                    &ProtocolObjectContext::store_encrypted(
-                        evidence.store_root_hash,
-                        ProtocolObjectDomain::StoreReclaimEvidence,
-                    ),
-                    evidence_prepared,
-                    &reclaim_evidence_semantic_prefix(evidence.evidence_hash()),
-                    &evidence.to_bytes(),
-                )
-                .await?;
-                create_and_verify(
-                    storage,
-                    &ProtocolObjectContext::signed_plaintext(
-                        authorization.store_root_hash,
-                        ProtocolObjectDomain::StoreReclaimAuthorization,
-                    ),
-                    authorization_prepared,
-                    &reclaim_authorization_semantic_prefix(authorization.authorization_hash()),
-                    &authorization.to_bytes(),
-                )
-                .await
-            }
-            Self::Receipt {
-                receipt,
-                receipt_prepared,
-                ..
-            } => {
-                create_and_verify(
-                    storage,
-                    &ProtocolObjectContext::signed_plaintext(
-                        receipt.store_root_hash,
-                        ProtocolObjectDomain::StoreReclaimReceipt,
-                    ),
-                    receipt_prepared,
-                    &reclaim_receipt_semantic_prefix(receipt.receipt_hash()),
-                    &receipt.to_bytes(),
-                )
-                .await
-            }
-        }
-    }
-}
-
-async fn create_and_verify(
-    storage: &dyn SyncStorage,
-    context: &ProtocolObjectContext,
-    prepared: &PreparedExactObject,
-    prefix: &str,
-    expected: &[u8],
-) -> Result<(), StoreReclaimJournalError> {
-    storage.create_protocol_object(prepared).await?;
-    let opened = storage
-        .read_protocol_object(context, prepared.reference(), prefix)
-        .await?;
-    if opened != expected {
-        return Err(StoreReclaimJournalError::Invalid(
-            "reclaim object exact readback differs from its signed bytes".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

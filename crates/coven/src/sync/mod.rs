@@ -4,7 +4,6 @@ mod blob_content_hash_tests;
 // (`crate::blob::upload`) both count attempts in multiples of one base interval,
 // so the formula is `pub(crate)`.
 pub(crate) mod backoff;
-pub(crate) mod blocking;
 pub(crate) mod cycle;
 pub(crate) mod store;
 // Exercises the register clock through `Database::hlc()`.

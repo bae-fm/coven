@@ -1,5 +1,7 @@
 //! Proof-gated deletion of exact Store packages covered by exact authority.
 
+use crate::database::StoreReclaimJournalError;
+use crate::protocol::objects::PreparedExactObject;
 use std::sync::Arc;
 
 use crate::database::{
@@ -1502,9 +1504,12 @@ impl AuthorizedReclaim<'_, '_> {
                     ));
                 }
             };
-            Box::pin(object.create_exact_objects(self.storage.as_ref()))
-                .await
-                .map_err(|error| StoreReclaimError::Journal(error.to_string()))?;
+            Box::pin(create_reclaim_exact_objects(
+                object.as_ref(),
+                self.storage.as_ref(),
+            ))
+            .await
+            .map_err(|error| StoreReclaimError::Journal(error.to_string()))?;
             for remote in object
                 .remote_objects(&candidate)
                 .map_err(|error| StoreReclaimError::Journal(error.to_string()))?
@@ -1904,3 +1909,77 @@ impl AuthorizedReclaim<'_, '_> {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) async fn create_reclaim_exact_objects(
+    object: &crate::database::DurableStoreReclaimObject,
+    storage: &dyn SyncStorage,
+) -> Result<(), StoreReclaimJournalError> {
+    match object {
+        crate::database::DurableStoreReclaimObject::Authorization {
+            evidence,
+            evidence_prepared,
+            authorization,
+            authorization_prepared,
+            ..
+        } => {
+            create_and_verify(
+                storage,
+                &ProtocolObjectContext::store_encrypted(
+                    evidence.store_root_hash,
+                    ProtocolObjectDomain::StoreReclaimEvidence,
+                ),
+                evidence_prepared,
+                &reclaim_evidence_semantic_prefix(evidence.evidence_hash()),
+                &evidence.to_bytes(),
+            )
+            .await?;
+            create_and_verify(
+                storage,
+                &ProtocolObjectContext::signed_plaintext(
+                    authorization.store_root_hash,
+                    ProtocolObjectDomain::StoreReclaimAuthorization,
+                ),
+                authorization_prepared,
+                &reclaim_authorization_semantic_prefix(authorization.authorization_hash()),
+                &authorization.to_bytes(),
+            )
+            .await
+        }
+        crate::database::DurableStoreReclaimObject::Receipt {
+            receipt,
+            receipt_prepared,
+            ..
+        } => {
+            create_and_verify(
+                storage,
+                &ProtocolObjectContext::signed_plaintext(
+                    receipt.store_root_hash,
+                    ProtocolObjectDomain::StoreReclaimReceipt,
+                ),
+                receipt_prepared,
+                &reclaim_receipt_semantic_prefix(receipt.receipt_hash()),
+                &receipt.to_bytes(),
+            )
+            .await
+        }
+    }
+}
+
+async fn create_and_verify(
+    storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
+    prepared: &PreparedExactObject,
+    prefix: &str,
+    expected: &[u8],
+) -> Result<(), StoreReclaimJournalError> {
+    storage.create_protocol_object(prepared).await?;
+    let opened = storage
+        .read_protocol_object(context, prepared.reference(), prefix)
+        .await?;
+    if opened != expected {
+        return Err(StoreReclaimJournalError::Invalid(
+            "reclaim object exact readback differs from its signed bytes".to_string(),
+        ));
+    }
+    Ok(())
+}

@@ -1115,7 +1115,7 @@ async fn run_storage_cpu<T>(
 where
     T: Send + 'static,
 {
-    crate::sync::blocking::run(work)
+    crate::blocking::run(work)
         .await
         .map_err(|error| StorageError::Storage(format!("{operation}: {error}")))?
 }

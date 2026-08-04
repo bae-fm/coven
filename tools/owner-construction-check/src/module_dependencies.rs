@@ -80,6 +80,7 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("oauth", Region::Storage),
     ("storage", Region::Storage),
     ("blob", Region::Replication),
+    ("blocking", Region::Foundation),
     ("sync", Region::Replication),
     ("joining", Region::Domain),
     ("restoration", Region::Domain),
