@@ -8,11 +8,14 @@ use crate::storage::cloud::setup::StorageSetupError;
 use crate::storage::BlobChunking;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync};
-use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobCache};
+use crate::sync::store::blob::{
+    LocalStoreBlobAccess, RemoteBlobSource, StoreBlobAccess, StoreBlobCache,
+};
 use crate::sync::{BlobCacheError, BlobStream};
 
 #[derive(Clone)]
 pub(crate) struct ReadOnlyBlobStorage {
+    database: StoreDatabase,
     config_provider: ConfigProvider,
     security: StoreSecurity,
     clock: ClockRef,
@@ -23,6 +26,7 @@ pub(crate) struct ReadOnlyBlobStorage {
 impl ReadOnlyBlobStorage {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        database: StoreDatabase,
         config_provider: ConfigProvider,
         security: StoreSecurity,
         clock: ClockRef,
@@ -30,6 +34,7 @@ impl ReadOnlyBlobStorage {
         blob_chunking: BlobChunking,
     ) -> Self {
         Self {
+            database,
             config_provider,
             security,
             clock,
@@ -61,7 +66,12 @@ impl ReadOnlyBlobStorage {
             )
             .await?;
         let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
-        Ok(StoreBlobAccess::remote(local.connect(storage)))
+        Ok(StoreBlobAccess::remote(
+            crate::sync::store::blob::RemoteStoreBlobAccess::new(
+                local,
+                RemoteBlobSource::current(self.database.clone(), storage),
+            ),
+        ))
     }
 }
 

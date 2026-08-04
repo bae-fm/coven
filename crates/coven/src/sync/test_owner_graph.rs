@@ -4,6 +4,7 @@ use crate::blob::transition::{ConnectedBlobTransitions, LocalBlobTransitions};
 use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
+use crate::sync::store::blob::RemoteBlobSource;
 use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobCache};
 
 #[derive(Clone)]
@@ -184,7 +185,12 @@ impl TestOwnerGraph {
 
     pub(crate) fn blob_access(&self, storage: Option<Arc<dyn SyncStorage>>) -> StoreBlobAccess {
         match storage {
-            Some(storage) => StoreBlobAccess::remote(self.local_access.connect(storage)),
+            Some(storage) => {
+                StoreBlobAccess::remote(crate::sync::store::blob::RemoteStoreBlobAccess::new(
+                    self.local_access.clone(),
+                    RemoteBlobSource::current(self.database.clone(), storage),
+                ))
+            }
             None => StoreBlobAccess::local(self.local_access.clone()),
         }
     }
@@ -243,7 +249,10 @@ impl TestOwnerGraph {
     ) -> ConnectedBlobTransitions {
         ConnectedBlobTransitions::new(
             self.local_transitions.clone(),
-            self.local_access.connect(storage),
+            crate::sync::store::blob::RemoteStoreBlobAccess::new(
+                self.local_access.clone(),
+                RemoteBlobSource::current(self.database.clone(), storage),
+            ),
             routing_encryption,
             observer,
         )

@@ -20,7 +20,9 @@ use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
 use crate::store_security::StoreSecurity;
 use crate::sync::cycle::{InitSyncError, SyncComponents};
-use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess};
+use crate::sync::store::blob::{
+    LocalStoreBlobAccess, RemoteBlobSource, RemoteStoreBlobAccess, StoreBlobAccess,
+};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 use crate::sync::BlobCacheError;
 use crate::sync::Store;
@@ -183,9 +185,10 @@ impl StoreSync {
             }
         };
         match storage {
-            Some(storage) => Ok(StoreBlobAccess::remote(
-                self.local_blob_access.connect(storage),
-            )),
+            Some(storage) => Ok(StoreBlobAccess::remote(RemoteStoreBlobAccess::new(
+                self.local_blob_access.clone(),
+                RemoteBlobSource::current(self.database.clone(), storage),
+            ))),
             None => self
                 .read_only_blob_storage
                 .access(self.local_blob_access.clone())
@@ -718,7 +721,10 @@ impl StoreSync {
     ) -> Arc<SyncLoopHandle> {
         let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
             self.local_blob_transitions.clone(),
-            self.local_blob_access.connect(storage),
+            RemoteStoreBlobAccess::new(
+                self.local_blob_access.clone(),
+                RemoteBlobSource::current(self.database.clone(), storage),
+            ),
             routing_encryption,
             self.observer.clone(),
         );

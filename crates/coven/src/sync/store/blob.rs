@@ -184,18 +184,6 @@ impl LocalStoreBlobAccess {
         }
     }
 
-    pub(crate) fn connect(
-        &self,
-        storage: std::sync::Arc<dyn SyncStorage>,
-    ) -> RemoteStoreBlobAccess {
-        RemoteStoreBlobAccess::new(
-            self.clone(),
-            RemoteBlobSource::current(self.database.clone(), storage),
-            self.store_dir.clone(),
-            self.cache.clone(),
-        )
-    }
-
     pub(crate) async fn drain_published_blob_drop_intents(
         &self,
         max_seq: u64,
@@ -433,7 +421,7 @@ enum RemoteBlobRoot {
 }
 
 #[derive(Clone)]
-pub(super) struct RemoteBlobSource<'storage> {
+pub(crate) struct RemoteBlobSource<'storage> {
     database: StoreDatabase,
     storage: RemoteBlobStorage<'storage>,
     root: RemoteBlobRoot,
@@ -592,23 +580,11 @@ impl<'storage> RemoteBlobSource<'storage> {
 pub(crate) struct RemoteStoreBlobAccess {
     local: LocalStoreBlobAccess,
     remote: RemoteBlobSource<'static>,
-    store_dir: StoreDir,
-    cache: StoreBlobCache,
 }
 
 impl RemoteStoreBlobAccess {
-    fn new(
-        local: LocalStoreBlobAccess,
-        remote: RemoteBlobSource<'static>,
-        store_dir: StoreDir,
-        cache: StoreBlobCache,
-    ) -> Self {
-        Self {
-            remote,
-            store_dir,
-            cache,
-            local,
-        }
+    pub(crate) fn new(local: LocalStoreBlobAccess, remote: RemoteBlobSource<'static>) -> Self {
+        Self { remote, local }
     }
 
     pub(crate) async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
@@ -616,21 +592,23 @@ impl RemoteStoreBlobAccess {
             return self.local.read(reference).await;
         }
         self.remote.validate(reference).await?;
-        let bytes = match self.cache.read_exact(reference).await? {
+        let bytes = match self.local.cache.read_exact(reference).await? {
             Some(bytes) => bytes,
             None => {
                 let stored = remote_stored_ref(reference)?;
-                let (_, destination) = self.store_dir.remote_blob_paths(stored)?;
+                let (_, destination) = self.local.store_dir.remote_blob_paths(stored)?;
                 let remote = self.remote.access(reference).await?;
                 let staged = remote
                     .stage_verified_plaintext(stored, &destination)
                     .await?;
                 let bytes = staged.read_bytes().await.map_err(BlobCacheError::Io)?;
                 self.remote.validate(reference).await?;
-                self.cache
+                self.local
+                    .cache
                     .publish_materialization(staged, reference)
                     .await?;
-                self.cache
+                self.local
+                    .cache
                     .enforce_budget(&reference.blob().namespace, Some(&destination))
                     .await?;
                 bytes
@@ -648,7 +626,7 @@ impl RemoteStoreBlobAccess {
             return self.local.open_stream(reference).await;
         }
         self.remote.validate(reference).await?;
-        let source = if let Some(source) = self.cache.open_exact(reference).await? {
+        let source = if let Some(source) = self.local.cache.open_exact(reference).await? {
             source
         } else {
             let stored = remote_stored_ref(reference)?;
@@ -668,11 +646,12 @@ impl RemoteStoreBlobAccess {
             return self.local.materialize(reference).await;
         }
         self.remote.validate(reference).await?;
-        if self.cache.has_exact(reference).await? {
+        if self.local.cache.has_exact(reference).await? {
             self.remote.validate(reference).await?;
             return Ok(());
         }
         let (_, destination) = self
+            .local
             .store_dir
             .remote_blob_paths(remote_stored_ref(reference)?)?;
         let staged = self
@@ -680,7 +659,10 @@ impl RemoteStoreBlobAccess {
             .await?;
         verify_exact_file(staged.path(), reference).await?;
         self.remote.validate(reference).await?;
-        self.cache.publish_materialization(staged, reference).await
+        self.local
+            .cache
+            .publish_materialization(staged, reference)
+            .await
     }
 
     pub(crate) async fn stage_verified_local_copy(
@@ -689,8 +671,9 @@ impl RemoteStoreBlobAccess {
         destination: &std::path::Path,
     ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
         self.remote.validate(reference).await?;
-        if let Some(hit) = self.cache.cached_path(reference, false).await? {
+        if let Some(hit) = self.local.cache.cached_path(reference, false).await? {
             let staged = self
+                .local
                 .cache
                 .stage_exact_copy(hit.path(), destination, reference)
                 .await?;
@@ -712,17 +695,19 @@ impl RemoteStoreBlobAccess {
         reference: &RowBlobRef,
     ) -> Result<BlobStreamSource, BlobCacheError> {
         let stored = remote_stored_ref(reference)?;
-        let (_, destination) = self.store_dir.remote_blob_paths(stored)?;
+        let (_, destination) = self.local.store_dir.remote_blob_paths(stored)?;
         let staged = remote
             .stage_verified_plaintext(stored, &destination)
             .await?;
         verify_exact_file(staged.path(), reference).await?;
         let source = open_local_file(staged.path()).await?;
         self.remote.validate(reference).await?;
-        self.cache
+        self.local
+            .cache
             .publish_materialization(staged, reference)
             .await?;
-        self.cache
+        self.local
+            .cache
             .enforce_budget(&reference.blob().namespace, Some(&destination))
             .await?;
         Ok(source)

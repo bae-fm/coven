@@ -85,6 +85,7 @@ impl CovenReadHandle {
         let local_blob_access =
             LocalStoreBlobAccess::new(database.clone(), store_dir, blob_cache.clone());
         let blob_storage = ReadOnlyBlobStorage::new(
+            database.clone(),
             config_provider,
             security.clone(),
             clock,
