@@ -266,17 +266,29 @@ pub(crate) fn open_test_db() -> Database {
     open_test_db_schema(test_synced_tables(), test_migrations())
 }
 
+pub(crate) fn open_test_db_with_tombstone_grace(grace: chrono::Duration) -> Database {
+    open_test_db_schema_with_tombstone_grace(test_synced_tables(), test_migrations(), grace)
+}
+
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
 /// tests that exercise a different schema (gate tests).
 pub(crate) fn open_test_db_schema(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
 ) -> Database {
+    open_test_db_schema_with_tombstone_grace(tables, migrations, crate::blob::BLOB_TOMBSTONE_GRACE)
+}
+
+fn open_test_db_schema_with_tombstone_grace(
+    tables: Vec<SyncedTable>,
+    migrations: Vec<Migration>,
+    grace: chrono::Duration,
+) -> Database {
     // `:memory:` is unique per connection; the Database owns exactly one.
     Database::open(
         std::path::Path::new(":memory:"),
         tables,
-        crate::blob::BLOB_TOMBSTONE_GRACE,
+        grace,
         crate::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
@@ -3053,38 +3065,38 @@ impl TestStore {
         self.bind_device(database, &self.signer).await
     }
 
-    pub(crate) async fn founder_membership(
-        &self,
-    ) -> Result<crate::protocol::membership::MembershipChain, String> {
-        self.founder.membership().await
-    }
-
-    pub(crate) async fn membership_for_store_database(
-        &self,
-        database: &crate::database::StoreDatabase,
-        identity: &UserKeypair,
-    ) -> Result<crate::protocol::membership::MembershipChain, String> {
-        self.bind_store_device(database, identity)
-            .await?
-            .membership_for_test()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
     pub(crate) async fn open_store_with_identity(
         &self,
         database: &Database,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
-        crate::sync::store::Store::open(
+        self.open_store_with_storage(
             crate::database::StoreDatabase::new(database),
             self.storage.clone(),
-            &self.root,
             identity,
         )
         .await
-        .map(|initialized| initialized.store)
-        .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn open_store_with_storage(
+        &self,
+        database: crate::database::StoreDatabase,
+        storage: Arc<dyn crate::storage::SyncStorage>,
+        identity: &UserKeypair,
+    ) -> Result<crate::sync::store::Store, String> {
+        crate::sync::store::Store::open(database, storage, &self.root, identity)
+            .await
+            .map(|initialized| initialized.store)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn open_founder_store_with_storage(
+        &self,
+        database: crate::database::StoreDatabase,
+        storage: Arc<dyn crate::storage::SyncStorage>,
+    ) -> Result<crate::sync::store::Store, String> {
+        self.open_store_with_storage(database, storage, &self.signer)
+            .await
     }
 
     pub(crate) fn tombstone_deletions(&self) -> Vec<String> {
