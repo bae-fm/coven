@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::upload::{BlobUploadQueue, DrainOutcome};
+use super::upload::DrainOutcome;
 use crate::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::clock::{Clock, FixedClock};
 use crate::database::StoreDatabase;
@@ -261,6 +261,7 @@ impl ExactSlotStorage for InstrumentedHome {
 struct UploadFixture {
     db: Database,
     database: StoreDatabase,
+    device: crate::sync::test_helpers::TestDevice,
     storage: Arc<CloudSyncStorage>,
     home: Arc<InstrumentedHome>,
 }
@@ -300,7 +301,7 @@ impl UploadFixture {
             )
             .expect("construct exact sync storage"),
         );
-        let _device = crate::sync::test_helpers::TestDevice::create(
+        let device = crate::sync::test_helpers::TestDevice::create(
             &db,
             storage.clone(),
             "upload-store",
@@ -313,6 +314,7 @@ impl UploadFixture {
         Self {
             db,
             database,
+            device,
             storage,
             home,
         }
@@ -324,19 +326,9 @@ impl UploadFixture {
         clock: &dyn Clock,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<DrainOutcome, DbError> {
-        let registration = self.database.local_blob_write_authority().await?;
-        let authority = crate::storage::BlobWriteAuthority::new(&registration);
-        BlobUploadQueue::new(
-            &self.database,
-            &self.storage,
-            authority,
-            store_dir,
-            clock,
-            None,
-            observer,
-        )
-        .drain()
-        .await
+        self.device
+            .drain_uploads(store_dir, clock, None, observer)
+            .await
     }
 
     async fn journal(&self, blob_id: &str) -> crate::database::OutboxEntry {

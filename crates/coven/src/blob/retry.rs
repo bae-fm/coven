@@ -23,7 +23,7 @@ pub(super) fn backoff_window(attempt_count: i64) -> chrono::Duration {
 /// Whether `entry` is still inside its retry backoff window and must be skipped
 /// this pass. A malformed durable timestamp makes that decision unknowable, so
 /// the caller must stop before performing remote effects.
-pub(super) fn entry_in_backoff(
+pub(crate) fn entry_in_backoff(
     entry: &OutboxEntry,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, DbError> {

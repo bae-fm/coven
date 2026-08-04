@@ -423,35 +423,19 @@ impl PullTestStoreOps for TestStore {
         root_id: &str,
     ) {
         self.open_into(db).await.expect("open exact test Store");
-        self.bind_founder_device(db)
+        let device = self
+            .bind_founder_device(db)
             .await
-            .expect("load exact fixture Store")
-            .authorize_writer()
-            .await
-            .expect("activate exact fixture writer");
+            .expect("load exact fixture Store");
         crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
             .local_transitions()
             .make_remote("notes", root_id, false)
             .await
             .expect("queue exact blob fixture upload");
-        let registration = store_database(db)
-            .local_blob_write_authority()
+        let outcome = device
+            .drain_uploads(store_dir, &crate::clock::SystemClock, None, None)
             .await
-            .expect("load exact blob fixture write authority");
-        let authority = crate::storage::BlobWriteAuthority::new(&registration);
-        let database = store_database(db);
-        let outcome = crate::blob::upload::BlobUploadQueue::new(
-            &database,
-            self,
-            authority,
-            store_dir,
-            &crate::clock::SystemClock,
-            None,
-            None,
-        )
-        .drain()
-        .await
-        .expect("upload exact blob fixture");
+            .expect("upload exact blob fixture");
         assert!(outcome.uploaded() > 0);
         assert!(outcome.yielded_for_publish());
         assert!(self

@@ -3,29 +3,6 @@ use crate::database::StoredBlobReferenceState;
 use tracing::{debug, warn};
 
 impl AuthorizedWriterOperation<'_> {
-    pub(crate) async fn drain_uploads(
-        &self,
-        clock: &dyn crate::clock::Clock,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
-    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
-        self.database
-            .validate_store_write_routing(routing_encryption)?;
-        let registration = self.database.local_blob_write_authority().await?;
-        let authority = crate::storage::BlobWriteAuthority::new(&registration);
-        crate::blob::upload::BlobUploadQueue::new(
-            &self.database,
-            self.storage.as_ref(),
-            authority,
-            self.store_dir,
-            clock,
-            routing_encryption,
-            observer,
-        )
-        .drain()
-        .await
-    }
-
     pub(crate) async fn drain_tombstones(
         &self,
         cipher: &dyn CloudCipherAccess,

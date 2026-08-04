@@ -104,7 +104,7 @@ pub(crate) mod delete;
 #[doc(hidden)]
 pub(crate) mod local_cleanup;
 pub(crate) mod locator;
-mod retry;
+pub(crate) mod retry;
 #[cfg(test)]
 mod row_ref_tests;
 pub(crate) mod transition;
