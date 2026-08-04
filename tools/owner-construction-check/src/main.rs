@@ -60,7 +60,6 @@ const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "AuthorizedStore",
     "AuthorizedWriterOperation",
     "HostWriteBlobStaging",
-    "RemoteBlobSource",
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
@@ -1850,7 +1849,6 @@ mod tests {
                 "AuthorizedStore",
                 "AuthorizedWriterOperation",
                 "HostWriteBlobStaging",
-                "RemoteBlobSource",
             ]
         );
         assert!(CAPABILITY_TYPES.contains(&"CirclePackageAccess"));
