@@ -1,4 +1,4 @@
-use crate::blob::local_cleanup::LocalBlobCleanupIntent;
+use crate::database::local_blob_cleanup_intents::LocalBlobCleanupIntent;
 use crate::database::DbError;
 use crate::encryption::EncryptionService;
 use crate::protocol::blob::BlobRef;

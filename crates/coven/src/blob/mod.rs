@@ -4,7 +4,6 @@
 //! [`crate::protocol::blob`].
 
 pub(crate) mod delete;
-pub(crate) mod local_cleanup;
 pub(crate) mod retry;
 pub(crate) mod transition;
 

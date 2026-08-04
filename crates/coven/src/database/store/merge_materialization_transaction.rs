@@ -23,12 +23,12 @@ use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
     RetainedMergeMaterializationCache, StoreDatabase,
 };
-use crate::blob::local_cleanup::intents_from_changes as local_blob_cleanup_intents;
 use crate::changeset::RowChange;
 use crate::database::blob_records::{
     live_blob_row, validate_live_blob_row, validate_stored_locator_on,
     validate_stored_row_binding_on,
 };
+use crate::database::local_blob_cleanup_intents::intents_from_changes as local_blob_cleanup_intents;
 use crate::database::remote_object_records::{
     validate_remote_object_on, RemoteStoredRepresentationRef,
 };
@@ -622,7 +622,7 @@ impl MergeMaterializationTransaction<'_, '_> {
     pub(crate) fn record_obsolete_blob_cleanup_intent(
         &self,
         declarations: &crate::database::BlobDecls,
-        intent: &crate::blob::local_cleanup::LocalBlobCleanupIntent,
+        intent: &crate::database::local_blob_cleanup_intents::LocalBlobCleanupIntent,
     ) -> Result<(), DbError> {
         super::local_blob_cleanup::record_obsolete_copy_intents_on(
             self.transaction,

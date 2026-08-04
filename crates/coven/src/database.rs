@@ -236,6 +236,7 @@ pub(crate) use store::{
     StoreRowWrites, StoreWritePreparation, TableSchema, ValidatedChangeset,
     VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
 };
+pub(crate) use store::{local_blob_cleanup_intents, PostUpload};
 #[cfg(test)]
 pub(crate) use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};
 #[cfg(test)]

@@ -489,12 +489,6 @@ fn gated_root_gate_col(
         .ok_or_else(|| MakeRemoteError::NotGated(root_table.to_string()))
 }
 
-pub(crate) enum PostUpload {
-    Waiting,
-    Cancelled,
-    MadeRemote { root_table: String, root_id: String },
-}
-
 // ===========================================================================
 // make_local — foreground operation with a cancel signal
 // ===========================================================================

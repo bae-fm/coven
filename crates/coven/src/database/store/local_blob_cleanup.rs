@@ -1,7 +1,9 @@
 use tracing::debug;
 
 use super::*;
-use crate::blob::local_cleanup::{LocalBlobCleanupIdentity, LocalBlobCleanupIntent};
+use crate::database::local_blob_cleanup_intents::{
+    LocalBlobCleanupIdentity, LocalBlobCleanupIntent,
+};
 use crate::database::BlobDecls;
 
 /// Record cleanup obligations for each copy identity no live row needs in this
@@ -171,7 +173,7 @@ impl<'operation> LocalBlobCleanup<'operation> {
                 let rows = statement
                     .query_map([], |row| {
                         Ok((
-                            crate::blob::local_cleanup::LocalBlobCleanupIntent::from_persisted(
+                            crate::database::local_blob_cleanup_intents::LocalBlobCleanupIntent::from_persisted(
                                 row.get::<_, String>(0)?,
                                 row.get::<_, String>(1)?,
                                 row.get::<_, String>(2)?,

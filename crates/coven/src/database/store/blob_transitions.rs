@@ -1,9 +1,14 @@
 use super::*;
 
-use crate::blob::transition::PostUpload;
 use crate::database::{CloudOutboxRecords, ExternalBlobRecords, MakeRemoteIntentState};
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use crate::protocol::blob::{Provenance, RowBlobRef};
+
+pub(crate) enum PostUpload {
+    Waiting,
+    Cancelled,
+    MadeRemote { root_table: String, root_id: String },
+}
 
 #[derive(Clone)]
 pub(crate) struct MaterializedLocalBlob {

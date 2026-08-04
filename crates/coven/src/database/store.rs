@@ -20,6 +20,7 @@ mod host_sql_transaction;
 mod host_write_capture;
 mod host_write_operation;
 mod local_blob_cleanup;
+pub(crate) mod local_blob_cleanup_intents;
 mod materialization;
 pub(super) mod materialization_models;
 mod materialized_commit_index;
@@ -71,6 +72,7 @@ fn cache_budget_state_key(namespace: &str) -> String {
 pub use blob_outbox::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub(crate) use blob_outbox::{OutboxEntry, OutboxOperation, OutboxUploadState};
 pub(crate) use blob_transitions::MaterializedLocalBlob;
+pub(crate) use blob_transitions::PostUpload;
 #[cfg(test)]
 pub(crate) use candidate_records::select_author_exclusion_activation_locator;
 pub(crate) use candidate_records::CandidateCleanupObject;
@@ -342,7 +344,7 @@ impl StoreDatabase {
         old_changes: &[crate::changeset::RowChange],
         new_changes: &[crate::changeset::RowChange],
     ) -> Result<(), crate::database::BlobDeclError> {
-        crate::blob::local_cleanup::intents_from_changes(
+        crate::database::local_blob_cleanup_intents::intents_from_changes(
             self.blob_decls.as_ref(),
             old_changes,
             new_changes,

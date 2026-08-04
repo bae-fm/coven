@@ -255,7 +255,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         entry: &OutboxEntry,
         routing_encryption: Option<EncryptionService>,
-    ) -> Result<crate::blob::transition::PostUpload, DbError> {
+    ) -> Result<crate::database::PostUpload, DbError> {
         self.database
             .finalize_created_blob_upload(entry, self.database.stamp(), routing_encryption)
             .await
@@ -498,11 +498,11 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             .finalize_blob_upload(&self.entry, self.routing_encryption.cloned())
             .await
         {
-            Ok(crate::blob::transition::PostUpload::Waiting) => EntryOutcome::Uploaded {
+            Ok(crate::database::PostUpload::Waiting) => EntryOutcome::Uploaded {
                 made_remote: false,
                 created_this_pass,
             },
-            Ok(crate::blob::transition::PostUpload::MadeRemote {
+            Ok(crate::database::PostUpload::MadeRemote {
                 root_table,
                 root_id,
             }) => {
@@ -514,7 +514,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     created_this_pass,
                 }
             }
-            Ok(crate::blob::transition::PostUpload::Cancelled) => {
+            Ok(crate::database::PostUpload::Cancelled) => {
                 self.finish_cancelled(
                     &OutboxUploadState::Created {
                         authority: crate::protocol::audience_package::PackageAudience::Store,

@@ -209,7 +209,7 @@ impl StoreDatabase {
                             .map_err(DbError::Message)?;
                         let new_projection = crate::database::walk_changeset(&projection_changeset)
                             .map_err(DbError::Message)?;
-                        for intent in crate::blob::local_cleanup::intents_from_changes(
+                        for intent in crate::database::local_blob_cleanup_intents::intents_from_changes(
                             &blob_decls,
                             &old_projection,
                             &new_projection,
