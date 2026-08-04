@@ -318,7 +318,9 @@ mod tests {
                 &config,
                 store_root(),
                 hex::encode([7u8; 32]),
-                crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+                crate::protocol::membership::MembershipFloor(membership_floor(hex::encode(
+                    [7u8; 32],
+                ))),
                 restore_authority(),
             )
             .expect("generate restore code");
@@ -353,7 +355,9 @@ mod tests {
                 &config,
                 store_root(),
                 hex::encode([7u8; 32]),
-                crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+                crate::protocol::membership::MembershipFloor(membership_floor(hex::encode(
+                    [7u8; 32],
+                ))),
                 restore_authority(),
             )
             .expect_err("a share-joined CloudKit config must not generate a restore code");
@@ -379,7 +383,9 @@ mod tests {
                 &config,
                 store_root(),
                 hex::encode([7u8; 32]),
-                crate::joining::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+                crate::protocol::membership::MembershipFloor(membership_floor(hex::encode(
+                    [7u8; 32],
+                ))),
                 restore_authority(),
             )
             .expect("a private CloudKit config generates a restore code");

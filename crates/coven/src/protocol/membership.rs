@@ -6474,3 +6474,13 @@ pub(crate) enum ApplyOutcome {
     Applied(Vec<crate::changeset::RowChange>),
     Held(HeldStorePositionReason),
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct MembershipFloor(pub Vec<MembershipHeadRef>);
+
+impl MembershipFloor {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        crate::protocol::membership::validate_membership_floor(&self.0)
+    }
+}

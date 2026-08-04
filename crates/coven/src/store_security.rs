@@ -233,7 +233,7 @@ impl StoreSecurity {
         config: &Config,
         store_root: crate::protocol::store_commit::StoreRootRef,
         founder_pubkey: String,
-        membership_floor: crate::joining::MembershipFloor,
+        membership_floor: crate::protocol::membership::MembershipFloor,
         authority: crate::restoration::RestoreAuthority,
     ) -> Result<String, crate::storage::cloud::setup::SetupError> {
         use crate::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};

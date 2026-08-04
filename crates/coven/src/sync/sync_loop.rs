@@ -726,7 +726,7 @@ impl SyncLoopHandle {
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::joining::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
         self.inner
             .components
             .invite_member(public_key_hex, invitee_email, role, store_name)

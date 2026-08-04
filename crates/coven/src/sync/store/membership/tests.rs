@@ -72,7 +72,7 @@ impl MergeFixture {
         &self,
         member: &UserKeypair,
         role: MemberRole,
-    ) -> crate::joining::InviteCode {
+    ) -> crate::join_code::InviteCode {
         self.store
             .invite_member(
                 &self.db,
@@ -649,7 +649,7 @@ async fn invite_carries_the_founder_and_exact_root() {
     assert_eq!(invite.store_root, fixture.store.root);
     assert!(matches!(
         invite.membership_floor,
-        crate::joining::MembershipFloor(ref floor) if !floor.is_empty()
+        crate::protocol::membership::MembershipFloor(ref floor) if !floor.is_empty()
     ));
 }
 

@@ -62,7 +62,7 @@ pub(crate) struct Store {
 pub(crate) struct StoreRestoreMembership {
     pub store_root: StoreRootRef,
     pub founder_pubkey: String,
-    pub membership_floor: crate::joining::MembershipFloor,
+    pub membership_floor: crate::protocol::membership::MembershipFloor,
 }
 
 pub(crate) struct InitializedStore {
@@ -1421,7 +1421,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn prepare_snapshot_bootstrap_for_test(
         &self,
-        membership_floor: &crate::joining::MembershipFloor,
+        membership_floor: &crate::protocol::membership::MembershipFloor,
         binary_schema_version: u32,
         target_path: &std::path::Path,
         restorer_identity: &UserKeypair,
@@ -1618,7 +1618,7 @@ impl Store {
         encryption: &crate::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
-    ) -> Result<crate::joining::InviteCode, crate::sync::store::membership::MembershipOpsError>
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
     {
         let mut authorization = self.authorize_writer().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(

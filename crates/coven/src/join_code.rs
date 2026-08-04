@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
-use crate::protocol::membership::MembershipHeadRef;
+
 #[cfg(test)]
 use crate::protocol::membership::{MembershipCoord, MembershipGrantId};
 #[cfg(test)]
@@ -10,15 +10,7 @@ use crate::storage::cloud::CloudHomeJoinInfo;
 
 pub(crate) const INVITE_CODE_VERSION: u8 = 4;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct MembershipFloor(pub Vec<MembershipHeadRef>);
-
-impl MembershipFloor {
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        crate::protocol::membership::validate_membership_floor(&self.0)
-    }
-}
+use crate::protocol::membership::MembershipFloor;
 
 /// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
@@ -207,6 +199,7 @@ impl From<EnvelopeError> for JoinCodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::membership::MembershipHeadRef;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
 

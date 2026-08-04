@@ -1884,7 +1884,7 @@ mod test_device {
 
         pub(crate) async fn prepare_snapshot_bootstrap_for_test(
             &self,
-            membership_floor: &crate::joining::MembershipFloor,
+            membership_floor: &crate::protocol::membership::MembershipFloor,
             binary_schema_version: u32,
             target_path: &std::path::Path,
             restorer_identity: &UserKeypair,
@@ -1911,7 +1911,7 @@ mod test_device {
             encryption: &crate::encryption::EncryptionService,
             store_id: &str,
             store_name: &str,
-        ) -> Result<crate::joining::InviteCode, crate::sync::store::MembershipOpsError> {
+        ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
             self.store
                 .invite_member(
                     member_pubkey,
@@ -4269,7 +4269,7 @@ impl TestStore {
 
     pub(crate) async fn prepare_snapshot_bootstrap<'a>(
         &'a self,
-        membership_floor: &crate::joining::MembershipFloor,
+        membership_floor: &crate::protocol::membership::MembershipFloor,
         binary_schema_version: u32,
         target_path: &std::path::Path,
         restorer_identity: &UserKeypair,
@@ -4595,7 +4595,7 @@ impl TestStore {
         role: crate::protocol::membership::MemberRole,
         encryption: &crate::encryption::EncryptionService,
         store_name: &str,
-    ) -> Result<crate::joining::InviteCode, crate::sync::store::MembershipOpsError> {
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
         let device = self.bind_device(db, identity).await.map_err(|error| {
             crate::sync::store::MembershipOpsError::Chain(
                 crate::sync::store::AnchoredChainError::LoadFailed(error),

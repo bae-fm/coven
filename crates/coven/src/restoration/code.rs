@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
-use crate::joining::MembershipFloor;
+use crate::protocol::membership::MembershipFloor;
 #[cfg(test)]
 use crate::protocol::membership::{MembershipCoord, MembershipGrantId, MembershipHeadRef};
 #[cfg(test)]

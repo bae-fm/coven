@@ -154,7 +154,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         mut history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
-        membership_floor: &crate::joining::MembershipFloor,
+        membership_floor: &crate::protocol::membership::MembershipFloor,
         binary_schema_version: u32,
         target_path: &Path,
         restorer_identity: &crate::keys::UserKeypair,
@@ -982,7 +982,9 @@ mod tests {
             let bootstrap = self
                 .store
                 .prepare_snapshot_bootstrap(
-                    &crate::joining::MembershipFloor(self.membership.head_refs().to_vec()),
+                    &crate::protocol::membership::MembershipFloor(
+                        self.membership.head_refs().to_vec(),
+                    ),
                     1,
                     database_path,
                     &restorer_identity,
@@ -1436,7 +1438,7 @@ mod tests {
         let database_path = destination.path().join("store.db");
         let bootstrap = store
             .prepare_snapshot_bootstrap(
-                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
                 2,
                 &database_path,
                 &signer,
@@ -1678,7 +1680,7 @@ mod tests {
             let database_path = destination.path().join("store.db");
             let bootstrap = store
                 .prepare_snapshot_bootstrap(
-                    &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                    &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
                     1,
                     &database_path,
                     &signer,
@@ -1785,7 +1787,7 @@ mod tests {
         let database_path = destination.path().join("store.db");
         let result = store
             .prepare_snapshot_bootstrap(
-                &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
                 1,
                 &database_path,
                 &signer,

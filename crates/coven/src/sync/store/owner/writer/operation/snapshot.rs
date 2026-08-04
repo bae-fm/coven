@@ -755,7 +755,7 @@ mod tests {
             let database_path = destination.path().join("store.db");
             let selected = store
                 .prepare_snapshot_bootstrap(
-                    &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+                    &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
                     1,
                     &database_path,
                     &signer,

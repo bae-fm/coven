@@ -192,7 +192,7 @@ pub async fn restore_from_cloud(
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     source: RestoreSource,
-    membership_floor: &crate::joining::MembershipFloor,
+    membership_floor: &crate::protocol::membership::MembershipFloor,
     keypair: &UserKeypair,
     authority: &crate::restoration::RestoreAuthority,
     continuation_device_signer: Option<&UserKeypair>,

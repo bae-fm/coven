@@ -1402,7 +1402,7 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
     let database_path = destination.path().join("store.db");
     let bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &database_path,
             &signer,
@@ -1484,7 +1484,7 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
     let database_path = destination.path().join("store.db");
     let bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &database_path,
             &signer,
@@ -1542,7 +1542,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
     let database_path = destination.path().join("store.db");
     let bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &database_path,
             &member,
@@ -1732,7 +1732,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     let database_path = destination.path().join("store.db");
     let bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &database_path,
             &signer,
@@ -1789,7 +1789,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     let removed_path = removed_destination.path().join("store.db");
     let removed_bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &removed_path,
             &member,
@@ -2018,7 +2018,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let database_path = destination.path().join("store.db");
     let bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::joining::MembershipFloor(membership.head_refs().to_vec()),
+            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &database_path,
             &signer,

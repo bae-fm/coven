@@ -18,9 +18,9 @@ use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
 use crate::joining::BootstrapError;
-use crate::joining::MembershipFloor;
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::protocol::blob::{CacheFill, Provenance};
+use crate::protocol::membership::MembershipFloor;
 use crate::protocol::synced_schema::BlobDecl;
 use crate::restoration::restore_from_code;
 use crate::restoration::{

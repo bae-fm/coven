@@ -689,7 +689,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         encryption: &crate::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
-    ) -> Result<crate::joining::InviteCode, crate::sync::store::membership::MembershipOpsError>
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
     {
         if role == crate::protocol::membership::MemberRole::Owner {
             return Err(crate::sync::store::membership::MembershipOpsError::Invite(
@@ -913,15 +913,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 ),
             ));
         }
-        Ok(crate::joining::InviteCode {
-            v: crate::joining::INVITE_CODE_VERSION,
+        Ok(crate::join_code::InviteCode {
+            v: crate::join_code::INVITE_CODE_VERSION,
             store_id: store_id.to_string(),
             store_name: store_name.to_string(),
             join_info,
             owner_pubkey,
             wrapped_key,
             store_root: root,
-            membership_floor: crate::joining::MembershipFloor(self.membership.head_refs().to_vec()),
+            membership_floor: crate::protocol::membership::MembershipFloor(
+                self.membership.head_refs().to_vec(),
+            ),
         })
     }
 

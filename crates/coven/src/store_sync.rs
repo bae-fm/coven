@@ -1153,7 +1153,7 @@ impl StoreSync {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
-    ) -> Result<crate::joining::InviteCode, SyncError> {
+    ) -> Result<crate::join_code::InviteCode, SyncError> {
         let active = self.active().ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);
@@ -1579,7 +1579,7 @@ impl ActiveSyncOperation {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
-    ) -> Result<crate::joining::InviteCode, crate::sync::store::MembershipOpsError> {
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
         self.loop_handle
             .invite_member(public_key_hex, invitee_email, role, self.store_name())
             .await

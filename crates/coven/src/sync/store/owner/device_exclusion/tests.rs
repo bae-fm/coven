@@ -1975,7 +1975,7 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
     async fn open(
         store: &'storage TestStore,
         store_dir: &'storage StoreDir,
-        membership_floor: &crate::joining::MembershipFloor,
+        membership_floor: &crate::protocol::membership::MembershipFloor,
         schema_version: u32,
         identity: &UserKeypair,
         device_id: String,

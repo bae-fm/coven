@@ -233,7 +233,9 @@ impl<'storage> AuthorizedStore<'storage> {
         Ok(super::StoreRestoreMembership {
             store_root: self.history.root().clone(),
             founder_pubkey,
-            membership_floor: crate::joining::MembershipFloor(self.membership.head_refs().to_vec()),
+            membership_floor: crate::protocol::membership::MembershipFloor(
+                self.membership.head_refs().to_vec(),
+            ),
         })
     }
 

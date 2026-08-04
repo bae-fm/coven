@@ -1009,7 +1009,7 @@ impl SyncComponents {
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::joining::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
         let encryption = self
             .current_encryption()
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;

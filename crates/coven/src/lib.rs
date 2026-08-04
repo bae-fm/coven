@@ -23,6 +23,7 @@ pub(crate) mod envelope;
 mod handle;
 pub(crate) mod id_provider;
 pub(crate) mod identity_custody;
+pub(crate) mod join_code;
 pub(crate) mod joining;
 pub(crate) mod keyring_backend;
 pub(crate) mod keys;

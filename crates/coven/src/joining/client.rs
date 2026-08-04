@@ -12,7 +12,7 @@ use crate::database::supported_version;
 use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
-use crate::joining::InviteCode;
+use crate::join_code::InviteCode;
 use crate::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
