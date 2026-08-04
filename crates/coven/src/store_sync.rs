@@ -770,16 +770,16 @@ impl StoreSync {
         Ok(())
     }
 
-    /// Build a connection over an injected cloud home, replacing whatever was
-    /// connected before. The returned sync is assembled but unstarted; the caller
-    /// decides whether a loop thread or the caller itself drives it, and installs
-    /// it accordingly.
+    /// Replace the current connection with one over an injected cloud home.
+    /// This lifetime owner constructs and installs both the loop and its storage;
+    /// callers select only who drives cycles.
     #[cfg(any(test, feature = "test-utils"))]
-    async fn build_test_connection(
+    async fn replace_with_test_home(
         &self,
         home: Arc<dyn CloudHome>,
         cipher: crate::storage::CloudCipher,
-    ) -> Result<(Arc<SyncLoopHandle>, Arc<dyn SyncStorage>), SyncError> {
+        driver: SyncDriver,
+    ) -> Result<(), SyncError> {
         let config = self.config();
         crate::storage::cloud::setup::require_exact_slot_capabilities_home(
             home.clone(),
@@ -810,19 +810,11 @@ impl StoreSync {
             .await?;
         let storage: Arc<dyn SyncStorage> = storage;
         let sync = self.build_sync(components, config, storage.clone(), routing_encryption);
-        Ok((sync, storage))
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn replace_with_test_home(
-        &self,
-        home: Arc<dyn CloudHome>,
-        cipher: crate::storage::CloudCipher,
-    ) -> Result<(), SyncError> {
-        let (sync, storage) = self.build_test_connection(home, cipher).await?;
-        sync.start().map_err(SyncError::Loop)?;
-        info!("Sync loop started");
-        self.install_cloud(sync, storage, SyncDriver::Loop);
+        if matches!(&driver, SyncDriver::Loop) {
+            sync.start().map_err(SyncError::Loop)?;
+            info!("Sync loop started");
+        }
+        self.install_cloud(sync, storage, driver);
         Ok(())
     }
 
@@ -833,7 +825,8 @@ impl StoreSync {
         cipher: crate::storage::CloudCipher,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.replace_with_test_home(home, cipher).await?;
+        self.replace_with_test_home(home, cipher, SyncDriver::Loop)
+            .await?;
         info!("store sync connected over an injected test cloud home");
         Ok(())
     }
@@ -845,8 +838,8 @@ impl StoreSync {
         cipher: crate::storage::CloudCipher,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        let (sync, storage) = self.build_test_connection(home, cipher).await?;
-        self.install_cloud(sync, storage, SyncDriver::Caller);
+        self.replace_with_test_home(home, cipher, SyncDriver::Caller)
+            .await?;
         info!(
             "store sync connected over an injected test cloud home; the caller drives its cycles"
         );
@@ -862,7 +855,8 @@ impl StoreSync {
         let cipher = self
             .security
             .resolve_cloud_cipher(self.config().cloud_home.storage)?;
-        self.replace_with_test_home(home, cipher).await?;
+        self.replace_with_test_home(home, cipher, SyncDriver::Loop)
+            .await?;
         info!("store sync connected over an injected test cloud home");
         Ok(())
     }
