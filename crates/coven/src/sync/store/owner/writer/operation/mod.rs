@@ -479,14 +479,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn pull(
         &mut self,
-        store_dir: &StoreDir,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, SyncCycleFailure> {
         let identity = self.writer.identity;
         let membership = self.membership.clone();
         let execution = self
             .history
-            .pull(store_dir, &membership, Some(identity), routing_encryption)
+            .pull(&membership, Some(identity), routing_encryption)
             .await
             .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
         self.membership = execution.membership;
@@ -1520,6 +1519,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn circles(&mut self) -> super::AuthorizedCircleWriter<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
+        let store_dir = self.store_dir;
         let root = self.store_root().clone();
         let membership = self.membership.clone();
         let identity = self.writer.identity;
@@ -1530,6 +1530,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             self,
             database,
             storage,
+            store_dir,
             root,
             membership,
             identity,
@@ -2977,11 +2978,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     #[cfg(test)]
-    pub(crate) async fn prepare_pending_store_write(
-        &mut self,
-        store_dir: &StoreDir,
-    ) -> Result<bool, StoreError> {
-        self.prepare_store_write(store_dir).await
+    pub(crate) async fn prepare_pending_store_write(&mut self) -> Result<bool, StoreError> {
+        self.prepare_store_write().await
     }
 
     #[cfg(test)]
@@ -2989,14 +2987,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.drain_prepared_store_writes().await
     }
 
-    pub(crate) async fn publish_pending_store_writes(
-        &mut self,
-        store_dir: &StoreDir,
-    ) -> Result<u64, SyncCycleFailure> {
+    pub(crate) async fn publish_pending_store_writes(&mut self) -> Result<u64, SyncCycleFailure> {
         let mut published = 0_u64;
         loop {
             if !self
-                .prepare_store_write(store_dir)
+                .prepare_store_write()
                 .await
                 .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))?
             {

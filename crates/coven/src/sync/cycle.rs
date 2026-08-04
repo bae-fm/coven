@@ -231,7 +231,6 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     pending_rotation: &'cycle dyn CloudRotationAccess,
     security: Option<&'cycle crate::store_security::StoreSecurity>,
     routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
-    store_dir: &'cycle StoreDir,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     manage_tombstones: bool,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
@@ -247,10 +246,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             CycleBeforePull::Continue(prepared) => prepared,
             CycleBeforePull::Complete(result) => return Ok(result),
         };
-        let store_pull = self
-            .authorization
-            .pull(self.store_dir, self.routing_encryption)
-            .await?;
+        let store_pull = self.authorization.pull(self.routing_encryption).await?;
         let completed = Box::pin(self.complete_after_pull(prepared, store_pull)).await?;
         if completed.rotation_pending.is_none() {
             self.authorization
@@ -265,11 +261,7 @@ impl AuthorizedSyncCycle<'_, '_> {
                 self.authorization
                     .circles()
                     .close()
-                    .finalize_ready_circle_epoch_closes(
-                        &completed.sync_time,
-                        self.store_dir,
-                        routing_encryption,
-                    )
+                    .finalize_ready_circle_epoch_closes(&completed.sync_time, routing_encryption)
                     .await
                     .map_err(|error| {
                         SyncCycleFailure::operation("finalize Circle epoch closes", error)
@@ -371,12 +363,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         if rotation_pending.is_none() {
             let outcome = self
                 .authorization
-                .drain_uploads(
-                    self.store_dir,
-                    self.clock,
-                    self.routing_encryption,
-                    self.observer,
-                )
+                .drain_uploads(self.clock, self.routing_encryption, self.observer)
                 .await
                 .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
             match outcome {
@@ -445,10 +432,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             // Pull installs the membership state that decides whether this active
             // member may write. One capability then retains that decision through
             // preparation and publication of every pending Store write.
-            let published = self
-                .authorization
-                .publish_pending_store_writes(self.store_dir)
-                .await?;
+            let published = self.authorization.publish_pending_store_writes().await?;
             if published > 0 {
                 info!(published, "Published Store writes");
             }
@@ -465,7 +449,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             .await?;
         let local_blob_cleanup_pending = self
             .authorization
-            .drain_local_blob_cleanup(self.store_dir)
+            .drain_local_blob_cleanup()
             .await
             .map_err(|error| {
                 format!("drain local blob cleanup after Store publication: {error}")
@@ -483,7 +467,6 @@ impl AuthorizedSyncCycle<'_, '_> {
 
         self.authorization
             .publish_due_snapshots(
-                self.store_dir,
                 &sync_time,
                 self.routing_encryption,
                 rotation_pending.is_some(),
@@ -560,6 +543,7 @@ impl SyncCycleStorage for CloudSyncStorage {}
 /// before Store creation or opening can perform protocol work.
 pub(crate) struct PreparedSyncComponents {
     database: crate::database::StoreDatabase,
+    store_dir: StoreDir,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: std::sync::Arc<CloudSyncStorage>,
     identity: crate::keys::UserKeypair,
@@ -571,6 +555,7 @@ pub(crate) struct PreparedSyncComponents {
 impl PreparedSyncComponents {
     pub(crate) async fn prepare(
         database: crate::database::StoreDatabase,
+        store_dir: StoreDir,
         local_blob_access: super::store::blob::LocalStoreBlobAccess,
         storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
         identity: crate::keys::UserKeypair,
@@ -615,6 +600,7 @@ impl PreparedSyncComponents {
         let store_id = storage.store_id().to_string();
         Ok(Self {
             database,
+            store_dir,
             local_blob_access,
             storage,
             identity,
@@ -632,6 +618,7 @@ impl PreparedSyncComponents {
                 Store::create(
                     self.database.clone(),
                     store_storage.clone(),
+                    self.store_dir.clone(),
                     &self.database.stamp(),
                     &self.identity,
                 )
@@ -643,6 +630,7 @@ impl PreparedSyncComponents {
                 Store::open(
                     self.database.clone(),
                     store_storage.clone(),
+                    self.store_dir.clone(),
                     &expected_store_root,
                     &self.identity,
                 )
@@ -740,9 +728,8 @@ impl SyncComponents {
     pub(crate) fn host_write_blob_staging(
         &self,
         runtime: tokio::runtime::Handle,
-        store_dir: StoreDir,
     ) -> super::store::HostWriteBlobStaging {
-        self.store.host_write_blob_staging(runtime, store_dir)
+        self.store.host_write_blob_staging(runtime)
     }
 
     pub(crate) async fn propose_device_exclusion(
@@ -990,14 +977,13 @@ impl SyncComponents {
     pub(crate) async fn drain_uploads(
         &self,
         clock: &dyn crate::clock::Clock,
-        store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
         self.store
             .authorize_writer()
             .await
             .map_err(|error| DbError::Message(error.to_string()))?
-            .drain_uploads(store_dir, clock, self.routing_encryption.as_ref(), observer)
+            .drain_uploads(clock, self.routing_encryption.as_ref(), observer)
             .await
     }
 
@@ -1102,7 +1088,6 @@ impl SyncComponents {
 
     pub(crate) async fn add_circle_member(
         &self,
-        store_dir: &StoreDir,
         circle_id: crate::protocol::circle::CircleId,
         member_pubkey: String,
         role: crate::protocol::circle::CircleRole,
@@ -1120,17 +1105,13 @@ impl SyncComponents {
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         authorization
-            .publish_pending_store_writes(store_dir)
+            .publish_pending_store_writes()
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let bootstrap = authorization
             .circles()
             .snapshots()
-            .capture_circle_snapshot_cut(
-                store_dir.as_ref().to_path_buf(),
-                &routing_encryption,
-                circle_id,
-            )
+            .capture_circle_snapshot_cut(&routing_encryption, circle_id)
             .await?;
         let routing_key = crate::protocol::circle::derive_row_routing_key(
             &routing_encryption,
@@ -1209,7 +1190,6 @@ impl SyncComponents {
         &self,
         clock: &dyn crate::clock::Clock,
         security: Option<&crate::store_security::StoreSecurity>,
-        store_dir: &StoreDir,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
         let authorization =
@@ -1223,7 +1203,6 @@ impl SyncComponents {
             pending_rotation: self.storage.as_ref(),
             security,
             routing_encryption: self.routing_encryption.as_ref(),
-            store_dir,
             local_blob_access: &self.local_blob_access,
             manage_tombstones: true,
             observer,

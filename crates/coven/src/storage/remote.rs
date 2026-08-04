@@ -4067,6 +4067,7 @@ mod tests {
         .expect("construct pending-rotation storage");
         let components = crate::sync::cycle::PreparedSyncComponents::prepare(
             store_database.clone(),
+            store_dir.clone(),
             crate::sync::test_owner_graph::local_blob_access(
                 store_database.clone(),
                 store_dir.clone(),
@@ -4103,6 +4104,7 @@ mod tests {
         .expect("reconstruct pending-rotation storage");
         let result = crate::sync::cycle::PreparedSyncComponents::prepare(
             crate::database::StoreDatabase::new(&reopened),
+            store_dir.clone(),
             crate::sync::test_owner_graph::local_blob_access(
                 crate::database::StoreDatabase::new(&reopened),
                 store_dir,

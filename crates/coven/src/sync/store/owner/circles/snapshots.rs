@@ -17,6 +17,7 @@ pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
+    store_dir: &'storage crate::store_dir::StoreDir,
     root: StoreRootRef,
     registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
     registration: crate::protocol::store_commit::StoreDeviceRegistration,
@@ -65,6 +66,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
         root: StoreRootRef,
         registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
         registration: crate::protocol::store_commit::StoreDeviceRegistration,
@@ -74,6 +76,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             writer,
             database,
             storage,
+            store_dir,
             root,
             registration_ref,
             registration,
@@ -83,7 +86,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
 
     pub(crate) async fn capture_circle_snapshot_cut(
         &self,
-        temp_dir: std::path::PathBuf,
         routing_encryption: &crate::encryption::EncryptionService,
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<SnapshotCut, crate::database::DbError> {
@@ -91,7 +93,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .database
             .capture_circle_snapshot_cut(
                 self.root.clone(),
-                temp_dir,
+                self.store_dir.as_ref().to_path_buf(),
                 self.database.synced_tables().to_vec(),
                 routing_encryption.clone(),
                 circle_id,
@@ -102,7 +104,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
 
     pub(crate) async fn capture_circle_snapshot_at_cutoff(
         &self,
-        temp_dir: std::path::PathBuf,
         routing_encryption: &crate::encryption::EncryptionService,
         circle_id: crate::protocol::circle::CircleId,
         cutoff: CommitFrontier,
@@ -119,7 +120,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .database
             .capture_circle_snapshot_at_cutoff(
                 root,
-                temp_dir,
+                self.store_dir.as_ref().to_path_buf(),
                 tables,
                 routing_encryption,
                 routing_key,
@@ -141,7 +142,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     /// and does not abort the others or the cycle.
     pub(crate) async fn push_circle_snapshots(
         &mut self,
-        temp_dir: std::path::PathBuf,
         schema_version: u32,
         created_at: &str,
         store_routing: Option<&crate::encryption::EncryptionService>,
@@ -206,10 +206,8 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                     continue;
                 }
             }
-            let circle_temp = temp_dir.join(format!("circle-snapshot-{}", input.circle_id));
-            std::fs::create_dir_all(&circle_temp).map_err(SnapshotError::Io)?;
             let cut = match self
-                .capture_circle_snapshot_cut(circle_temp, store_routing, input.circle_id)
+                .capture_circle_snapshot_cut(store_routing, input.circle_id)
                 .await
             {
                 Ok(cut) => cut,
@@ -539,7 +537,7 @@ impl CircleSnapshotWriter<'_, '_> {
             })?;
         std::fs::create_dir_all(&temp_dir).map_err(SnapshotError::Io)?;
         let cut = self
-            .capture_circle_snapshot_cut(temp_dir, store_routing, input.circle_id)
+            .capture_circle_snapshot_cut(store_routing, input.circle_id)
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         self.push_circle_snapshot(

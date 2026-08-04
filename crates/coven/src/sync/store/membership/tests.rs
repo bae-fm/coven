@@ -10,7 +10,7 @@ use crate::protocol::membership::{
 use crate::storage::cloud::ObjectSlot;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
-use crate::sync::test_helpers::{open_test_db, pubkey_hex, TestCustody, TestStore};
+use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
@@ -22,6 +22,8 @@ struct MergeFixture {
     database: StoreDatabase,
     owner: UserKeypair,
     owner_pubkey: String,
+    _store_dir_temp: tempfile::TempDir,
+    store_dir: crate::store_dir::StoreDir,
 }
 
 impl MergeFixture {
@@ -38,6 +40,7 @@ impl MergeFixture {
             .await
             .expect("bind exact Store");
         let database = crate::database::StoreDatabase::new(&db);
+        let (store_dir_temp, store_dir) = temp_store_dir();
         Self {
             store,
             home,
@@ -47,6 +50,8 @@ impl MergeFixture {
             database,
             owner,
             owner_pubkey,
+            _store_dir_temp: store_dir_temp,
+            store_dir,
         }
     }
 
@@ -373,10 +378,14 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         )
         .expect("open a Store-owned storage session"),
     );
-    let store =
-        crate::sync::store::Store::load(fixture.database.clone(), storage, fixture.owner.clone())
-            .await
-            .expect("load Store owner");
+    let store = crate::sync::store::Store::load(
+        fixture.database.clone(),
+        storage,
+        fixture.store_dir.clone(),
+        fixture.owner.clone(),
+    )
+    .await
+    .expect("load Store owner");
     assert!(store
         .membership_conflict()
         .await
@@ -430,10 +439,14 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
         )
         .expect("open a Store-owned storage session"),
     );
-    let store =
-        crate::sync::store::Store::load(fixture.database.clone(), storage, fixture.owner.clone())
-            .await
-            .expect("load Store owner");
+    let store = crate::sync::store::Store::load(
+        fixture.database.clone(),
+        storage,
+        fixture.store_dir.clone(),
+        fixture.owner.clone(),
+    )
+    .await
+    .expect("load Store owner");
     fixture
         .db
         .delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
@@ -467,10 +480,14 @@ async fn store_membership_reads_reject_tampered_founder_state() {
         )
         .expect("open a Store-owned storage session"),
     );
-    let store =
-        crate::sync::store::Store::load(fixture.database.clone(), storage, fixture.owner.clone())
-            .await
-            .expect("load Store owner");
+    let store = crate::sync::store::Store::load(
+        fixture.database.clone(),
+        storage,
+        fixture.store_dir.clone(),
+        fixture.owner.clone(),
+    )
+    .await
+    .expect("load Store owner");
     fixture
         .db
         .set_protocol_state(crate::database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
@@ -898,6 +915,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
     assert!(crate::sync::store::Store::open(
         crate::database::StoreDatabase::new(&db),
         fixture.store.clone(),
+        fixture.store_dir.clone(),
         &fixture.store.root,
         &fixture.owner,
     )
@@ -994,7 +1012,6 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
                  '0000000001000-0000-owner', '2026-07-21')",
         )
         .await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let loaded_store = fixture
         .store
         .bind_device(&fixture.db, &fixture.owner)
@@ -1004,7 +1021,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
         .authorize_writer()
         .await
         .expect("authorize owner writer");
-    assert!(Box::pin(writer.prepare_pending_store_write(&store_dir))
+    assert!(Box::pin(writer.prepare_pending_store_write())
         .await
         .expect("queue a host write at the contended position"));
 

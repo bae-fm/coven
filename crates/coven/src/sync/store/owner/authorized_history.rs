@@ -13,6 +13,7 @@ use crate::protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamA
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
     storage: &'storage Arc<dyn SyncStorage>,
+    store_dir: &'storage crate::store_dir::StoreDir,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
     keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -26,6 +27,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) fn new(
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -33,6 +35,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Self {
             database,
             storage,
+            store_dir,
             history_verifier,
             blob_source,
             keyrings,
@@ -87,6 +90,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let store = Store::new(
             database,
             Arc::clone(self.storage),
+            self.store_dir.clone(),
             identity.clone(),
             Some(device_id.clone()),
             self.history_verifier.verified_root().clone(),
@@ -263,10 +267,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> super::writer::AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let storage = self.storage;
+        let store_dir = self.store_dir;
         super::writer::AuthorizedWriterOperation::from_parts(
             database,
             self,
             storage,
+            store_dir,
             membership,
             identity,
             registration,
@@ -276,12 +282,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn pull(
         &mut self,
-        store_dir: &crate::store_dir::StoreDir,
         membership: &crate::protocol::membership::MembershipChain,
         identity: Option<&UserKeypair>,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<pull::StorePullExecution, pull::StorePullError> {
-        pull::AuthorizedPull::load(self, store_dir, membership, identity, routing_encryption)
+        pull::AuthorizedPull::load(self, membership, identity, routing_encryption)
             .await?
             .execute()
             .await
@@ -289,20 +294,21 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn bind_pull_package_materializer(
         &self,
-        store_dir: &crate::store_dir::StoreDir,
     ) -> Result<
         super::pull_package_materializer::PullPackageMaterializer<'storage>,
         crate::database::DbError,
     > {
         let schema = std::sync::Arc::new(self.database.table_schema_for_apply().await?);
-        let blob_cache =
-            crate::sync::store::blob::StoreBlobCache::new(self.database.clone(), store_dir.clone());
+        let blob_cache = crate::sync::store::blob::StoreBlobCache::new(
+            self.database.clone(),
+            self.store_dir.clone(),
+        );
         Ok(
             super::pull_package_materializer::PullPackageMaterializer::new(
                 self.database.clone(),
                 self.blob_source.clone(),
                 blob_cache,
-                store_dir.clone(),
+                self.store_dir.clone(),
                 schema,
             ),
         )
@@ -417,22 +423,38 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         _authority: super::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
-        Self::new(database, storage, history_verifier, blob_source, keyrings)
+        Self::new(
+            database,
+            storage,
+            store_dir,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
     }
 
     pub(super) fn from_snapshot(
         _authority: super::writer::SnapshotHistoryConstruction,
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
     ) -> Self {
-        Self::new(database, storage, history_verifier, blob_source, keyrings)
+        Self::new(
+            database,
+            storage,
+            store_dir,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
     }
 }
 

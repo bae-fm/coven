@@ -5,7 +5,6 @@ use tracing::{debug, warn};
 impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn drain_uploads(
         &self,
-        store_dir: &StoreDir,
         clock: &dyn crate::clock::Clock,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         observer: Option<&dyn crate::blob::BlobTransitionObserver>,
@@ -18,7 +17,7 @@ impl AuthorizedWriterOperation<'_> {
             &self.database,
             self.storage.as_ref(),
             authority,
-            store_dir,
+            self.store_dir,
             clock,
             routing_encryption,
             observer,
@@ -255,11 +254,8 @@ impl AuthorizedWriterOperation<'_> {
         Ok(deleted)
     }
 
-    pub(crate) async fn drain_local_blob_cleanup(
-        &self,
-        store_dir: &StoreDir,
-    ) -> Result<bool, crate::database::DbError> {
-        self.database.drain_local_blob_cleanup(store_dir).await
+    pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, crate::database::DbError> {
+        self.database.drain_local_blob_cleanup(self.store_dir).await
     }
 
     pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), crate::database::DbError> {

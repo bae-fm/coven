@@ -49,6 +49,7 @@ pub(crate) use writer::{AuthorizedWriterOperation, StoreAckError};
 pub(crate) struct Store {
     database: StoreDatabase,
     storage: Arc<dyn SyncStorage>,
+    store_dir: StoreDir,
     identity: UserKeypair,
     device_id: Option<String>,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
@@ -98,6 +99,19 @@ impl Store {
         Self::new(
             self.database.clone(),
             storage,
+            self.store_dir.clone(),
+            self.identity.clone(),
+            self.device_id.clone(),
+            self.root.clone(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_store_dir(&self, store_dir: StoreDir) -> Self {
+        Self::new(
+            self.database.clone(),
+            self.storage.clone(),
+            store_dir,
             self.identity.clone(),
             self.device_id.clone(),
             self.root.clone(),
@@ -128,23 +142,23 @@ impl Store {
     pub(crate) fn host_write_blob_staging(
         &self,
         runtime: tokio::runtime::Handle,
-        store_dir: StoreDir,
     ) -> HostWriteBlobStaging {
         HostWriteBlobStaging::new(
             runtime,
             Arc::clone(&self.storage),
             self.root.reference().clone(),
-            store_dir,
+            self.store_dir.clone(),
         )
     }
 
     pub(crate) async fn create(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
+        store_dir: StoreDir,
         founder_timestamp: &str,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        FounderStoreCreation::begin(database, storage, founder_timestamp, identity)
+        FounderStoreCreation::begin(database, storage, &store_dir, founder_timestamp, identity)
             .await
             .execute()
             .await
@@ -153,6 +167,7 @@ impl Store {
     pub(crate) async fn open(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
+        store_dir: StoreDir,
         expected_root: &StoreRootRef,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
@@ -174,15 +189,23 @@ impl Store {
             root.reference().clone(),
         );
         let keyrings = keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
-        AuthorizedStoreHistory::new(database, &storage, history_verifier, blob_source, keyrings)
-            .finish_initialization(identity)
-            .await
+        AuthorizedStoreHistory::new(
+            database,
+            &storage,
+            &store_dir,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
+        .finish_initialization(identity)
+        .await
     }
 
     #[doc(hidden)]
     pub(crate) async fn load(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
+        store_dir: StoreDir,
         identity: UserKeypair,
     ) -> Result<Self, StoreError> {
         let store_root =
@@ -202,12 +225,15 @@ impl Store {
         let device_id = database
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
-        Ok(Self::new(database, storage, identity, device_id, root))
+        Ok(Self::new(
+            database, storage, store_dir, identity, device_id, root,
+        ))
     }
 
     fn new(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
+        store_dir: StoreDir,
         identity: UserKeypair,
         device_id: Option<String>,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
@@ -215,6 +241,7 @@ impl Store {
         Self {
             database,
             storage,
+            store_dir,
             identity,
             device_id,
             root,
@@ -378,6 +405,7 @@ impl Store {
         Ok(AuthorizedStoreHistory::new(
             self.database.clone(),
             &self.storage,
+            &self.store_dir,
             history_verifier,
             blob_source,
             keyrings,
@@ -1473,7 +1501,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{open_test_db, TestStore};
+    use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
 
     #[tokio::test]
     async fn loaded_store_authorization_retains_its_verified_root() {
@@ -1484,9 +1512,11 @@ mod tests {
             TestStore::create(&db, "retained-root-authority", signer.clone(), home.clone())
                 .await
                 .expect("create Store");
+        let (_store_dir_temp, store_dir) = temp_store_dir();
         let store = Store::load(
             crate::database::StoreDatabase::new(&db),
             fixture.clone(),
+            store_dir,
             signer,
         )
         .await

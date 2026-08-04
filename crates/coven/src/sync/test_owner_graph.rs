@@ -279,6 +279,7 @@ impl TestOwnerGraph {
             .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
         let components = Box::pin(crate::sync::cycle::PreparedSyncComponents::prepare(
             self.database.clone(),
+            self.store_dir.clone(),
             self.local_access.clone(),
             storage,
             identity,

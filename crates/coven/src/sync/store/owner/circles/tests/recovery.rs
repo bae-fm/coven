@@ -355,7 +355,6 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue the membership-revocation witness");
-    let (_owner_temp, owner_store_dir) = temp_store_dir();
     let owner_store = revoked
         .store
         .bind_device(&revoked.owner_db, &revoked.founder)
@@ -367,7 +366,7 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .expect("authorize the revocation witness writer");
     assert!(
         writer
-            .prepare_pending_store_write(&owner_store_dir)
+            .prepare_pending_store_write()
             .await
             .expect("prepare the membership-revocation witness"),
         "membership revocation must be named by a Store commit"
@@ -386,12 +385,11 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .bind_device(&revoked.db, &revoked.successor)
         .await
         .expect("load removed member Store");
-    let (_member_temp, member_store_dir) = temp_store_dir();
     let pull = member_store
         .authorize_writer()
         .await
         .expect("authorize removed member Store pull")
-        .pull(&member_store_dir, None)
+        .pull(None)
         .await
         .expect("pull the accepted membership-revocation witness");
     assert!(

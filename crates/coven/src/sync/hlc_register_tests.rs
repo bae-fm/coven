@@ -379,6 +379,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let member_store = crate::sync::store::Store::load(
         crate::database::StoreDatabase::new(&member_db),
         storage.clone(),
+        member_store_dir,
         member.clone(),
     )
     .await
@@ -389,7 +390,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .expect("authorize member writer while their grant is active");
     assert!(
         writer
-            .prepare_pending_store_write(&member_store_dir)
+            .prepare_pending_store_write()
             .await
             .expect("prepare member commit while grant is active"),
         "member write must prepare while its grant is active",

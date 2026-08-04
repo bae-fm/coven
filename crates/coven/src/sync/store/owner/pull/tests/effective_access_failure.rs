@@ -105,13 +105,12 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     drop(founder_writer);
     drop(second_writer);
 
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let mut founder_writer = owner_store
         .authorize_writer()
         .await
         .expect("authorize the founder with the unresolved membership");
     let error = founder_writer
-        .pull(&store_dir, Some(&encryption))
+        .pull(Some(&encryption))
         .await
         .expect_err("pull must reject unresolved Store membership");
     assert!(error.to_string().contains("membership"), "{error}");
@@ -132,7 +131,6 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
         .await;
         let first = fixture
             .publish_row(
-                &owner_store_dir,
                 EFFECTIVE_ACCESS_ROW_ID,
                 "active baseline",
                 "0000000002000-0000-owner",
@@ -149,7 +147,6 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
 
         let unavailable = fixture
             .publish_row(
-                &owner_store_dir,
                 EFFECTIVE_ACCESS_ROW_ID,
                 "must not materialize",
                 "0000000003000-0000-owner",

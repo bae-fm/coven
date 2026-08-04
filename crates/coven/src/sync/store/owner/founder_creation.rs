@@ -19,6 +19,7 @@ use super::HistoryConstructionAuthority;
 pub(super) struct FounderStoreCreation<'operation> {
     database: StoreDatabase,
     storage: Arc<dyn SyncStorage>,
+    store_dir: &'operation StoreDir,
     founder_timestamp: &'operation str,
     identity: &'operation UserKeypair,
     _permit: crate::database::store::StoreCreationPermit,
@@ -86,6 +87,7 @@ impl<'operation> FounderStoreCreation<'operation> {
     pub(super) async fn begin(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
+        store_dir: &'operation StoreDir,
         founder_timestamp: &'operation str,
         identity: &'operation UserKeypair,
     ) -> Self {
@@ -93,6 +95,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         Self {
             database,
             storage,
+            store_dir,
             founder_timestamp,
             identity,
             _permit: permit,
@@ -963,6 +966,7 @@ impl FounderStoreCreation<'_> {
         Ok(AuthorizedStoreHistory::new(
             database.clone(),
             storage,
+            self.store_dir,
             history_verifier,
             blob_source,
             keyrings,

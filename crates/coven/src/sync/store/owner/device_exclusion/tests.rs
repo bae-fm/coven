@@ -237,6 +237,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         .await
         .expect("create snapshot exclusion Store"),
     );
+    let (_restore_store_dir_temp, restore_store_dir) = temp_store_dir();
     let owner_device = Box::pin(store.open_into(&owner_db))
         .await
         .expect("open snapshot exclusion Store");
@@ -313,6 +314,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
     ] {
         let mut snapshot = Box::pin(PublishedExclusionSnapshot::open(
             &store,
+            &restore_store_dir,
             &restore.membership_floor,
             owner_db.schema_version(),
             &signer,
@@ -357,6 +359,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
 
     let mut snapshot = Box::pin(PublishedExclusionSnapshot::open(
         &store,
+        &restore_store_dir,
         &restore.membership_floor,
         owner_db.schema_version(),
         &signer,
@@ -531,8 +534,10 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         ))
         .await
         .expect("verify pre-exclusion snapshot");
+        let store_dir = StoreDir::new(destination.path());
         let mut joining_db = bootstrap
             .install(
+                &store_dir,
                 crate::sync::test_helpers::test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -1402,9 +1407,14 @@ async fn run_excluded_author_candidate_cleanup_case(
             .await
             .expect_err("excluded peer cannot activate its late candidate")
     };
-    let peer_store = Store::load(StoreDatabase::new(&peer_db), store.clone(), signer.clone())
-        .await
-        .expect("bind excluded peer Store");
+    let peer_store = Store::load(
+        StoreDatabase::new(&peer_db),
+        store.clone(),
+        store_dir.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind excluded peer Store");
     let local_position = peer_store
         .latest_local_store_position()
         .await
@@ -1656,9 +1666,14 @@ async fn run_excluded_author_candidate_cleanup_case(
     } else {
         reopened
     };
-    let retried_store = Store::load(StoreDatabase::new(&retried), store.clone(), signer.clone())
-        .await
-        .expect("bind retried excluded peer Store");
+    let retried_store = Store::load(
+        StoreDatabase::new(&retried),
+        store.clone(),
+        store_dir.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind retried excluded peer Store");
     assert_eq!(
         retried_store
             .latest_local_store_position()
@@ -1957,6 +1972,7 @@ struct PublishedExclusionSnapshot<'storage> {
 impl<'storage> PublishedExclusionSnapshot<'storage> {
     async fn open(
         store: &'storage TestStore,
+        store_dir: &'storage StoreDir,
         membership_floor: &crate::joining::MembershipFloor,
         schema_version: u32,
         identity: &UserKeypair,
@@ -1970,6 +1986,7 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
             .expect("verify author exclusion snapshot");
         let restored = bootstrap
             .install(
+                store_dir,
                 crate::sync::test_helpers::test_synced_tables(),
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),

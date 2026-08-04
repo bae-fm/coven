@@ -40,13 +40,12 @@ async fn one_retained_checkpoint() -> (
                  '0000000001000-0000-checkpoint', '2026-07-21')",
     )
     .await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let mut writer = loaded_store
         .authorize_writer()
         .await
         .expect("authorize checkpoint writer");
     assert!(writer
-        .prepare_pending_store_write(&store_dir)
+        .prepare_pending_store_write()
         .await
         .expect("prepare checkpoint commit"));
     assert_eq!(
@@ -346,13 +345,7 @@ impl EffectiveAccessFixture {
             .map(|(_, result)| result)
     }
 
-    async fn publish_row(
-        &self,
-        owner_store_dir: &crate::store_dir::StoreDir,
-        row_id: &str,
-        body: &str,
-        stamp: &str,
-    ) -> StoreBatchCommitRef {
+    async fn publish_row(&self, row_id: &str, body: &str, stamp: &str) -> StoreBatchCommitRef {
         let statement = if self
             .owner_database
             .scoped_routing_state_for_test(row_id)
@@ -381,7 +374,7 @@ impl EffectiveAccessFixture {
             .await
             .expect("authorize effective-access owner writer");
         assert!(writer
-            .prepare_pending_store_write(owner_store_dir)
+            .prepare_pending_store_write()
             .await
             .expect("prepare effective-access Circle row"));
         assert_eq!(
@@ -462,6 +455,7 @@ impl EffectiveAccessFixture {
         .expect("open effective-access owner storage");
         let components = crate::sync::cycle::PreparedSyncComponents::prepare(
             StoreDatabase::new(&owner_database),
+            owner_store_dir.clone(),
             crate::sync::test_owner_graph::local_blob_access(
                 StoreDatabase::new(&owner_database),
                 owner_store_dir.clone(),
@@ -480,7 +474,6 @@ impl EffectiveAccessFixture {
         .expect("initialize effective-access owner sync");
         components
             .add_circle_member(
-                owner_store_dir,
                 circle_id,
                 crate::keys::public_key_hex(&member),
                 crate::protocol::circle::CircleRole::Member,
@@ -592,7 +585,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
 
     let first = fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "visible before removal",
             "0000000002000-0000-owner",
@@ -614,7 +606,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     );
     let hidden_before_removal = fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "private immediately before removal",
             "0000000002500-0000-owner",
@@ -630,7 +621,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     // removed member must still be pruned from.
     let late = fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "private just before removal",
             "0000000002800-0000-owner",
@@ -817,7 +807,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
 
     fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "visible before removal",
             "0000000002000-0000-owner",
@@ -834,7 +823,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     // exercising the prune of the member's Circle rows.
     let pre_removal = fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "private just before removal",
             "0000000002500-0000-owner",
@@ -921,7 +909,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .expect("publish Circle successor after Store re-add");
     fixture
         .publish_row(
-            &owner_store_dir,
             READD_EFFECTIVE_ACCESS_ROW_ID,
             "visible after re-add",
             "0000000005000-0000-owner",
@@ -1274,7 +1261,6 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         )
         .await
         .expect("promote candidate Owner");
-    let (_candidate_temp, candidate_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let candidate_device = store
         .bind_device(&candidate_db, &candidate)
         .await
@@ -1284,7 +1270,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("authorize candidate Owner");
     let candidate_pull = candidate_writer
-        .pull(&candidate_store_dir, None)
+        .pull(None)
         .await
         .expect("pull candidate Owner to the common Store history");
     assert!(candidate_pull.held_positions.is_empty());
@@ -1355,7 +1341,6 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .load_membership_head_for_test(&earlier_head_ref)
         .await
         .expect("load concurrent membership head");
-    let (_later_temp, later_store_dir) = crate::sync::test_helpers::temp_store_dir();
     let later_device = store
         .bind_device(later_db, later_owner)
         .await
@@ -1365,7 +1350,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("authorize later Owner writer");
     assert!(later_writer
-        .prepare_pending_store_write(&later_store_dir)
+        .prepare_pending_store_write()
         .await
         .expect("prepare later concurrent write"));
     later_writer
@@ -1501,7 +1486,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
 
     fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "before deletion",
             "0000000002000-0000-owner",
@@ -1550,7 +1534,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     // A pre-deletion Circle package the member has not yet pulled.
     fixture
         .publish_row(
-            &owner_store_dir,
             READD_EFFECTIVE_ACCESS_ROW_ID,
             "private before deletion",
             "0000000002500-0000-owner",
@@ -1729,7 +1712,6 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
     // deletion is authored, so the row is materialized locally.
     fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "applied then pruned",
             "0000000002000-0000-owner",
@@ -1796,7 +1778,6 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     // decrypt and verify against the frozen epoch's key.
     let package_commit_ref = fixture
         .publish_row(
-            &owner_store_dir,
             EFFECTIVE_ACCESS_ROW_ID,
             "authored before deletion",
             "0000000002000-0000-owner",

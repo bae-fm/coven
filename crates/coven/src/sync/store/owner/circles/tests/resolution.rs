@@ -81,6 +81,7 @@ impl ConflictFixture {
         Store::load(
             StoreDatabase::new(&self.db1),
             self.store.clone(),
+            self.dir1.clone(),
             self.founder.clone(),
         )
         .await
@@ -91,6 +92,7 @@ impl ConflictFixture {
         Store::load(
             StoreDatabase::new(&self.db2),
             self.store.clone(),
+            self.dir2.clone(),
             self.founder.clone(),
         )
         .await
@@ -103,7 +105,7 @@ impl ConflictFixture {
             .authorize_writer()
             .await
             .expect("authorize device 1 pull")
-            .pull(&self.dir1, Some(&routing()))
+            .pull(Some(&routing()))
             .await
             .expect("device 1 pull");
     }
@@ -114,7 +116,7 @@ impl ConflictFixture {
             .authorize_writer()
             .await
             .expect("authorize device 2 pull")
-            .pull(&self.dir2, Some(&routing()))
+            .pull(Some(&routing()))
             .await
             .expect("device 2 pull");
     }
@@ -558,6 +560,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .expect("open Circle owner storage");
     let components = PreparedSyncComponents::prepare(
         StoreDatabase::new(&db1),
+        store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
             StoreDatabase::new(&db1),
             store_dir.clone(),
@@ -575,12 +578,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .await
     .expect("initialize Circle owner sync");
     components
-        .add_circle_member(
-            &store_dir,
-            circle_id,
-            member_pubkey.clone(),
-            CircleRole::Member,
-        )
+        .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
         .await
         .expect("add Circle member");
 
@@ -592,43 +590,62 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .await
         .expect("register the founder's second device");
     let (_dir2, dir2) = temp_store_dir();
-    Store::load(StoreDatabase::new(&db2), store.clone(), founder.clone())
-        .await
-        .expect("load device 2 Store")
-        .authorize_writer()
-        .await
-        .expect("authorize device 2 pull")
-        .pull(&dir2, Some(&routing()))
-        .await
-        .expect("device 2 pulls the with-member Circle");
+    Store::load(
+        StoreDatabase::new(&db2),
+        store.clone(),
+        dir2.clone(),
+        founder.clone(),
+    )
+    .await
+    .expect("load device 2 Store")
+    .authorize_writer()
+    .await
+    .expect("authorize device 2 pull")
+    .pull(Some(&routing()))
+    .await
+    .expect("device 2 pulls the with-member Circle");
 
     // Each founder device removes the same member from the shared predecessor
     // without seeing the other's close, producing two concurrent close controls.
-    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
-        .await
-        .expect("load device 1 Store")
-        .circles()
-        .remove_circle_member(circle_id, member_pubkey.clone())
-        .await
-        .expect("device 1 authors an epoch close");
-    Store::load(StoreDatabase::new(&db2), store.clone(), founder.clone())
-        .await
-        .expect("load device 2 Store")
-        .circles()
-        .remove_circle_member(circle_id, member_pubkey)
-        .await
-        .expect("device 2 authors a concurrent epoch close");
+    Store::load(
+        StoreDatabase::new(&db1),
+        store.clone(),
+        store_dir.clone(),
+        founder.clone(),
+    )
+    .await
+    .expect("load device 1 Store")
+    .circles()
+    .remove_circle_member(circle_id, member_pubkey.clone())
+    .await
+    .expect("device 1 authors an epoch close");
+    Store::load(
+        StoreDatabase::new(&db2),
+        store.clone(),
+        dir2,
+        founder.clone(),
+    )
+    .await
+    .expect("load device 2 Store")
+    .circles()
+    .remove_circle_member(circle_id, member_pubkey)
+    .await
+    .expect("device 2 authors a concurrent epoch close");
 
-    let (_dir1, dir1) = temp_store_dir();
-    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
-        .await
-        .expect("load device 1 Store")
-        .authorize_writer()
-        .await
-        .expect("authorize device 1 pull")
-        .pull(&dir1, Some(&routing()))
-        .await
-        .expect("device 1 pulls the concurrent close");
+    Store::load(
+        StoreDatabase::new(&db1),
+        store.clone(),
+        store_dir.clone(),
+        founder.clone(),
+    )
+    .await
+    .expect("load device 1 Store")
+    .authorize_writer()
+    .await
+    .expect("authorize device 1 pull")
+    .pull(Some(&routing()))
+    .await
+    .expect("device 1 pulls the concurrent close");
     let branches = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
@@ -659,13 +676,18 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // resolution successor under a new control coordinate would strand the close's
     // participant responses, which bind to the closing control at create-once
     // slots.
-    let error = Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
-        .await
-        .expect("load device 1 Store")
-        .circles()
-        .resolve_circle_control(circle_id, closing[0].clone())
-        .await
-        .expect_err("resolving to the closing branch is refused");
+    let error = Store::load(
+        StoreDatabase::new(&db1),
+        store.clone(),
+        store_dir.clone(),
+        founder.clone(),
+    )
+    .await
+    .expect("load device 1 Store")
+    .circles()
+    .resolve_circle_control(circle_id, closing[0].clone())
+    .await
+    .expect_err("resolving to the closing branch is refused");
     assert!(
         matches!(&error, CircleOperationError::ResolveToClosingBranch { circle_id: id }
             if *id == circle_id),
@@ -676,13 +698,18 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // The cancellation reopens that branch without covering the other close, so
     // the Circle remains conflicted until the Owner explicitly selects the
     // reopened branch.
-    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
-        .await
-        .expect("load device 1 Store")
-        .circles()
-        .cancel_circle_epoch_close(circle_id)
-        .await
-        .expect("cancel device 1's close while conflicted");
+    Store::load(
+        StoreDatabase::new(&db1),
+        store.clone(),
+        store_dir.clone(),
+        founder.clone(),
+    )
+    .await
+    .expect("load device 1 Store")
+    .circles()
+    .cancel_circle_epoch_close(circle_id)
+    .await
+    .expect("cancel device 1's close while conflicted");
     let after_cancel = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
@@ -714,13 +741,18 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     }
     let reopened = reopened.expect("one branch is the cancelled close's active successor");
     assert_eq!(closing_count, 1, "the concurrent close remains retained");
-    Store::load(StoreDatabase::new(&db1), store.clone(), founder.clone())
-        .await
-        .expect("load device 1 Store")
-        .circles()
-        .resolve_circle_control(circle_id, reopened)
-        .await
-        .expect("resolve to the reopened branch");
+    Store::load(
+        StoreDatabase::new(&db1),
+        store.clone(),
+        store_dir,
+        founder.clone(),
+    )
+    .await
+    .expect("load device 1 Store")
+    .circles()
+    .resolve_circle_control(circle_id, reopened)
+    .await
+    .expect("resolve to the reopened branch");
     let circles = StoreDatabase::new(&db1)
         .get_circles(
             &keys::public_key_hex(&founder),
@@ -798,6 +830,7 @@ async fn non_owner_resolution_is_refused() {
     Store::load(
         StoreDatabase::new(&outsider_db),
         fixture.store.clone(),
+        outsider_dir.clone(),
         outsider.clone(),
     )
     .await
@@ -805,7 +838,7 @@ async fn non_owner_resolution_is_refused() {
     .authorize_writer()
     .await
     .expect("authorize non-owner pull")
-    .pull(&outsider_dir, Some(&routing()))
+    .pull(Some(&routing()))
     .await
     .expect("non-owner pulls the public conflict");
     assert!(
@@ -820,6 +853,7 @@ async fn non_owner_resolution_is_refused() {
     let error = Store::load(
         StoreDatabase::new(&outsider_db),
         fixture.store.clone(),
+        outsider_dir,
         outsider.clone(),
     )
     .await

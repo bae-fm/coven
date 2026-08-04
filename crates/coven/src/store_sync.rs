@@ -390,7 +390,7 @@ impl StoreSync {
         };
         Some(
             identity
-                .load_store(self.database.clone(), storage)
+                .load_store(self.database.clone(), storage, self.store_dir.clone())
                 .await
                 .map_err(SyncError::from),
         )
@@ -445,12 +445,9 @@ impl ConnectedSyncOperation {
         self.loop_handle.self_uploader()
     }
 
-    fn host_write_blob_staging(
-        &self,
-        store_dir: crate::store_dir::StoreDir,
-    ) -> crate::sync::store::HostWriteBlobStaging {
+    fn host_write_blob_staging(&self) -> crate::sync::store::HostWriteBlobStaging {
         self.loop_handle
-            .host_write_blob_staging(tokio::runtime::Handle::current(), store_dir)
+            .host_write_blob_staging(tokio::runtime::Handle::current())
     }
 
     #[cfg(test)]
@@ -746,6 +743,7 @@ impl StoreSync {
             .established_identity()?
             .initialize_sync_components(
                 self.database.clone(),
+                self.store_dir.clone(),
                 self.local_blob_access.clone(),
                 storage,
                 initialization,
@@ -945,10 +943,7 @@ impl StoreSync {
     pub(crate) fn host_write_blob_staging(
         &self,
     ) -> Option<crate::sync::store::HostWriteBlobStaging> {
-        Some(
-            self.connected()?
-                .host_write_blob_staging(self.store_dir.clone()),
-        )
+        Some(self.connected()?.host_write_blob_staging())
     }
 
     #[cfg(test)]
@@ -1002,7 +997,7 @@ impl StoreSync {
             .await
             .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
         let result = authorization
-            .pull(&self.store_dir, Some(&routing_encryption))
+            .pull(Some(&routing_encryption))
             .await
             .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
         let sequences = result
@@ -1153,7 +1148,11 @@ impl StoreSync {
             .map_err(SyncError::StorageSetup)?;
         self.security
             .established_identity()?
-            .load_store(self.database.clone(), Arc::new(storage))
+            .load_store(
+                self.database.clone(),
+                Arc::new(storage),
+                self.store_dir.clone(),
+            )
             .await
             .map_err(SyncError::from)
     }

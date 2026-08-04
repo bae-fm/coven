@@ -51,6 +51,7 @@ pub(crate) struct AuthorizedWriterOperation<'storage> {
     database: StoreDatabase,
     history: AuthorizedStoreHistory<'storage>,
     storage: &'storage Arc<dyn SyncStorage>,
+    store_dir: &'storage StoreDir,
     membership: crate::protocol::membership::MembershipChain,
     writer: LocalStoreWriter<'storage>,
 }
@@ -61,6 +62,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         database: StoreDatabase,
         history: AuthorizedStoreHistory<'storage>,
         storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage StoreDir,
         membership: crate::protocol::membership::MembershipChain,
         identity: &'storage UserKeypair,
         registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
@@ -70,6 +72,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             database,
             history,
             storage,
+            store_dir,
             membership,
             writer: LocalStoreWriter::from_verified_parts(identity, registration, device_signer),
         }

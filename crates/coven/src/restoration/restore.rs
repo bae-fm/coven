@@ -342,6 +342,7 @@ pub async fn restore_from_cloud(
             .map(|keyring| EncryptionService::from(keyring.clone()));
         let mut store = bootstrap
             .install(
+                &store_dir,
                 synced_tables.to_vec(),
                 crate::blob::delete::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -371,7 +372,7 @@ pub async fn restore_from_cloud(
         if *cancel.borrow() {
             return Err(BootstrapError::Cancelled);
         }
-        let pull_result = store.pull(&store_dir, routing_encryption.as_ref()).await?;
+        let pull_result = store.pull(routing_encryption.as_ref()).await?;
 
         if let Some(continuation) = continuation {
             store

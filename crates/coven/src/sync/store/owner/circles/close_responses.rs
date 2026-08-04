@@ -13,6 +13,7 @@ pub(crate) struct CircleCloseCoordinator<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
+    store_dir: &'storage crate::store_dir::StoreDir,
     root: crate::protocol::store_commit::StoreRootRef,
     membership: crate::protocol::membership::MembershipChain,
     identity: &'storage crate::keys::UserKeypair,
@@ -27,6 +28,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
         root: crate::protocol::store_commit::StoreRootRef,
         membership: crate::protocol::membership::MembershipChain,
         identity: &'storage crate::keys::UserKeypair,
@@ -38,6 +40,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             writer,
             database,
             storage,
+            store_dir,
             root,
             membership,
             identity,
@@ -52,6 +55,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             self.writer,
             self.database.clone(),
             self.storage.clone(),
+            self.store_dir,
             self.root.clone(),
             self.registration_ref.clone(),
             self.registration.clone(),
@@ -94,7 +98,6 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
     pub(crate) async fn finalize_ready_circle_epoch_closes(
         &mut self,
         metadata_stamp: &str,
-        store_dir: &crate::store_dir::StoreDir,
         routing_encryption: &crate::encryption::EncryptionService,
     ) -> Result<(), CircleOperationError> {
         let journals = self.database.waiting_circle_operations().await?;
@@ -147,12 +150,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                 })?;
             let bootstrap = self
                 .snapshots()
-                .capture_circle_snapshot_at_cutoff(
-                    store_dir.as_ref().to_path_buf(),
-                    routing_encryption,
-                    journal.circle_id,
-                    cutoff,
-                )
+                .capture_circle_snapshot_at_cutoff(routing_encryption, journal.circle_id, cutoff)
                 .await?;
             let activation = self
                 .history()

@@ -216,7 +216,6 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         forged_head_object.stored_bytes().to_vec(),
     );
 
-    let (_store_temp, store_dir) = temp_store_dir();
     let loaded_store = store
         .bind_device(&db, &signer)
         .await
@@ -225,7 +224,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .authorize_writer()
         .await
         .expect("authorize Store pull")
-        .pull(&store_dir, None)
+        .pull(None)
         .await
         .expect("pull reports the invented access commit as held");
     assert!(

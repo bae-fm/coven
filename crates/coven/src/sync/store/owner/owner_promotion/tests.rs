@@ -69,7 +69,6 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         .await
         .expect("promote first Owner");
 
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let second_device = store
         .bind_device(&second_owner_db, &second_owner)
         .await
@@ -79,7 +78,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         .await
         .expect("authorize second Owner writer");
     let pull = second_writer
-        .pull(&store_dir, Some(&EncryptionService::from_key([42; 32])))
+        .pull(Some(&EncryptionService::from_key([42; 32])))
         .await
         .expect("pull second Owner through the first promotion");
     assert!(pull.held_positions.is_empty());
@@ -411,7 +410,6 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
                  '0000000001000-0000-owner', '2026-07-20')",
         )
         .await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let loaded_owner_store = store
         .bind_device(&owner_db, &owner)
         .await
@@ -420,7 +418,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         .authorize_writer()
         .await
         .expect("authorize promoter writer");
-    assert!(Box::pin(writer.prepare_pending_store_write(&store_dir))
+    assert!(Box::pin(writer.prepare_pending_store_write())
         .await
         .expect("queue a host write at the contended position"));
 

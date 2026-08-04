@@ -4,7 +4,9 @@ use super::*;
 use crate::database::Database;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::test_helpers::{open_test_db, test_migrations, test_synced_tables};
+use crate::sync::test_helpers::{
+    open_test_db, temp_store_dir, test_migrations, test_synced_tables,
+};
 
 fn store_database(database: &Database) -> StoreDatabase {
     StoreDatabase::new(database)
@@ -25,10 +27,12 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         .expect("construct exact founder storage"),
     );
     let db = open_test_db();
+    let (_store_dir_temp, store_dir) = temp_store_dir();
 
     let initialized = crate::sync::store::Store::create(
         store_database(&db),
         storage,
+        store_dir,
         "0000000000001-0000-founder",
         &founder,
     )
@@ -65,13 +69,19 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             .expect("construct founder rollback storage"),
         );
         let db = open_test_db();
+        let (_store_dir_temp, store_dir) = temp_store_dir();
         let timestamp = "0000000000001-0000-founder";
-        let staged =
-            FounderStoreCreation::begin(store_database(&db), storage.clone(), timestamp, &founder)
-                .await
-                .stage()
-                .await
-                .expect("stage exact founder graph");
+        let staged = FounderStoreCreation::begin(
+            store_database(&db),
+            storage.clone(),
+            &store_dir,
+            timestamp,
+            &founder,
+        )
+        .await
+        .stage()
+        .await
+        .expect("stage exact founder graph");
         let graph = staged.graph.clone();
         let mut exact_objects = vec![
             graph.root.object.clone(),
@@ -97,6 +107,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
         crate::sync::store::Store::create(
             store_database(&db),
             storage.clone(),
+            store_dir,
             timestamp,
             &founder,
         )
@@ -134,13 +145,19 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
         .expect("open founder rollback database")
     };
     let db = open();
+    let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
-    let staged =
-        FounderStoreCreation::begin(store_database(&db), storage.clone(), timestamp, &founder)
-            .await
-            .stage()
-            .await
-            .expect("stage exact founder graph");
+    let staged = FounderStoreCreation::begin(
+        store_database(&db),
+        storage.clone(),
+        &store_dir,
+        timestamp,
+        &founder,
+    )
+    .await
+    .stage()
+    .await
+    .expect("stage exact founder graph");
     home.fail_exact_create_before_call(3);
     home.fail_exact_delete_on_call(1);
 
@@ -152,9 +169,15 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
     drop(db);
     let db = open();
 
-    crate::sync::store::Store::create(store_database(&db), storage.clone(), timestamp, &founder)
-        .await
-        .expect("retry resumes rollback before publishing the founder graph");
+    crate::sync::store::Store::create(
+        store_database(&db),
+        storage.clone(),
+        store_dir,
+        timestamp,
+        &founder,
+    )
+    .await
+    .expect("retry resumes rollback before publishing the founder graph");
 }
 
 #[tokio::test]
@@ -172,23 +195,31 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
         .expect("construct concurrent founder storage"),
     );
     let db = open_test_db();
+    let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
-    let staged =
-        FounderStoreCreation::begin(store_database(&db), storage.clone(), timestamp, &founder)
-            .await
-            .stage()
-            .await
-            .expect("stage exact founder graph");
+    let staged = FounderStoreCreation::begin(
+        store_database(&db),
+        storage.clone(),
+        &store_dir,
+        timestamp,
+        &founder,
+    )
+    .await
+    .stage()
+    .await
+    .expect("stage exact founder graph");
     drop(staged);
     let deletes_before = home.deletes_seen();
     let (reached, release) = home.pause_after_exact_create_call(1);
     let first_db = db.clone();
     let first_storage = storage.clone();
     let first_founder = founder.clone();
+    let first_store_dir = store_dir.clone();
     let first = tokio::spawn(async move {
         crate::sync::store::Store::create(
             store_database(&first_db),
             first_storage,
+            first_store_dir,
             timestamp,
             &first_founder,
         )
@@ -198,10 +229,12 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let second_db = db.clone();
     let second_storage = storage.clone();
     let second_founder = founder.clone();
+    let second_store_dir = store_dir;
     let second = tokio::spawn(async move {
         crate::sync::store::Store::create(
             store_database(&second_db),
             second_storage,
+            second_store_dir,
             timestamp,
             &second_founder,
         )
@@ -240,12 +273,19 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
         .expect("construct founder collision storage"),
     );
     let db = open_test_db();
+    let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
-    let staged = FounderStoreCreation::begin(store_database(&db), storage, timestamp, &founder)
-        .await
-        .stage()
-        .await
-        .expect("stage exact founder graph");
+    let staged = FounderStoreCreation::begin(
+        store_database(&db),
+        storage,
+        &store_dir,
+        timestamp,
+        &founder,
+    )
+    .await
+    .stage()
+    .await
+    .expect("stage exact founder graph");
     let competing = b"different Store root occupant".to_vec();
     home.insert_exact_object(
         staged.graph.root.object.slot().logical_key(),
@@ -280,10 +320,12 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         .expect("construct opaque founder storage"),
     );
     let db = open_test_db();
+    let (_store_dir_temp, store_dir) = temp_store_dir();
 
     crate::sync::store::Store::create(
         store_database(&db),
         storage.clone(),
+        store_dir.clone(),
         "0000000000001-0000-opaque-founder",
         &founder,
     )
@@ -294,9 +336,15 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         .await
         .expect("read Store root reference")
         .expect("Store root exists");
-    let opened = crate::sync::store::Store::open(store_database(&db), storage, &root_ref, &founder)
-        .await
-        .expect("open exact opaque root");
+    let opened = crate::sync::store::Store::open(
+        store_database(&db),
+        storage,
+        store_dir,
+        &root_ref,
+        &founder,
+    )
+    .await
+    .expect("open exact opaque root");
     let registration = opened
         .store
         .load_founder_registration_for_test()

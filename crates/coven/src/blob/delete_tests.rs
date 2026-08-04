@@ -78,9 +78,10 @@ impl<'a> TombstoneCollector<'a> {
         cipher: &'a RwLock<CloudCipher>,
         identity: &UserKeypair,
     ) -> Result<Self, String> {
+        let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         Ok(Self {
             store: fixture
-                .open_store_with_storage(database, storage, identity)
+                .open_store_with_storage(database, storage, store_dir, identity)
                 .await?,
             cipher,
         })
@@ -100,9 +101,10 @@ impl<'a> TombstoneCollector<'a> {
         storage: Arc<dyn SyncStorage>,
         cipher: &'a RwLock<CloudCipher>,
     ) -> Result<Self, String> {
+        let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         Ok(Self {
             store: fixture
-                .open_founder_store_with_storage(database, storage)
+                .open_founder_store_with_storage(database, storage, store_dir)
                 .await?,
             cipher,
         })
@@ -1467,8 +1469,9 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // Opening this exact Store under the established owner refuses the forged root
     // before a cycle can load membership or run GC.
     let joining_db = open_test_db();
+    let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let result = storage
-        .open_store_with_identity(&joining_db, &real_owner)
+        .open_store_with_identity(&joining_db, store_dir, &real_owner)
         .await;
     assert!(
         result.is_err(),
@@ -1526,8 +1529,9 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     storage.plant_tombstone(&tombstone).await;
 
     let joining_db = open_test_db();
+    let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let result = storage
-        .open_store_with_identity(&joining_db, &real_owner)
+        .open_store_with_identity(&joining_db, store_dir, &real_owner)
         .await;
     assert!(
         result.is_err(),

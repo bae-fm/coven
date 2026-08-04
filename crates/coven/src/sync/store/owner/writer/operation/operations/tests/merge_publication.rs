@@ -754,10 +754,8 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         .await
         .expect("authorize writer before invalidating its durable root");
     db.remove_store_protocol_root_for_test().await;
-    let (_store_temp, store_dir) = temp_store_dir();
-
     assert!(writer
-        .prepare_pending_store_write(&store_dir)
+        .prepare_pending_store_write()
         .await
         .expect("prepare with the root retained by the writer capability"));
     assert_eq!(

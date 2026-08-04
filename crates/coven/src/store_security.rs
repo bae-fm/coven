@@ -21,6 +21,7 @@ impl EstablishedStoreIdentity {
     pub(crate) async fn initialize_sync_components(
         &self,
         database: crate::database::StoreDatabase,
+        store_dir: crate::store_dir::StoreDir,
         local_blob_access: crate::sync::store::blob::LocalStoreBlobAccess,
         storage: Arc<CloudSyncStorage>,
         initialization: crate::sync::cycle::StoreInitialization,
@@ -28,6 +29,7 @@ impl EstablishedStoreIdentity {
     ) -> Result<crate::sync::cycle::SyncComponents, crate::sync::cycle::InitSyncError> {
         crate::sync::cycle::PreparedSyncComponents::prepare(
             database,
+            store_dir,
             local_blob_access,
             storage,
             self.keypair.clone(),
@@ -43,8 +45,9 @@ impl EstablishedStoreIdentity {
         &self,
         database: crate::database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
+        store_dir: crate::store_dir::StoreDir,
     ) -> Result<crate::sync::Store, crate::sync::store::StoreError> {
-        crate::sync::Store::load(database, storage, self.keypair.clone()).await
+        crate::sync::Store::load(database, storage, store_dir, self.keypair.clone()).await
     }
 
     pub(crate) async fn export_activated_device_continuation(

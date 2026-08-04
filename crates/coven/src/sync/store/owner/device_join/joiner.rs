@@ -275,6 +275,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     pub(crate) async fn into_joining_store(
         self,
         database: StoreDatabase,
+        store_dir: &'storage crate::store_dir::StoreDir,
         identity: UserKeypair,
     ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
         let Self {
@@ -294,6 +295,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             PendingDeviceJoinHistoryConstruction,
             database,
             storage,
+            store_dir,
             history_verifier,
             blob_source,
             keyrings,
@@ -356,18 +358,12 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
 impl JoiningStore<'_> {
     pub(crate) async fn pull_store_history(
         &mut self,
-        store_dir: &crate::store_dir::StoreDir,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, DeviceJoinError> {
         let membership = self.membership.clone();
         let execution = self
             .history
-            .pull(
-                store_dir,
-                &membership,
-                Some(&self.identity),
-                routing_encryption,
-            )
+            .pull(&membership, Some(&self.identity), routing_encryption)
             .await
             .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
         self.membership = execution.membership;
@@ -505,9 +501,10 @@ impl<'a> PendingDeviceJoinAuthority<'a> {
     pub(crate) async fn begin_joining_store(
         self,
         database: StoreDatabase,
+        store_dir: &'a crate::store_dir::StoreDir,
     ) -> Result<JoiningStore<'a>, DeviceJoinError> {
         self.observation
-            .into_joining_store(database, self.identity)
+            .into_joining_store(database, store_dir, self.identity)
             .await
     }
 

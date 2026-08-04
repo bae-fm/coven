@@ -904,6 +904,7 @@ mod test_device {
     pub(crate) struct TestDevice {
         db: crate::database::StoreDatabase,
         store: std::sync::Arc<crate::sync::store::Store>,
+        _store_dir_temp: std::sync::Arc<tempfile::TempDir>,
         pub device_id: String,
         storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
         identity: UserKeypair,
@@ -931,9 +932,11 @@ mod test_device {
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
+            let (store_dir_temp, store_dir) = temp_store_dir();
             let initialized = crate::sync::store::Store::create(
                 database.clone(),
                 storage.clone(),
+                store_dir,
                 founder_timestamp,
                 &identity,
             )
@@ -942,6 +945,7 @@ mod test_device {
             Ok(Self {
                 db: database,
                 store: std::sync::Arc::new(initialized.store),
+                _store_dir_temp: std::sync::Arc::new(store_dir_temp),
                 device_id: initialized.device_id,
                 storage,
                 identity,
@@ -954,13 +958,20 @@ mod test_device {
             root: &crate::protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, String> {
-            let initialized =
-                crate::sync::store::Store::open(database.clone(), storage.clone(), root, identity)
-                    .await
-                    .map_err(|error| error.to_string())?;
+            let (store_dir_temp, store_dir) = temp_store_dir();
+            let initialized = crate::sync::store::Store::open(
+                database.clone(),
+                storage.clone(),
+                store_dir,
+                root,
+                identity,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             Ok(Self {
                 db: database,
                 store: std::sync::Arc::new(initialized.store),
+                _store_dir_temp: std::sync::Arc::new(store_dir_temp),
                 device_id: initialized.device_id,
                 storage,
                 identity: identity.clone(),
@@ -981,9 +992,11 @@ mod test_device {
             storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
+            let (store_dir_temp, store_dir) = temp_store_dir();
             let store = crate::sync::store::Store::load(
                 database.clone(),
                 storage.clone(),
+                store_dir,
                 identity.clone(),
             )
             .await?;
@@ -996,6 +1009,7 @@ mod test_device {
             Ok(Self {
                 db: database,
                 store: std::sync::Arc::new(store),
+                _store_dir_temp: std::sync::Arc::new(store_dir_temp),
                 device_id,
                 storage,
                 identity,
@@ -1853,10 +1867,12 @@ mod test_device {
             routing_encryption: Option<&crate::encryption::EncryptionService>,
             observer: Option<&dyn crate::blob::BlobTransitionObserver>,
         ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
-            self.authorize_writer()
+            self.store
+                .with_test_store_dir(store_dir.clone())
+                .authorize_writer()
                 .await
                 .map_err(|error| crate::database::DbError::Message(error.to_string()))?
-                .drain_uploads(store_dir, clock, routing_encryption, observer)
+                .drain_uploads(clock, routing_encryption, observer)
                 .await
         }
 
@@ -1864,12 +1880,13 @@ mod test_device {
             &self,
             store_dir: &StoreDir,
         ) -> Result<bool, String> {
-            let mut writer = self
+            let store = self.store.with_test_store_dir(store_dir.clone());
+            let mut writer = store
                 .authorize_writer()
                 .await
                 .map_err(|error| error.to_string())?;
             let prepared = writer
-                .prepare_pending_store_write(store_dir)
+                .prepare_pending_store_write()
                 .await
                 .map_err(|error| error.to_string())?;
             let published = writer
@@ -2034,13 +2051,12 @@ mod test_device {
                 .enqueue_store_changeset_for_test(changeset)
                 .await
                 .map_err(|error| error.to_string())?;
-            let (_tmp, store_dir) = temp_store_dir();
             let mut writer = self
                 .authorize_writer()
                 .await
                 .map_err(|error| error.to_string())?;
             let published = writer
-                .publish_pending_store_writes(&store_dir)
+                .publish_pending_store_writes()
                 .await
                 .map_err(|error| error.to_string())?;
             if published == 0 {
@@ -2075,12 +2091,13 @@ mod test_device {
                 .enqueue_store_changeset_for_test(changeset)
                 .await
                 .map_err(|error| error.to_string())?;
-            let mut writer = self
+            let store = self.store.with_test_store_dir(store_dir.clone());
+            let mut writer = store
                 .authorize_writer()
                 .await
                 .map_err(|error| error.to_string())?;
             if !writer
-                .prepare_pending_store_write(store_dir)
+                .prepare_pending_store_write()
                 .await
                 .map_err(|error| error.to_string())?
             {
@@ -2285,6 +2302,7 @@ mod test_device {
                 self.db.clone(),
                 store_dir.clone(),
             );
+            let store = std::sync::Arc::new(store.with_test_store_dir(store_dir.clone()));
             let components = crate::sync::cycle::SyncComponents::from_retained_test_device(
                 store,
                 self.db.clone(),
@@ -2293,9 +2311,7 @@ mod test_device {
                 self.storage.store_id().to_string(),
                 self.device_id.clone(),
             );
-            components
-                .run_cycle(clock, security, store_dir, observer)
-                .await
+            components.run_cycle(clock, security, observer).await
         }
 
         pub(crate) fn current_encryption_for_test(
@@ -2421,12 +2437,13 @@ mod test_device {
             store_dir: &StoreDir,
         ) -> Result<bool, crate::sync::store::StoreError> {
             self.store
+                .with_test_store_dir(store_dir.clone())
                 .authorize_writer()
                 .await
                 .map_err(|error| {
                     crate::sync::store::StoreError::InvalidOutbound(error.to_string())
                 })?
-                .prepare_pending_store_write(store_dir)
+                .prepare_pending_store_write()
                 .await
         }
 
@@ -3032,12 +3049,13 @@ mod test_device {
             ),
             crate::sync::store::StorePullError,
         > {
-            let mut authorization =
-                self.store.authorize_writer().await.map_err(|error| {
-                    crate::sync::store::StorePullError::Database(error.to_string())
-                })?;
+            let store = self.store.with_test_store_dir(store_dir.clone());
+            let mut authorization = store
+                .authorize_writer()
+                .await
+                .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
             let result = authorization
-                .pull(store_dir, Some(routing_encryption))
+                .pull(Some(routing_encryption))
                 .await
                 .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
             let sequences = result
@@ -3068,11 +3086,13 @@ impl TestStore {
     pub(crate) async fn open_store_with_identity(
         &self,
         database: &Database,
+        store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         self.open_store_with_storage(
             crate::database::StoreDatabase::new(database),
             self.storage.clone(),
+            store_dir,
             identity,
         )
         .await
@@ -3082,9 +3102,10 @@ impl TestStore {
         &self,
         database: crate::database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
+        store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
-        crate::sync::store::Store::open(database, storage, &self.root, identity)
+        crate::sync::store::Store::open(database, storage, store_dir, &self.root, identity)
             .await
             .map(|initialized| initialized.store)
             .map_err(|error| error.to_string())
@@ -3094,8 +3115,9 @@ impl TestStore {
         &self,
         database: crate::database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
+        store_dir: StoreDir,
     ) -> Result<crate::sync::store::Store, String> {
-        self.open_store_with_storage(database, storage, &self.signer)
+        self.open_store_with_storage(database, storage, store_dir, &self.signer)
             .await
     }
 
@@ -3178,6 +3200,7 @@ impl TestStore {
         let store = crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(database),
             storage,
+            store_dir.clone(),
             self.signer.clone(),
         )
         .await
@@ -3186,7 +3209,7 @@ impl TestStore {
             .authorize_writer()
             .await
             .map_err(|error| crate::sync::cycle::SyncCycleFailure::from(error.to_string()))?
-            .pull(store_dir, routing_encryption)
+            .pull(routing_encryption)
             .await
     }
 
@@ -3314,8 +3337,9 @@ impl TestStore {
                 .publish_device_provider_challenge(provisional)
                 .await
                 .map_err(|error| error.to_string())?;
+            let (_store_dir_temp, store_dir) = temp_store_dir();
             let mut joining = pending_join
-                .begin_joining_store(local_database)
+                .begin_joining_store(local_database, &store_dir)
                 .await
                 .map_err(|error| error.to_string())?;
             let readiness = joining
@@ -4424,14 +4448,14 @@ impl TestStore {
             .publish_device_provider_challenge(provisional)
             .await
             .map_err(|error| format!("publish device provider challenge: {error}"))?;
+        let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
         let mut joining = pending_join
-            .begin_joining_store(joining_database)
+            .begin_joining_store(joining_database, &bootstrap_store_dir)
             .await
             .map_err(|error| format!("begin joining Store: {error}"))?;
-        let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
         let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
         let bootstrap_pull = joining
-            .pull_store_history(&bootstrap_store_dir, Some(&routing_encryption))
+            .pull_store_history(Some(&routing_encryption))
             .await
             .map_err(|error| format!("pull joining Store history: {error}"))?;
         if !bootstrap_pull.held_positions.is_empty() {

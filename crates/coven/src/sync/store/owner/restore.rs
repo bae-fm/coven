@@ -1344,17 +1344,11 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(crate) async fn pull(
         &mut self,
-        store_dir: &crate::store_dir::StoreDir,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<pull::StorePullResult, pull::StorePullError> {
         let execution = self
             .history
-            .pull(
-                store_dir,
-                &self.membership,
-                Some(&self.identity),
-                routing_encryption,
-            )
+            .pull(&self.membership, Some(&self.identity), routing_encryption)
             .await?;
         self.membership = execution.membership;
         Ok(execution.result)

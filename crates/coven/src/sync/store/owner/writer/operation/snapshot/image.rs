@@ -299,6 +299,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn install(
         self,
+        store_dir: &'storage crate::store_dir::StoreDir,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
@@ -424,6 +425,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                     super::SnapshotHistoryConstruction,
                     database,
                     storage,
+                    store_dir,
                     history_verifier,
                     blob_source,
                     keyrings,
@@ -857,6 +859,8 @@ mod tests {
         source: Database,
         store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
         membership: crate::protocol::membership::MembershipChain,
+        _store_dir_temp: tempfile::TempDir,
+        store_dir: crate::store_dir::StoreDir,
     }
 
     impl PublishedScopedSnapshot {
@@ -955,10 +959,13 @@ mod tests {
                 .await
                 .expect("publish scoped snapshot acknowledgement");
 
+            let (store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
             Self {
                 source,
                 store,
                 membership,
+                _store_dir_temp: store_dir_temp,
+                store_dir,
             }
         }
 
@@ -979,6 +986,7 @@ mod tests {
             let routing = crate::encryption::EncryptionService::from_key([42; 32]);
             bootstrap
                 .install(
+                    &self.store_dir,
                     self.source.synced_tables().to_vec(),
                     crate::blob::BLOB_TOMBSTONE_GRACE,
                     crate::blob::TransferLimits::one_at_a_time(),
@@ -1431,8 +1439,10 @@ mod tests {
             .await
             .expect("verify pre-migration scoped snapshot");
         let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let store_dir = crate::store_dir::StoreDir::new(destination.path());
         let database = bootstrap
             .install(
+                &store_dir,
                 target_tables,
                 crate::blob::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -1570,7 +1580,6 @@ mod tests {
             .authorize_writer()
             .await
             .expect("authorize device-state snapshot writer");
-        let (_store_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         for sequence in 1..=3 {
             source
                 .execute_test_host_write(&format!(
@@ -1580,7 +1589,7 @@ mod tests {
                 ))
                 .await;
             assert!(writer
-                .prepare_pending_store_write(&store_dir)
+                .prepare_pending_store_write()
                 .await
                 .expect("prepare snapshot history write"));
             assert_eq!(
@@ -1671,8 +1680,10 @@ mod tests {
                 )
                 .await
                 .expect("verify bootstrap authority");
+            let store_dir = crate::store_dir::StoreDir::new(destination.path());
             let installed = bootstrap
                 .install(
+                    &store_dir,
                     tables,
                     crate::blob::BLOB_TOMBSTONE_GRACE,
                     crate::blob::TransferLimits::one_at_a_time(),
@@ -1906,7 +1917,7 @@ mod tests {
             .await
             .expect("prepare source blob publication");
             components
-                .run_cycle(&crate::clock::SystemClock, None, &source_dir, None)
+                .run_cycle(&crate::clock::SystemClock, None, None)
                 .await
                 .expect("publish source blob");
 

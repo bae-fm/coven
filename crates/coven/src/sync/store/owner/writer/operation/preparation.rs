@@ -9,7 +9,6 @@ use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::operations::{next_store_sequence, successor_store_sequence};
 use crate::sync::store::StoreError;
-use crate::StoreDir;
 
 use super::AuthorizedWriterOperation;
 
@@ -23,10 +22,8 @@ struct LocalBlobDropRequest {
 }
 
 impl AuthorizedWriterOperation<'_> {
-    pub(super) async fn prepare_store_write(
-        &mut self,
-        store_dir: &StoreDir,
-    ) -> Result<bool, StoreError> {
+    pub(super) async fn prepare_store_write(&mut self) -> Result<bool, StoreError> {
+        let store_dir = self.store_dir;
         let database = self.database.clone();
         let Some(pending) = database.prepare_store_write().await? else {
             return Ok(false);

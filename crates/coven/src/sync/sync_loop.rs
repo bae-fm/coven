@@ -441,11 +441,8 @@ impl SyncLoopHandle {
     pub(crate) fn host_write_blob_staging(
         &self,
         runtime: tokio::runtime::Handle,
-        store_dir: crate::store_dir::StoreDir,
     ) -> crate::sync::store::HostWriteBlobStaging {
-        self.inner
-            .components
-            .host_write_blob_staging(runtime, store_dir)
+        self.inner.components.host_write_blob_staging(runtime)
     }
 
     pub(crate) async fn propose_device_exclusion(
@@ -765,11 +762,7 @@ impl SyncLoopHandle {
     ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
         self.inner
             .components
-            .drain_uploads(
-                self.inner.clock.as_ref(),
-                &self.inner.config.store_dir,
-                self.inner.observer.as_deref(),
-            )
+            .drain_uploads(self.inner.clock.as_ref(), self.inner.observer.as_deref())
             .await
     }
 
@@ -972,7 +965,7 @@ impl SyncLoopHandleInner {
                 reply_circle_command(
                     reply,
                     self.components
-                        .add_circle_member(&self.config.store_dir, circle_id, member_pubkey, role)
+                        .add_circle_member(circle_id, member_pubkey, role)
                         .await,
                 );
             }
@@ -1051,7 +1044,6 @@ impl SyncLoopHandleInner {
             .run_cycle(
                 self.clock.as_ref(),
                 Some(&self.security),
-                &self.config.store_dir,
                 self.observer.as_deref(),
             )
             .await

@@ -159,6 +159,7 @@ impl PullTestDatabaseOps for crate::database::Database {
         let initialized = crate::sync::store::Store::open(
             crate::database::StoreDatabase::new(self),
             storage.clone(),
+            store_dir.clone(),
             &root,
             identity,
         )
@@ -170,7 +171,7 @@ impl PullTestDatabaseOps for crate::database::Database {
             .authorize_writer()
             .await
             .expect("authorize exact destination Store")
-            .pull(store_dir, Some(&routing_encryption))
+            .pull(Some(&routing_encryption))
             .await
             .expect("pull exact Store commits");
         let positions = result
@@ -260,6 +261,7 @@ trait TestStoreStorage: Sync {
     async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
+        store_dir: &crate::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String>;
 
@@ -280,7 +282,7 @@ trait TestStoreStorage: Sync {
             message.is_empty(),
             "Store commits carry no arbitrary message"
         );
-        let store = self.store_for_test_publish(db, keypair).await?;
+        let store = self.store_for_test_publish(db, store_dir, keypair).await?;
         let before = store
             .latest_local_store_position()
             .await
@@ -300,7 +302,7 @@ trait TestStoreStorage: Sync {
             .await
             .map_err(|error| error.to_string())?;
         let prepared = writer
-            .prepare_pending_store_write(store_dir)
+            .prepare_pending_store_write()
             .await
             .map_err(|error| error.to_string())?;
         if !prepared {
@@ -340,12 +342,14 @@ impl TestStoreStorage for TestStore {
     async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
+        store_dir: &crate::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         self.bind_device(db, keypair)
             .await
             .map_err(|error| error.to_string())?;
-        self.open_store_with_identity(db, keypair).await
+        self.open_store_with_identity(db, store_dir.clone(), keypair)
+            .await
     }
 }
 
@@ -354,6 +358,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
     async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
+        store_dir: &crate::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         if crate::database::StoreDatabase::new(db)
@@ -365,6 +370,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
             crate::sync::store::Store::create(
                 crate::database::StoreDatabase::new(db),
                 self.clone(),
+                store_dir.clone(),
                 self.store_id(),
                 keypair,
             )
@@ -374,6 +380,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
         crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(db),
             self.clone(),
+            store_dir.clone(),
             keypair.clone(),
         )
         .await
@@ -504,13 +511,12 @@ impl PullTestStoreOps for TestStore {
                 crate::sync::store::StorePullMembershipError::Message(error),
             )
         })?;
-        let (_temp, dir) = temp_store_dir();
         let routing_encryption = EncryptionService::from_key([42; 32]);
         device
             .authorize_writer()
             .await
             .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?
-            .pull(&dir, Some(&routing_encryption))
+            .pull(Some(&routing_encryption))
             .await
             .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))
     }
@@ -3771,13 +3777,12 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         .open_into(&target)
         .await
         .expect("open scoped target Store");
-    let (_target_temp, target_dir) = temp_store_dir();
     let routing_encryption = EncryptionService::from_key([42; 32]);
     let result = target_device
         .authorize_writer()
         .await
         .expect("authorize scoped target writer")
-        .pull(&target_dir, Some(&routing_encryption))
+        .pull(Some(&routing_encryption))
         .await
         .expect("pull Circle-scoped rows");
 
@@ -3861,7 +3866,6 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("create Circle on the later-sorted stream");
 
-    let (_successor_temp, successor_dir) = temp_store_dir();
     let successor_device = storage
         .open_into(successor)
         .await
@@ -3870,7 +3874,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .authorize_writer()
         .await
         .expect("authorize Circle successor writer")
-        .pull(&successor_dir, Some(&routing_encryption))
+        .pull(Some(&routing_encryption))
         .await
         .expect("pull Circle activation before authoring successor");
     storage
@@ -3881,7 +3885,6 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .await
         .expect("publish Circle successor from the earlier-sorted stream");
 
-    let (_receiver_temp, receiver_dir) = temp_store_dir();
     let receiver_device = storage
         .open_into(&receiver)
         .await
@@ -3890,7 +3893,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
         .authorize_writer()
         .await
         .expect("authorize ordered Circle receiver")
-        .pull(&receiver_dir, Some(&routing_encryption))
+        .pull(Some(&routing_encryption))
         .await
         .expect("pull Circle activation and successor in one pass");
 
@@ -6180,9 +6183,8 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await;
     let stream_id = commit_stream_id(&reference);
 
-    let (_tmp, store_dir) = temp_store_dir();
     let result = writer
-        .pull(&store_dir, None)
+        .pull(None)
         .await
         .expect("pull with an empty mid-cycle membership LIST");
     let updated: HashMap<_, _> = result
@@ -6241,12 +6243,17 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         storage.clone(),
         FaultingStorage::membership(1),
     ));
-    let result =
-        crate::sync::store::Store::load(crate::database::StoreDatabase::new(&db2), failing, owner)
-            .await
-            .expect("load fault-injected Store")
-            .membership_for_test()
-            .await;
+    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let result = crate::sync::store::Store::load(
+        crate::database::StoreDatabase::new(&db2),
+        failing,
+        store_dir,
+        owner,
+    )
+    .await
+    .expect("load fault-injected Store")
+    .membership_for_test()
+    .await;
     assert!(
         result.is_err(),
         "an exact membership read failure on an owner-pinned store must abort the cycle",
@@ -6655,6 +6662,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let store = crate::sync::store::Store::open(
         crate::database::StoreDatabase::new(&db2),
         lagging,
+        pull_store_dir,
         &storage.root,
         &owner,
     )
@@ -6666,7 +6674,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .await
         .expect("authorize pull through lagging membership listing");
     let activation = writer
-        .pull(&pull_store_dir, None)
+        .pull(None)
         .await
         .expect("materialize member device activation through lagging membership listing");
     assert!(
@@ -6674,7 +6682,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         "device activation must materialize before its stream is discovered: {activation:#?}"
     );
     let result = writer
-        .pull(&pull_store_dir, None)
+        .pull(None)
         .await
         .expect("pull through lagging membership listing");
     let updated = db2.materialized_sequences().await;
@@ -7153,13 +7161,17 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     // durable cursor the first pull committed, and a shorter chain is
     // indistinguishable from tampering, so the load fails loud instead of
     // re-admitting whatever the truncated walk hash-links into.
-    let error =
-        crate::sync::store::Store::load(crate::database::StoreDatabase::new(&db2), lagging, owner)
-            .await
-            .expect("load lagging Store")
-            .membership_for_test()
-            .await
-            .expect_err("a chain regressing below the durable cursor is refused");
+    let error = crate::sync::store::Store::load(
+        crate::database::StoreDatabase::new(&db2),
+        lagging,
+        store_dir,
+        owner,
+    )
+    .await
+    .expect("load lagging Store")
+    .membership_for_test()
+    .await
+    .expect_err("a chain regressing below the durable cursor is refused");
     assert!(
         format!("{error:?}").contains("regressed below its durable cursor"),
         "unexpected refusal: {error:?}"
@@ -7357,10 +7369,15 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         storage.clone(),
         FaultingStorage::membership(0),
     ));
-    let retained_store =
-        crate::sync::store::Store::load(store_database(&db2), failing.clone(), owner.clone())
-            .await
-            .expect("bind fault-injected Store");
+    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let retained_store = crate::sync::store::Store::load(
+        store_database(&db2),
+        failing.clone(),
+        store_dir,
+        owner.clone(),
+    )
+    .await
+    .expect("bind fault-injected Store");
     let mut retained_writer = retained_store
         .authorize_writer()
         .await
@@ -7406,9 +7423,8 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let stream_id = commit_stream_id(&reference);
 
     failing.interceptor().arm_membership(1);
-    let (_pull_temp, pull_store_dir) = temp_store_dir();
     let result = retained_writer
-        .pull(&pull_store_dir, None)
+        .pull(None)
         .await
         .expect("a failed membership reload holds only the affected stream");
 

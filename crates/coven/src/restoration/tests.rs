@@ -1335,7 +1335,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         .await
         .expect("prepare B sync cycle");
         components
-            .run_cycle(&SystemClock, None, &lib_b, None)
+            .run_cycle(&SystemClock, None, None)
             .await
             .expect("run B sync cycle");
         let snapshot_after = components
@@ -1565,7 +1565,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         )
         .await
         .expect("prepare owner row and blob publication");
-        Box::pin(components.run_cycle(&SystemClock, None, &owner_dir, None))
+        Box::pin(components.run_cycle(&SystemClock, None, None))
             .await
             .expect("publish owner row and blob");
         let membership = owner_device
@@ -1761,7 +1761,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         )
         .await
         .expect("prepare restored row publication");
-        Box::pin(components.run_cycle(&SystemClock, None, &lib_b, None))
+        Box::pin(components.run_cycle(&SystemClock, None, None))
             .await
             .expect("publish restored row by reusing its exact remote blob");
     })

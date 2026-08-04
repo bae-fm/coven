@@ -3,7 +3,6 @@
 use super::*;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
-use crate::store_dir::StoreDir;
 use std::collections::BTreeMap;
 
 pub(crate) struct AuthorizedPull<'operation, 'storage> {
@@ -17,13 +16,12 @@ pub(crate) struct AuthorizedPull<'operation, 'storage> {
 impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
     pub(crate) async fn load(
         history: &'operation mut super::AuthorizedStoreHistory<'storage>,
-        store_dir: &'operation StoreDir,
         membership: &'operation MembershipChain,
         identity: Option<&'operation UserKeypair>,
         routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
     ) -> Result<Self, StorePullError> {
         let packages = history
-            .bind_pull_package_materializer(store_dir)
+            .bind_pull_package_materializer()
             .await
             .map_err(|error| {
                 StorePullError::Database(format!("load pull package materializer: {error}"))

@@ -44,11 +44,11 @@ impl StoreSnapshotCut {
 impl super::AuthorizedWriterOperation<'_> {
     pub(crate) async fn publish_due_snapshots(
         &mut self,
-        store_dir: &crate::store_dir::StoreDir,
         created_at: &str,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
+        let store_dir = self.store_dir;
         let keypair = self.writer.identity;
         let resumed = self
             .resume_snapshot_publication()
@@ -164,12 +164,7 @@ impl super::AuthorizedWriterOperation<'_> {
         if let Err(error) = self
             .circles()
             .snapshots()
-            .push_circle_snapshots(
-                store_dir.as_ref().to_path_buf(),
-                schema_version,
-                created_at,
-                routing_encryption,
-            )
+            .push_circle_snapshots(schema_version, created_at, routing_encryption)
             .await
         {
             warn!("Failed to author Circle snapshots: {error}");

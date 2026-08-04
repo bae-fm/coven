@@ -596,6 +596,7 @@ impl DeviceJoinClient {
             .to_string();
         let opened = snapshot
             .install(
+                &store_dir,
                 self.synced_tables.clone(),
                 crate::blob::delete::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::one_at_a_time(),
@@ -689,10 +690,10 @@ impl DeviceJoinClient {
         )
         .await?;
         let mut joining = observation
-            .into_joining_store(database, signer.clone())
+            .into_joining_store(database, &store_dir, signer.clone())
             .await?;
         joining
-            .pull_store_history(&store_dir, Some(&routing_encryption))
+            .pull_store_history(Some(&routing_encryption))
             .await?;
         let joined = joining.materialize(activation.clone()).await?;
         if pending_readiness

@@ -1432,6 +1432,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .expect("verify snapshot-only blob bootstrap");
     let restored = bootstrap
         .install(
+            &restore_dir,
             tables.clone(),
             crate::blob::BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::one_at_a_time(),
@@ -1581,7 +1582,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
     )));
-    run_cycle_in_task(interceptor, device, store_dir)
+    run_cycle_in_task(interceptor, device, store_dir.clone())
         .await
         .expect_err("retain cleanup spool after rejected blob create");
     let pending = store_database(&db)
@@ -1610,6 +1611,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let store = crate::sync::store::Store::load(
         crate::database::StoreDatabase::new(&reopened),
         storage.clone(),
+        store_dir.clone(),
         keypair,
     )
     .await
@@ -1976,10 +1978,12 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
     .await
     .expect("create foreign exact Store");
     let fresh_db = open_test_db();
+    let (_foreign_store_dir_temp, foreign_store_dir) = temp_store_dir();
     assert!(
         crate::sync::store::Store::open(
             store_database(&fresh_db),
             seeded.clone(),
+            foreign_store_dir,
             &seeded.root,
             &owner,
         )
@@ -2019,6 +2023,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
 
     cycle::PreparedSyncComponents::prepare(
         crate::database::StoreDatabase::new(&db),
+        store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2085,6 +2090,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
 
     let prepared = cycle::PreparedSyncComponents::prepare(
         crate::database::StoreDatabase::new(&db),
+        store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2159,6 +2165,7 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
     let (_store_temp, store_dir) = temp_store_dir();
     let prepared = cycle::PreparedSyncComponents::prepare(
         crate::database::StoreDatabase::new(&db),
+        store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2223,6 +2230,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
     let (_store_temp, store_dir) = temp_store_dir();
     cycle::PreparedSyncComponents::prepare(
         crate::database::StoreDatabase::new(&db),
+        store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2292,6 +2300,7 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     assert!(
         cycle::PreparedSyncComponents::prepare(
             crate::database::StoreDatabase::new(&db),
+            store_dir.clone(),
             crate::sync::test_owner_graph::local_blob_access(
                 crate::database::StoreDatabase::new(&db),
                 store_dir,
@@ -2346,6 +2355,7 @@ async fn initialization_rejects_an_identity_other_than_the_storage_identity() {
 
     let result = cycle::PreparedSyncComponents::prepare(
         crate::database::StoreDatabase::new(&db),
+        store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
             crate::database::StoreDatabase::new(&db),
             store_dir,
@@ -2392,6 +2402,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         assert!(
             cycle::PreparedSyncComponents::prepare(
                 crate::database::StoreDatabase::new(&db),
+                store_dir.clone(),
                 crate::sync::test_owner_graph::local_blob_access(
                     crate::database::StoreDatabase::new(&db),
                     store_dir,
@@ -4713,13 +4724,12 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .await
         .expect("remove founder after cycle authorization");
 
-    let (_temp, store_dir) = temp_store_dir();
     authorized
-        .pull(&store_dir, Some(&encryption))
+        .pull(Some(&encryption))
         .await
         .expect("pull founder removal");
     authorized
-        .publish_due_snapshots(&store_dir, "2026-07-26T01:00:00Z", Some(&encryption), false)
+        .publish_due_snapshots("2026-07-26T01:00:00Z", Some(&encryption), false)
         .await
         .expect("evaluate snapshot after pull");
 
@@ -4922,6 +4932,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
         let store = crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(&owner_db),
             storage.clone(),
+            store_dir.clone(),
             owner.clone(),
         )
         .await
@@ -4932,7 +4943,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
             .expect("authorize the owner's registered writer");
         assert!(
             writer
-                .prepare_pending_store_write(&store_dir)
+                .prepare_pending_store_write()
                 .await
                 .expect("prepare the owner's queued Store write"),
             "the owner's row queues a Store write for the sync loop to publish",
@@ -4955,10 +4966,12 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     position_held.notified().await;
     let drain_db = owner_db.clone();
     let drain_storage = storage.clone();
+    let drain_store_dir = store_dir;
     let drain = tokio::spawn(async move {
         let store = crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(&drain_db),
             drain_storage.clone(),
+            drain_store_dir,
             owner.clone(),
         )
         .await
@@ -5586,8 +5599,12 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
             .publish_device_provider_challenge(provisional.clone())
             .await
             .expect("publish same-principal provider readiness");
+        let (_joining_store_dir_temp, joining_store_dir) = temp_store_dir();
         let mut joining_store = pending_join
-            .begin_joining_store(crate::database::StoreDatabase::new(&joining_db))
+            .begin_joining_store(
+                crate::database::StoreDatabase::new(&joining_db),
+                &joining_store_dir,
+            )
             .await
             .expect("bind joining Store database");
         let (registration_visible, release_registration_create) =
