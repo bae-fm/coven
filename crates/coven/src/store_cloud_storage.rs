@@ -70,6 +70,34 @@ impl StoreCloudStorage {
             home,
         })
     }
+
+    async fn open_admitted_config(
+        &self,
+        config: &Config,
+        cipher: Option<CloudCipher>,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    ) -> Result<CloudSyncStorage, StorageSetupError> {
+        let home = self
+            .cloud_homes
+            .create(
+                config,
+                self.clock.clone(),
+                cloudkit_ops.or_else(|| self.cloudkit_ops.clone()),
+            )
+            .await?;
+        self.security
+            .open_cloud_storage(config, Arc::from(home), cipher, self.blob_chunking)
+    }
+
+    fn open_admitted_home(
+        &self,
+        config: &Config,
+        home: Arc<dyn CloudHome>,
+        cipher: Option<CloudCipher>,
+    ) -> Result<CloudSyncStorage, StorageSetupError> {
+        self.security
+            .open_cloud_storage(config, home, cipher, self.blob_chunking)
+    }
 }
 
 pub(crate) struct AdmittedStoreCloudConfig<'storage, 'config> {
@@ -83,22 +111,9 @@ impl AdmittedStoreCloudConfig<'_, '_> {
         self,
         cipher: Option<CloudCipher>,
     ) -> Result<CloudSyncStorage, StorageSetupError> {
-        let home = self
-            .storage
-            .cloud_homes
-            .create(
-                self.config,
-                self.storage.clock.clone(),
-                self.cloudkit_ops
-                    .or_else(|| self.storage.cloudkit_ops.clone()),
-            )
-            .await?;
-        self.storage.security.open_cloud_storage(
-            self.config,
-            Arc::from(home),
-            cipher,
-            self.storage.blob_chunking,
-        )
+        self.storage
+            .open_admitted_config(self.config, cipher, self.cloudkit_ops)
+            .await
     }
 }
 
@@ -113,11 +128,7 @@ impl AdmittedStoreCloudHome<'_, '_> {
         self,
         cipher: Option<CloudCipher>,
     ) -> Result<CloudSyncStorage, StorageSetupError> {
-        self.storage.security.open_cloud_storage(
-            self.config,
-            self.home,
-            cipher,
-            self.storage.blob_chunking,
-        )
+        self.storage
+            .open_admitted_home(self.config, self.home, cipher)
     }
 }
