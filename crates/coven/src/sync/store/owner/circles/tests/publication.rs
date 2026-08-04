@@ -1449,7 +1449,6 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("authorize Circle close response");
     authorized_store
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish local Circle epoch-close response");
@@ -1498,7 +1497,6 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     );
     let error = authorized_store
         .circles()
-        .close()
         .finalize_ready_circle_epoch_closes(
             "2026-07-23T00:00:01Z",
             &EncryptionService::from_key([42; 32]),
@@ -3070,7 +3068,6 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
         .expect("authorize Owner Store");
     authorized
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -3081,7 +3078,6 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     fixture.home.fail_exact_create_before_call(1);
     let interrupted = authorized
         .circles()
-        .close()
         .finalize_ready_circle_epoch_closes(
             "2026-07-24T03:00:00Z",
             &EncryptionService::from_key([42; 32]),
@@ -3466,7 +3462,6 @@ impl SilentParticipantClose {
             .expect("silent participant pulls the epoch close");
         writer
             .circles()
-            .close()
             .publish_circle_epoch_close_responses()
             .await
             .expect("silent participant publishes its close response");
@@ -3551,7 +3546,6 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .expect("authorize Circle close response");
     authorized
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -3655,7 +3649,6 @@ async fn close_status_reports_a_response_and_an_exclusion() {
         .await
         .expect("authorize Circle close response")
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4016,7 +4009,6 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .expect("member pulls the epoch close");
     member
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("member publishes its close response");
@@ -4029,7 +4021,6 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .await
         .expect("authorize Owner close response")
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4389,7 +4380,6 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
         .await
         .expect("authorize Owner Store")
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4445,7 +4435,6 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .await
         .expect("authorize Owner Store")
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4517,7 +4506,6 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
         .expect("authorize Owner Store");
     owner
         .circles()
-        .close()
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish Owner close response");
@@ -4541,8 +4529,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
         .expect("close retains its signed intent");
     let settlements = owner
         .circles()
-        .close()
-        .load_complete_circle_epoch_close_responses(&close_control)
+        .load_complete_circle_epoch_close_responses_for_test(&close_control)
         .await
         .expect("read close settlements")
         .expect("every slot holds a settlement");

@@ -1,7 +1,7 @@
 use super::commands::{
     CircleAddMemberRequest, CircleCancelEpochCloseRequest, CircleDeleteRequest,
-    CircleOperationRequest, CircleRemoveMemberRequest, CircleRenameRequest,
-    CircleResolveControlRequest, CircleResolveLosingBranch,
+    CircleFinalizeEpochCloseRequest, CircleOperationRequest, CircleRemoveMemberRequest,
+    CircleRenameRequest, CircleResolveControlRequest, CircleResolveLosingBranch,
 };
 use super::*;
 use crate::protocol::circle::{
@@ -10,6 +10,7 @@ use crate::protocol::circle::{
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 
 mod acknowledgements;
+mod close_responses;
 
 pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     writer: &'writer mut AuthorizedWriterOperation<'storage>,
@@ -256,16 +257,40 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .await
     }
 
-    pub(crate) fn close(&mut self) -> close_responses::CircleCloseCoordinator<'_, 'storage> {
-        close_responses::CircleCloseCoordinator::new(
-            self.writer,
-            self.database.clone(),
-            self.storage.clone(),
-            self.store_dir,
-            self.root.clone(),
-            self.membership.clone(),
-            std::sync::Arc::clone(&self.local_writer),
-        )
+    pub(crate) async fn publish_circle_epoch_close_responses(
+        &mut self,
+    ) -> Result<(), CircleOperationError> {
+        close_responses::CircleCloseCoordinator::new(self)
+            .publish_circle_epoch_close_responses()
+            .await
+    }
+
+    pub(crate) async fn finalize_ready_circle_epoch_closes(
+        &mut self,
+        metadata_stamp: &str,
+        routing_encryption: &crate::encryption::EncryptionService,
+    ) -> Result<(), CircleOperationError> {
+        close_responses::CircleCloseCoordinator::new(self)
+            .finalize_ready_circle_epoch_closes(metadata_stamp, routing_encryption)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_complete_circle_epoch_close_responses_for_test(
+        &mut self,
+        control: &crate::protocol::circle::PreparedCircleControl,
+    ) -> Result<
+        Option<
+            Vec<(
+                crate::protocol::circle::CircleEpochCloseSettlement,
+                crate::protocol::circle::CircleEpochCloseResponseSlotValue,
+            )>,
+        >,
+        CircleOperationError,
+    > {
+        close_responses::CircleCloseCoordinator::new(self)
+            .load_complete_circle_epoch_close_responses(control)
+            .await
     }
 
     pub(crate) async fn stage_acknowledgements(

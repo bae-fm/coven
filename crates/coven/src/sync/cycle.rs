@@ -251,7 +251,6 @@ impl AuthorizedSyncCycle<'_, '_> {
         if completed.rotation_pending.is_none() {
             self.authorization
                 .circles()
-                .close()
                 .publish_circle_epoch_close_responses()
                 .await
                 .map_err(|error| {
@@ -260,7 +259,6 @@ impl AuthorizedSyncCycle<'_, '_> {
             if let Some(routing_encryption) = self.routing_encryption {
                 self.authorization
                     .circles()
-                    .close()
                     .finalize_ready_circle_epoch_closes(&completed.sync_time, routing_encryption)
                     .await
                     .map_err(|error| {

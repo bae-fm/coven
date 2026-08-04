@@ -2371,7 +2371,6 @@ mod test_device {
                     crate::sync::store::CircleOperationError::InvalidState(error.to_string())
                 })?
                 .circles()
-                .close()
                 .publish_circle_epoch_close_responses()
                 .await
         }

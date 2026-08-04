@@ -11,7 +11,6 @@ pub(super) mod acknowledgements;
 pub(super) mod activation;
 mod authorized_writer;
 mod bootstrap_blobs;
-mod close_responses;
 mod commands;
 mod discard;
 mod history;
