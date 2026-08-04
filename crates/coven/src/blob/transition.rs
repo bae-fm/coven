@@ -419,9 +419,21 @@ struct PreparedMakeLocal {
     references: Vec<RowBlobRef>,
 }
 
+/// Materializing a blob back to a local file needs one capability from the
+/// connected blob access the host composes: staging a verified local copy of
+/// an exact reference. Transitions name only this port.
+#[async_trait::async_trait]
+pub(crate) trait VerifiedLocalCopyStaging: Send + Sync {
+    async fn stage_verified_local_copy(
+        &self,
+        reference: &RowBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::sync::BlobCacheError>;
+}
+
 pub(crate) struct ConnectedBlobTransitions {
     local: LocalBlobTransitions,
-    blob_access: crate::store_blobs::StoreBlobAccess,
+    blob_access: Arc<dyn VerifiedLocalCopyStaging>,
     routing_encryption: Option<crate::encryption::EncryptionService>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
@@ -429,7 +441,7 @@ pub(crate) struct ConnectedBlobTransitions {
 impl ConnectedBlobTransitions {
     pub(crate) fn new(
         local: LocalBlobTransitions,
-        blob_access: crate::store_blobs::StoreBlobAccess,
+        blob_access: Arc<dyn VerifiedLocalCopyStaging>,
         routing_encryption: Option<crate::encryption::EncryptionService>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {

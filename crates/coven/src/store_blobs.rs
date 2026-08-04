@@ -452,3 +452,14 @@ impl ReadStoreBlobs {
         self.storage.all_pinned(blobs).await
     }
 }
+
+#[async_trait::async_trait]
+impl crate::blob::transition::VerifiedLocalCopyStaging for StoreBlobAccess {
+    async fn stage_verified_local_copy(
+        &self,
+        reference: &RowBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
+        StoreBlobAccess::stage_verified_local_copy(self, reference, destination).await
+    }
+}

@@ -45,9 +45,10 @@ pub(crate) enum Region {
     Database,
     /// Cloud providers, local file storage, and the OAuth flow they use.
     Storage,
-    /// Replication: the sync loop, Store authority spine, verified history.
+    /// Replication: the sync loop, Store authority spine, verified history,
+    /// and the blob locality/tombstone machinery its cycles execute.
     Replication,
-    /// Domain workflows over replication: blobs, joining, restore, Circles.
+    /// Domain workflows over replication: joining, restore.
     Domain,
     /// The host-facing composition roots and their retained owners.
     Host,
@@ -76,8 +77,8 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("database", Region::Database),
     ("oauth", Region::Storage),
     ("storage", Region::Storage),
+    ("blob", Region::Replication),
     ("sync", Region::Replication),
-    ("blob", Region::Domain),
     ("joining", Region::Domain),
     ("restoration", Region::Domain),
     ("circles", Region::Host),

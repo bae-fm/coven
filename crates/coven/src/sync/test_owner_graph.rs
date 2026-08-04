@@ -258,11 +258,11 @@ impl TestOwnerGraph {
     ) -> ConnectedBlobTransitions {
         ConnectedBlobTransitions::new(
             self.local_transitions.clone(),
-            crate::store_blobs::StoreBlobAccess::connected_for_test(
+            Arc::new(crate::store_blobs::StoreBlobAccess::connected_for_test(
                 self.database.clone(),
                 self.local_access.clone(),
                 storage,
-            ),
+            )),
             routing_encryption,
             observer,
         )

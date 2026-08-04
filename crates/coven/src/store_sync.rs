@@ -641,7 +641,7 @@ impl StoreSync {
     ) -> Arc<SyncLoopHandle> {
         let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
             self.local_blob_transitions.clone(),
-            self.blob_access.clone(),
+            Arc::new(self.blob_access.clone()),
             routing_encryption,
             self.observer.clone(),
         );
