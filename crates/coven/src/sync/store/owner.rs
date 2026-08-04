@@ -266,6 +266,71 @@ impl Store {
         self.storage.blob_path_scheme()
     }
 
+    async fn circle_close_status(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+    ) -> Result<crate::protocol::circle::CircleCloseStatus, CircleOperationError> {
+        let (current, _) = self
+            .database
+            .circle_closing_context(circle_id, &self.local_author_pubkey())
+            .await?;
+        let crate::protocol::circle::CircleControlState::EpochClose(close) =
+            current.control.value.state()
+        else {
+            return Err(CircleOperationError::InvalidState(
+                "Circle close-status inspection received an active control".to_string(),
+            ));
+        };
+        let context = crate::storage::ProtocolObjectContext::store_encrypted(
+            current.control.value.store_root_hash,
+            crate::storage::ProtocolObjectDomain::CircleEpochCloseResponse,
+        );
+        let mut participants = Vec::with_capacity(close.participants.len());
+        for participant in &close.participants {
+            let prefix = crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
+                current.control.value.circle_id,
+                close.close_id,
+                participant.registration.device_id,
+            );
+            let settlement = match self
+                .storage
+                .read_protocol_slot(&context, &participant.response_slot, &prefix)
+                .await
+            {
+                Ok((bytes, _)) => {
+                    match crate::protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
+                        .map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "Circle epoch-close response slot for device {} failed to parse: {error}",
+                                participant.registration.device_id
+                            ))
+                        })?
+                    {
+                        crate::protocol::circle::CircleEpochCloseResponseSlotValue::Response(_) => {
+                            crate::protocol::circle::CircleCloseSettlement::Responded
+                        }
+                        crate::protocol::circle::CircleEpochCloseResponseSlotValue::Exclusion(_) => {
+                            crate::protocol::circle::CircleCloseSettlement::Excluded
+                        }
+                    }
+                }
+                Err(crate::storage::StorageError::NotFound(_)) => {
+                    crate::protocol::circle::CircleCloseSettlement::Pending
+                }
+                Err(error) => return Err(crate::storage::StoreObjectError::from(error).into()),
+            };
+            participants.push(crate::protocol::circle::CircleCloseParticipant {
+                device_id: participant.registration.device_id,
+                settlement,
+            });
+        }
+        Ok(crate::protocol::circle::CircleCloseStatus {
+            circle_id,
+            close_id: close.close_id,
+            participants,
+        })
+    }
+
     pub(crate) fn self_uploader(&self) -> String {
         self.storage.self_uploader()
     }
