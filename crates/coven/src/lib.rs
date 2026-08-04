@@ -28,6 +28,7 @@ pub(crate) mod keyring_backend;
 pub(crate) mod keys;
 pub(crate) mod local_file;
 pub(crate) mod oauth;
+pub(crate) mod object_hash;
 pub(crate) mod protocol;
 mod read_handle;
 mod read_store_rows;

@@ -644,3 +644,9 @@ pub(super) fn validate_operation_membership_authority(
 ) -> Result<(), StoreProtocolError> {
     validate_membership_authority(authority)
 }
+
+impl From<crate::object_hash::InvalidObjectHash> for StoreProtocolError {
+    fn from(error: crate::object_hash::InvalidObjectHash) -> Self {
+        StoreProtocolError::InvalidObjectHash(error.0)
+    }
+}

@@ -688,7 +688,10 @@ impl RemoteStoreBlobAccess {
             Some(bytes) => bytes,
             None => {
                 let stored = remote_stored_ref(reference)?;
-                let (_, destination) = self.local.store_dir.remote_blob_paths(stored)?;
+                let (_, destination) = self.local.store_dir.remote_blob_paths(
+                    stored.locator().namespace(),
+                    stored.locator().locator_hash(),
+                )?;
                 let remote = self.remote.access(reference).await?;
                 let staged = remote
                     .stage_verified_plaintext(stored, &destination)
@@ -742,10 +745,11 @@ impl RemoteStoreBlobAccess {
             self.remote.validate(reference).await?;
             return Ok(());
         }
-        let (_, destination) = self
-            .local
-            .store_dir
-            .remote_blob_paths(remote_stored_ref(reference)?)?;
+        let stored = remote_stored_ref(reference)?;
+        let (_, destination) = self.local.store_dir.remote_blob_paths(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )?;
         let staged = self
             .stage_verified_local_copy(reference, &destination)
             .await?;
@@ -791,7 +795,10 @@ impl RemoteStoreBlobAccess {
         reference: &RowBlobRef,
     ) -> Result<BlobStreamSource, BlobCacheError> {
         let stored = remote_stored_ref(reference)?;
-        let (_, destination) = self.local.store_dir.remote_blob_paths(stored)?;
+        let (_, destination) = self.local.store_dir.remote_blob_paths(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )?;
         let staged = remote
             .stage_verified_plaintext(stored, &destination)
             .await?;
@@ -829,9 +836,11 @@ impl StoreBlobCache {
         reference: &RowBlobRef,
         verify: bool,
     ) -> Result<Option<CachedStoreBlobPath>, BlobCacheError> {
-        let (pinned, cached) = self
-            .store_dir
-            .remote_blob_paths(remote_stored_ref(reference)?)?;
+        let stored = remote_stored_ref(reference)?;
+        let (pinned, cached) = self.store_dir.remote_blob_paths(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )?;
         for candidate in [
             CachedStoreBlobPath::Pinned(pinned),
             CachedStoreBlobPath::Evictable(cached),
@@ -1021,7 +1030,10 @@ impl StoreBlobCache {
         self.database.validate_row_blob_ref(reference).await?;
         let stored = remote_stored_ref(reference)?;
         let locator = stored.locator();
-        let (pinned, _) = self.store_dir.remote_blob_paths(stored)?;
+        let (pinned, _) = self.store_dir.remote_blob_paths(
+            stored.locator().namespace(),
+            stored.locator().locator_hash(),
+        )?;
         if self
             .store_dir
             .pinned_blob_is_exact(
@@ -1077,7 +1089,10 @@ impl StoreBlobCache {
             self.database.validate_row_blob_ref(reference).await?;
             let stored = remote_stored_ref(reference)?;
             let locator = stored.locator();
-            let (pinned, cached) = self.store_dir.remote_blob_paths(stored)?;
+            let (pinned, cached) = self.store_dir.remote_blob_paths(
+                stored.locator().namespace(),
+                stored.locator().locator_hash(),
+            )?;
             if self
                 .store_dir
                 .pinned_blob_is_exact(

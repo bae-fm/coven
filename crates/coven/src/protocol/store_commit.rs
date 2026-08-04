@@ -5,8 +5,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 
 use super::membership::{
     verify_membership_entry, AuthorHead, AuthorStreamId, MembershipChange, MembershipCoord,

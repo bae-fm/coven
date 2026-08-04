@@ -63,6 +63,7 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("config", Region::Foundation),
     ("id_provider", Region::Foundation),
     ("local_file", Region::Foundation),
+    ("object_hash", Region::Foundation),
     ("store_dir", Region::Foundation),
     ("write", Region::Foundation),
     ("custody", Region::Keys),

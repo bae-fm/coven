@@ -32,7 +32,7 @@ impl FromStr for StoreDeviceId {
     type Err = StoreProtocolError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
+        Ok(Self(value.parse()?))
     }
 }
 

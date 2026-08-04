@@ -94,8 +94,8 @@ pub(crate) enum StoreBlobFileError {
         path: PathBuf,
         expected_size: u64,
         actual_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
-        actual_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
+        actual_hash: crate::object_hash::ObjectHash,
     },
 }
 
@@ -402,7 +402,7 @@ impl StoreDir {
     /// the plaintext again with fresh randomness.
     pub(crate) fn outbound_blob_spool_path(
         &self,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
     ) -> PathBuf {
         self.storage_dir()
             .join("outbound-blobs")
@@ -411,7 +411,7 @@ impl StoreDir {
 
     pub(crate) async fn remove_outbound_blob_spool(
         &self,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
     ) -> Result<(), String> {
         let path = self.outbound_blob_spool_path(locator_hash);
         match tokio::fs::remove_file(&path).await {
@@ -433,7 +433,7 @@ impl StoreDir {
     pub fn pinned_blob_path(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
     ) -> Result<PathBuf, PathTokenError> {
         self.cache_folder_blob_path("pinned", namespace, &locator_hash.to_string())
     }
@@ -441,9 +441,9 @@ impl StoreDir {
     pub(crate) async fn populate_pinned_blob_from_file(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
         source: &Path,
     ) -> Result<(), StoreBlobFileError> {
         let destination = self
@@ -456,9 +456,9 @@ impl StoreDir {
     pub(crate) async fn populate_cached_blob_from_file(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
         source: &Path,
     ) -> Result<PathBuf, StoreBlobFileError> {
         let destination = self
@@ -478,7 +478,7 @@ impl StoreDir {
         &self,
         destination: PathBuf,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
         source: &Path,
     ) -> Result<(), StoreBlobFileError> {
         let staged = crate::local_file::AtomicStagedFile::create(&destination)
@@ -488,7 +488,7 @@ impl StoreDir {
             .copy_from(source)
             .await
             .map_err(StoreBlobFileError::Io)?;
-        let actual_hash = crate::protocol::store_commit::ObjectHash::from_digest(actual_digest);
+        let actual_hash = crate::object_hash::ObjectHash::from_digest(actual_digest);
         if actual_size != expected_size || actual_hash != expected_hash {
             return Err(StoreBlobFileError::Integrity {
                 path: source.to_path_buf(),
@@ -523,9 +523,9 @@ impl StoreDir {
     pub(crate) async fn pinned_blob_is_exact(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
     ) -> Result<bool, StoreBlobFileError> {
         let path = self
             .pinned_blob_path(namespace, locator_hash)
@@ -555,9 +555,9 @@ impl StoreDir {
     pub(crate) async fn remote_blob_is_exact(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
     ) -> Result<bool, StoreBlobFileError> {
         for path in [
             self.pinned_blob_path(namespace, locator_hash)?,
@@ -573,9 +573,9 @@ impl StoreDir {
     pub(crate) async fn cached_blob_is_exact(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: crate::object_hash::ObjectHash,
     ) -> Result<bool, StoreBlobFileError> {
         let path = self.cache_blob_path(namespace, locator_hash)?;
         file_is_exact(&path, expected_size, expected_hash).await
@@ -591,26 +591,26 @@ impl StoreDir {
     pub fn cache_blob_path(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
     ) -> Result<PathBuf, PathTokenError> {
         self.cache_folder_blob_path("cache", namespace, &locator_hash.to_string())
     }
 
     pub(crate) fn remote_blob_paths(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        namespace: &str,
+        locator_hash: crate::object_hash::ObjectHash,
     ) -> Result<(PathBuf, PathBuf), PathTokenError> {
-        let locator = stored.locator();
         Ok((
-            self.pinned_blob_path(locator.namespace(), locator.locator_hash())?,
-            self.cache_blob_path(locator.namespace(), locator.locator_hash())?,
+            self.pinned_blob_path(namespace, locator_hash)?,
+            self.cache_blob_path(namespace, locator_hash)?,
         ))
     }
 
     pub(crate) async fn remove_cached_locator(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: crate::object_hash::ObjectHash,
     ) -> Result<(), CachedLocatorRemovalError> {
         for path in [
             self.pinned_blob_path(namespace, locator_hash)
@@ -888,9 +888,7 @@ async fn file_exists(path: &Path) -> Result<bool, String> {
     }
 }
 
-async fn exact_file_facts(
-    path: &Path,
-) -> Result<(u64, crate::protocol::store_commit::ObjectHash), String> {
+async fn exact_file_facts(path: &Path) -> Result<(u64, crate::object_hash::ObjectHash), String> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
 
@@ -915,14 +913,14 @@ async fn exact_file_facts(
     }
     Ok((
         size,
-        crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
+        crate::object_hash::ObjectHash::from_digest(hasher.finalize().into()),
     ))
 }
 
 async fn file_is_exact(
     path: &Path,
     expected_size: u64,
-    expected_hash: crate::protocol::store_commit::ObjectHash,
+    expected_hash: crate::object_hash::ObjectHash,
 ) -> Result<bool, StoreBlobFileError> {
     if !file_exists(path).await.map_err(StoreBlobFileError::Io)? {
         return Ok(false);
@@ -1203,7 +1201,7 @@ mod tests {
     #[test]
     fn outbound_blob_spool_is_keyed_by_locator_hash() {
         let store = StoreDir::new("/stores/example");
-        let locator_hash = crate::protocol::store_commit::ObjectHash::digest(b"locator");
+        let locator_hash = crate::object_hash::ObjectHash::digest(b"locator");
 
         assert_eq!(
             store.outbound_blob_spool_path(locator_hash),
@@ -1217,7 +1215,7 @@ mod tests {
     #[test]
     fn remote_cache_paths_are_keyed_by_locator_hash() {
         let store = StoreDir::new("/stores/example");
-        let locator_hash = crate::protocol::store_commit::ObjectHash::digest(b"locator");
+        let locator_hash = crate::object_hash::ObjectHash::digest(b"locator");
         let shard = StoreDir::id_shard(&locator_hash.to_string()).expect("hash shard");
 
         assert_eq!(
