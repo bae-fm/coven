@@ -131,12 +131,7 @@ impl Store {
     }
 
     pub(crate) fn circles(&self) -> StoreCircleCommands<'_> {
-        StoreCircleCommands::from_parts(
-            self,
-            self.database.clone(),
-            self.storage.clone(),
-            self.storage.blob_path_scheme(),
-        )
+        StoreCircleCommands::new(self)
     }
 
     fn local_author_pubkey(&self) -> String {

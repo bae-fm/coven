@@ -13,24 +13,11 @@ use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 
 pub(crate) struct StoreCircleCommands<'store> {
     store: &'store super::Store,
-    database: crate::database::StoreDatabase,
-    storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-    blob_path_scheme: crate::storage::BlobPathScheme,
 }
 
 impl<'store> StoreCircleCommands<'store> {
-    pub(crate) fn from_parts(
-        store: &'store super::Store,
-        database: crate::database::StoreDatabase,
-        storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-        blob_path_scheme: crate::storage::BlobPathScheme,
-    ) -> Self {
-        Self {
-            store,
-            database,
-            storage,
-            blob_path_scheme,
-        }
+    pub(crate) fn new(store: &'store super::Store) -> Self {
+        Self { store }
     }
 }
 
@@ -47,6 +34,7 @@ impl StoreCircleCommands<'_> {
     ) -> Result<CircleCloseStatus, CircleOperationError> {
         let identity_pubkey = self.store.local_author_pubkey();
         let (current, _) = self
+            .store
             .database
             .circle_closing_context(circle_id, &identity_pubkey)
             .await?;
@@ -59,7 +47,7 @@ impl StoreCircleCommands<'_> {
             current.control.value.store_root_hash,
             ProtocolObjectDomain::CircleEpochCloseResponse,
         );
-        let storage = self.storage.as_ref();
+        let storage = self.store.storage.as_ref();
         let mut participants = Vec::with_capacity(close.participants.len());
         for participant in &close.participants {
             let prefix = circle_epoch_close_response_semantic_prefix(
@@ -106,7 +94,7 @@ impl StoreCircleCommands<'_> {
         metadata_stamp: &str,
         name: &str,
     ) -> Result<CircleId, CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -123,7 +111,7 @@ impl StoreCircleCommands<'_> {
         circle_id: CircleId,
         name: &str,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -142,7 +130,7 @@ impl StoreCircleCommands<'_> {
         circle_id: CircleId,
         member_pubkey: String,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -169,7 +157,7 @@ impl StoreCircleCommands<'_> {
         circle_id: CircleId,
         chosen: crate::protocol::circle::CircleControlCoord,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -195,7 +183,7 @@ impl StoreCircleCommands<'_> {
         &self,
         circle_id: CircleId,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -215,7 +203,7 @@ impl StoreCircleCommands<'_> {
         circle_id: CircleId,
         excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -239,7 +227,7 @@ impl StoreCircleCommands<'_> {
         operation_id: &crate::protocol::circle::CircleOperationId,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
@@ -266,7 +254,7 @@ impl StoreCircleCommands<'_> {
         &self,
         operation_id: &crate::protocol::circle::CircleOperationId,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut authorized = self
@@ -287,7 +275,7 @@ impl StoreCircleCommands<'_> {
         &self,
         circle_id: CircleId,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.blob_path_scheme, BlobPathScheme::Plain) {
+        if matches!(self.store.storage.blob_path_scheme(), BlobPathScheme::Plain) {
             return Err(CircleOperationError::BrowsableStorage);
         }
         let mut writer = self
