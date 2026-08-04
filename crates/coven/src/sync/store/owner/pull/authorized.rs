@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 pub(crate) struct AuthorizedPull<'operation, 'storage> {
     history: &'operation mut super::AuthorizedStoreHistory<'storage>,
-    packages: super::super::pull_package_materializer::PullPackageMaterializer<'storage>,
+    packages: super::PullPackageMaterializer<'storage>,
     membership: &'operation MembershipChain,
     identity: Option<&'operation UserKeypair>,
     routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
@@ -455,7 +455,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         let verified_prefix = VerifiedStreamActivationPrefix::empty();
         let circle_activations = if commit.control().is_some() {
             merge_candidate.membership_control.clone().ok_or_else(|| {
-                super::super::circles::CirclePackageReadError::Invalid(
+                super::CirclePackageReadError::Invalid(
                     "Merge membership control is absent from its operation-verified history"
                         .to_string(),
                 )
@@ -473,16 +473,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     &merge_candidate.membership_prefix,
                 )
                 .await
-                .map_err(|error| {
-                    super::super::circles::CirclePackageReadError::Invalid(error.to_string())
-                })
+                .map_err(|error| super::CirclePackageReadError::Invalid(error.to_string()))
         };
         let verified_circle_activations = match circle_activations {
             Ok(activations) => activations,
-            Err(super::super::circles::CirclePackageReadError::Database(error)) => {
-                return Err(error.into())
-            }
-            Err(super::super::circles::CirclePackageReadError::Invalid(error)) => {
+            Err(super::CirclePackageReadError::Database(error)) => return Err(error.into()),
+            Err(super::CirclePackageReadError::Invalid(error)) => {
                 return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
                     error,
                 )))
@@ -519,10 +515,8 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .await
         {
             Ok(packages) => packages,
-            Err(super::super::circles::CirclePackageReadError::Database(error)) => {
-                return Err(error.into())
-            }
-            Err(super::super::circles::CirclePackageReadError::Invalid(error)) => {
+            Err(super::CirclePackageReadError::Database(error)) => return Err(error.into()),
+            Err(super::CirclePackageReadError::Invalid(error)) => {
                 return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
                     error,
                 )))

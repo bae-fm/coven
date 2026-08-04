@@ -1,4 +1,4 @@
-use super::{AuthorizedWriterOperation, Store};
+use super::{AuthorizedWriterOperation, Store, StoreAckError};
 #[cfg(test)]
 use crate::sync::store::circle_controls::VerifiedCircleActivations;
 use crate::sync::store::circle_controls::{

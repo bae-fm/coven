@@ -7,7 +7,7 @@ use crate::protocol::store_commit::{
 pub(crate) struct ReclaimHistory<'operation, 'storage> {
     database: StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
-    history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
+    history: &'operation mut super::MergeHistoryVerifier<'storage>,
 }
 
 /// One device's per-Circle snapshot stream, read in generation order.
@@ -31,7 +31,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
-        history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
+        history: &'operation mut super::MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
@@ -47,29 +47,21 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) async fn load_circle_acknowledgement(
         &mut self,
         reference: &crate::protocol::store_commit::CircleAckRef,
-    ) -> Result<crate::protocol::store_commit::CircleAck, super::super::StoreAckError> {
-        super::super::circles::acknowledgements::CircleAcknowledgementReader::new(
-            &self.database,
-            self.storage,
-            self.root(),
-        )
-        .load(reference)
-        .await
+    ) -> Result<crate::protocol::store_commit::CircleAck, super::StoreAckError> {
+        super::CircleAcknowledgementReader::new(&self.database, self.storage, self.root())
+            .load(reference)
+            .await
     }
 
     pub(crate) async fn stable_circle_acknowledgements(
         &mut self,
         circle_id: crate::protocol::circle::CircleId,
         coverage: &CommitFrontier,
-    ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, super::super::StoreAckError>
+    ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, super::StoreAckError>
     {
-        super::super::circles::acknowledgements::CircleAcknowledgementReader::new(
-            &self.database,
-            self.storage,
-            self.root(),
-        )
-        .stable_dominating(circle_id, coverage)
-        .await
+        super::CircleAcknowledgementReader::new(&self.database, self.storage, self.root())
+            .stable_dominating(circle_id, coverage)
+            .await
     }
 
     pub(crate) async fn load_circle_snapshot_stream_refs(
@@ -83,15 +75,11 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             crate::protocol::store_commit::CircleSnapshotRef,
             crate::protocol::store_commit::CircleSnapshotMeta,
         )>,
-        super::super::writer::snapshot::SnapshotError,
+        super::SnapshotError,
     > {
-        super::super::circles::snapshots::CircleSnapshotReader::new(
-            &self.database,
-            self.storage,
-            self.history,
-        )
-        .load_stream_refs(circle_id, encryption, registration_ref, registration)
-        .await
+        super::CircleSnapshotReader::new(&self.database, self.storage, self.history)
+            .load_stream_refs(circle_id, encryption, registration_ref, registration)
+            .await
     }
 
     pub(crate) async fn load_ref(
@@ -105,10 +93,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<
-        Vec<crate::database::PublishedStoreSnapshot>,
-        super::super::writer::snapshot::SnapshotError,
-    > {
+    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, super::SnapshotError> {
         self.history
             .load_store_snapshot_stream(registration_ref, registration)
             .await
@@ -388,7 +373,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         candidates: Vec<crate::database::PublishedStoreSnapshot>,
     ) -> Result<
-        Option<super::super::verified_history::SelectedStableStoreSnapshot>,
+        Option<super::SelectedStableStoreSnapshot>,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.history

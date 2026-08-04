@@ -25,7 +25,7 @@ pub(crate) struct PendingDeviceJoinClosure<'storage> {
 #[doc(hidden)]
 pub(crate) struct JoiningStore<'storage> {
     journal: PendingJoinJournal,
-    history: super::super::AuthorizedStoreHistory<'storage>,
+    history: super::AuthorizedStoreHistory<'storage>,
     membership: crate::protocol::membership::MembershipChain,
     identity: UserKeypair,
 }
@@ -192,7 +192,7 @@ impl JoiningStore<'_> {
 
 impl<'storage> JoiningStore<'storage> {
     pub(crate) async fn begin_from_restored_history(
-        mut history: super::super::AuthorizedStoreHistory<'storage>,
+        mut history: super::AuthorizedStoreHistory<'storage>,
         identity: UserKeypair,
         pending: &DeviceJoinJournalDatabase,
         offer: DeviceJoinOffer,
@@ -289,11 +289,10 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             storage.as_ref(),
             root.reference().clone(),
         );
-        let keyrings =
-            super::super::keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
+        let keyrings = super::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
         let blob_cache =
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
-        let mut history = super::super::AuthorizedStoreHistory::from_pending_device_join(
+        let mut history = super::AuthorizedStoreHistory::from_pending_device_join(
             PendingDeviceJoinHistoryConstruction,
             database,
             storage,

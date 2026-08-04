@@ -88,7 +88,7 @@ impl DeviceStateResolver<'_> {
 
 pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
-    root: super::super::protocol_root::VerifiedStoreRoot,
+    root: super::VerifiedStoreRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 }
 
@@ -224,7 +224,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(super) fn from_verified_root(
         _authority: super::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
-        root: super::super::protocol_root::VerifiedStoreRoot,
+        root: super::VerifiedStoreRoot,
     ) -> Self {
         Self {
             storage,

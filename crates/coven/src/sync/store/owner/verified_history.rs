@@ -604,7 +604,7 @@ impl VerifiedOwnerPromotionRequestActivation {
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
-    pub(crate) fn verified_root(&self) -> &super::super::protocol_root::VerifiedStoreRoot {
+    pub(crate) fn verified_root(&self) -> &super::VerifiedStoreRoot {
         &self.root
     }
 
@@ -1937,7 +1937,7 @@ pub(crate) struct VerifiedMergeHistory {
 }
 
 pub(crate) struct MergeHistoryVerifier<'a> {
-    root: super::super::protocol_root::VerifiedStoreRoot,
+    root: super::VerifiedStoreRoot,
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
 }
@@ -2579,7 +2579,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(super) async fn from_commit_verifier(
         _authority: super::HistoryConstructionAuthority,
-        root: super::super::protocol_root::VerifiedStoreRoot,
+        root: super::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
         let founder = commit_verifier.load_founder_registration().await?;
@@ -2587,7 +2587,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     fn from_commit_verifier_and_founder(
-        root: super::super::protocol_root::VerifiedStoreRoot,
+        root: super::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
         founder: &VerifiedObject<StoreDeviceRegistration>,
     ) -> Result<Self, StorePullError> {

@@ -24,6 +24,7 @@ mod verified_history;
 pub(super) mod writer;
 
 use super::prepare_registration_object;
+use super::protocol_root::VerifiedStoreRoot;
 use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
 #[cfg(test)]

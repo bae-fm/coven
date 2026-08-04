@@ -26,7 +26,7 @@ use super::journal::{
 use super::OwnerPromotionError;
 
 pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
-    writer: &'operation mut super::super::AuthorizedWriterOperation<'storage>,
+    writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     root: crate::protocol::store_commit::StoreRootRef,
@@ -76,7 +76,7 @@ enum OwnerPromotionResumeOutcome {
 impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        writer: &'operation mut super::super::AuthorizedWriterOperation<'storage>,
+        writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
         root: crate::protocol::store_commit::StoreRootRef,

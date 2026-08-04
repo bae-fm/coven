@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
+use super::verified_history::MergeHistoryVerifier;
 use super::{AuthorizedWriterOperation, Store, StoreError};
 use crate::database::DbError;
 use crate::database::StoreDatabase;

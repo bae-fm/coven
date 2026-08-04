@@ -5,7 +5,7 @@ use crate::protocol::store_commit::{
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::operations;
 
-use super::super::StoreAckError;
+use super::StoreAckError;
 pub(crate) struct CircleAcknowledgementWriter {
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,

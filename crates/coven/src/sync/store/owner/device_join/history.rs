@@ -9,14 +9,14 @@ use crate::sync::store::StoreRegistrationError;
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
     database: StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
-    history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
+    history: &'operation mut super::MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
-        history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
+        history: &'operation mut super::MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
@@ -99,10 +99,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(super) async fn load_commit(
         &mut self,
         reference: &StoreBatchCommitRef,
-    ) -> Result<
-        crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        super::super::pull::StorePullError,
-    > {
+    ) -> Result<crate::protocol::store_commit::VerifiedStoreBatchCommit, super::StorePullError>
+    {
         self.history.load_ref(reference).await
     }
 
@@ -111,7 +109,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         access: &ActivatedStoreMemberProviderAccessGrant,
         provider_admin: &ProviderAdminGrantRecord,
         administrator: &StoreDeviceRegistration,
-    ) -> Result<(), super::super::pull::StorePullError> {
+    ) -> Result<(), super::StorePullError> {
         self.history
             .verify_accepted_provider_access_activation(access, provider_admin, administrator)
             .await
@@ -121,7 +119,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &mut self,
         cut: &crate::protocol::store_commit::StoreHistoryCut,
         target: &StoreBatchCommitRef,
-    ) -> Result<bool, super::super::pull::StorePullError> {
+    ) -> Result<bool, super::StorePullError> {
         self.history.history_cut_covers(cut, target).await
     }
 
@@ -129,8 +127,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &mut self,
         reference: &DeviceJoinAttemptRef,
         owner: &StoreDeviceRegistration,
-    ) -> Result<crate::storage::VerifiedObject<DeviceJoinAttempt>, super::super::pull::StorePullError>
-    {
+    ) -> Result<crate::storage::VerifiedObject<DeviceJoinAttempt>, super::StorePullError> {
         self.history
             .load_verified_device_join_attempt(reference, owner)
             .await
@@ -183,7 +180,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             crate::storage::VerifiedObject<DeviceJoinAttempt>,
             crate::storage::VerifiedObject<StoreDeviceRegistration>,
         ),
-        super::super::pull::StorePullError,
+        super::StorePullError,
     > {
         self.history
             .load_verified_device_join_attempt_and_owner(reference)
@@ -198,9 +195,9 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     ) -> Result<
         (
             crate::storage::VerifiedObject<DeviceJoinAttempt>,
-            super::super::pull::DeviceJoinBootstrapPlan,
+            super::DeviceJoinBootstrapPlan,
         ),
-        super::super::pull::StorePullError,
+        super::StorePullError,
     > {
         self.history
             .verify_attempt_and_prepare_device_join_bootstrap(
@@ -217,7 +214,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         identity: &UserKeypair,
         attempt_ref: DeviceJoinAttemptRef,
         verified_attempt: crate::storage::VerifiedObject<DeviceJoinAttempt>,
-        bootstrap_plan: super::super::pull::DeviceJoinBootstrapPlan,
+        bootstrap_plan: super::DeviceJoinBootstrapPlan,
         attempt_activation: StoreBatchCommitRef,
         owner: &StoreDeviceRegistration,
         published_at: &str,
@@ -396,7 +393,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .await
             .map_err(registration_database_error)?;
         }
-        super::super::RegistrationOutbox::new(database.clone(), storage)
+        super::RegistrationOutbox::new(database.clone(), storage)
             .drain()
             .await?;
         let durable = Box::pin(database.latest_local_store_device_registration())

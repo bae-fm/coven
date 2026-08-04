@@ -7,10 +7,7 @@ use crate::protocol::store_commit::{
 };
 use crate::sync::store::membership::AnchoredChainError;
 
-use super::super::pull::StorePullError;
-use super::super::verified_history::{
-    MergeHistoryVerifier, VerifiedOwnerPromotionRequestActivation,
-};
+use super::{MergeHistoryVerifier, StorePullError, VerifiedOwnerPromotionRequestActivation};
 
 pub(crate) struct OwnerPromotionHistory<'operation, 'storage> {
     history: &'operation mut MergeHistoryVerifier<'storage>,

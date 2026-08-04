@@ -3,6 +3,8 @@
 use crate::storage::StoreObjectError;
 
 #[cfg(test)]
+use super::RegistrationOutbox;
+#[cfg(test)]
 use crate::database::Database;
 #[cfg(test)]
 use crate::keys::UserKeypair;
@@ -106,7 +108,7 @@ mod tests {
         .await
         .expect("create registration failure test Store");
 
-        let result = super::super::RegistrationOutbox::new(database, &store)
+        let result = super::RegistrationOutbox::new(database, &store)
             .drain()
             .await;
         assert!(

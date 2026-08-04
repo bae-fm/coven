@@ -9,7 +9,12 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{prepare_registration_object, AuthorizedWriterOperation};
+use super::pull::{DeviceJoinBootstrapPlan, StorePullError};
+use super::verified_history::MergeHistoryVerifier;
+use super::{
+    prepare_registration_object, AuthorizedStoreHistory, AuthorizedWriterOperation,
+    RegistrationOutbox, StoreKeyrings,
+};
 use crate::keys::{self, UserKeypair};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::MembershipGrantId;

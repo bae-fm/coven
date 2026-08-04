@@ -4,13 +4,11 @@ use crate::protocol::store_commit::{
 };
 
 pub(crate) struct DeviceExclusionHistory<'operation, 'storage> {
-    history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
+    history: &'operation mut super::MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
-    pub(crate) fn new(
-        history: &'operation mut super::super::verified_history::MergeHistoryVerifier<'storage>,
-    ) -> Self {
+    pub(crate) fn new(history: &'operation mut super::MergeHistoryVerifier<'storage>) -> Self {
         Self { history }
     }
 

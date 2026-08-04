@@ -1,5 +1,7 @@
 //! Store-owned Owner promotion workflow.
 
+use super::AuthorizedWriterOperation;
+
 mod authority;
 mod error;
 mod journal;
