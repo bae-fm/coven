@@ -21,6 +21,7 @@ use crate::encryption::{
     EncryptionError, EncryptionService, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
 };
 use crate::keys::UserKeypair;
+use crate::protocol::provider::ProviderProbeStorage;
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::{
     BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage, ObjectSlot,
@@ -1017,7 +1018,7 @@ pub(crate) struct CloudSyncStorage {
     /// of a stream and reads across awaits, so it is genuinely shared between
     /// this storage and the readers it opens, not owned by one.
     exact: Arc<dyn ExactSlotStorage>,
-    exact_probe_peer: Arc<dyn ExactSlotStorage>,
+    provider_probes: ProviderProbeStorage,
     cipher: Arc<CloudCipherState>,
     /// Whether a committed rotation is outstanding — see [`PendingRotation`].
     /// Shared the same way `cipher` is, so a member removal or a refresh cycle
@@ -1055,10 +1056,11 @@ impl CloudSyncStorage {
                 "CloudSyncStorage requires a second exact-slot probe client".to_string(),
             )
         })?;
+        let provider_probes = ProviderProbeStorage::new(exact.clone(), exact_probe_peer);
         Ok(CloudSyncStorage {
             home,
             exact,
-            exact_probe_peer,
+            provider_probes,
             cipher: Arc::new(CloudCipherState::new(cipher)),
             pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
@@ -1934,34 +1936,18 @@ impl SyncStorage for CloudSyncStorage {
         crate::protocol::provider::ExactSlotProbeReceipt,
         crate::protocol::provider::ProviderProbeError,
     > {
-        crate::protocol::provider::probe_exact_slots(
-            self.exact.as_ref(),
-            self.exact_probe_peer.as_ref(),
-            journal,
-            probe_id,
-            binding,
-        )
-        .await
+        self.provider_probes
+            .probe_exact_slots(journal, probe_id, binding)
+            .await
     }
 
     async fn reserve_cross_principal_response_slot(
         &self,
         probe_id: crate::protocol::provider::ProviderProbeId,
     ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError> {
-        let logical = crate::protocol::provider::cross_peer_logical_key(probe_id);
-        let slot = self
-            .exact
-            .allocate_slot(&logical)
+        self.provider_probes
+            .reserve_cross_principal_response_slot(probe_id)
             .await
-            .map_err(StorageError::from)?;
-        if slot.logical_key() != logical {
-            return Err(
-                crate::protocol::provider::ProviderProbeError::InvalidReceipt(
-                    "cross-principal response slot changed its logical key".to_string(),
-                ),
-            );
-        }
-        Ok(slot)
     }
 
     async fn observe_exact_slot(
@@ -1992,15 +1978,15 @@ impl SyncStorage for CloudSyncStorage {
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
     > {
-        crate::protocol::provider::prepare_cross_principal_challenge(
-            self.exact.as_ref(),
-            publication_journal,
-            probe_id,
-            store,
-            context,
-            administrator_signer,
-        )
-        .await
+        self.provider_probes
+            .prepare_cross_principal_challenge(
+                publication_journal,
+                probe_id,
+                store,
+                context,
+                administrator_signer,
+            )
+            .await
     }
 
     async fn settle_cross_principal_challenge(
@@ -2014,15 +2000,15 @@ impl SyncStorage for CloudSyncStorage {
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
     > {
-        crate::protocol::provider::settle_cross_principal_challenge(
-            self.exact.as_ref(),
-            publication_journal,
-            authorization,
-            challenge,
-            context,
-            store,
-        )
-        .await
+        self.provider_probes
+            .settle_cross_principal_challenge(
+                publication_journal,
+                authorization,
+                challenge,
+                context,
+                store,
+            )
+            .await
     }
 
     async fn create_cross_principal_response(
@@ -2036,15 +2022,15 @@ impl SyncStorage for CloudSyncStorage {
         crate::protocol::provider::CrossPrincipalProbeResponse,
         crate::protocol::provider::ProviderProbeError,
     > {
-        crate::protocol::provider::create_cross_principal_response(
-            self.exact.as_ref(),
-            challenge,
-            context,
-            store,
-            administrator_signing_pubkey,
-            peer_signer,
-        )
-        .await
+        self.provider_probes
+            .create_cross_principal_response(
+                challenge,
+                context,
+                store,
+                administrator_signing_pubkey,
+                peer_signer,
+            )
+            .await
     }
 
     async fn complete_cross_principal_probe(
@@ -2060,17 +2046,17 @@ impl SyncStorage for CloudSyncStorage {
         crate::protocol::provider::CrossPrincipalProbeReceipt,
         crate::protocol::provider::ProviderProbeError,
     > {
-        crate::protocol::provider::complete_cross_principal_probe(
-            self.exact.as_ref(),
-            journal,
-            challenge,
-            response,
-            context,
-            store,
-            administrator_signer,
-            peer_signing_pubkey,
-        )
-        .await
+        self.provider_probes
+            .complete_cross_principal_probe(
+                journal,
+                challenge,
+                response,
+                context,
+                store,
+                administrator_signer,
+                peer_signing_pubkey,
+            )
+            .await
     }
 
     fn store_blob_protection(&self) -> Result<crate::storage::BlobSpoolProtection, StorageError> {
