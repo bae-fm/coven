@@ -1,13 +1,21 @@
 use tracing::debug;
 
 use crate::database::{DbError, StoreDatabase};
-use crate::protocol::store_commit::{StoreDeviceRegistration, VerifiedStoreBatchCommit};
+use crate::protocol::store_commit::{
+    CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,
+};
+use crate::storage::{run_blocking_object_verification, VerifiedObject};
 use crate::sync::store::owner::pull::{LoadedCirclePackage, LocalStoreMembership};
 use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
 
 pub(crate) enum CirclePackageReadError {
     Database(DbError),
     Invalid(String),
+}
+
+pub(crate) struct OpenedCirclePackage {
+    pub(crate) object: VerifiedObject<Vec<u8>>,
+    pub(crate) blob_protection: crate::storage::BlobSpoolProtection,
 }
 
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
@@ -31,6 +39,68 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
 
     fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
         self.history.verified_root().reference()
+    }
+
+    pub(crate) async fn open_package(
+        &self,
+        access: &crate::sync::store::circle_controls::CirclePackageAccess,
+        verified: &VerifiedStoreBatchCommit,
+        reference: &CirclePackageRef,
+        author: &StoreDeviceRegistration,
+    ) -> Result<OpenedCirclePackage, CirclePackageReadError> {
+        access
+            .authorize_package(reference, author)
+            .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+        let commit = verified.value();
+        if !commit
+            .circle_packages()
+            .iter()
+            .any(|committed| committed == reference)
+        {
+            return Err(CirclePackageReadError::Invalid(
+                StoreProtocolError::MissingCirclePackage(reference.circle_id).to_string(),
+            ));
+        }
+        let semantic_prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
+            reference.circle_id,
+            commit.candidate_family(),
+            &verified.reference().coord.stream_id.to_string(),
+            commit.seq(),
+            reference.package.content_hash,
+        );
+        let encryption = access.package_encryption();
+        let context = crate::storage::ProtocolObjectContext::circle(
+            commit.store_root_hash,
+            crate::storage::ProtocolObjectDomain::CirclePackage,
+            encryption.clone(),
+        );
+        let bytes = self
+            .storage
+            .read_protocol_object(&context, &reference.package.object, &semantic_prefix)
+            .await
+            .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+        let verify_bytes = bytes.clone();
+        let expected_commit = commit.clone();
+        let expected_circle_id = reference.circle_id;
+        let value = run_blocking_object_verification(
+            &semantic_prefix,
+            &reference.package.object,
+            Box::new(move || {
+                expected_commit.verify_circle_package(expected_circle_id, &verify_bytes)?;
+                Ok(verify_bytes)
+            }),
+        )
+        .await
+        .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+        Ok(OpenedCirclePackage {
+            object: VerifiedObject {
+                value,
+                bytes,
+                semantic_hash: reference.package.content_hash,
+                object: reference.package.object.clone(),
+            },
+            blob_protection: crate::storage::BlobSpoolProtection::Opaque(encryption),
+        })
     }
 
     pub(crate) async fn load_applicable(
@@ -196,10 +266,9 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                 )
                 .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?
             };
-            let package = access
-                .open_package(self.storage, verified, reference, author)
-                .await
-                .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+            let package = self
+                .open_package(&access, verified, reference, author)
+                .await?;
             loaded.push(LoadedCirclePackage {
                 reference: reference.clone(),
                 bytes: package.object.value,

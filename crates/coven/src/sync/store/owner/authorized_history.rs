@@ -2718,15 +2718,27 @@ impl AuthorizedStoreHistory<'_> {
     }
 
     pub(super) async fn open_circle_package_for_test(
-        &self,
+        &mut self,
         access: &crate::sync::store::circle_controls::CirclePackageAccess,
         commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &crate::protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
-        let opened = access
-            .open_package(self.storage, commit, reference, commit.author())
+        let reader = super::circles::packages::CirclePackageReader::new(
+            &self.database,
+            self.storage.as_ref(),
+            &mut self.history_verifier,
+        );
+        let opened = reader
+            .open_package(access, commit, reference, commit.author())
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(|error| match error {
+                super::circles::packages::CirclePackageReadError::Database(error) => {
+                    StoreError::Database(error.to_string())
+                }
+                super::circles::packages::CirclePackageReadError::Invalid(error) => {
+                    StoreError::InvalidOutbound(error)
+                }
+            })?;
         Ok(opened.object.value)
     }
 

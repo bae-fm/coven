@@ -13,9 +13,8 @@ use crate::protocol::circle_roster::CircleMaterializedRoster;
 use crate::protocol::store_commit::{
     CandidateFamilyId, CircleAccessObjectRef, CircleControlRef, CirclePackageRef, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreProtocolError, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
+    StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
-use crate::storage::{run_blocking_object_verification, VerifiedObject};
 use crate::sync::store::circle_controls::CircleOperationError;
 
 /// The local device's own exclusion from a Circle epoch close, derived strictly
@@ -142,11 +141,6 @@ pub(crate) struct CirclePackageAccess {
     writers: BTreeSet<String>,
 }
 
-pub(crate) struct OpenedCirclePackage {
-    pub(crate) object: VerifiedObject<Vec<u8>>,
-    pub(crate) blob_protection: crate::storage::BlobSpoolProtection,
-}
-
 struct VerifiedCircleKeyring {
     keyring: EncryptionService,
     key_fingerprint: KeyFingerprint,
@@ -216,13 +210,11 @@ impl CirclePackageAccess {
         })
     }
 
-    pub(crate) async fn open_package(
+    pub(crate) fn authorize_package(
         &self,
-        storage: &dyn crate::storage::SyncStorage,
-        verified: &VerifiedStoreBatchCommit,
         reference: &CirclePackageRef,
         author: &StoreDeviceRegistration,
-    ) -> Result<OpenedCirclePackage, CircleOperationError> {
+    ) -> Result<(), CircleOperationError> {
         if reference.circle_id != self.circle_id {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle package names {}, but access belongs to {}",
@@ -241,59 +233,11 @@ impl CirclePackageAccess {
                 reference.circle_id
             )));
         }
-        let commit = verified.value();
-        if !commit
-            .circle_packages()
-            .iter()
-            .any(|committed| committed == reference)
-        {
-            return Err(CircleOperationError::Object(
-                crate::storage::StoreObjectError::InvalidObject {
-                    semantic_prefix: reference.package.object.slot().logical_key().to_string(),
-                    key: reference.package.object.slot().logical_key().to_string(),
-                    source: Box::new(StoreProtocolError::MissingCirclePackage(
-                        reference.circle_id,
-                    )),
-                },
-            ));
-        }
-        let semantic_prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
-            reference.circle_id,
-            commit.candidate_family(),
-            &verified.reference().coord.stream_id.to_string(),
-            commit.seq(),
-            reference.package.content_hash,
-        );
-        let context = crate::storage::ProtocolObjectContext::circle(
-            commit.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CirclePackage,
-            self.encryption.clone(),
-        );
-        let bytes = storage
-            .read_protocol_object(&context, &reference.package.object, &semantic_prefix)
-            .await
-            .map_err(crate::storage::StoreObjectError::from)?;
-        let verify_bytes = bytes.clone();
-        let expected_commit = commit.clone();
-        let expected_circle_id = reference.circle_id;
-        let value = run_blocking_object_verification(
-            &semantic_prefix,
-            &reference.package.object,
-            Box::new(move || {
-                expected_commit.verify_circle_package(expected_circle_id, &verify_bytes)?;
-                Ok(verify_bytes)
-            }),
-        )
-        .await?;
-        Ok(OpenedCirclePackage {
-            object: VerifiedObject {
-                value,
-                bytes,
-                semantic_hash: reference.package.content_hash,
-                object: reference.package.object.clone(),
-            },
-            blob_protection: crate::storage::BlobSpoolProtection::Opaque(self.encryption.clone()),
-        })
+        Ok(())
+    }
+
+    pub(crate) fn package_encryption(&self) -> EncryptionService {
+        self.encryption.clone()
     }
 }
 

@@ -949,7 +949,7 @@ impl Store {
         commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &crate::protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
-        let history = self
+        let mut history = self
             .authorize_history()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
