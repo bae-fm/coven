@@ -165,14 +165,9 @@ impl std::error::Error for UploadFailures {
     }
 }
 
-struct BlobUploadAttempt<'operation, 'authority> {
-    database: &'operation crate::database::StoreDatabase,
-    storage: &'operation dyn crate::storage::SyncStorage,
-    authority: crate::storage::BlobWriteAuthority<'authority>,
-    store_dir: &'operation StoreDir,
+struct BlobUploadAttempt<'queue, 'operation, 'authority> {
+    queue: &'queue BlobUploadQueue<'operation, 'authority>,
     now: chrono::DateTime<chrono::Utc>,
-    routing_encryption: Option<EncryptionService>,
-    observer: Option<&'operation dyn BlobTransitionObserver>,
     entry: OutboxEntry,
 }
 
@@ -278,16 +273,11 @@ impl<'operation, 'authority> BlobUploadQueue<'operation, 'authority> {
                 };
                 admitted += 1;
                 inflight.push(
-                    BlobUploadAttempt::new(
-                        self.database,
-                        self.storage,
-                        self.authority,
-                        self.store_dir,
+                    BlobUploadAttempt {
+                        queue: self,
                         now,
-                        self.routing_encryption.cloned(),
-                        self.observer,
                         entry,
-                    )
+                    }
                     .run(),
                 );
             }
@@ -341,30 +331,7 @@ enum EntryOutcome {
     },
 }
 
-impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        database: &'operation crate::database::StoreDatabase,
-        storage: &'operation dyn crate::storage::SyncStorage,
-        authority: crate::storage::BlobWriteAuthority<'authority>,
-        store_dir: &'operation StoreDir,
-        now: chrono::DateTime<chrono::Utc>,
-        routing_encryption: Option<EncryptionService>,
-        observer: Option<&'operation dyn BlobTransitionObserver>,
-        entry: OutboxEntry,
-    ) -> Self {
-        Self {
-            database,
-            storage,
-            authority,
-            store_dir,
-            now,
-            routing_encryption,
-            observer,
-            entry,
-        }
-    }
-
+impl<'queue, 'operation, 'authority> BlobUploadAttempt<'queue, 'operation, 'authority> {
     async fn run(mut self) -> EntryOutcome {
         let OutboxOperation::Upload {
             root_table,
@@ -379,11 +346,12 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
             unreachable!("get_pending_cloud_uploads returns only Upload rows");
         };
         let file_id = row.blob().id.clone();
-        if let Some(observer) = self.observer {
+        if let Some(observer) = self.queue.observer {
             observer.on_blob_upload_started(&file_id).await;
         }
 
         match self
+            .queue
             .database
             .make_remote_intent_state(&root_table, &root_id)
             .await
@@ -402,7 +370,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
         let mut created_this_pass = false;
         let (stored, spool_path) = match state {
             OutboxUploadState::Pending => {
-                let protection = match self.storage.store_blob_protection() {
+                let protection = match self.queue.storage.store_blob_protection() {
                     Ok(protection) => protection,
                     Err(error) => return self.storage_failure(&file_id, error).await,
                 };
@@ -410,7 +378,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                     crate::storage::BlobSpoolProtection::Opaque(encryption) => BlobLocator::opaque(
                         row.blob().namespace.clone(),
                         row.blob().id.clone(),
-                        self.authority.reference.clone(),
+                        self.queue.authority.reference.clone(),
                         RemoteAudience::Store,
                         row.blob().scope.clone(),
                         encryption.seal_key_fingerprint(),
@@ -429,7 +397,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                         BlobLocator::browsable(
                             row.blob().namespace.clone(),
                             row.blob().id.clone(),
-                            self.authority.reference.clone(),
+                            self.queue.authority.reference.clone(),
                             cloud_path,
                             row.plaintext_size(),
                             row.plaintext_hash(),
@@ -445,13 +413,15 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                     }
                 };
                 let spool_path = self
+                    .queue
                     .store_dir
                     .outbound_blob_spool_path(locator.locator_hash());
                 if let Err(error) = self
+                    .queue
                     .storage
                     .seal_blob_to_spool(
                         &locator,
-                        &self.authority,
+                        &self.queue.authority,
                         protection,
                         &source_path,
                         &spool_path,
@@ -461,22 +431,25 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                     return self.storage_failure(&file_id, error).await;
                 }
                 let slot = match self
+                    .queue
                     .storage
-                    .allocate_blob_slot(&locator, &self.authority)
+                    .allocate_blob_slot(&locator, &self.queue.authority)
                     .await
                 {
                     Ok(slot) => slot,
                     Err(error) => return self.storage_failure(&file_id, error).await,
                 };
                 let stored = match self
+                    .queue
                     .storage
-                    .prepare_blob_object(&locator, &self.authority, slot, &spool_path)
+                    .prepare_blob_object(&locator, &self.queue.authority, slot, &spool_path)
                     .await
                 {
                     Ok(stored) => stored,
                     Err(error) => return self.storage_failure(&file_id, error).await,
                 };
                 if let Err(error) = self
+                    .queue
                     .database
                     .mark_blob_upload_prepared(
                         &self.entry,
@@ -534,10 +507,15 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
             {
                 return self.storage_failure(&file_id, error).await;
             }
-            if let Err(error) = self.storage.verify_blob_object(&stored).await {
+            if let Err(error) = self.queue.storage.verify_blob_object(&stored).await {
                 return self.storage_failure(&file_id, error).await;
             }
-            if let Err(error) = self.database.mark_blob_upload_created(&self.entry).await {
+            if let Err(error) = self
+                .queue
+                .database
+                .mark_blob_upload_created(&self.entry)
+                .await
+            {
                 let object_key = stored.object().slot().logical_key().to_string();
                 return self
                     .local_failure(&file_id, object_key, error.to_string())
@@ -549,7 +527,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                 spool_path: spool_path.clone(),
             });
             created_this_pass = true;
-            if let Some(observer) = self.observer {
+            if let Some(observer) = self.queue.observer {
                 observer.on_blob_uploaded(&file_id).await;
             }
         }
@@ -557,6 +535,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
         if retain_pinned {
             let locator = stored.locator();
             if let Err(error) = self
+                .queue
                 .store_dir
                 .populate_pinned_blob_from_file(
                     locator.namespace(),
@@ -574,10 +553,15 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
             }
         }
 
-        let stamp = self.database.stamp();
+        let stamp = self.queue.database.stamp();
         match self
+            .queue
             .database
-            .finalize_created_blob_upload(&self.entry, stamp, self.routing_encryption.clone())
+            .finalize_created_blob_upload(
+                &self.entry,
+                stamp,
+                self.queue.routing_encryption.cloned(),
+            )
             .await
         {
             Ok(crate::blob::transition::PostUpload::Waiting) => EntryOutcome::Uploaded {
@@ -588,7 +572,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                 root_table,
                 root_id,
             }) => {
-                if let Some(observer) = self.observer {
+                if let Some(observer) = self.queue.observer {
                     observer.on_root_made_remote(&root_table, &root_id).await;
                 }
                 EntryOutcome::Uploaded {
@@ -627,10 +611,13 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
             let sent = sent.clone();
             move |count: u64| sent.store(count, Ordering::Relaxed)
         };
-        let create =
-            self.storage
-                .create_blob_object_from_file(blob, &self.authority, spool_path, &progress);
-        let Some(observer) = self.observer else {
+        let create = self.queue.storage.create_blob_object_from_file(
+            blob,
+            &self.queue.authority,
+            spool_path,
+            &progress,
+        );
+        let Some(observer) = self.queue.observer else {
             return create.await;
         };
         tokio::pin!(create);
@@ -663,16 +650,19 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                 OutboxUploadState::Pending => {}
                 OutboxUploadState::Prepared { stored, .. }
                 | OutboxUploadState::Created { stored, .. } => {
-                    self.storage
+                    self.queue
+                        .storage
                         .delete_blob_object(stored)
                         .await
                         .map_err(UploadFailureCause::Storage)?;
-                    self.store_dir
+                    self.queue
+                        .store_dir
                         .remove_outbound_blob_spool(stored.locator().locator_hash())
                         .await
                         .map_err(UploadFailureCause::Local)?;
                     let locator = stored.locator();
-                    self.store_dir
+                    self.queue
+                        .store_dir
                         .remove_cached_locator(locator.namespace(), locator.locator_hash())
                         .await
                         .map_err(|error| {
@@ -680,7 +670,8 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                         })?;
                 }
             }
-            self.database
+            self.queue
+                .database
                 .finish_cancelled_blob_upload(&self.entry)
                 .await
                 .map_err(|error| UploadFailureCause::Local(error.to_string()))
@@ -735,6 +726,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
 
     async fn record_failure(&self, file_id: &str, error: &str) {
         if let Err(record_error) = self
+            .queue
             .database
             .record_blob_upload_failure(&self.entry, error, &self.now.to_rfc3339())
             .await
@@ -744,7 +736,7 @@ impl<'operation, 'authority> BlobUploadAttempt<'operation, 'authority> {
                 self.entry.id
             );
         }
-        if let Some(observer) = self.observer {
+        if let Some(observer) = self.queue.observer {
             observer.on_blob_upload_failed(file_id, error).await;
         }
     }
