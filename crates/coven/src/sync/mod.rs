@@ -38,7 +38,7 @@ pub use session::{BlobDecl, RowIdentity, SyncedTable};
 pub use status::DeviceActivity;
 pub(crate) use store::{
     activated_merge_membership_remote_objects, ApplyOutcome, CircleAuthoringState,
-    CircleCurrentState, CircleOperationIntent, CircleOperationJournal, CirclePackageAccess,
+    CircleCurrentState, CircleEpochAccess, CircleOperationIntent, CircleOperationJournal,
     DeviceJoinBootstrapPlan, HeldStorePositionReason, HostWriteBlobStaging, LocalCircleExclusion,
     LocalStoreMembership, MembershipAuthorityBytes, OwnerPromotionJournal,
     OwnerPromotionJournalTransition, PreparedCircleOperation, PreparedMergeMaterialization,

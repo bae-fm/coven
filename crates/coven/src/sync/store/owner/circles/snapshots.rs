@@ -6,7 +6,6 @@ use crate::protocol::store_commit::{
     CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
-use crate::KeyFingerprint;
 use tracing::warn;
 
 use super::bootstrap_blobs::CircleBootstrapBlobVerification;
@@ -217,8 +216,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                     input.circle_id,
                     input.control,
                     input.epoch_id,
-                    input.key_fingerprint,
-                    input.epoch_encryption,
+                    input.access,
                     cut.snapshot,
                     cut.coverage,
                     schema_version,
@@ -271,8 +269,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         circle_id: CircleId,
         control: CircleControlCoord,
         epoch_id: CircleEpochId,
-        key_fingerprint: KeyFingerprint,
-        encryption: EncryptionService,
+        access: crate::sync::CircleEpochAccess,
         snapshot: CreatedSnapshot,
         coverage: CommitFrontier,
         schema_version: u32,
@@ -292,10 +289,9 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
         let image_bytes = snapshot.db_image;
         let image_hash = ObjectHash::digest(&image_bytes);
-        let image_context = ProtocolObjectContext::circle(
+        let image_context = access.protocol_context(
             root.store_root_hash,
             ProtocolObjectDomain::CircleSnapshotImage,
-            encryption.clone(),
         );
         let image_prefix = self
             .local_writer
@@ -351,10 +347,9 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             ),
             None => (0, None, stream_first_slot),
         };
-        let meta_context = ProtocolObjectContext::circle(
+        let meta_context = access.protocol_context(
             root.store_root_hash,
             ProtocolObjectDomain::CircleSnapshotMeta,
-            encryption,
         );
         let semantic_prefix = self
             .local_writer
@@ -381,7 +376,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 circle_id,
                 control,
                 epoch_id,
-                key_fingerprint,
+                access.key_fingerprint(),
                 generation,
                 bootstrap,
                 created_at,
@@ -425,7 +420,7 @@ impl CircleSnapshotWriter<'_, '_> {
     pub(crate) async fn load_circle_snapshot_refs_for_test(
         &mut self,
         circle_id: CircleId,
-        encryption: EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Result<
         Vec<(
             crate::protocol::store_commit::CircleSnapshotRef,
@@ -436,39 +431,38 @@ impl CircleSnapshotWriter<'_, '_> {
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let mut history = self.writer.circle_history();
         local_writer
-            .load_local_circle_snapshot_refs(&mut history, circle_id, encryption)
+            .load_local_circle_snapshot_refs(&mut history, circle_id, access)
             .await
     }
 
     pub(crate) async fn load_circle_snapshot_metas_for_test(
         &mut self,
         circle_id: CircleId,
-        encryption: EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let mut history = self.writer.circle_history();
         local_writer
-            .load_local_circle_snapshots(&mut history, circle_id, encryption)
+            .load_local_circle_snapshots(&mut history, circle_id, access)
             .await
     }
 
     pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
         &mut self,
         circle_id: CircleId,
-        epoch_encryption: EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
         store_routing: &EncryptionService,
     ) -> Result<(), SnapshotError> {
         let stream = self
-            .load_circle_snapshot_metas_for_test(circle_id, epoch_encryption.clone())
+            .load_circle_snapshot_metas_for_test(circle_id, access)
             .await?;
         let selected = select_maximal_circle_snapshot(stream).ok_or_else(|| {
             SnapshotError::PublicationState("no standalone Circle snapshot to verify".to_string())
         })?;
         let author_device = selected.author_registration.device_id.to_string();
-        let image_context = ProtocolObjectContext::circle(
+        let image_context = access.protocol_context(
             self.root.store_root_hash,
             ProtocolObjectDomain::CircleSnapshotImage,
-            epoch_encryption,
         );
         let image = self
             .storage
@@ -524,8 +518,7 @@ impl CircleSnapshotWriter<'_, '_> {
             input.circle_id,
             input.control,
             input.epoch_id,
-            input.key_fingerprint,
-            input.epoch_encryption,
+            input.access,
             cut.snapshot,
             cut.coverage,
             schema_version,
@@ -548,8 +541,13 @@ impl CircleSnapshotReader<'_, '_> {
         registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
         registration: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
+        let context = ProtocolObjectContext::circle(
+            self.root().store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotMeta,
+            encryption,
+        );
         Ok(self
-            .load_stream_refs(circle_id, encryption, registration_ref, registration)
+            .load_stream_refs_with_context(circle_id, context, registration_ref, registration)
             .await?
             .into_iter()
             .map(|(_, meta)| meta)
@@ -561,7 +559,28 @@ impl CircleSnapshotReader<'_, '_> {
     pub(crate) async fn load_stream_refs(
         &self,
         circle_id: CircleId,
-        encryption: EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<
+        Vec<(
+            crate::protocol::store_commit::CircleSnapshotRef,
+            CircleSnapshotMeta,
+        )>,
+        SnapshotError,
+    > {
+        let context = access.protocol_context(
+            self.root().store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotMeta,
+        );
+        self.load_stream_refs_with_context(circle_id, context, registration_ref, registration)
+            .await
+    }
+
+    async fn load_stream_refs_with_context(
+        &self,
+        circle_id: CircleId,
+        context: ProtocolObjectContext,
         registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
         registration: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<
@@ -579,11 +598,6 @@ impl CircleSnapshotReader<'_, '_> {
             ));
         }
         let device_id = registration.device_id.to_string();
-        let context = ProtocolObjectContext::circle(
-            root.store_root_hash,
-            ProtocolObjectDomain::CircleSnapshotMeta,
-            encryption,
-        );
         let mut slot = crate::storage::cloud::ObjectSlot::logical(format!(
             "{}.json",
             circle_snapshot_slot_prefix(circle_id, &device_id, 0)

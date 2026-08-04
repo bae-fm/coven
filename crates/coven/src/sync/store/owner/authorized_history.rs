@@ -2905,7 +2905,7 @@ impl AuthorizedStoreHistory<'_> {
 
     pub(super) async fn open_circle_package_for_test(
         &mut self,
-        access: &crate::sync::store::circle_controls::CirclePackageAccess,
+        access: &crate::sync::store::circle_controls::CircleEpochAccess,
         commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &crate::protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {

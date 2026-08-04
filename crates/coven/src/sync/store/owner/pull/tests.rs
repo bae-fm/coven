@@ -1816,7 +1816,7 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     // retained package with it proves the spine keeps historical commits
     // readable after deletion.
     let access = retained
-        .package_access()
+        .epoch_access()
         .expect("reconstruct retained package access after deletion")
         .expect("the retained historical activation carries package access");
     let decrypted = fixture

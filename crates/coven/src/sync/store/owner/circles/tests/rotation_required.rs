@@ -380,14 +380,13 @@ impl RotationFixture {
             .bind_device(&self.db, &self.signer)
             .await
             .expect("bind Circle snapshot access Store");
-        let encryption = device
-            .circle_package_access(self.circle_id, control)
+        let access = device
+            .circle_epoch_access(self.circle_id, control)
             .await
             .expect("resolve Circle snapshot access")
-            .expect("the Circle access is retained")
-            .into_encryption();
+            .expect("the Circle access is retained");
         device
-            .load_circle_snapshot_refs(self.circle_id, encryption)
+            .load_circle_snapshot_refs(self.circle_id, &access)
             .await
             .expect("walk the owner's Circle snapshot stream")
     }
@@ -2235,13 +2234,13 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
         .await
         .expect("bind retained Circle activation Store");
     let retained = device
-        .circle_package_access(fixture.circle_id, old_control.clone())
+        .circle_epoch_access(fixture.circle_id, old_control.clone())
         .await
         .expect("read retained Circle activation")
         .expect("the pre-rotation control's activation is retained");
     let metas = fixture
         .store
-        .load_circle_snapshot_metas(&fixture.db, fixture.circle_id, retained.into_encryption())
+        .load_circle_snapshot_metas(&fixture.db, fixture.circle_id, &retained)
         .await
         .expect("read the pre-rotation Circle snapshot after the epoch rotated");
     let old = metas
@@ -2297,17 +2296,16 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
         .circle_authoring_context(fixture.circle_id, &owner_pk)
         .await
         .expect("Circle authoring context");
-    let epoch_encryption = StoreDatabase::new(&fixture.db)
+    let access = StoreDatabase::new(&fixture.db)
         .circle_publication_context(fixture.circle_id, authoring.control.coord.clone())
         .await
-        .expect("Circle publication context")
-        .into_encryption();
+        .expect("Circle publication context");
     fixture
         .store
         .verify_standalone_circle_snapshot_image(
             &fixture.db,
             fixture.circle_id,
-            epoch_encryption,
+            &access,
             &EncryptionService::from_key([42; 32]),
         )
         .await
@@ -2503,7 +2501,7 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
         .expect("bind owner successor Circle Store");
     assert!(
         owner_device
-            .circle_package_access(circle_id, successor_control.clone())
+            .circle_epoch_access(circle_id, successor_control.clone())
             .await
             .expect("read owner successor access")
             .is_some(),
@@ -2521,7 +2519,7 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
         .expect("bind removed member Circle Store");
     assert!(
         member_device
-            .circle_package_access(circle_id, successor_control)
+            .circle_epoch_access(circle_id, successor_control)
             .await
             .expect("read member successor access")
             .is_none(),

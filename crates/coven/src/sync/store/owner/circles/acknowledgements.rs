@@ -1,5 +1,5 @@
 use crate::protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFrontier};
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
+use crate::storage::{ProtocolObjectDomain, StoreObjectError};
 
 use super::StoreAckError;
 
@@ -28,7 +28,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     ) -> Result<CircleAck, StoreAckError> {
         let access = self
             .database
-            .circle_package_access(
+            .circle_epoch_access(
                 self.root.clone(),
                 reference.circle_id,
                 reference.control.clone(),
@@ -44,10 +44,9 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .database
             .activated_store_device_registration(reference.registration.clone())
             .await?;
-        let context = ProtocolObjectContext::circle(
+        let context = access.protocol_context(
             self.root.store_root_hash,
             ProtocolObjectDomain::CircleAcknowledgement,
-            access.into_encryption(),
         );
         let semantic_prefix = circle_ack_slot_prefix(
             reference.circle_id,

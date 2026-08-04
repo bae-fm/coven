@@ -7,7 +7,7 @@ pub(crate) use context::{read_exact_circle_object, verify_control_context_for_ve
 #[cfg(test)]
 pub(crate) use state::CircleCurrentControl;
 pub(crate) use state::{
-    CircleAuthoringState, CircleCurrentState, CirclePackageAccess, LocalCircleExclusion,
+    CircleAuthoringState, CircleCurrentState, CircleEpochAccess, LocalCircleExclusion,
     VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage,
     VerifiedCircleReference, VerifiedStreamActivationPrefix, VerifiedStreamActivations,
 };

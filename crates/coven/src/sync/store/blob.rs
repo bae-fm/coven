@@ -591,19 +591,16 @@ impl RemoteBlobSourceInner<'_> {
                 circle_id,
                 control,
                 key_fingerprint,
-            } => {
-                let encryption = self
-                    .database
-                    .circle_blob_opening_key(
-                        self.exact_root().await?,
-                        circle_id,
-                        control.clone(),
-                        key_fingerprint,
-                    )
-                    .await
-                    .map_err(BlobCacheError::Metadata)?;
-                Ok(BlobSpoolProtection::Opaque(encryption))
-            }
+            } => self
+                .database
+                .circle_blob_opening_protection(
+                    self.exact_root().await?,
+                    circle_id,
+                    control.clone(),
+                    key_fingerprint,
+                )
+                .await
+                .map_err(BlobCacheError::Metadata),
         }
     }
 

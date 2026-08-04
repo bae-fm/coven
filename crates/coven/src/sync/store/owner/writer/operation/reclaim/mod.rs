@@ -992,7 +992,7 @@ impl AuthorizedReclaim<'_, '_> {
             AudienceBlobBindingPackage::Circle(package) => {
                 let access = self
                     .database
-                    .circle_package_access(
+                    .circle_epoch_access(
                         self.root.clone(),
                         package.circle_id,
                         package.control.clone(),
@@ -1004,10 +1004,9 @@ impl AuthorizedReclaim<'_, '_> {
                         )
                     })?;
                 (
-                    ProtocolObjectContext::circle(
+                    access.protocol_context(
                         self.root.store_root_hash,
                         ProtocolObjectDomain::CirclePackage,
-                        access.into_encryption(),
                     ),
                     crate::protocol::store_commit::circle_package_semantic_prefix(
                         package.circle_id,
@@ -1056,7 +1055,7 @@ impl AuthorizedReclaim<'_, '_> {
                         ))
                     })?;
                 let access = database
-                    .circle_package_access(root, circle_id, current_control)
+                    .circle_epoch_access(root, circle_id, current_control)
                     .await?
                     .ok_or_else(|| {
                         StoreReclaimError::Authorization(format!(
@@ -1069,7 +1068,7 @@ impl AuthorizedReclaim<'_, '_> {
                 let stream = history
                     .load_circle_snapshot_stream_refs(
                         circle_id,
-                        access.into_encryption(),
+                        &access,
                         &claim.covering_snapshot.author_registration,
                         &author.value,
                     )
@@ -1717,7 +1716,7 @@ impl AuthorizedReclaim<'_, '_> {
                 // access only builds the read context — a deleted object reads back
                 // absent before any decryption.
                 let access = database
-                    .circle_package_access(
+                    .circle_epoch_access(
                         root.clone(),
                         target.package.circle_id,
                         target.package.control.clone(),
@@ -1729,10 +1728,9 @@ impl AuthorizedReclaim<'_, '_> {
                         )
                     })?;
                 (
-                    ProtocolObjectContext::circle(
+                    access.protocol_context(
                         root.store_root_hash,
                         ProtocolObjectDomain::CirclePackage,
-                        access.into_encryption(),
                     ),
                     crate::protocol::store_commit::circle_package_semantic_prefix(
                         target.package.circle_id,
@@ -1750,7 +1748,7 @@ impl AuthorizedReclaim<'_, '_> {
                 // readback prefix is the image object's own logical key without the domain
                 // extension, so no recipient-sealed leaf field is needed to confirm absence.
                 let access = database
-                    .circle_package_access(
+                    .circle_epoch_access(
                         root.clone(),
                         target.coverage.circle_id,
                         target.coverage.control.clone(),
@@ -1763,10 +1761,9 @@ impl AuthorizedReclaim<'_, '_> {
                         )
                     })?;
                 (
-                    ProtocolObjectContext::circle(
+                    access.protocol_context(
                         root.store_root_hash,
                         ProtocolObjectDomain::CircleBootstrapImage,
-                        access.into_encryption(),
                     ),
                     crate::protocol::store_commit::semantic_prefix_from_exact_object(
                         &target.coverage.bootstrap.image.object,
@@ -1781,7 +1778,7 @@ impl AuthorizedReclaim<'_, '_> {
                 // builds the read context — a deleted object reads back absent before any
                 // decryption.
                 let access = database
-                    .circle_package_access(root.clone(), target.circle_id, target.control.clone())
+                    .circle_epoch_access(root.clone(), target.circle_id, target.control.clone())
                     .await?
                     .ok_or_else(|| {
                         StoreReclaimError::Authorization(
@@ -1790,10 +1787,9 @@ impl AuthorizedReclaim<'_, '_> {
                         )
                     })?;
                 (
-                    ProtocolObjectContext::circle(
+                    access.protocol_context(
                         root.store_root_hash,
                         ProtocolObjectDomain::CircleSnapshotImage,
-                        access.into_encryption(),
                     ),
                     crate::protocol::store_commit::semantic_prefix_from_exact_object(
                         &target.image.object,

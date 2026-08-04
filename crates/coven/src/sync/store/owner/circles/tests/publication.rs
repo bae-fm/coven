@@ -1376,7 +1376,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("bind historical Circle access Store");
     let historical_access = device
-        .circle_package_access(circle_id, prior_control.clone())
+        .circle_epoch_access(circle_id, prior_control.clone())
         .await
         .expect("load historical pre-close access")
         .expect("historical pre-close access remains retained");
@@ -1770,10 +1770,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         sequence,
         ObjectHash::digest(&candidate_package_bytes),
     );
-    let candidate_package_context = ProtocolObjectContext::circle(
+    let candidate_package_context = historical_access.protocol_context(
         successor_commit.store_root_hash,
         ProtocolObjectDomain::CirclePackage,
-        historical_access.into_encryption(),
     );
     let candidate_package_slot = store
         .allocate_protocol_slot(

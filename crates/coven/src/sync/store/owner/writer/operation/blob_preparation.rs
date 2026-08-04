@@ -68,13 +68,12 @@ impl AuthorizedWriterOperation<'_> {
                         "Circle partition {circle_id} has no exact control"
                     ))
                 })?;
-                let encryption = database
+                let access = database
                     .circle_publication_context(circle_id, control.coordinate().clone())
-                    .await?
-                    .into_encryption();
+                    .await?;
                 (
                     crate::blob::locator::RemoteAudience::Circle(circle_id),
-                    storage::BlobSpoolProtection::Opaque(encryption),
+                    access.blob_protection(),
                 )
             }
             circle::Audience::Local => {
@@ -141,7 +140,6 @@ impl AuthorizedWriterOperation<'_> {
                     .circle_publication_context(circle_id, control.coordinate().clone())
                     .await?;
                 let key_fingerprint = access.key_fingerprint();
-                let encryption = access.into_encryption();
                 let package = audience_package::AudiencePackage::circle(
                     store_root_hash,
                     candidate_family,
@@ -165,11 +163,7 @@ impl AuthorizedWriterOperation<'_> {
                 );
                 (
                     package,
-                    ProtocolObjectContext::circle(
-                        store_root_hash,
-                        ProtocolObjectDomain::CirclePackage,
-                        encryption,
-                    ),
+                    access.protocol_context(store_root_hash, ProtocolObjectDomain::CirclePackage),
                     prefix,
                     Some(key_fingerprint),
                 )

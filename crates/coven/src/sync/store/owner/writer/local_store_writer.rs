@@ -885,7 +885,7 @@ impl LocalStoreWriter {
         &self,
         history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Result<
         Vec<(
             crate::protocol::store_commit::CircleSnapshotRef,
@@ -897,7 +897,7 @@ impl LocalStoreWriter {
             .snapshots()
             .load_stream_refs(
                 circle_id,
-                encryption,
+                access,
                 self.registration.reference(),
                 self.registration.value(),
             )
@@ -909,7 +909,7 @@ impl LocalStoreWriter {
         &self,
         history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Result<
         Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
         crate::sync::store::owner::snapshot::SnapshotError,
@@ -918,7 +918,7 @@ impl LocalStoreWriter {
             .snapshots()
             .load_stream_refs(
                 circle_id,
-                encryption,
+                access,
                 self.registration.reference(),
                 self.registration.value(),
             )

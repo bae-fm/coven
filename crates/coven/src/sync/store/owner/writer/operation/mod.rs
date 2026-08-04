@@ -3056,15 +3056,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             control,
                             ..
                         } => {
-                            let encryption = database
+                            let access = database
                                 .circle_publication_context(*circle_id, control.clone())
-                                .await?
-                                .into_encryption();
+                                .await?;
                             (
-                                ProtocolObjectContext::circle(
+                                access.protocol_context(
                                     store_root_hash,
                                     ProtocolObjectDomain::CirclePackage,
-                                    encryption,
                                 ),
                                 circle_package_semantic_prefix(
                                     *circle_id,

@@ -425,10 +425,9 @@ impl super::AuthorizedWriterOperation<'_> {
                     .await
                     .map_err(SnapshotError::from)?;
                 let key_fingerprint = access.key_fingerprint();
-                let encryption = access.into_encryption();
                 (
                     crate::blob::locator::RemoteAudience::Circle(circle_id),
-                    crate::storage::BlobSpoolProtection::Opaque(encryption),
+                    access.blob_protection(),
                     crate::protocol::audience_package::PackageAudience::Circle {
                         circle_id,
                         control: control.coordinate().clone(),

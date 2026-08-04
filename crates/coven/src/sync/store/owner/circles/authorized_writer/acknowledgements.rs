@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::store_commit::CommitFrontier;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
+use crate::storage::{ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::operations;
 
 pub(super) struct CircleAcknowledgementWriter<'operation, 'writer, 'storage> {
@@ -52,10 +52,9 @@ impl<'operation, 'writer, 'storage> CircleAcknowledgementWriter<'operation, 'wri
                 ),
                 None => (1, None),
             };
-            let context = ProtocolObjectContext::circle(
+            let context = input.access.protocol_context(
                 root.store_root_hash,
                 ProtocolObjectDomain::CircleAcknowledgement,
-                input.epoch_encryption,
             );
             let semantic_prefix = self
                 .owner
@@ -97,7 +96,7 @@ impl<'operation, 'writer, 'storage> CircleAcknowledgementWriter<'operation, 'wri
                     frontier.clone(),
                     input.control,
                     input.epoch_id,
-                    input.key_fingerprint,
+                    input.access.key_fingerprint(),
                     input.seeded_from,
                     sync_time.to_owned(),
                     predecessor,

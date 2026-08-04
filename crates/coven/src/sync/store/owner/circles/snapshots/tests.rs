@@ -77,23 +77,20 @@ impl CircleSnapshotFixture {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         control: crate::protocol::circle::CircleControlCoord,
-    ) -> (crate::encryption::EncryptionService, crate::KeyFingerprint) {
-        let access = self
-            .store_database
+    ) -> crate::sync::CircleEpochAccess {
+        self.store_database
             .circle_publication_context(circle_id, control)
             .await
-            .expect("resolve Circle publication context");
-        let fingerprint = access.key_fingerprint();
-        (access.into_encryption(), fingerprint)
+            .expect("resolve Circle publication context")
     }
 
     async fn load_snapshot_metas(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Vec<CircleSnapshotMeta> {
         self.store
-            .load_circle_snapshot_metas(&self.database, circle_id, encryption)
+            .load_circle_snapshot_metas(&self.database, circle_id, access)
             .await
             .expect("load Circle snapshot stream")
     }
@@ -101,10 +98,10 @@ impl CircleSnapshotFixture {
     async fn read_snapshot_image(
         &self,
         selected: &CircleSnapshotMeta,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Vec<u8> {
         self.store
-            .read_circle_snapshot_image(selected, encryption)
+            .read_circle_snapshot_image(selected, access)
             .await
             .expect("read Circle snapshot image")
     }
@@ -129,15 +126,14 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
     let fixture = CircleSnapshotFixture::initialize("circle-snapshot-device").await;
     fixture.apply_routing_schema().await;
     let (circle_id, control) = fixture.install_active_circle().await;
-    let (encryption, key_fingerprint) = fixture
+    let access = fixture
         .publication_context(circle_id, control.clone())
         .await;
+    let key_fingerprint = access.key_fingerprint();
 
     fixture.push_snapshots().await;
 
-    let stream = fixture
-        .load_snapshot_metas(circle_id, encryption.clone())
-        .await;
+    let stream = fixture.load_snapshot_metas(circle_id, &access).await;
     assert_eq!(stream.len(), 1);
     let selected = select_maximal_circle_snapshot(stream).expect("a maximal Circle snapshot");
     assert_eq!(selected.generation, 0);
@@ -145,12 +141,12 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
     assert_eq!(selected.control, control);
     assert_eq!(selected.key_fingerprint, key_fingerprint);
 
-    let image = fixture
-        .read_snapshot_image(&selected, encryption.clone())
-        .await;
-    let routing_key =
-        crate::protocol::circle::derive_row_routing_key(&encryption, fixture.store_root_hash())
-            .expect("derive Circle row routing key");
+    let image = fixture.read_snapshot_image(&selected, &access).await;
+    let routing_key = crate::protocol::circle::derive_row_routing_key(
+        &crate::encryption::EncryptionService::from_key([42; 32]),
+        fixture.store_root_hash(),
+    )
+    .expect("derive Circle row routing key");
     verify_circle_bootstrap_image(
         &image,
         &selected.bootstrap,

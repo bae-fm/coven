@@ -7,7 +7,6 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::PreparedExactObject;
 use crate::sync::CircleCurrentState;
-use crate::KeyFingerprint;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,17 +14,13 @@ use super::StoreDatabase;
 
 /// Everything one active Circle contributes to staging its device's next Circle
 /// acknowledgement: the exact control and epoch the live projection derives from,
-/// the epoch key that seals the acknowledgement, and the retained bootstrap
+/// the access authority that seals the acknowledgement, and the retained bootstrap
 /// coverage the projection was seeded from (`None` for a founder/source device).
 pub(crate) struct CircleAckPublicationInput {
     pub circle_id: CircleId,
     pub control: CircleControlCoord,
     pub epoch_id: CircleEpochId,
-    pub key_fingerprint: KeyFingerprint,
-    /// The Circle epoch key that *seals* this Circle's published acknowledgement
-    /// and snapshot objects. It is never the row-routing key: routing ids are
-    /// derived from the Store generation-one key, which this epoch key is not.
-    pub epoch_encryption: crate::encryption::EncryptionService,
+    pub access: crate::sync::CircleEpochAccess,
     pub seeded_from: Option<CircleBootstrapCoverageRef>,
 }
 
@@ -87,15 +82,12 @@ impl StoreDatabase {
             let control = authoring.control.coord.clone();
             let epoch_id = authoring.control.value.epoch_id();
             let access = super::circle_publication_context_on(conn, circle_id, &control)?;
-            let key_fingerprint = access.key_fingerprint();
-            let epoch_encryption = access.into_encryption();
             let seeded_from = Self::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
             inputs.push(CircleAckPublicationInput {
                 circle_id,
                 control,
                 epoch_id,
-                key_fingerprint,
-                epoch_encryption,
+                access,
                 seeded_from,
             });
         }

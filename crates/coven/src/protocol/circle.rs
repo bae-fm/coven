@@ -1358,11 +1358,6 @@ mod tests {
             .await
             .expect("load publication authority from derived current state");
         let publication_fingerprint = publication.key_fingerprint();
-        let publication_encryption = publication.into_encryption();
-        assert_eq!(
-            publication_encryption.seal_key_fingerprint(),
-            publication_fingerprint
-        );
         assert_eq!(publication_fingerprint, control.value.key_fingerprint());
 
         let mut second_value = control.value.clone();

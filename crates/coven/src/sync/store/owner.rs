@@ -271,16 +271,16 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) async fn circle_package_access(
+    pub(crate) async fn circle_epoch_access(
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
     ) -> Result<
-        Option<crate::sync::store::circle_controls::CirclePackageAccess>,
+        Option<crate::sync::store::circle_controls::CircleEpochAccess>,
         crate::database::DbError,
     > {
         self.database
-            .circle_package_access(self.root.reference().clone(), circle_id, expected_control)
+            .circle_epoch_access(self.root.reference().clone(), circle_id, expected_control)
             .await
     }
 
@@ -984,7 +984,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn open_circle_package_for_test(
         &self,
-        access: &crate::sync::store::circle_controls::CirclePackageAccess,
+        access: &crate::sync::store::circle_controls::CircleEpochAccess,
         commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &crate::protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {

@@ -28,9 +28,10 @@ pub(crate) use circle_controls::CircleOperationError;
 #[cfg(test)]
 pub(crate) use circle_controls::CircleTransitionHistory;
 pub(crate) use circle_controls::{
-    CircleAuthoringState, CircleCurrentState, CircleOperationIntent, CircleOperationJournal,
-    CirclePackageAccess, LocalCircleExclusion, PreparedCircleOperation, VerifiedCircleActivations,
-    VerifiedCircleImage, VerifiedCircleReference, VerifiedStreamActivations,
+    CircleAuthoringState, CircleCurrentState, CircleEpochAccess, CircleOperationIntent,
+    CircleOperationJournal, LocalCircleExclusion, PreparedCircleOperation,
+    VerifiedCircleActivations, VerifiedCircleImage, VerifiedCircleReference,
+    VerifiedStreamActivations,
 };
 #[cfg(test)]
 pub(crate) use circle_controls::{VerifiedCircleAccess, VerifiedCircleActive};

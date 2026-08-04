@@ -202,14 +202,10 @@ impl HostWriteBlobStaging {
                         format!("destination Circle {circle_id} has no exact control"),
                     )
                 })?;
-                let encryption = transaction
+                let access = transaction
                     .circle_publication_context(*circle_id, control.coordinate())
-                    .map_err(|error| move_materialization_error(fact, error))?
-                    .into_encryption();
-                Ok((
-                    RemoteAudience::Circle(*circle_id),
-                    BlobSpoolProtection::Opaque(encryption),
-                ))
+                    .map_err(|error| move_materialization_error(fact, error))?;
+                Ok((RemoteAudience::Circle(*circle_id), access.blob_protection()))
             }
             crate::protocol::circle::Audience::Local => {
                 unreachable!("Local handled before protection")
@@ -237,8 +233,12 @@ impl HostWriteBlobStaging {
                 control,
                 key_fingerprint,
             } => transaction
-                .circle_blob_opening_key(&self.store_root, circle_id, control, key_fingerprint)
-                .map(BlobSpoolProtection::Opaque)
+                .circle_blob_opening_protection(
+                    &self.store_root,
+                    circle_id,
+                    control,
+                    key_fingerprint,
+                )
                 .map_err(|error| move_materialization_error(fact, error)),
         }
     }

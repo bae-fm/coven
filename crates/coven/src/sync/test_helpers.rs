@@ -1096,14 +1096,14 @@ mod test_device {
             self.store.circles()
         }
 
-        pub(crate) async fn circle_package_access(
+        pub(crate) async fn circle_epoch_access(
             &self,
             circle_id: crate::protocol::circle::CircleId,
             expected_control: crate::protocol::circle::CircleControlCoord,
-        ) -> Result<Option<crate::sync::store::CirclePackageAccess>, crate::database::DbError>
+        ) -> Result<Option<crate::sync::store::CircleEpochAccess>, crate::database::DbError>
         {
             self.store
-                .circle_package_access(circle_id, expected_control)
+                .circle_epoch_access(circle_id, expected_control)
                 .await
         }
 
@@ -1401,7 +1401,7 @@ mod test_device {
 
         pub(crate) async fn open_circle_package_for_test(
             &self,
-            access: &crate::sync::store::CirclePackageAccess,
+            access: &crate::sync::store::CircleEpochAccess,
             commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
             reference: &crate::protocol::store_commit::CirclePackageRef,
         ) -> Result<Vec<u8>, crate::sync::store::StoreError> {
@@ -2763,7 +2763,7 @@ mod test_device {
         pub(crate) async fn load_circle_snapshot_refs(
             &self,
             circle_id: crate::CircleId,
-            encryption: crate::encryption::EncryptionService,
+            access: &crate::sync::CircleEpochAccess,
         ) -> Result<
             Vec<(
                 crate::protocol::store_commit::CircleSnapshotRef,
@@ -2777,7 +2777,7 @@ mod test_device {
                 .map_err(|error| error.to_string())?
                 .circles()
                 .snapshots()
-                .load_circle_snapshot_refs_for_test(circle_id, encryption)
+                .load_circle_snapshot_refs_for_test(circle_id, access)
                 .await
                 .map_err(|error| error.to_string())
         }
@@ -3746,14 +3746,13 @@ impl TestStore {
     ) -> Result<bool, String> {
         let access = self
             .founder
-            .circle_package_access(circle_id, meta.control.clone())
+            .circle_epoch_access(circle_id, meta.control.clone())
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "the Circle snapshot control has no retained access".to_string())?;
-        let context = crate::storage::ProtocolObjectContext::circle(
+        let context = access.protocol_context(
             self.root.store_root_hash,
             crate::storage::ProtocolObjectDomain::CircleSnapshotImage,
-            access.into_encryption(),
         );
         let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
             &meta.bootstrap.image.object,
@@ -3793,14 +3792,13 @@ impl TestStore {
     ) -> bool {
         let access = self
             .founder
-            .circle_package_access(package.circle_id, package.control.clone())
+            .circle_epoch_access(package.circle_id, package.control.clone())
             .await
             .expect("resolve Circle package access")
             .expect("the package's control stays retained after its epoch closed");
-        let context = crate::storage::ProtocolObjectContext::circle(
+        let context = access.protocol_context(
             self.root.store_root_hash,
             crate::storage::ProtocolObjectDomain::CirclePackage,
-            access.into_encryption(),
         );
         let prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
             package.circle_id,
@@ -4256,7 +4254,7 @@ impl TestStore {
         &self,
         db: &Database,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Result<
         Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
         crate::sync::store::SnapshotError,
@@ -4271,7 +4269,7 @@ impl TestStore {
             })?
             .circles()
             .snapshots()
-            .load_circle_snapshot_metas_for_test(circle_id, encryption)
+            .load_circle_snapshot_metas_for_test(circle_id, access)
             .await
     }
 
@@ -4280,7 +4278,7 @@ impl TestStore {
         &self,
         db: &Database,
         circle_id: crate::protocol::circle::CircleId,
-        epoch_encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
         store_routing: &crate::encryption::EncryptionService,
     ) -> Result<(), crate::sync::store::SnapshotError> {
         self.bind_device(db, &self.signer)
@@ -4293,11 +4291,7 @@ impl TestStore {
             })?
             .circles()
             .snapshots()
-            .verify_standalone_circle_snapshot_image_for_test(
-                circle_id,
-                epoch_encryption,
-                store_routing,
-            )
+            .verify_standalone_circle_snapshot_image_for_test(circle_id, access, store_routing)
             .await
     }
 
@@ -4339,12 +4333,11 @@ impl TestStore {
     pub(crate) async fn read_circle_snapshot_image(
         &self,
         selected: &crate::protocol::store_commit::CircleSnapshotMeta,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
     ) -> Result<Vec<u8>, crate::storage::StorageError> {
-        let context = crate::storage::ProtocolObjectContext::circle(
+        let context = access.protocol_context(
             self.root.store_root_hash,
             crate::storage::ProtocolObjectDomain::CircleSnapshotImage,
-            encryption,
         );
         self.storage
             .read_protocol_object(

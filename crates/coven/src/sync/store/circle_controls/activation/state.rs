@@ -134,7 +134,7 @@ impl VerifiedCircleImage {
 }
 
 #[derive(Clone)]
-pub(crate) struct CirclePackageAccess {
+pub(crate) struct CircleEpochAccess {
     circle_id: CircleId,
     encryption: EncryptionService,
     key_fingerprint: KeyFingerprint,
@@ -151,7 +151,7 @@ impl VerifiedCircleKeyring {
         self.keyring
     }
 
-    fn package_encryption(
+    fn epoch_encryption(
         &self,
         circle_id: CircleId,
     ) -> Result<EncryptionService, CircleOperationError> {
@@ -165,18 +165,30 @@ impl VerifiedCircleKeyring {
     }
 }
 
-impl CirclePackageAccess {
+impl CircleEpochAccess {
     #[cfg(test)]
     pub(crate) fn authorizes_writer(&self, author_pubkey: &str) -> bool {
         self.writers.contains(author_pubkey)
     }
 
-    pub(crate) fn into_encryption(self) -> EncryptionService {
-        self.encryption
-    }
-
     pub(crate) fn key_fingerprint(&self) -> KeyFingerprint {
         self.key_fingerprint
+    }
+
+    pub(crate) fn protocol_context(
+        &self,
+        store_root_hash: ObjectHash,
+        domain: crate::storage::CircleProtocolObjectDomain,
+    ) -> crate::storage::ProtocolObjectContext {
+        crate::storage::ProtocolObjectContext::circle(
+            store_root_hash,
+            domain,
+            self.encryption.clone(),
+        )
+    }
+
+    pub(crate) fn blob_protection(&self) -> crate::storage::BlobSpoolProtection {
+        crate::storage::BlobSpoolProtection::Opaque(self.encryption.clone())
     }
 
     pub(crate) fn from_historical(
@@ -235,10 +247,6 @@ impl CirclePackageAccess {
         }
         Ok(())
     }
-
-    pub(crate) fn package_encryption(&self) -> EncryptionService {
-        self.encryption.clone()
-    }
 }
 
 impl VerifiedCircleReference {
@@ -260,16 +268,14 @@ impl VerifiedCircleReference {
         .map(|keyring| Some(keyring.into_keyring()))
     }
 
-    pub(crate) fn package_access(
-        &self,
-    ) -> Result<Option<CirclePackageAccess>, CircleOperationError> {
+    pub(crate) fn epoch_access(&self) -> Result<Option<CircleEpochAccess>, CircleOperationError> {
         let Some(access) = self.local_access.as_ref() else {
             return Ok(None);
         };
         let Some(active) = access.active.as_ref() else {
             return Ok(None);
         };
-        package_access_from(
+        epoch_access_from(
             self.circle_id,
             &self.control.value,
             &access.leaf.value.disposition,
@@ -279,16 +285,16 @@ impl VerifiedCircleReference {
     }
 }
 
-fn package_access_from(
+fn epoch_access_from(
     circle_id: CircleId,
     control: &CircleControl,
     disposition: &CircleAccessDisposition,
     roster: &CircleMaterializedRoster,
-) -> Result<CirclePackageAccess, CircleOperationError> {
+) -> Result<CircleEpochAccess, CircleOperationError> {
     let verified = verified_keyring_from(circle_id, control, disposition, roster)?;
-    let encryption = verified.package_encryption(circle_id)?;
+    let encryption = verified.epoch_encryption(circle_id)?;
     let key_fingerprint = verified.key_fingerprint;
-    Ok(CirclePackageAccess {
+    Ok(CircleEpochAccess {
         circle_id,
         encryption,
         key_fingerprint,
@@ -1262,10 +1268,10 @@ impl CircleCurrentState {
         }
     }
 
-    pub(crate) fn package_access(
+    pub(crate) fn epoch_access(
         &self,
         expected_control: &CircleControlCoord,
-    ) -> Result<Option<CirclePackageAccess>, CircleOperationError> {
+    ) -> Result<Option<CircleEpochAccess>, CircleOperationError> {
         let Self::Active(active) = self else {
             return Ok(None);
         };
@@ -1278,7 +1284,7 @@ impl CircleCurrentState {
                 active.current.circle_id()
             )));
         }
-        package_access_from(
+        epoch_access_from(
             active.current.circle_id(),
             &active.current.control.value,
             &active.access.disposition,

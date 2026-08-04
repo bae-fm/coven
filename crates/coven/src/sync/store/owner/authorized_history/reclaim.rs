@@ -56,7 +56,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) async fn load_circle_snapshot_stream_refs(
         &mut self,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        access: &crate::sync::CircleEpochAccess,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
     ) -> Result<
@@ -68,7 +68,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     > {
         self.owner
             .circle_snapshots()
-            .load_stream_refs(circle_id, encryption, registration_ref, registration)
+            .load_stream_refs(circle_id, access, registration_ref, registration)
             .await
     }
 
@@ -178,17 +178,16 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         current_control: &crate::protocol::circle::CircleControlCoord,
         registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<Vec<CircleSnapshotStream>, crate::sync::store::StoreReclaimError> {
-        let encryption = self
+        let access = self
             .owner
             .database
-            .circle_package_access(self.root().clone(), circle_id, current_control.clone())
+            .circle_epoch_access(self.root().clone(), circle_id, current_control.clone())
             .await?
             .ok_or_else(|| {
                 crate::sync::store::StoreReclaimError::Authorization(format!(
                     "Circle {circle_id} snapshot key is not resolvable from retained controls"
                 ))
-            })?
-            .into_encryption();
+            })?;
         let mut streams = Vec::new();
         for registration in registrations {
             let registration_ref = registration.reference();
@@ -198,7 +197,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             let generations = match self
                 .load_circle_snapshot_stream_refs(
                     circle_id,
-                    encryption.clone(),
+                    &access,
                     registration_ref,
                     registration,
                 )

@@ -64,18 +64,18 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::CirclePackageAccess, DbError> {
+    ) -> Result<crate::sync::CircleEpochAccess, DbError> {
         super::circle_publication_context_on(self.transaction, circle_id, expected_control)
     }
 
-    pub(crate) fn circle_blob_opening_key(
+    pub(crate) fn circle_blob_opening_protection(
         &self,
         root: &crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<EncryptionService, DbError> {
-        StoreDatabase::circle_blob_opening_key_on(
+    ) -> Result<crate::storage::BlobSpoolProtection, DbError> {
+        StoreDatabase::circle_blob_opening_protection_on(
             self.transaction,
             root,
             circle_id,

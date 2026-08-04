@@ -43,7 +43,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
 
     pub(crate) async fn open_package(
         &self,
-        access: &crate::sync::store::circle_controls::CirclePackageAccess,
+        access: &crate::sync::store::circle_controls::CircleEpochAccess,
         verified: &VerifiedStoreBatchCommit,
         reference: &CirclePackageRef,
         author: &StoreDeviceRegistration,
@@ -68,11 +68,9 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             commit.seq(),
             reference.package.content_hash,
         );
-        let encryption = access.package_encryption();
-        let context = crate::storage::ProtocolObjectContext::circle(
+        let context = access.protocol_context(
             commit.store_root_hash,
             crate::storage::ProtocolObjectDomain::CirclePackage,
-            encryption.clone(),
         );
         let bytes = self
             .storage
@@ -99,7 +97,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                 semantic_hash: reference.package.content_hash,
                 object: reference.package.object.clone(),
             },
-            blob_protection: crate::storage::BlobSpoolProtection::Opaque(encryption),
+            blob_protection: access.blob_protection(),
         })
     }
 
@@ -181,11 +179,11 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             }
             let exact_access = if let Some(activation) = same_commit {
                 activation
-                    .package_access()
+                    .epoch_access()
                     .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?
             } else {
                 self.database
-                    .circle_package_access(
+                    .circle_epoch_access(
                         root.clone(),
                         reference.circle_id,
                         reference.control.clone(),
@@ -258,7 +256,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                         reference.circle_id
                     ))
                 })?;
-                crate::sync::store::circle_controls::CirclePackageAccess::from_historical(
+                crate::sync::store::circle_controls::CircleEpochAccess::from_historical(
                     reference.circle_id,
                     reference.key_fingerprint,
                     &keyring,

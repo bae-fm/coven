@@ -423,7 +423,7 @@ impl StoreDatabase {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::CirclePackageAccess, DbError> {
+    ) -> Result<crate::sync::CircleEpochAccess, DbError> {
         self.connection
             .call(move |conn| circle_publication_context_on(conn, circle_id, &expected_control))
             .await
@@ -478,7 +478,7 @@ pub(super) fn circle_publication_context_on(
     conn: &Connection,
     circle_id: crate::protocol::circle::CircleId,
     expected_control: &crate::protocol::circle::CircleControlCoord,
-) -> Result<crate::sync::CirclePackageAccess, DbError> {
+) -> Result<crate::sync::CircleEpochAccess, DbError> {
     // An exclusion blocks publication until this device's bootstrap coverage
     // records the exact successor commit that excluded it. The gate derives
     // clear from that coverage; no reset flag is mutated.
@@ -516,7 +516,7 @@ pub(super) fn circle_publication_context_on(
         return Err(DbError::Message(format!("Circle {circle_id} is deleted")));
     }
     let access = state
-        .package_access(expected_control)
+        .epoch_access(expected_control)
         .map_err(|error| DbError::Message(error.to_string()))?
         .ok_or_else(|| {
             DbError::Message(format!("Circle {circle_id} has no active publication key"))
@@ -584,12 +584,12 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn circle_package_access(
+    pub(crate) async fn circle_epoch_access(
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::CirclePackageAccess>, DbError> {
+    ) -> Result<Option<crate::sync::CircleEpochAccess>, DbError> {
         self.with_retained_merge_materializations(move |conn, retained| {
             retained.replay_inputs_on(conn, &root)?;
             let Some(activation) =
@@ -598,7 +598,7 @@ impl StoreDatabase {
                 return Ok(None);
             };
             activation
-                .package_access()
+                .epoch_access()
                 .map_err(|error| DbError::Message(error.to_string()))
         })
         .await
@@ -688,16 +688,16 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn circle_blob_opening_key(
+    pub(crate) async fn circle_blob_opening_protection(
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<EncryptionService, DbError> {
+    ) -> Result<crate::storage::BlobSpoolProtection, DbError> {
         self.connection
             .call(move |conn| {
-                Self::circle_blob_opening_key_on(
+                Self::circle_blob_opening_protection_on(
                     conn,
                     &root,
                     circle_id,
@@ -708,13 +708,13 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) fn circle_blob_opening_key_on(
+    pub(crate) fn circle_blob_opening_protection_on(
         conn: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<EncryptionService, DbError> {
+    ) -> Result<crate::storage::BlobSpoolProtection, DbError> {
         let Some(authority) =
             Self::verified_circle_activation_on(conn, root, circle_id, expected_control)?
         else {
@@ -784,12 +784,14 @@ impl StoreDatabase {
                 retained_key = Some(candidate);
             }
         }
-        retained_key.ok_or_else(|| {
-            DbError::Message(format!(
-                "Circle {circle_id} retains no local key for fingerprint \
+        retained_key
+            .map(crate::storage::BlobSpoolProtection::Opaque)
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle {circle_id} retains no local key for fingerprint \
                      {expected_key_fingerprint}"
-            ))
-        })
+                ))
+            })
     }
 
     pub(crate) async fn verified_circle_activation(

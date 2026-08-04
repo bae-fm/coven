@@ -6,7 +6,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 const CAPABILITY_TYPES: &[&str] = &[
-    "CirclePackageAccess",
+    "CircleEpochAccess",
     "ClockRef",
     "CloudHome",
     "CloudSyncStorage",
@@ -59,6 +59,7 @@ const RETAINED_SERVICE_ROOT_TYPES: &[&str] =
 const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "AuthorizedStore",
     "AuthorizedWriterOperation",
+    "CircleEpochAccess",
     "HostWriteBlobStaging",
 ];
 
@@ -1848,10 +1849,11 @@ mod tests {
             &[
                 "AuthorizedStore",
                 "AuthorizedWriterOperation",
+                "CircleEpochAccess",
                 "HostWriteBlobStaging",
             ]
         );
-        assert!(CAPABILITY_TYPES.contains(&"CirclePackageAccess"));
+        assert!(CAPABILITY_TYPES.contains(&"CircleEpochAccess"));
         for value in [
             "AdmittedStoreCloudConfig",
             "AdmittedStoreCloudHome",
