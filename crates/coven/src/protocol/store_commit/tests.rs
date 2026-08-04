@@ -2,6 +2,7 @@ use super::batch_commit::{candidate_manifest, validate_stream_activations};
 use super::operation_refs::validate_device_join_attempt_decision_refs;
 use super::*;
 use crate::protocol::membership::founder_entry;
+use crate::protocol::{audience_package, remote_object};
 
 fn routing_hash() -> ObjectHash {
     ObjectHash::digest(b"test-sync-schema")
@@ -202,7 +203,7 @@ impl Fixture {
             &write_id,
             &order,
         );
-        let package = super::super::audience_package::AudiencePackage::store(
+        let package = audience_package::AudiencePackage::store(
             self.root_ref.store_root_hash,
             family,
             write_id.clone(),
@@ -1518,17 +1519,17 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
     let fixture = fixture();
     let (commit, owner, semantic, stored) = fixture.closed_store_package();
     let package = commit.store_package().cloned().unwrap();
-    let graph = super::super::remote_object::CandidateObjectGraph::from_commit(&commit).unwrap();
+    let graph = remote_object::CandidateObjectGraph::from_commit(&commit).unwrap();
     assert!(matches!(
         graph.clone().close(&commit, &owner, Vec::new()),
-        Err(super::super::remote_object::RemoteObjectRecordError::CandidateObjectMissing)
+        Err(remote_object::RemoteObjectRecordError::CandidateObjectMissing)
     ));
-    let exact_material = super::super::remote_object::CandidateObjectMaterial {
+    let exact_material = remote_object::CandidateObjectMaterial {
         object: package.object.clone(),
         canonical_semantic_bytes: semantic.clone(),
         stored_bytes: stored.clone(),
     };
-    let invented_material = super::super::remote_object::CandidateObjectMaterial {
+    let invented_material = remote_object::CandidateObjectMaterial {
         object: exact("store-v1/candidates/invented.pkg".to_string(), b"invented"),
         canonical_semantic_bytes: b"invented".to_vec(),
         stored_bytes: b"invented".to_vec(),
@@ -1539,26 +1540,23 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
             &owner,
             vec![exact_material.clone(), invented_material]
         ),
-        Err(super::super::remote_object::RemoteObjectRecordError::CandidateObjectInvented)
+        Err(remote_object::RemoteObjectRecordError::CandidateObjectInvented)
     ));
     let mut records = graph.close(&commit, &owner, vec![exact_material]).unwrap();
-    let super::super::remote_object::RemoteObjectRecord::CandidateExclusive(record) =
-        &mut records[0]
-    else {
+    let remote_object::RemoteObjectRecord::CandidateExclusive(record) = &mut records[0] else {
         panic!("package graph must close as candidate-exclusive")
     };
-    record.identity.domain =
-        super::super::remote_object::CandidateExclusiveObjectDomain::CirclePackage {
-            reference: CirclePackageRef {
-                circle_id: CircleId::from_bytes([9; 16]),
-                control: fixture.circle_control_coord(ObjectHash::digest(b"substituted control")),
-                package,
-                key_fingerprint: KeyFingerprint::from_bytes([7; 32]),
-            },
-        };
+    record.identity.domain = remote_object::CandidateExclusiveObjectDomain::CirclePackage {
+        reference: CirclePackageRef {
+            circle_id: CircleId::from_bytes([9; 16]),
+            control: fixture.circle_control_coord(ObjectHash::digest(b"substituted control")),
+            package,
+            key_fingerprint: KeyFingerprint::from_bytes([7; 32]),
+        },
+    };
     assert!(matches!(
         records[0].validate(),
-        Err(super::super::remote_object::RemoteObjectRecordError::DomainMismatch)
+        Err(remote_object::RemoteObjectRecordError::DomainMismatch)
     ));
 }
 

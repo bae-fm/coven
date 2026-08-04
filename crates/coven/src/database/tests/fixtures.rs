@@ -1,5 +1,5 @@
-use super::super::*;
 use crate::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
+use crate::database::*;
 use crate::protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
 
 pub(super) fn reclaim_test_object(path: &str) -> ExactObjectRef {

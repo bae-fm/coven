@@ -1649,7 +1649,7 @@ mod tests {
         home.create_at(
             &slot,
             BlobBody::from_bytes(b"copy-bytes".to_vec()),
-            &super::super::no_progress(),
+            &crate::storage::cloud::no_progress(),
         )
         .await
         .expect("create exact Drive object");
@@ -2095,7 +2095,7 @@ mod tests {
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
-            .write("mutable/copy", body, &super::super::no_progress())
+            .write("mutable/copy", body, &crate::storage::cloud::no_progress())
             .await
             .expect_err("Drive body failure must cancel its create session");
 
@@ -2127,7 +2127,7 @@ mod tests {
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
-            .write("mutable/short", body, &super::super::no_progress())
+            .write("mutable/short", body, &crate::storage::cloud::no_progress())
             .await
             .expect_err("Drive must reject an incomplete upload body");
 
@@ -2148,7 +2148,11 @@ mod tests {
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
 
         let error = home
-            .write("mutable/cancel-499", body, &super::super::no_progress())
+            .write(
+                "mutable/cancel-499",
+                body,
+                &crate::storage::cloud::no_progress(),
+            )
             .await
             .expect_err("the body failure must surface");
 
@@ -2173,7 +2177,7 @@ mod tests {
         );
         let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
         let write = tokio::spawn(async move {
-            home.write("mutable/copy", body, &super::super::no_progress())
+            home.write("mutable/copy", body, &crate::storage::cloud::no_progress())
                 .await
         });
         waiting.notified().await;
@@ -2320,7 +2324,7 @@ mod tests {
             .create_at(
                 &slot,
                 BlobBody::from_bytes(b"new bytes".to_vec()),
-                &super::super::no_progress(),
+                &crate::storage::cloud::no_progress(),
             )
             .await
             .expect_err("generated-id collision must fail");
@@ -2425,7 +2429,7 @@ mod tests {
         home.create_at(
             &slot,
             BlobBody::from_bytes(b"committed bytes".to_vec()),
-            &super::super::no_progress(),
+            &crate::storage::cloud::no_progress(),
         )
         .await
         .expect("logical-key-matched commit resolves ambiguous create");

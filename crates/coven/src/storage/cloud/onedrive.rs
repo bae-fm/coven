@@ -858,7 +858,7 @@ mod tests {
         home.create_at(
             &slot,
             BlobBody::from_bytes(b"copy-bytes".to_vec()),
-            &super::super::no_progress(),
+            &crate::storage::cloud::no_progress(),
         )
         .await
         .expect("create exact OneDrive object");
@@ -989,7 +989,7 @@ mod tests {
             .create_at(
                 &slot,
                 BlobBody::from_bytes(b"copy-bytes".to_vec()),
-                &super::super::no_progress(),
+                &crate::storage::cloud::no_progress(),
             )
             .await
             .expect_err("ambiguous commit must remain unresolved");

@@ -2747,17 +2747,15 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     let journal = authority
         .circles()
         .preparer()
-        .prepare_request(
-            super::super::commands::CircleOperationRequest::CancelEpochClose(Box::new(
-                super::super::commands::CircleCancelEpochCloseRequest {
-                    operation_id: fixture.operation_id.clone(),
-                    circle_id: fixture.circle_id,
-                    member_pubkey: fixture.member_pubkey.clone(),
-                    current,
-                    previous_control,
-                },
-            )),
-        )
+        .prepare_request(CircleOperationRequest::CancelEpochClose(Box::new(
+            CircleCancelEpochCloseRequest {
+                operation_id: fixture.operation_id.clone(),
+                circle_id: fixture.circle_id,
+                member_pubkey: fixture.member_pubkey.clone(),
+                current,
+                previous_control,
+            },
+        )))
         .await
         .expect("prepare Circle reopen");
 

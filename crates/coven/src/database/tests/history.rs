@@ -1,5 +1,5 @@
-use super::super::*;
 use super::fixtures::*;
+use crate::database::*;
 
 #[tokio::test]
 async fn store_creation_installs_generation_zero_replay_baseline() {

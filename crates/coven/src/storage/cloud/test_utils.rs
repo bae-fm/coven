@@ -833,7 +833,9 @@ impl ExactSlotStorage for InMemoryCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cloud::{no_progress, BlobBody};
+    use crate::storage::cloud::{
+        no_progress, BlobBody, CloudHomeJoinInfo, RevokeOutcome, PROGRESS_CHUNK_SIZE,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -857,7 +859,7 @@ mod tests {
         let h = InMemoryCloudHome::new();
         // Two-and-a-bit chunks so progress fires more than once and the final
         // value equals the total.
-        let len = super::super::PROGRESS_CHUNK_SIZE * 2 + 7;
+        let len = PROGRESS_CHUNK_SIZE * 2 + 7;
         let last = Arc::new(AtomicU64::new(0));
         let ticks = Arc::new(AtomicU64::new(0));
         let last2 = last.clone();
@@ -1151,7 +1153,7 @@ mod tests {
 
         let first = h.set_access(desired.clone()).await.unwrap();
         let second = h.set_access(desired).await.unwrap();
-        let expected = CloudAccessOutcome::Present(super::super::CloudHomeJoinInfo::S3 {
+        let expected = CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
             bucket: "in-memory".to_string(),
             region: "test".to_string(),
             endpoint: Some("https://in-memory.invalid".to_string()),
@@ -1168,7 +1170,7 @@ mod tests {
             })
             .await
             .unwrap(),
-            CloudAccessOutcome::Absent(super::super::RevokeOutcome::Unsupported)
+            CloudAccessOutcome::Absent(RevokeOutcome::Unsupported)
         );
     }
 }

@@ -135,7 +135,7 @@ mod sync_cycle_failure_tests {
 
     #[test]
     fn registration_transport_source_is_offline() {
-        let error = super::super::store::StoreRegistrationError::Object(
+        let error = crate::sync::store::StoreRegistrationError::Object(
             crate::storage::StoreObjectError::Storage(crate::storage::StorageError::Storage(
                 "provider unavailable".to_string(),
             )),
@@ -155,7 +155,7 @@ mod sync_cycle_failure_tests {
 
     #[test]
     fn registration_configuration_source_is_failed() {
-        let error = super::super::store::StoreRegistrationError::Object(
+        let error = crate::sync::store::StoreRegistrationError::Object(
             crate::storage::StoreObjectError::Storage(crate::storage::StorageError::Configuration(
                 "missing bucket".to_string(),
             )),

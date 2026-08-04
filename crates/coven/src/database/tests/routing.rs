@@ -1,6 +1,6 @@
-use super::super::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
 use crate::database::StoreDatabase;
+use crate::database::*;
 
 #[tokio::test]
 async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {

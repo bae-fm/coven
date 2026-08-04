@@ -4155,11 +4155,12 @@ pub enum CircleTransitionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::circle_roster;
 
     #[test]
     fn semantic_paths_bind_writer_and_author_stream_id() {
         let grant = MembershipGrantId(ObjectHash::digest(b"path grant"));
-        let first = super::super::circle_roster::CircleRosterCoord {
+        let first = circle_roster::CircleRosterCoord {
             author_pubkey: "owner".to_string(),
             device_id: "device".to_string(),
             stream_id: AuthorStreamId::from_bytes([1; 32]),

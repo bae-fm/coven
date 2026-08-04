@@ -4229,17 +4229,18 @@ pub(crate) enum RemoteObjectRecordError {
 mod tests {
     use super::*;
     use crate::blob::locator::{BlobLocator, RemoteAudience};
+    use crate::protocol::{audience_package, membership, store_commit};
     use crate::storage::cloud::ObjectSlot;
     use crate::{BlobScope, KeyFingerprint, WriteId};
 
     fn test_commit_ref(label: &str, sequence: u64) -> StoreBatchCommitRef {
         let commit_hash = ObjectHash::digest(format!("{label} semantic commit").as_bytes());
         let stored = format!("{label} stored commit");
-        let stream_id = super::super::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+        let stream_id = membership::AuthorStreamId::from_digest(ObjectHash::digest(
             format!("{label} author stream").as_bytes(),
         ));
         StoreBatchCommitRef {
-            coord: super::super::store_commit::StoreCommitCoord {
+            coord: store_commit::StoreCommitCoord {
                 stream_id,
                 sequence,
             },
@@ -4256,11 +4257,11 @@ mod tests {
     fn test_store_package(
         owner: &StoreBatchCommitRef,
     ) -> (
-        super::super::store_commit::StorePackageRef,
-        super::super::audience_package::AudiencePackage,
+        store_commit::StorePackageRef,
+        audience_package::AudiencePackage,
     ) {
         let family = CandidateFamilyId::from_hash(ObjectHash::digest(b"test package family"));
-        let package = super::super::audience_package::AudiencePackage::store(
+        let package = audience_package::AudiencePackage::store(
             ObjectHash::digest(b"test Store root"),
             family,
             WriteId::from_generated("test-package-write".to_string()),
@@ -4272,7 +4273,7 @@ mod tests {
         .expect("valid test package");
         let semantic = package.to_bytes();
         let stored = b"encrypted test package";
-        let reference = super::super::store_commit::StorePackageRef {
+        let reference = store_commit::StorePackageRef {
             candidate_family: family,
             content_hash: ObjectHash::digest(&semantic),
             schema_version: package.schema_version(),
@@ -4289,7 +4290,7 @@ mod tests {
 
     fn test_stored_blob(label: &str) -> crate::blob::locator::StoredBlobRef {
         let uploader_bytes = b"uploader registration";
-        let uploader = super::super::store_commit::StoreDeviceRegistrationRef {
+        let uploader = store_commit::StoreDeviceRegistrationRef {
             device_id: "11".repeat(32).parse().expect("valid test device id"),
             registration_hash: ObjectHash::digest(b"uploader registration semantic bytes"),
             object: ExactObjectRef::new(
@@ -4324,18 +4325,13 @@ mod tests {
         .expect("valid stored blob")
     }
 
-    fn test_membership_resolution() -> (
-        super::super::membership::StoreMembershipConflictResolutionRef,
-        Vec<u8>,
-    ) {
+    fn test_membership_resolution() -> (membership::StoreMembershipConflictResolutionRef, Vec<u8>) {
         let conflict_hash = ObjectHash::digest(b"remote-object membership conflict");
         let resolver_pubkey = "22".repeat(crate::keys::SIGN_PUBLICKEYBYTES);
-        let replacement_grant = super::super::membership::derive_store_resolution_grant(
-            &conflict_hash,
-            &resolver_pubkey,
-        );
+        let replacement_grant =
+            membership::derive_store_resolution_grant(&conflict_hash, &resolver_pubkey);
         let registration_bytes = b"resolution registration";
-        let registration = super::super::store_commit::StoreDeviceRegistrationRef {
+        let registration = store_commit::StoreDeviceRegistrationRef {
             device_id: "33".repeat(32).parse().expect("valid resolution device id"),
             registration_hash: ObjectHash::digest(registration_bytes),
             object: ExactObjectRef::new(
@@ -4345,32 +4341,32 @@ mod tests {
                 ObjectHash::digest(registration_bytes),
             ),
         };
-        let membership = super::super::store_commit::GrantStreamAnchor::StoreMembership {
+        let membership = store_commit::GrantStreamAnchor::StoreMembership {
             first_slot: ObjectSlot::logical(
                 "store-v1/membership/heads/resolver/replacement/stream/1.json".to_string(),
             )
             .expect("valid resolution membership slot"),
         };
-        let recovery = super::super::store_commit::GrantStreamAnchor::OwnerRecovery {
+        let recovery = store_commit::GrantStreamAnchor::OwnerRecovery {
             first_slot: ObjectSlot::logical(
                 "store-v1/recovery/resolver/replacement/1.json".to_string(),
             )
             .expect("valid resolution recovery slot"),
         };
-        let resolution = super::super::membership::StoreMembershipConflictResolution {
-            version: super::super::store_commit::STORE_PROTOCOL_VERSION,
+        let resolution = membership::StoreMembershipConflictResolution {
+            version: store_commit::STORE_PROTOCOL_VERSION,
             store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
             conflict_hash,
             conflicting_heads: Vec::new(),
             retired_owner_grants: BTreeSet::new(),
             retirement_barriers: BTreeMap::new(),
             resolver_pubkey: resolver_pubkey.clone(),
-            selection: super::super::membership::MembershipConflictSelection::RevocationBranch {
+            selection: membership::MembershipConflictSelection::RevocationBranch {
                 heads: Vec::new(),
             },
             replacement_grant: replacement_grant.clone(),
             replacement_membership: membership.clone(),
-            replacement_acceptance: super::super::store_commit::OwnerConflictResolutionAcceptance {
+            replacement_acceptance: store_commit::OwnerConflictResolutionAcceptance {
                 store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
                 owner_grant: replacement_grant,
                 owner_registration: registration,
@@ -4381,9 +4377,9 @@ mod tests {
                 },
                 membership,
                 recovery,
-                device_state: super::super::store_commit::StoreDeviceStateRef::from_resolved(
-                    super::super::store_commit::CommitFrontier(BTreeMap::new()),
-                    &super::super::store_commit::ResolvedStoreDeviceState {
+                device_state: store_commit::StoreDeviceStateRef::from_resolved(
+                    store_commit::CommitFrontier(BTreeMap::new()),
+                    &store_commit::ResolvedStoreDeviceState {
                         devices: BTreeMap::new(),
                         recovery: Vec::new(),
                         state_hash: ObjectHash::digest(b"resolution device state"),
@@ -4399,7 +4395,7 @@ mod tests {
         let object = ExactObjectRef::new(
             ObjectSlot::logical(format!(
                 "{}.json",
-                super::super::store_commit::membership_resolution_semantic_prefix(
+                store_commit::membership_resolution_semantic_prefix(
                     conflict_hash,
                     &resolver_pubkey,
                     resolution_hash,
@@ -4413,7 +4409,7 @@ mod tests {
     }
 
     fn test_membership_resolution_record(
-        reference: super::super::membership::StoreMembershipConflictResolutionRef,
+        reference: membership::StoreMembershipConflictResolutionRef,
         canonical: Vec<u8>,
         candidate: StoreBatchCommitRef,
     ) -> Result<RemoteObjectRecord, RemoteObjectRecordError> {
@@ -4563,7 +4559,7 @@ mod tests {
     #[test]
     fn stored_blob_record_rejects_object_outside_locator_semantic_slot() {
         let uploader_bytes = b"uploader registration";
-        let uploader = super::super::store_commit::StoreDeviceRegistrationRef {
+        let uploader = store_commit::StoreDeviceRegistrationRef {
             device_id: "11".repeat(32).parse().expect("valid test device id"),
             registration_hash: ObjectHash::digest(b"uploader registration semantic bytes"),
             object: ExactObjectRef::new(
@@ -4591,11 +4587,11 @@ mod tests {
             stored_bytes.len() as u64,
             ObjectHash::digest(&stored_bytes),
         );
-        let stream_id = super::super::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+        let stream_id = membership::AuthorStreamId::from_digest(ObjectHash::digest(
             b"remote object test author stream",
         ));
         let owner = StoreBatchCommitRef {
-            coord: super::super::store_commit::StoreCommitCoord {
+            coord: store_commit::StoreCommitCoord {
                 stream_id,
                 sequence: 1,
             },
@@ -4603,10 +4599,10 @@ mod tests {
             object: ExactObjectRef::new(
                 ObjectSlot::logical(format!(
                     "{}.json",
-                    super::super::store_commit::commit_semantic_prefix(
-                        super::super::store_commit::CandidateFamilyId::from_hash(
-                            ObjectHash::digest(b"remote object test candidate family"),
-                        ),
+                    store_commit::commit_semantic_prefix(
+                        store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+                            b"remote object test candidate family"
+                        ),),
                         &stream_id.to_string(),
                         1,
                         ObjectHash::digest(b"commit semantic bytes"),
@@ -4749,17 +4745,17 @@ mod tests {
     #[test]
     fn deserialized_device_head_rejects_resolution_cleanup_state() {
         let (_, resolution_bytes) = test_membership_resolution();
-        let resolution: super::super::membership::StoreMembershipConflictResolution =
+        let resolution: membership::StoreMembershipConflictResolution =
             serde_json::from_slice(&resolution_bytes).expect("parse resolution fixture");
         let candidate = test_commit_ref("invalid-head-cleanup-state", 1);
-        let head = super::super::store_commit::StoreDeviceHead {
-            version: super::super::store_commit::STORE_PROTOCOL_VERSION,
+        let head = store_commit::StoreDeviceHead {
+            version: store_commit::STORE_PROTOCOL_VERSION,
             store_root_hash: resolution.store_root_hash,
             author_registration: resolution.replacement_acceptance.owner_registration.clone(),
             commit: candidate.clone(),
-            history_summary: super::super::store_commit::ObjectHash::digest(&resolution_bytes),
-            successor: super::super::store_commit::SuccessorLink {
-                activation: super::super::store_commit::StreamActivation::grant_authorized(
+            history_summary: store_commit::ObjectHash::digest(&resolution_bytes),
+            successor: store_commit::SuccessorLink {
+                activation: store_commit::StreamActivation::grant_authorized(
                     resolution.store_root_hash,
                     resolution.replacement_acceptance.owner_registration,
                     resolution.replacement_grant,
@@ -4782,7 +4778,7 @@ mod tests {
             ObjectHash::digest(&bytes),
         );
         let mut record = RemoteObjectRecord::candidate_activated_store_head(
-            super::super::store_commit::StoreDeviceHeadRef {
+            store_commit::StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
                 object,
             },

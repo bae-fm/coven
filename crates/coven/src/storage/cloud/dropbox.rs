@@ -1443,7 +1443,7 @@ mod tests {
             &home,
             &slot,
             BlobBody::from_bytes(b"copy-bytes".to_vec()),
-            &super::super::no_progress(),
+            &crate::storage::cloud::no_progress(),
         )
         .await
         .expect("create Dropbox slot");

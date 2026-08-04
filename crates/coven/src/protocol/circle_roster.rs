@@ -2067,6 +2067,7 @@ fn circle_revocation_conflict_hash(
 #[cfg(test)]
 mod authority_tests {
     use super::*;
+    use crate::protocol::store_commit;
 
     fn grant(label: &[u8]) -> MembershipGrantId {
         MembershipGrantId(ObjectHash::digest(label))
@@ -2155,7 +2156,7 @@ mod authority_tests {
         ))
         .expect("valid test Circle roster-head slot");
         let registration_bytes = format!("{} registration", entry.device_id);
-        let registration = super::super::store_commit::StoreDeviceRegistrationRef {
+        let registration = store_commit::StoreDeviceRegistrationRef {
             device_id: ObjectHash::digest(entry.device_id.as_bytes())
                 .to_string()
                 .parse()
@@ -2169,11 +2170,11 @@ mod authority_tests {
                 registration_bytes.as_bytes(),
             ),
         };
-        let activation = super::super::store_commit::StreamActivation::grant_authorized(
+        let activation = store_commit::StreamActivation::grant_authorized(
             entry.store_root_hash,
             registration,
             entry.author_owner_grant.clone(),
-            super::super::store_commit::GrantStreamAnchor::CircleRoster {
+            store_commit::GrantStreamAnchor::CircleRoster {
                 circle_id: entry.circle_id,
                 first_slot: head_slot.clone(),
             },

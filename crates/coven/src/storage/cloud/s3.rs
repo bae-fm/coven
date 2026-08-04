@@ -1695,7 +1695,7 @@ mod tests {
             &home,
             &slot,
             BlobBody::from_bytes(vec![9; MULTIPART_THRESHOLD + 1]),
-            &super::super::no_progress(),
+            &crate::storage::cloud::no_progress(),
         )
         .await
         .expect("append immutable multipart object");
@@ -1703,7 +1703,7 @@ mod tests {
             &home,
             &slot,
             BlobBody::from_bytes(vec![8; MULTIPART_THRESHOLD + 1]),
-            &super::super::no_progress(),
+            &crate::storage::cloud::no_progress(),
         )
         .await
         .expect_err("second immutable append must collide");
@@ -1872,9 +1872,10 @@ mod tests {
         let body = BlobBody::from_test_reader((MULTIPART_PART_SIZE + 1) as u64, reader);
 
         let slot = ObjectSlot::logical("immutable/body-failure".to_string()).unwrap();
-        let error = ExactSlotStorage::create_at(&home, &slot, body, &super::super::no_progress())
-            .await
-            .expect_err("body failure must abort synchronously");
+        let error =
+            ExactSlotStorage::create_at(&home, &slot, body, &crate::storage::cloud::no_progress())
+                .await
+                .expect_err("body failure must abort synchronously");
 
         assert!(
             matches!(error, CloudHomeError::CleanupFailed { .. }),

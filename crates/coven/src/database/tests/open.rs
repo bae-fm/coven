@@ -1,9 +1,9 @@
 use crate::database::connection_io::attach_session;
 use crate::database::connection_io::capture_changeset;
 
-use super::super::*;
 use super::fixtures::*;
 use crate::blob::BLOB_TOMBSTONE_GRACE;
+use crate::database::*;
 
 #[tokio::test]
 async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {

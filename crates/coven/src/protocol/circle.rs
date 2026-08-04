@@ -641,14 +641,13 @@ fn decode_base32(value: &str) -> Result<[u8; 16], CircleIdError> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::super::circle_control::{merkle_root_and_proofs, verify_merkle_proof};
     use super::*;
     use crate::keys::{self, UserKeypair};
+    use crate::protocol::circle_control::{merkle_root_and_proofs, verify_merkle_proof};
+    use crate::protocol::{membership, store_commit};
 
-    fn candidate_family(label: &str) -> super::super::store_commit::CandidateFamilyId {
-        super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
-            label.as_bytes(),
-        ))
+    fn candidate_family(label: &str) -> store_commit::CandidateFamilyId {
+        store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(label.as_bytes()))
     }
 
     fn exact_object(label: &str, bytes: &[u8]) -> crate::storage::ExactObjectRef {
@@ -671,9 +670,9 @@ mod tests {
     fn test_founder_entry(
         label: &str,
         owner: &UserKeypair,
-        membership: super::super::store_commit::GrantStreamAnchor,
-    ) -> super::super::membership::MembershipEntry {
-        super::super::membership::founder_entry(
+        membership: store_commit::GrantStreamAnchor,
+    ) -> membership::MembershipEntry {
+        membership::founder_entry(
             label,
             owner,
             crate::protocol::causal_grants::MembershipGrantId::from_test_label(label),
@@ -685,16 +684,16 @@ mod tests {
 
     fn merge_membership_ref(
         owner: &UserKeypair,
-        members: &[(String, super::super::membership::MemberRole)],
+        members: &[(String, membership::MemberRole)],
         label: &str,
     ) -> (
         StoreMembershipStateRef,
-        super::super::membership::MembershipGrantCreationAuthority,
+        membership::MembershipGrantCreationAuthority,
     ) {
         let founder = test_founder_entry(
             label,
             owner,
-            super::super::store_commit::GrantStreamAnchor::StoreMembership {
+            store_commit::GrantStreamAnchor::StoreMembership {
                 first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
                     "store-v1/test/{label}/membership/1.json"
                 ))
@@ -702,13 +701,13 @@ mod tests {
             },
         );
         let founder_coord = founder.coord();
-        let mut chain = super::super::membership::MembershipChain::from_entries(vec![founder])
+        let mut chain = membership::MembershipChain::from_entries(vec![founder])
             .expect("found merge-concurrent membership");
         for (index, (pubkey, role)) in members.iter().enumerate() {
             if pubkey == &keys::public_key_hex(owner) {
                 continue;
             }
-            if role == &super::super::membership::MemberRole::Owner {
+            if role == &membership::MemberRole::Owner {
                 chain
                     .add_owner_for_test(
                         owner,
@@ -734,13 +733,13 @@ mod tests {
                 .expect("apply merge-concurrent member");
         }
         let resolved = match chain.status() {
-            super::super::membership::MembershipStatus::Resolved(resolved) => resolved,
-            super::super::membership::MembershipStatus::Conflict(_) => {
+            membership::MembershipStatus::Resolved(resolved) => resolved,
+            membership::MembershipStatus::Conflict(_) => {
                 panic!("membership fixture must resolve")
             }
         };
         let tip = chain.entries().last().expect("membership tip").coord();
-        let head = super::super::membership::MembershipHeadRef {
+        let head = membership::MembershipHeadRef {
             coord: tip,
             head_hash: ObjectHash::digest(format!("{label} head").as_bytes()),
             object: exact_object(&format!("{label}/membership-head"), b"membership head"),
@@ -753,15 +752,15 @@ mod tests {
                 resolved.state_hash,
             )
             .expect("valid merge-concurrent membership reference"),
-            super::super::membership::MembershipGrantCreationAuthority::Entry(founder_coord),
+            membership::MembershipGrantCreationAuthority::Entry(founder_coord),
         )
     }
 
     struct MergeDeviceAuthority {
-        registration: super::super::store_commit::StoreDeviceRegistration,
-        reference: super::super::store_commit::StoreDeviceRegistrationRef,
+        registration: store_commit::StoreDeviceRegistration,
+        reference: store_commit::StoreDeviceRegistrationRef,
         device_signer: UserKeypair,
-        stream_id: super::super::membership::AuthorStreamId,
+        stream_id: membership::AuthorStreamId,
     }
 
     impl MergeDeviceAuthority {
@@ -769,17 +768,17 @@ mod tests {
             &self,
             control: &PreparedCircleControl,
             label: &str,
-        ) -> super::super::store_commit::CircleControlRef {
+        ) -> store_commit::CircleControlRef {
             let control_object = exact_object(&format!("{label}/control"), &control.bytes);
             let head_slot = crate::storage::cloud::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/control-head/1.json"
             ))
             .expect("valid test Circle control-head slot");
-            let activation = super::super::store_commit::StreamActivation::grant_authorized(
+            let activation = store_commit::StreamActivation::grant_authorized(
                 control.value.store_root_hash,
                 self.reference.clone(),
                 control.value.author_grant_id(),
-                super::super::store_commit::GrantStreamAnchor::CircleControl {
+                store_commit::GrantStreamAnchor::CircleControl {
                     circle_id: control.value.circle_id,
                     first_slot: head_slot.clone(),
                 },
@@ -787,7 +786,7 @@ mod tests {
             let head = CircleControlHead::signed(
                 &control.value,
                 control_object.clone(),
-                super::super::store_commit::SuccessorLink {
+                store_commit::SuccessorLink {
                     activation: activation.activation_id(),
                     predecessor: None,
                     next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
@@ -803,7 +802,7 @@ mod tests {
                 head_bytes.len() as u64,
                 ObjectHash::digest(&head_bytes),
             );
-            let objects = super::super::store_commit::CircleActivationObjects {
+            let objects = store_commit::CircleActivationObjects {
                 control: control_object,
                 close_intent: None,
                 close_outcome: None,
@@ -815,7 +814,7 @@ mod tests {
                 metadata_heads: Vec::new(),
                 access: Vec::new(),
             };
-            super::super::store_commit::CircleControlRef {
+            store_commit::CircleControlRef {
                 circle_id: control.value.circle_id,
                 control: control.coord.clone(),
                 head_hash: head.head_hash(),
@@ -830,7 +829,7 @@ mod tests {
         store_root_hash: ObjectHash,
         label: &str,
     ) -> MergeDeviceAuthority {
-        let root = super::super::store_commit::StoreRootRef {
+        let root = store_commit::StoreRootRef {
             store_root_id: ObjectHash::digest(format!("{label} identity").as_bytes()),
             store_root_hash,
             object: exact_object(&format!("{label}/root"), label.as_bytes()),
@@ -841,40 +840,40 @@ mod tests {
             ))
             .unwrap()
         };
-        let registration = super::super::store_commit::StoreDeviceRegistration::signed(
+        let registration = store_commit::StoreDeviceRegistration::signed(
             root.clone(),
-            super::super::store_commit::StoreDeviceRegistrationOrigin::Founder {
-                creation_id: super::super::store_commit::StoreCreationId::from_nonce(label),
+            store_commit::StoreDeviceRegistrationOrigin::Founder {
+                creation_id: store_commit::StoreCreationId::from_nonce(label),
             },
             crate::storage::ProviderDeviceBinding {
                 principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: ObjectHash::digest(label.as_bytes()),
                 },
             },
-            super::super::store_commit::DeviceStreamAnchor::StoreAnnouncements {
+            store_commit::DeviceStreamAnchor::StoreAnnouncements {
                 first_slot: slot("announcements"),
             },
-            super::super::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
+            store_commit::DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: slot("acknowledgements"),
             },
-            super::super::store_commit::DeviceStreamAnchor::StoreSnapshots {
+            store_commit::DeviceStreamAnchor::StoreSnapshots {
                 first_slot: slot("snapshots"),
             },
             identity,
         )
         .expect("sign test device registration");
         let bytes = registration.to_bytes();
-        let reference = super::super::store_commit::StoreDeviceRegistrationRef::from_registration(
+        let reference = store_commit::StoreDeviceRegistrationRef::from_registration(
             &registration,
             exact_object(&format!("{label}/registration"), &bytes),
         );
         let device_signer = registration
             .device_signer(identity)
             .expect("derive registered device signer");
-        let stream_id = super::super::store_commit::StreamActivation::device_authorized_stream_id(
+        let stream_id = store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &reference,
-            super::super::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
         MergeDeviceAuthority {
             registration,
@@ -908,14 +907,8 @@ mod tests {
         let owner_pubkey = crate::keys::public_key_hex(&owner);
         let peer_pubkey = crate::keys::public_key_hex(&peer);
         let members = vec![
-            (
-                owner_pubkey.clone(),
-                super::super::membership::MemberRole::Owner,
-            ),
-            (
-                peer_pubkey.clone(),
-                super::super::membership::MemberRole::Member,
-            ),
+            (owner_pubkey.clone(), membership::MemberRole::Owner),
+            (peer_pubkey.clone(), membership::MemberRole::Member),
         ];
 
         let (membership, membership_authority) =
@@ -999,14 +992,8 @@ mod tests {
         let owner_pubkey = crate::keys::public_key_hex(&owner);
         let peer_pubkey = crate::keys::public_key_hex(&peer);
         let members = vec![
-            (
-                owner_pubkey.clone(),
-                super::super::membership::MemberRole::Owner,
-            ),
-            (
-                peer_pubkey.clone(),
-                super::super::membership::MemberRole::Member,
-            ),
+            (owner_pubkey.clone(), membership::MemberRole::Owner),
+            (peer_pubkey.clone(), membership::MemberRole::Member),
         ];
         let (membership, authority) = merge_membership_ref(&owner, &members, "access-verification");
         let ids = crate::id_provider::SequentialIdProvider::new("access-verification");
@@ -1033,18 +1020,14 @@ mod tests {
 
         let mut wrong_family_envelope = creation.access[0].envelope.clone();
         wrong_family_envelope.candidate_family =
-            super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
-                b"other access family",
-            ));
+            store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(b"other access family"));
         wrong_family_envelope.signature =
             keys::sign_hex(&owner, &wrong_family_envelope.canonical_bytes()).1;
         assert!(!wrong_family_envelope.verify(&creation.control, candidate_family));
 
         let mut wrong_family_leaf = creation.access[0].leaf.clone();
         wrong_family_leaf.value.candidate_family =
-            super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
-                b"other leaf family",
-            ));
+            store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(b"other leaf family"));
         wrong_family_leaf.value.signature =
             keys::sign_hex(&owner, &wrong_family_leaf.value.canonical_bytes()).1;
         assert!(!wrong_family_leaf.verify(&creation.control, candidate_family));
@@ -1202,14 +1185,8 @@ mod tests {
         };
         let earlier_owner_pubkey = crate::keys::public_key_hex(&earlier_owner);
         let members = vec![
-            (
-                author_pubkey.clone(),
-                super::super::membership::MemberRole::Owner,
-            ),
-            (
-                earlier_owner_pubkey.clone(),
-                super::super::membership::MemberRole::Owner,
-            ),
+            (author_pubkey.clone(), membership::MemberRole::Owner),
+            (earlier_owner_pubkey.clone(), membership::MemberRole::Owner),
         ];
         let store_root_hash = ObjectHash::digest(b"multi-owner-store-root");
         let (membership, membership_authority) =
@@ -1217,12 +1194,12 @@ mod tests {
         let device = merge_device_authority(&author, store_root_hash, "multi-owner-device");
         let ids = crate::id_provider::SequentialIdProvider::new("multi-owner-control");
         let operation_id = crate::WriteId::from_generated("multi-owner-control-commit".to_string());
-        let order = super::super::store_commit::StoreCommitOrder {
+        let order = store_commit::StoreCommitOrder {
             seq: 1,
             predecessor: None,
             dependencies: BTreeMap::new(),
         };
-        let candidate_family = super::super::store_commit::CandidateFamilyId::derive(
+        let candidate_family = store_commit::CandidateFamilyId::derive(
             store_root_hash,
             &device.reference,
             &operation_id,
@@ -1257,11 +1234,11 @@ mod tests {
             value: control,
         };
         let reference = device.circle_control_reference(&control, "multi-owner");
-        let first_coord = super::super::store_commit::StoreCommitCoord {
+        let first_coord = store_commit::StoreCommitCoord {
             stream_id: device.stream_id,
             sequence: 1,
         };
-        let commit = super::super::store_commit::StoreBatchCommit::signed_operations(
+        let commit = store_commit::StoreBatchCommit::signed_operations(
             store_root_hash,
             operation_id,
             first_coord.clone(),
@@ -1269,19 +1246,19 @@ mod tests {
             &device.registration,
             order,
             membership.clone(),
-            super::super::store_commit::StoreDeviceStateRef::from_resolved(
-                super::super::store_commit::CommitFrontier(BTreeMap::new()),
-                &super::super::store_commit::ResolvedStoreDeviceState {
+            store_commit::StoreDeviceStateRef::from_resolved(
+                store_commit::CommitFrontier(BTreeMap::new()),
+                &store_commit::ResolvedStoreDeviceState {
                     devices: BTreeMap::new(),
                     recovery: Vec::new(),
                     state_hash: ObjectHash::digest(b"multi-owner initial device state"),
                 },
             )
             .expect("bind initial device state"),
-            super::super::store_commit::StoreOperationMembershipAuthority {
+            store_commit::StoreOperationMembershipAuthority {
                 predecessor: membership_authority.clone(),
             },
-            super::super::store_commit::StoreCommitOperationsInput {
+            store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
                 circle_acknowledgements: Vec::new(),
                 control: None,
@@ -1302,20 +1279,20 @@ mod tests {
         .expect("sign Store commit");
         let first_commit_path = format!(
             "{}.json",
-            super::super::store_commit::commit_semantic_prefix(
+            store_commit::commit_semantic_prefix(
                 commit.candidate_family(),
                 &device.stream_id.to_string(),
                 1,
                 commit.commit_hash(),
             )
         );
-        let commit_ref = super::super::store_commit::StoreBatchCommitRef::from_commit(
+        let commit_ref = store_commit::StoreBatchCommitRef::from_commit(
             &commit,
             first_coord,
             exact_logical_object(first_commit_path, &commit.to_bytes()),
         )
         .expect("reference first Store commit");
-        let verified_commit = super::super::store_commit::VerifiedStoreBatchCommit::parse(
+        let verified_commit = store_commit::VerifiedStoreBatchCommit::parse(
             &commit.to_bytes(),
             store_root_hash,
             &commit_ref,
@@ -1402,38 +1379,38 @@ mod tests {
             value: second_value,
         };
         let second_reference = device.circle_control_reference(&second_control, "second-founder");
-        let second_coord = super::super::store_commit::StoreCommitCoord {
+        let second_coord = store_commit::StoreCommitCoord {
             stream_id: device.stream_id,
             sequence: 2,
         };
-        let second_commit = super::super::store_commit::StoreBatchCommit::signed_operations(
+        let second_commit = store_commit::StoreBatchCommit::signed_operations(
             store_root_hash,
             crate::WriteId::from_generated("second-founder-control-commit".to_string()),
             second_coord.clone(),
             device.reference,
             &device.registration,
-            super::super::store_commit::StoreCommitOrder {
+            store_commit::StoreCommitOrder {
                 seq: 2,
                 predecessor: Some(commit_ref.clone()),
                 dependencies: BTreeMap::new(),
             },
             membership,
-            super::super::store_commit::StoreDeviceStateRef::from_resolved(
-                super::super::store_commit::CommitFrontier(BTreeMap::from([(
+            store_commit::StoreDeviceStateRef::from_resolved(
+                store_commit::CommitFrontier(BTreeMap::from([(
                     device.stream_id,
                     commit_ref.clone(),
                 )])),
-                &super::super::store_commit::ResolvedStoreDeviceState {
+                &store_commit::ResolvedStoreDeviceState {
                     devices: BTreeMap::new(),
                     recovery: Vec::new(),
                     state_hash: ObjectHash::digest(b"multi-owner second device state"),
                 },
             )
             .expect("bind second device state"),
-            super::super::store_commit::StoreOperationMembershipAuthority {
+            store_commit::StoreOperationMembershipAuthority {
                 predecessor: control.value.membership_authority().clone(),
             },
-            super::super::store_commit::StoreCommitOperationsInput {
+            store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
                 circle_acknowledgements: Vec::new(),
                 control: None,
@@ -1454,20 +1431,20 @@ mod tests {
         .expect("sign second founder Store commit");
         let second_commit_path = format!(
             "{}.json",
-            super::super::store_commit::commit_semantic_prefix(
+            store_commit::commit_semantic_prefix(
                 second_commit.candidate_family(),
                 &device.stream_id.to_string(),
                 2,
                 second_commit.commit_hash(),
             )
         );
-        let second_commit_ref = super::super::store_commit::StoreBatchCommitRef::from_commit(
+        let second_commit_ref = store_commit::StoreBatchCommitRef::from_commit(
             &second_commit,
             second_coord,
             exact_logical_object(second_commit_path, &second_commit.to_bytes()),
         )
         .expect("reference second Store commit");
-        let second_commit = super::super::store_commit::VerifiedStoreBatchCommit::parse(
+        let second_commit = store_commit::VerifiedStoreBatchCommit::parse(
             &second_commit.to_bytes(),
             store_root_hash,
             &second_commit_ref,

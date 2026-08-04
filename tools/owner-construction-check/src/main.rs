@@ -364,6 +364,78 @@ struct RetainedCapabilityParameterViolation {
     capability: String,
 }
 
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct DeepParentPathViolation {
+    path: String,
+    line: usize,
+}
+
+fn find_deep_parent_path_violations(files: &[RustFile]) -> Vec<DeepParentPathViolation> {
+    let mut violations = BTreeSet::new();
+    for file in files {
+        let mut visitor = DeepParentPathVisitor {
+            path: &file.relative_path,
+            violations: &mut violations,
+        };
+        visitor.visit_file(&file.syntax);
+    }
+    violations.into_iter().collect()
+}
+
+struct DeepParentPathVisitor<'a> {
+    path: &'a str,
+    violations: &'a mut BTreeSet<DeepParentPathViolation>,
+}
+
+impl DeepParentPathVisitor<'_> {
+    fn record(&mut self, span: Span) {
+        self.violations.insert(DeepParentPathViolation {
+            path: self.path.to_string(),
+            line: span.start().line,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for DeepParentPathVisitor<'_> {
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if use_tree_skips_parent(&node.tree, 0) {
+            self.record(node.span());
+        }
+        visit::visit_item_use(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if node
+            .segments
+            .iter()
+            .take(2)
+            .all(|segment| segment.ident == "super")
+            && node.segments.len() >= 2
+        {
+            self.record(node.span());
+        }
+        visit::visit_path(self, node);
+    }
+}
+
+fn use_tree_skips_parent(tree: &syn::UseTree, leading_parents: usize) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let leading_parents = if path.ident == "super" {
+                leading_parents + 1
+            } else {
+                0
+            };
+            leading_parents >= 2 || use_tree_skips_parent(&path.tree, leading_parents)
+        }
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|tree| use_tree_skips_parent(tree, leading_parents)),
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => false,
+    }
+}
+
 fn find_retained_capability_parameter_violations(
     files: &[RustFile],
     owners: &BTreeSet<String>,
@@ -471,6 +543,7 @@ struct CheckResult {
     service_returns: Vec<ServiceReturnViolation>,
     retained_service_construction: Vec<RetainedServiceConstructionViolation>,
     retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
+    deep_parent_paths: Vec<DeepParentPathViolation>,
 }
 
 fn main() {
@@ -510,7 +583,8 @@ fn main() {
                 && result.database_boundary.is_empty()
                 && result.service_returns.is_empty()
                 && result.retained_service_construction.is_empty()
-                && result.retained_capability_parameters.is_empty() => {}
+                && result.retained_capability_parameters.is_empty()
+                && result.deep_parent_paths.is_empty() => {}
         Ok(result) => {
             for violation in &result.owner_construction {
                 eprintln!(
@@ -565,6 +639,12 @@ fn main() {
                     violation.capability
                 );
             }
+            for violation in &result.deep_parent_paths {
+                eprintln!(
+                    "{}:{}: paths cannot skip over the immediate parent module with super::super",
+                    violation.path, violation.line
+                );
+            }
             if !result.owner_construction.is_empty() {
                 eprintln!(
                     "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
@@ -588,6 +668,11 @@ fn main() {
             if !result.retained_capability_parameters.is_empty() {
                 eprintln!(
                     "construction-only capabilities are bound when owner graphs are composed and are never accepted by runtime owner methods"
+                );
+            }
+            if !result.deep_parent_paths.is_empty() {
+                eprintln!(
+                    "import the capability from the immediate parent or from its domain boundary"
                 );
             }
             std::process::exit(1);
@@ -650,6 +735,7 @@ fn check(
         } else {
             Vec::new()
         },
+        deep_parent_paths: find_deep_parent_path_violations(&files),
     })
 }
 
@@ -1730,6 +1816,23 @@ fn could_be_local_associated_function_path(segments: &[&syn::PathSegment]) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_cannot_skip_over_their_parent_module() {
+        let source = syn::parse_file(
+            r#"
+            use super::super::Sibling;
+            fn call() { super::super::run(); }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+
+        assert_eq!(find_deep_parent_path_violations(&files).len(), 2);
+    }
 
     #[test]
     fn operation_scope_exemptions_only_name_operation_authorities() {
