@@ -1484,56 +1484,6 @@ impl CircleRosterChain {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn signed_cycle_resolution(
-        &self,
-        resolver_branch_heads: Vec<CircleRosterHeadRef>,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
-    ) -> Result<CircleRosterConflictResolution, CircleRosterError> {
-        let CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
-            conflict_hash,
-            heads,
-            involved_owner_grants,
-            maximal_valid_branches,
-            ..
-        }) = self.status()
-        else {
-            return Err(CircleRosterError::Conflict);
-        };
-        let resolver_pubkey = keys::public_key_hex(signer);
-        let branch = maximal_valid_branches
-            .iter()
-            .find(|branch| branch.heads == resolver_branch_heads)
-            .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        if !active_circle_grants(&branch.grants).any(|(_, record)| {
-            record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner
-        }) {
-            return Err(CircleRosterError::SignerIsNotOwner(resolver_pubkey));
-        }
-        let replacement_grant = derive_circle_resolution_grant(conflict_hash, &resolver_pubkey);
-        let mut retired_owner_grants = involved_owner_grants.clone();
-        retired_owner_grants.extend(active_circle_grants(&branch.grants).filter_map(
-            |(grant, record)| {
-                (record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner)
-                    .then_some(grant.clone())
-            },
-        ));
-        let mut resolution = CircleRosterConflictResolution {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: self.entries[0].store_root_hash,
-            circle_id: self.entries[0].circle_id,
-            conflict_hash: *conflict_hash,
-            conflicting_heads: heads.clone(),
-            retired_owner_grants,
-            resolver_pubkey,
-            resolver_branch_heads,
-            replacement_grant,
-            signature: String::new(),
-        };
-        resolution.signature = keys::sign_hex(signer, &resolution.canonical_bytes()).1;
-        Ok(resolution)
-    }
-
     pub(crate) fn resolved(&self) -> ResolvedCircleRoster {
         self.try_resolved()
             .expect("caller must inspect Circle roster status before consuming resolved state")
@@ -1874,6 +1824,56 @@ impl CircleRosterChain {
             self.resolution_checkpoint.clone(),
         )?;
         Ok(entry)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signed_cycle_resolution(
+        &self,
+        resolver_branch_heads: Vec<CircleRosterHeadRef>,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
+    ) -> Result<CircleRosterConflictResolution, CircleRosterError> {
+        let CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
+            conflict_hash,
+            heads,
+            involved_owner_grants,
+            maximal_valid_branches,
+            ..
+        }) = self.status()
+        else {
+            return Err(CircleRosterError::Conflict);
+        };
+        let resolver_pubkey = keys::public_key_hex(signer);
+        let branch = maximal_valid_branches
+            .iter()
+            .find(|branch| branch.heads == resolver_branch_heads)
+            .ok_or(CircleRosterError::InvalidConflictResolution)?;
+        if !active_circle_grants(&branch.grants).any(|(_, record)| {
+            record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner
+        }) {
+            return Err(CircleRosterError::SignerIsNotOwner(resolver_pubkey));
+        }
+        let replacement_grant = derive_circle_resolution_grant(conflict_hash, &resolver_pubkey);
+        let mut retired_owner_grants = involved_owner_grants.clone();
+        retired_owner_grants.extend(active_circle_grants(&branch.grants).filter_map(
+            |(grant, record)| {
+                (record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner)
+                    .then_some(grant.clone())
+            },
+        ));
+        let mut resolution = CircleRosterConflictResolution {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: self.entries[0].store_root_hash,
+            circle_id: self.entries[0].circle_id,
+            conflict_hash: *conflict_hash,
+            conflicting_heads: heads.clone(),
+            retired_owner_grants,
+            resolver_pubkey,
+            resolver_branch_heads,
+            replacement_grant,
+            signature: String::new(),
+        };
+        resolution.signature = keys::sign_hex(signer, &resolution.canonical_bytes()).1;
+        Ok(resolution)
     }
 }
 

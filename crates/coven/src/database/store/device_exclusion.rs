@@ -248,36 +248,6 @@ impl StoreDatabase {
         Box::pin(self.connection.call(load_active_store_device_exclusion_on)).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn outbound_store_device_exclusion_operations(
-        &self,
-    ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
-        Box::pin(self.connection.call(|conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT operation_id, state
-                     FROM outbound_store_device_exclusion
-                     ORDER BY operation_id",
-                )
-                .map_err(DbError::from)?;
-            let operations = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(DbError::from)?
-                .map(|row| {
-                    let (raw_id, raw) = row.map_err(DbError::from)?;
-                    let operation_id = raw_id.parse::<ObjectHash>().map_err(|error| {
-                        DbError::Message(format!("Store-device exclusion operation id: {error}"))
-                    })?;
-                    parse_store_device_exclusion_operation(operation_id, &raw)
-                })
-                .collect();
-            operations
-        }))
-        .await
-    }
-
     pub(crate) async fn replace_outbound_store_device_exclusion_candidate(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
@@ -861,5 +831,35 @@ impl StoreDatabase {
                 Ok(())
             })
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn outbound_store_device_exclusion_operations(
+        &self,
+    ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
+        Box::pin(self.connection.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT operation_id, state
+                     FROM outbound_store_device_exclusion
+                     ORDER BY operation_id",
+                )
+                .map_err(DbError::from)?;
+            let operations = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?
+                .map(|row| {
+                    let (raw_id, raw) = row.map_err(DbError::from)?;
+                    let operation_id = raw_id.parse::<ObjectHash>().map_err(|error| {
+                        DbError::Message(format!("Store-device exclusion operation id: {error}"))
+                    })?;
+                    parse_store_device_exclusion_operation(operation_id, &raw)
+                })
+                .collect();
+            operations
+        }))
+        .await
     }
 }

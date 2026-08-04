@@ -86,6 +86,86 @@ pub(crate) enum StoreDeviceExclusionError {
 }
 
 impl Store {
+    pub(crate) async fn propose_device_exclusion_for_device(
+        &self,
+        device_id: crate::protocol::store_commit::StoreDeviceId,
+    ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
+        let target = self
+            .database
+            .activated_store_device_registration_for_device(device_id)
+            .await?
+            .ok_or(StoreDeviceExclusionError::TargetNotActive)?;
+        match self.propose_device_exclusion(target.reference()).await? {
+            StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => Ok(proposal),
+            other => Err(StoreDeviceExclusionError::InvalidState(format!(
+                "proposal did not activate: {other:?}"
+            ))),
+        }
+    }
+
+    pub(crate) async fn cancel_device_exclusion_proposal(
+        &self,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> Result<(), StoreDeviceExclusionError> {
+        match self.cancel_device_exclusion(proposal).await? {
+            StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
+            other => Err(StoreDeviceExclusionError::InvalidState(format!(
+                "cancellation did not activate: {other:?}"
+            ))),
+        }
+    }
+
+    pub(crate) async fn finalize_device_exclusion_proposal(
+        &self,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> Result<(), StoreDeviceExclusionError> {
+        match self.finalize_device_exclusion(proposal).await? {
+            StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
+            other => Err(StoreDeviceExclusionError::InvalidState(format!(
+                "exclusion did not activate: {other:?}"
+            ))),
+        }
+    }
+
+    pub(crate) async fn propose_device_exclusion(
+        &self,
+        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+        let mut authority = self
+            .authorize_writer()
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+        authority.device_exclusion().propose(target).await
+    }
+
+    pub(crate) async fn cancel_device_exclusion(
+        &self,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+        let mut authority = self
+            .authorize_writer()
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+        authority
+            .device_exclusion()
+            .publish_outcome(proposal, OutcomeIntent::Cancel)
+            .await
+    }
+
+    pub(crate) async fn finalize_device_exclusion(
+        &self,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+        let mut authority = self
+            .authorize_writer()
+            .await
+            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
+        authority
+            .device_exclusion()
+            .publish_outcome(proposal, OutcomeIntent::Exclude)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn device_exclusion_operations_for_test(
         &self,
@@ -193,86 +273,6 @@ impl Store {
             .mark_store_device_exclusion_authority_uploaded(durable)
             .await?;
         Ok(reference)
-    }
-
-    pub(crate) async fn propose_device_exclusion_for_device(
-        &self,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
-    ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
-        let target = self
-            .database
-            .activated_store_device_registration_for_device(device_id)
-            .await?
-            .ok_or(StoreDeviceExclusionError::TargetNotActive)?;
-        match self.propose_device_exclusion(target.reference()).await? {
-            StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => Ok(proposal),
-            other => Err(StoreDeviceExclusionError::InvalidState(format!(
-                "proposal did not activate: {other:?}"
-            ))),
-        }
-    }
-
-    pub(crate) async fn cancel_device_exclusion_proposal(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<(), StoreDeviceExclusionError> {
-        match self.cancel_device_exclusion(proposal).await? {
-            StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
-            other => Err(StoreDeviceExclusionError::InvalidState(format!(
-                "cancellation did not activate: {other:?}"
-            ))),
-        }
-    }
-
-    pub(crate) async fn finalize_device_exclusion_proposal(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<(), StoreDeviceExclusionError> {
-        match self.finalize_device_exclusion(proposal).await? {
-            StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
-            other => Err(StoreDeviceExclusionError::InvalidState(format!(
-                "exclusion did not activate: {other:?}"
-            ))),
-        }
-    }
-
-    pub(crate) async fn propose_device_exclusion(
-        &self,
-        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let mut authority = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        authority.device_exclusion().propose(target).await
-    }
-
-    pub(crate) async fn cancel_device_exclusion(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let mut authority = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        authority
-            .device_exclusion()
-            .publish_outcome(proposal, OutcomeIntent::Cancel)
-            .await
-    }
-
-    pub(crate) async fn finalize_device_exclusion(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let mut authority = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        authority
-            .device_exclusion()
-            .publish_outcome(proposal, OutcomeIntent::Exclude)
-            .await
     }
 }
 
@@ -445,15 +445,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .await;
         Ok(durable)
     }
-}
 
-#[derive(Clone, Copy)]
-enum OutcomeIntent {
-    Exclude,
-    Cancel,
-}
-
-impl AuthorizedDeviceExclusion<'_, '_> {
     async fn publish_outcome(
         &mut self,
         proposal_ref: &StoreDeviceExclusionProposalRef,
@@ -576,15 +568,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             }
         }
     }
-}
 
-enum DeviceExclusionPublicationProgress {
-    Completed(StoreDeviceExclusionResult),
-    Continue,
-    ReplacementRequired(crate::protocol::remote_object::VerifiedCandidateNonactivation),
-}
-
-impl AuthorizedDeviceExclusion<'_, '_> {
     async fn publish_candidate(
         &mut self,
         operation: &mut Box<DurableStoreDeviceExclusionOperation>,
@@ -942,6 +926,18 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             cutoff,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum OutcomeIntent {
+    Exclude,
+    Cancel,
+}
+
+enum DeviceExclusionPublicationProgress {
+    Completed(StoreDeviceExclusionResult),
+    Continue,
+    ReplacementRequired(crate::protocol::remote_object::VerifiedCandidateNonactivation),
 }
 
 fn completion_result(

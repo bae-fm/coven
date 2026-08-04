@@ -284,23 +284,6 @@ impl DeviceProviderAdmissionApproval {
         Ok(value)
     }
 
-    #[cfg(test)]
-    pub(crate) fn signed_without_shape_validation_for_test(
-        request: DeviceProviderAccessRequest,
-        access_grant: ActivatedStoreMemberProviderAccessGrant,
-        admission: DeviceProviderAdmissionChallenge,
-        administrator_device_signer: &UserKeypair,
-    ) -> Self {
-        let mut value = Self {
-            request: Box::new(request),
-            access_grant,
-            admission,
-            signature: String::new(),
-        };
-        value.sign_with(administrator_device_signer);
-        value
-    }
-
     fn sign_with(&mut self, administrator_device_signer: &UserKeypair) {
         self.signature = sign(
             administrator_device_signer,
@@ -368,6 +351,23 @@ impl DeviceProviderAdmissionApproval {
         &DeviceProviderAdmissionChallenge,
     ) {
         (&self.request, &self.access_grant, &self.admission)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signed_without_shape_validation_for_test(
+        request: DeviceProviderAccessRequest,
+        access_grant: ActivatedStoreMemberProviderAccessGrant,
+        admission: DeviceProviderAdmissionChallenge,
+        administrator_device_signer: &UserKeypair,
+    ) -> Self {
+        let mut value = Self {
+            request: Box::new(request),
+            access_grant,
+            admission,
+            signature: String::new(),
+        };
+        value.sign_with(administrator_device_signer);
+        value
     }
 }
 

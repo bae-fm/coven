@@ -103,11 +103,6 @@ impl PassphraseVault {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
-        self.file.path()
-    }
-
     fn read_envelope(&self) -> Result<Option<Envelope>, KeyError> {
         match self.file.read_optional().map_err(KeyError::Persistence)? {
             Some(bytes) => {
@@ -268,6 +263,11 @@ impl PassphraseVault {
     /// Remove the stored envelope. `Ok` when nothing was stored.
     pub(crate) fn forget(&self) -> Result<(), KeyError> {
         self.file.remove().map_err(KeyError::Persistence)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path {
+        self.file.path()
     }
 }
 

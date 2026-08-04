@@ -29,45 +29,6 @@ impl StoreDatabase {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn enqueue_store_changeset_for_test(
-        &self,
-        changeset: Vec<u8>,
-    ) -> Result<(), DbError> {
-        let write_id = self.new_store_write_id();
-        let blob_decls = self.blob_decls();
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let local_stream_id = crate::database::local_merge_stream_id_on(&tx)?;
-                let base = StoreWriteBase {
-                    dependencies: crate::database::StoreDatabase::materialized_frontier_on(
-                        &tx,
-                        local_stream_id.as_deref(),
-                    )?,
-                };
-                let inverse_changeset = StoreDatabase::invert_changeset(&changeset)?;
-                let partitions = vec![crate::database::AudiencePartition {
-                    audience: crate::protocol::circle::Audience::Store,
-                    control: None,
-                    changeset,
-                }];
-                let blob_facts =
-                    StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
-                StoreDatabase::insert_store_write_on(
-                    &tx,
-                    &write_id,
-                    &partitions,
-                    &inverse_changeset,
-                    &base,
-                    &blob_facts,
-                    1,
-                )?;
-                tx.commit().map_err(DbError::from)
-            })
-            .await
-    }
-
     pub(crate) async fn prepare_store_write_commit(
         &self,
         stage: StoreWritePreparation,
@@ -558,5 +519,44 @@ impl StoreDatabase {
             .await?;
         self.notify_write_status(notified_write_id, WriteStatus::Publishing);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn enqueue_store_changeset_for_test(
+        &self,
+        changeset: Vec<u8>,
+    ) -> Result<(), DbError> {
+        let write_id = self.new_store_write_id();
+        let blob_decls = self.blob_decls();
+        self.connection
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let local_stream_id = crate::database::local_merge_stream_id_on(&tx)?;
+                let base = StoreWriteBase {
+                    dependencies: crate::database::StoreDatabase::materialized_frontier_on(
+                        &tx,
+                        local_stream_id.as_deref(),
+                    )?,
+                };
+                let inverse_changeset = StoreDatabase::invert_changeset(&changeset)?;
+                let partitions = vec![crate::database::AudiencePartition {
+                    audience: crate::protocol::circle::Audience::Store,
+                    control: None,
+                    changeset,
+                }];
+                let blob_facts =
+                    StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
+                StoreDatabase::insert_store_write_on(
+                    &tx,
+                    &write_id,
+                    &partitions,
+                    &inverse_changeset,
+                    &base,
+                    &blob_facts,
+                    1,
+                )?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
     }
 }

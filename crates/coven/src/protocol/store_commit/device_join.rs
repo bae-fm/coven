@@ -45,14 +45,14 @@ impl StoreCreationId {
         Self(ObjectHash::from_digest(bytes))
     }
 
+    pub(super) fn object_hash(self) -> ObjectHash {
+        self.0
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     #[cfg(test)]
     pub(crate) fn from_nonce(nonce: &str) -> Self {
         Self(ObjectHash::digest(nonce.as_bytes()))
-    }
-
-    pub(super) fn object_hash(self) -> ObjectHash {
-        self.0
     }
 }
 

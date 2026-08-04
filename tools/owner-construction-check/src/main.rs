@@ -245,7 +245,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "create",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operation/snapshot/image.rs",
+        "crates/coven/src/sync/store/owner/writer/operation/snapshot/image_tests.rs",
         "PublishedScopedSnapshot",
         "publish",
     ),
@@ -254,7 +254,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "MemberRemovalHistory",
         "create",
     ),
-    ("crates/coven/src/coven.rs", "RemoteOnlyStoreBlob", "create"),
+    (
+        "crates/coven/src/coven_tests.rs",
+        "RemoteOnlyStoreBlob",
+        "create",
+    ),
     (
         "crates/coven/src/sync/test_helpers.rs",
         "TestDevice",

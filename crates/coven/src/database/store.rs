@@ -268,11 +268,6 @@ impl StoreDatabase {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn new(database: &Database) -> Self {
-        Self::from_database(database.clone())
-    }
-
     pub(crate) async fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
     where
         F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
@@ -402,16 +397,6 @@ impl StoreDatabase {
         self.set_protocol_state(&key, &max_bytes.to_string()).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn set_invalid_cache_budget_for_test(
-        &self,
-        namespace: &str,
-        value: &str,
-    ) -> Result<(), DbError> {
-        let key = cache_budget_state_key(namespace);
-        self.set_protocol_state(&key, value).await
-    }
-
     pub(crate) async fn write_status(
         &self,
         write_id: &crate::WriteId,
@@ -440,18 +425,6 @@ impl StoreDatabase {
         if let Some(sender) = senders.get(&write_id) {
             sender.send_replace(status);
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn merge_materialization_failure_injection(
-        &self,
-    ) -> crate::database::MergeMaterializationFailureInjection {
-        self.test_access.merge_materialization_failure_injection()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn reach_test_point(&self, point: crate::database::DatabaseTestPoint) {
-        self.test_access.reach(point).await;
     }
 
     pub(crate) async fn membership_load_permit(&self) -> MembershipLoadPermit {
@@ -606,6 +579,33 @@ impl StoreDatabase {
                 Ok(())
             })
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(database: &Database) -> Self {
+        Self::from_database(database.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_invalid_cache_budget_for_test(
+        &self,
+        namespace: &str,
+        value: &str,
+    ) -> Result<(), DbError> {
+        let key = cache_budget_state_key(namespace);
+        self.set_protocol_state(&key, value).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn merge_materialization_failure_injection(
+        &self,
+    ) -> crate::database::MergeMaterializationFailureInjection {
+        self.test_access.merge_materialization_failure_injection()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reach_test_point(&self, point: crate::database::DatabaseTestPoint) {
+        self.test_access.reach(point).await;
     }
 
     #[cfg(test)]

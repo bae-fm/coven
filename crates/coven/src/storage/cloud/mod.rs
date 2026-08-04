@@ -510,11 +510,6 @@ impl BlobBody {
         Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))
     }
 
-    #[cfg(test)]
-    fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
-        Self::from_file_with_prefix(len, reader, None, Vec::new())
-    }
-
     pub(super) fn from_file_with_prefix(
         len: u64,
         reader: PlaintextReader,
@@ -579,6 +574,11 @@ impl BlobBody {
             out.extend_from_slice(&b);
         }
         Ok(out)
+    }
+
+    #[cfg(test)]
+    fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
+        Self::from_file_with_prefix(len, reader, None, Vec::new())
     }
 }
 

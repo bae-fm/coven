@@ -53,76 +53,6 @@ impl StoreDatabase {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn get_circles(
-        &self,
-        identity_pubkey: &str,
-        active_store_members: std::collections::BTreeSet<String>,
-    ) -> Result<Vec<crate::protocol::circle::CircleInfo>, DbError> {
-        let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call(move |conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT circle_id, state
-                     FROM circle_current_state
-                     ORDER BY circle_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(DbError::from)?;
-                let mut circles = Vec::new();
-                for row in rows {
-                    let (stored_circle_id, state) = row.map_err(DbError::from)?;
-                    let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
-                    let circle_id = state.circle_id();
-                    if state.is_deleted() {
-                        // A deleted Circle must remain visible to the application
-                        // as deleted rather than silently disappear from its UI.
-                        circles
-                            .push(crate::protocol::circle::CircleInfo::Deleted { id: circle_id });
-                    } else if let Some(branches) = state.conflict_branches() {
-                        // A forked Circle must be visible to the application as
-                        // conflicted so an Owner can resolve it; omitting it
-                        // would make the Circle silently disappear.
-                        circles.push(crate::protocol::circle::CircleInfo::Conflicted {
-                            id: circle_id,
-                            branches,
-                        });
-                    } else if let Some((_current, access, roster, metadata)) = state.active() {
-                        if access.recipient_pubkey != identity_pubkey {
-                            return Err(DbError::Message(format!(
-                                "active circle {circle_id} belongs to another local identity"
-                            )));
-                        }
-                        let role =
-                            roster
-                                .members()
-                                .get(&identity_pubkey)
-                                .copied()
-                                .ok_or_else(|| {
-                                    DbError::Message(format!(
-                                        "activated circle {circle_id} excludes the local identity"
-                                    ))
-                                })?;
-                        circles.push(crate::protocol::circle::CircleInfo::Active {
-                            id: circle_id,
-                            name: metadata.name.clone(),
-                            role,
-                            rotation_required: state
-                                .rotation_required(&active_store_members)
-                                .is_some(),
-                        });
-                    }
-                }
-                Ok(circles)
-            })
-            .await
-    }
-
     /// Every Circle the local identity can see, with its public derived state. A
     /// deleted or conflicted Circle stays visible (as `Deleted`/`ControlConflict`)
     /// rather than silently disappearing; an inactive Circle the identity holds no
@@ -490,59 +420,7 @@ impl StoreDatabase {
             })
             .await
     }
-}
 
-pub(super) fn circle_publication_context_on(
-    conn: &Connection,
-    circle_id: crate::protocol::circle::CircleId,
-    expected_control: &crate::protocol::circle::CircleControlCoord,
-) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
-    // An exclusion blocks publication until this device's bootstrap coverage
-    // records the exact successor commit that excluded it. The gate derives
-    // clear from that coverage; no reset flag is mutated.
-    let exclusion: Option<(String, String)> = conn
-        .query_row(
-            "SELECT close_id, activating_commit FROM circle_close_exclusions
-                 WHERE circle_id = ?1",
-            [circle_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(DbError::from)?;
-    if let Some((close_id, activating_commit)) = exclusion {
-        let coverage_commit: Option<String> = conn
-            .query_row(
-                "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                [circle_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        if coverage_commit.as_deref() != Some(activating_commit.as_str()) {
-            let close_id = serde_json::from_str(&close_id).map_err(|error| {
-                DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
-            })?;
-            return Err(DbError::ExcludedDeviceMustReset {
-                circle_id,
-                close_id,
-            });
-        }
-    }
-    let state = StoreDatabase::circle_current_state_on(conn, circle_id)?
-        .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
-    if state.is_deleted() {
-        return Err(DbError::Message(format!("Circle {circle_id} is deleted")));
-    }
-    let access = state
-        .epoch_access(expected_control)
-        .map_err(|error| DbError::Message(error.to_string()))?
-        .ok_or_else(|| {
-            DbError::Message(format!("Circle {circle_id} has no active publication key"))
-        })?;
-    Ok(access)
-}
-
-impl StoreDatabase {
     /// Record this device's own exclusion from a Circle epoch close, derived from
     /// the verified successor outcome at materialization. The row is keyed by
     /// Circle: a later close for the same Circle supersedes it. It is never
@@ -731,96 +609,7 @@ impl StoreDatabase {
             })
             .await
     }
-}
 
-pub(super) fn circle_blob_opening_protection_on(
-    conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    circle_id: crate::protocol::circle::CircleId,
-    expected_control: &crate::protocol::circle::CircleControlCoord,
-    expected_key_fingerprint: crate::KeyFingerprint,
-) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
-    let Some(authority) =
-        StoreDatabase::verified_circle_activation_on(conn, root, circle_id, expected_control)?
-    else {
-        return Err(DbError::Message(format!(
-            "Circle {circle_id} has no retained authority for control {expected_control:?}"
-        )));
-    };
-    if authority.control.value.key_fingerprint() != expected_key_fingerprint {
-        return Err(DbError::Message(format!(
-            "Circle {circle_id} blob key {expected_key_fingerprint} differs from \
-                 exact control {expected_control:?}"
-        )));
-    }
-
-    let mut statement = conn
-        .prepare(
-            "SELECT control_coord
-                 FROM circle_control_activations
-                 WHERE circle_id = ?1
-                 ORDER BY control_coord",
-        )
-        .map_err(DbError::from)?;
-    let rows = statement
-        .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
-        .map_err(DbError::from)?;
-    let mut controls = Vec::new();
-    for encoded in rows {
-        let encoded = encoded.map_err(DbError::from)?;
-        controls.push(serde_json::from_str(&encoded).map_err(|error| {
-            DbError::Message(format!(
-                "parse retained Circle {circle_id} control coordinate: {error}"
-            ))
-        })?);
-    }
-    drop(statement);
-
-    let mut retained_key = None;
-    for control in controls {
-        let activation =
-            StoreDatabase::verified_circle_activation_on(conn, root, circle_id, &control)?
-                .ok_or_else(|| {
-                    DbError::Message(format!(
-                        "Circle {circle_id} activation index lost control {control:?}"
-                    ))
-                })?;
-        let Some(keyring) = activation
-            .retained_keyring()
-            .map_err(|error| DbError::Message(error.to_string()))?
-        else {
-            continue;
-        };
-        for (generation, key) in keyring.keyring_entries() {
-            let candidate = EncryptionService::from_key_at_generation(generation, key);
-            if candidate.seal_key_fingerprint() != expected_key_fingerprint {
-                continue;
-            }
-            if retained_key
-                .as_ref()
-                .is_some_and(|existing: &EncryptionService| {
-                    existing.current_generation() != generation || existing.key_bytes() != key
-                })
-            {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} retains inconsistent key material for fingerprint \
-                         {expected_key_fingerprint}"
-                )));
-            }
-            retained_key = Some(candidate);
-        }
-    }
-    retained_key
-        .map(crate::protocol::objects::BlobSpoolProtection::Opaque)
-        .ok_or_else(|| {
-            DbError::Message(format!(
-                "Circle {circle_id} retains no local key for fingerprint \
-                     {expected_key_fingerprint}"
-            ))
-        })
-}
-
-impl StoreDatabase {
     pub(crate) async fn verified_circle_activation(
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
@@ -1227,4 +1016,211 @@ impl StoreDatabase {
             .map_err(DbError::from)?;
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) async fn get_circles(
+        &self,
+        identity_pubkey: &str,
+        active_store_members: std::collections::BTreeSet<String>,
+    ) -> Result<Vec<crate::protocol::circle::CircleInfo>, DbError> {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.connection
+            .call(move |conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT circle_id, state
+                     FROM circle_current_state
+                     ORDER BY circle_id",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(DbError::from)?;
+                let mut circles = Vec::new();
+                for row in rows {
+                    let (stored_circle_id, state) = row.map_err(DbError::from)?;
+                    let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
+                    let circle_id = state.circle_id();
+                    if state.is_deleted() {
+                        // A deleted Circle must remain visible to the application
+                        // as deleted rather than silently disappear from its UI.
+                        circles
+                            .push(crate::protocol::circle::CircleInfo::Deleted { id: circle_id });
+                    } else if let Some(branches) = state.conflict_branches() {
+                        // A forked Circle must be visible to the application as
+                        // conflicted so an Owner can resolve it; omitting it
+                        // would make the Circle silently disappear.
+                        circles.push(crate::protocol::circle::CircleInfo::Conflicted {
+                            id: circle_id,
+                            branches,
+                        });
+                    } else if let Some((_current, access, roster, metadata)) = state.active() {
+                        if access.recipient_pubkey != identity_pubkey {
+                            return Err(DbError::Message(format!(
+                                "active circle {circle_id} belongs to another local identity"
+                            )));
+                        }
+                        let role =
+                            roster
+                                .members()
+                                .get(&identity_pubkey)
+                                .copied()
+                                .ok_or_else(|| {
+                                    DbError::Message(format!(
+                                        "activated circle {circle_id} excludes the local identity"
+                                    ))
+                                })?;
+                        circles.push(crate::protocol::circle::CircleInfo::Active {
+                            id: circle_id,
+                            name: metadata.name.clone(),
+                            role,
+                            rotation_required: state
+                                .rotation_required(&active_store_members)
+                                .is_some(),
+                        });
+                    }
+                }
+                Ok(circles)
+            })
+            .await
+    }
+}
+
+pub(super) fn circle_publication_context_on(
+    conn: &Connection,
+    circle_id: crate::protocol::circle::CircleId,
+    expected_control: &crate::protocol::circle::CircleControlCoord,
+) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
+    // An exclusion blocks publication until this device's bootstrap coverage
+    // records the exact successor commit that excluded it. The gate derives
+    // clear from that coverage; no reset flag is mutated.
+    let exclusion: Option<(String, String)> = conn
+        .query_row(
+            "SELECT close_id, activating_commit FROM circle_close_exclusions
+                 WHERE circle_id = ?1",
+            [circle_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    if let Some((close_id, activating_commit)) = exclusion {
+        let coverage_commit: Option<String> = conn
+            .query_row(
+                "SELECT activation_commit FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if coverage_commit.as_deref() != Some(activating_commit.as_str()) {
+            let close_id = serde_json::from_str(&close_id).map_err(|error| {
+                DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
+            })?;
+            return Err(DbError::ExcludedDeviceMustReset {
+                circle_id,
+                close_id,
+            });
+        }
+    }
+    let state = StoreDatabase::circle_current_state_on(conn, circle_id)?
+        .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
+    if state.is_deleted() {
+        return Err(DbError::Message(format!("Circle {circle_id} is deleted")));
+    }
+    let access = state
+        .epoch_access(expected_control)
+        .map_err(|error| DbError::Message(error.to_string()))?
+        .ok_or_else(|| {
+            DbError::Message(format!("Circle {circle_id} has no active publication key"))
+        })?;
+    Ok(access)
+}
+
+pub(super) fn circle_blob_opening_protection_on(
+    conn: &Connection,
+    root: &crate::protocol::store_commit::StoreRootRef,
+    circle_id: crate::protocol::circle::CircleId,
+    expected_control: &crate::protocol::circle::CircleControlCoord,
+    expected_key_fingerprint: crate::KeyFingerprint,
+) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
+    let Some(authority) =
+        StoreDatabase::verified_circle_activation_on(conn, root, circle_id, expected_control)?
+    else {
+        return Err(DbError::Message(format!(
+            "Circle {circle_id} has no retained authority for control {expected_control:?}"
+        )));
+    };
+    if authority.control.value.key_fingerprint() != expected_key_fingerprint {
+        return Err(DbError::Message(format!(
+            "Circle {circle_id} blob key {expected_key_fingerprint} differs from \
+                 exact control {expected_control:?}"
+        )));
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT control_coord
+                 FROM circle_control_activations
+                 WHERE circle_id = ?1
+                 ORDER BY control_coord",
+        )
+        .map_err(DbError::from)?;
+    let rows = statement
+        .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
+        .map_err(DbError::from)?;
+    let mut controls = Vec::new();
+    for encoded in rows {
+        let encoded = encoded.map_err(DbError::from)?;
+        controls.push(serde_json::from_str(&encoded).map_err(|error| {
+            DbError::Message(format!(
+                "parse retained Circle {circle_id} control coordinate: {error}"
+            ))
+        })?);
+    }
+    drop(statement);
+
+    let mut retained_key = None;
+    for control in controls {
+        let activation =
+            StoreDatabase::verified_circle_activation_on(conn, root, circle_id, &control)?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle {circle_id} activation index lost control {control:?}"
+                    ))
+                })?;
+        let Some(keyring) = activation
+            .retained_keyring()
+            .map_err(|error| DbError::Message(error.to_string()))?
+        else {
+            continue;
+        };
+        for (generation, key) in keyring.keyring_entries() {
+            let candidate = EncryptionService::from_key_at_generation(generation, key);
+            if candidate.seal_key_fingerprint() != expected_key_fingerprint {
+                continue;
+            }
+            if retained_key
+                .as_ref()
+                .is_some_and(|existing: &EncryptionService| {
+                    existing.current_generation() != generation || existing.key_bytes() != key
+                })
+            {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} retains inconsistent key material for fingerprint \
+                         {expected_key_fingerprint}"
+                )));
+            }
+            retained_key = Some(candidate);
+        }
+    }
+    retained_key
+        .map(crate::protocol::objects::BlobSpoolProtection::Opaque)
+        .ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle {circle_id} retains no local key for fingerprint \
+                     {expected_key_fingerprint}"
+            ))
+        })
 }

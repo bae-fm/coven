@@ -155,9 +155,7 @@ impl StoreOperationCommitPlan {
     ) -> Result<(StoreBatchCommit, Option<ActivatedStoreDeviceRegistration>), StoreError> {
         self.common.sign_batch(write_id, batch)
     }
-}
 
-impl StoreOperationCommitPlan {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_owner_promotion_request(
         &self,
@@ -184,9 +182,7 @@ impl StoreOperationCommitPlan {
             finalization,
         )
     }
-}
 
-impl StoreOperationCommitPlan {
     pub(crate) fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreError> {
         self.order
             .predecessor_cut()
@@ -222,13 +218,6 @@ impl StoreOperationCommitPlan {
         registration: &super::store_commit::StoreDeviceRegistrationRef,
     ) -> bool {
         self.writer.is_authored_by_registration(registration)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn local_registration_reference_for_test(
-        &self,
-    ) -> super::store_commit::StoreDeviceRegistrationRef {
-        self.writer.registration_reference_for_test()
     }
 
     pub(crate) fn retain_device_exclusion_proposal(
@@ -399,5 +388,12 @@ impl StoreOperationCommitPlan {
             self.membership_state.clone(),
             provider_admin_grant,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_registration_reference_for_test(
+        &self,
+    ) -> super::store_commit::StoreDeviceRegistrationRef {
+        self.writer.registration_reference_for_test()
     }
 }

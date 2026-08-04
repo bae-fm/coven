@@ -190,43 +190,7 @@ impl AuthorizedWriterOperation<'_> {
             blobs: prepared_blobs,
         })
     }
-}
 
-fn partition_blob_facts<'a>(
-    changeset: &[u8],
-    facts: &'a StoreWriteBlobFacts,
-) -> Result<Vec<&'a StoreWriteBlobFact>, StoreError> {
-    let rows = crate::database::walk_changeset(changeset)
-        .map_err(|error| {
-            StoreError::InvalidOutbound(format!("read audience package blob rows: {error}"))
-        })?
-        .into_iter()
-        .filter(|change| {
-            matches!(
-                change.op,
-                crate::changeset::ChangeOp::Insert | crate::changeset::ChangeOp::Update
-            )
-        })
-        .map(|change| {
-            change
-                .pk()
-                .map(|row_id| (change.table.clone(), row_id.to_string()))
-                .ok_or_else(|| {
-                    StoreError::InvalidOutbound(format!(
-                        "audience package row in {:?} has no primary key",
-                        change.table
-                    ))
-                })
-        })
-        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    Ok(facts
-        .blobs
-        .iter()
-        .filter(|fact| rows.contains(&(fact.table.clone(), fact.row_id.clone())))
-        .collect())
-}
-
-impl AuthorizedWriterOperation<'_> {
     pub(super) async fn prepare_partition_blob(
         &self,
         fact: &StoreWriteBlobFact,
@@ -466,6 +430,40 @@ impl AuthorizedWriterOperation<'_> {
         staged.commit().await.map_err(StoreError::InvalidOutbound)?;
         Ok(destination)
     }
+}
+
+fn partition_blob_facts<'a>(
+    changeset: &[u8],
+    facts: &'a StoreWriteBlobFacts,
+) -> Result<Vec<&'a StoreWriteBlobFact>, StoreError> {
+    let rows = crate::database::walk_changeset(changeset)
+        .map_err(|error| {
+            StoreError::InvalidOutbound(format!("read audience package blob rows: {error}"))
+        })?
+        .into_iter()
+        .filter(|change| {
+            matches!(
+                change.op,
+                crate::changeset::ChangeOp::Insert | crate::changeset::ChangeOp::Update
+            )
+        })
+        .map(|change| {
+            change
+                .pk()
+                .map(|row_id| (change.table.clone(), row_id.to_string()))
+                .ok_or_else(|| {
+                    StoreError::InvalidOutbound(format!(
+                        "audience package row in {:?} has no primary key",
+                        change.table
+                    ))
+                })
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    Ok(facts
+        .blobs
+        .iter()
+        .filter(|fact| rows.contains(&(fact.table.clone(), fact.row_id.clone())))
+        .collect())
 }
 
 struct PartitionBlobSource {

@@ -583,111 +583,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         }
         Ok(())
     }
-}
 
-fn verify_prepared_objects_are_signed(
-    journal: &CircleOperationJournal,
-    reference: &crate::protocol::store_commit::CircleControlRef,
-) -> Result<(), CircleOperationError> {
-    let operation = journal.operation();
-    let objects = reference.objects();
-    let mut signed = BTreeSet::<crate::protocol::objects::ExactObjectRef>::from([
-        operation.commit_ref.object.clone(),
-        objects.control.clone(),
-    ]);
-    signed.insert(reference.head_object().clone());
-    signed.extend(objects.roster_entries.values().cloned());
-    signed.extend(objects.roster_heads.iter().map(|head| head.object.clone()));
-    signed.extend(objects.roster_resolutions.values().cloned());
-    signed.extend(
-        objects
-            .metadata_entries
-            .values()
-            .map(|metadata| metadata.object.clone()),
-    );
-    signed.extend(
-        objects
-            .metadata_heads
-            .iter()
-            .map(|head| head.object.clone()),
-    );
-    if let Some(intent) = &objects.close_intent {
-        signed.insert(intent.object.clone());
-    }
-    if let Some(outcome) = &objects.close_outcome {
-        signed.insert(outcome.object.clone());
-    }
-    if let Some(cancellation) = &objects.close_cancellation {
-        signed.insert(cancellation.object.clone());
-    }
-    for access in &objects.access {
-        signed.insert(access.leaf.object.clone());
-        signed.insert(access.envelope.object.clone());
-        if let Some(bootstrap) = &access.bootstrap {
-            signed.insert(bootstrap.object.clone());
-        }
-    }
-    for (step, prepared) in &operation.prepared_objects {
-        if step != "store-head" && !signed.contains(prepared.reference()) {
-            return Err(CircleOperationError::Journal(format!(
-                "Circle upload step {step:?} names an object outside its signed Store commit graph"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn expected_local_circle_activation(
-    creation: &PreparedCircleTransition,
-    reference: &crate::protocol::store_commit::CircleControlRef,
-    author_pubkey: &str,
-) -> Result<VerifiedCircleReference, CircleOperationError> {
-    if creation.control.value.state().is_deleted() {
-        // A deletion journals no access material; it activates locally to the
-        // terminal Deleted state with no local access.
-        return Ok(VerifiedCircleReference {
-            reference: reference.clone(),
-            circle_id: creation.circle_id,
-            control: creation.control.clone(),
-            local_access: None,
-        });
-    }
-    let access = creation
-        .access
-        .iter()
-        .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
-        .ok_or_else(|| {
-            CircleOperationError::InvalidState(
-                "Circle author has no journaled access disposition".to_string(),
-            )
-        })?;
-    let active = match &access.leaf.value.disposition {
-        CircleAccessDisposition::Active { .. } => Some(VerifiedCircleActive {
-            roster: creation.roster.clone(),
-            metadata: creation.metadata.clone(),
-        }),
-        CircleAccessDisposition::Inactive => None,
-    };
-    Ok(VerifiedCircleReference {
-        reference: reference.clone(),
-        circle_id: creation.circle_id,
-        control: creation.control.clone(),
-        local_access: Some(VerifiedCircleAccess {
-            envelope: access.envelope.clone(),
-            leaf: access.leaf.clone(),
-            active,
-        }),
-    })
-}
-
-enum CurrentMergeAuthority {
-    Active,
-    Revoked {
-        grant_id: crate::protocol::membership::MembershipGrantId,
-    },
-}
-
-impl CircleCandidatePublisher<'_, '_> {
     fn current_merge_authority(
         &self,
         commit: &StoreBatchCommit,
@@ -825,4 +721,106 @@ impl CircleCandidatePublisher<'_, '_> {
         )
         .await
     }
+}
+
+fn verify_prepared_objects_are_signed(
+    journal: &CircleOperationJournal,
+    reference: &crate::protocol::store_commit::CircleControlRef,
+) -> Result<(), CircleOperationError> {
+    let operation = journal.operation();
+    let objects = reference.objects();
+    let mut signed = BTreeSet::<crate::protocol::objects::ExactObjectRef>::from([
+        operation.commit_ref.object.clone(),
+        objects.control.clone(),
+    ]);
+    signed.insert(reference.head_object().clone());
+    signed.extend(objects.roster_entries.values().cloned());
+    signed.extend(objects.roster_heads.iter().map(|head| head.object.clone()));
+    signed.extend(objects.roster_resolutions.values().cloned());
+    signed.extend(
+        objects
+            .metadata_entries
+            .values()
+            .map(|metadata| metadata.object.clone()),
+    );
+    signed.extend(
+        objects
+            .metadata_heads
+            .iter()
+            .map(|head| head.object.clone()),
+    );
+    if let Some(intent) = &objects.close_intent {
+        signed.insert(intent.object.clone());
+    }
+    if let Some(outcome) = &objects.close_outcome {
+        signed.insert(outcome.object.clone());
+    }
+    if let Some(cancellation) = &objects.close_cancellation {
+        signed.insert(cancellation.object.clone());
+    }
+    for access in &objects.access {
+        signed.insert(access.leaf.object.clone());
+        signed.insert(access.envelope.object.clone());
+        if let Some(bootstrap) = &access.bootstrap {
+            signed.insert(bootstrap.object.clone());
+        }
+    }
+    for (step, prepared) in &operation.prepared_objects {
+        if step != "store-head" && !signed.contains(prepared.reference()) {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle upload step {step:?} names an object outside its signed Store commit graph"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn expected_local_circle_activation(
+    creation: &PreparedCircleTransition,
+    reference: &crate::protocol::store_commit::CircleControlRef,
+    author_pubkey: &str,
+) -> Result<VerifiedCircleReference, CircleOperationError> {
+    if creation.control.value.state().is_deleted() {
+        // A deletion journals no access material; it activates locally to the
+        // terminal Deleted state with no local access.
+        return Ok(VerifiedCircleReference {
+            reference: reference.clone(),
+            circle_id: creation.circle_id,
+            control: creation.control.clone(),
+            local_access: None,
+        });
+    }
+    let access = creation
+        .access
+        .iter()
+        .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
+        .ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "Circle author has no journaled access disposition".to_string(),
+            )
+        })?;
+    let active = match &access.leaf.value.disposition {
+        CircleAccessDisposition::Active { .. } => Some(VerifiedCircleActive {
+            roster: creation.roster.clone(),
+            metadata: creation.metadata.clone(),
+        }),
+        CircleAccessDisposition::Inactive => None,
+    };
+    Ok(VerifiedCircleReference {
+        reference: reference.clone(),
+        circle_id: creation.circle_id,
+        control: creation.control.clone(),
+        local_access: Some(VerifiedCircleAccess {
+            envelope: access.envelope.clone(),
+            leaf: access.leaf.clone(),
+            active,
+        }),
+    })
+}
+
+enum CurrentMergeAuthority {
+    Active,
+    Revoked {
+        grant_id: crate::protocol::membership::MembershipGrantId,
+    },
 }

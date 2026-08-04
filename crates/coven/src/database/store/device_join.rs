@@ -367,6 +367,27 @@ impl StoreDatabase {
         Ok(records)
     }
 
+    pub(crate) async fn device_join_status(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+        role: DeviceJoinRole,
+    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinJournalError> {
+        self.load_device_join(attempt_id, role)
+            .await
+            .map(|record| record.as_ref().map(DeviceJoinJournalRecord::status))
+    }
+
+    pub(crate) async fn device_join_actions(
+        &self,
+    ) -> Result<Vec<DeviceJoinAction>, DeviceJoinJournalError> {
+        Ok(self
+            .device_join_records()
+            .await?
+            .iter()
+            .filter_map(DeviceJoinJournalRecord::action)
+            .collect())
+    }
+
     #[cfg(test)]
     pub(crate) async fn forget_for_test(
         &self,
@@ -402,29 +423,6 @@ impl StoreDatabase {
             })
             .await
             .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))
-    }
-}
-
-impl StoreDatabase {
-    pub(crate) async fn device_join_status(
-        &self,
-        attempt_id: DeviceJoinAttemptId,
-        role: DeviceJoinRole,
-    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinJournalError> {
-        self.load_device_join(attempt_id, role)
-            .await
-            .map(|record| record.as_ref().map(DeviceJoinJournalRecord::status))
-    }
-
-    pub(crate) async fn device_join_actions(
-        &self,
-    ) -> Result<Vec<DeviceJoinAction>, DeviceJoinJournalError> {
-        Ok(self
-            .device_join_records()
-            .await?
-            .iter()
-            .filter_map(DeviceJoinJournalRecord::action)
-            .collect())
     }
 }
 

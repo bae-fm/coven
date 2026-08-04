@@ -134,13 +134,13 @@ impl VerifiedMergeWinner {
         &self.winner_prepared
     }
 
+    pub(crate) fn into_head(self) -> (StoreDeviceHead, PreparedExactObject) {
+        (self.winner, self.winner_prepared)
+    }
+
     #[cfg(test)]
     pub(crate) fn winner_commit(&self) -> &VerifiedStoreBatchCommit {
         &self.winner_commit
-    }
-
-    pub(crate) fn into_head(self) -> (StoreDeviceHead, PreparedExactObject) {
-        (self.winner, self.winner_prepared)
     }
 
     #[cfg(test)]

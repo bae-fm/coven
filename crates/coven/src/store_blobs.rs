@@ -50,31 +50,6 @@ impl StoreBlobAccess {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn connected_for_test(
-        database: StoreDatabase,
-        local: LocalStoreBlobAccess,
-        storage: Arc<dyn crate::storage::SyncStorage>,
-    ) -> Self {
-        let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
-            local.clone(),
-            CurrentRemoteBlobSource::current(database.clone(), storage),
-        ));
-        Self {
-            database,
-            local,
-            resolver: BlobAccessResolver::Exact,
-            resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState {
-                generation: 0,
-                connection: Some(ResolvedBlobConnection {
-                    config: None,
-                    access,
-                }),
-            })),
-            resolution: Arc::new(tokio::sync::Mutex::new(())),
-        }
-    }
-
     async fn resolve(&self) -> Result<ResolvedBlobAccess, StorageSetupError> {
         let (config_provider, cloud_storage) = match &self.resolver {
             BlobAccessResolver::Configured {
@@ -211,6 +186,31 @@ impl StoreBlobAccess {
                     .await
             }
             ResolvedBlobAccess::Local(_) => Err(BlobCacheError::NoCloudHome),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connected_for_test(
+        database: StoreDatabase,
+        local: LocalStoreBlobAccess,
+        storage: Arc<dyn crate::storage::SyncStorage>,
+    ) -> Self {
+        let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
+            local.clone(),
+            CurrentRemoteBlobSource::current(database.clone(), storage),
+        ));
+        Self {
+            database,
+            local,
+            resolver: BlobAccessResolver::Exact,
+            resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState {
+                generation: 0,
+                connection: Some(ResolvedBlobConnection {
+                    config: None,
+                    access,
+                }),
+            })),
+            resolution: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }

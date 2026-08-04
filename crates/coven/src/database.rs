@@ -745,15 +745,6 @@ impl VerifiedSnapshotBootstrapInstall {
         self
     }
 
-    /// Arm the Circle-install failure injection: the install transaction rolls
-    /// back after the Store image is installed but before any Circle decision
-    /// commits, standing in for a crash between the two installs.
-    #[cfg(test)]
-    pub(crate) fn fail_circle_install_for_test(mut self) -> Self {
-        self.fail_circle_install = true;
-        self
-    }
-
     fn install_on(
         &self,
         conn: &Connection,
@@ -879,6 +870,15 @@ impl VerifiedSnapshotBootstrapInstall {
             }
         }
         Ok(())
+    }
+
+    /// Arm the Circle-install failure injection: the install transaction rolls
+    /// back after the Store image is installed but before any Circle decision
+    /// commits, standing in for a crash between the two installs.
+    #[cfg(test)]
+    pub(crate) fn fail_circle_install_for_test(mut self) -> Self {
+        self.fail_circle_install = true;
+        self
     }
 }
 

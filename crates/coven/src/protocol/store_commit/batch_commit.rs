@@ -77,24 +77,6 @@ impl StoreBatchCommit {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn operations_membership_authority(
-        &self,
-    ) -> Result<StoreOperationMembershipAuthority, StoreProtocolError> {
-        if self.operations().is_none() {
-            return Err(StoreProtocolError::Malformed(
-                "Store commit does not carry operations".to_string(),
-            ));
-        }
-        let predecessor = self.membership_authority.clone().ok_or_else(|| {
-            StoreProtocolError::Malformed(
-                "operations commit omits its predecessor membership grant authority".to_string(),
-            )
-        })?;
-        validate_operation_membership_authority(&predecessor)?;
-        Ok(StoreOperationMembershipAuthority { predecessor })
-    }
-
     pub fn control(&self) -> Option<&StoreControl> {
         self.operations()
             .and_then(|operations| operations.control.as_ref())
@@ -1145,6 +1127,24 @@ impl StoreBatchCommit {
             .find(|package| package.circle_id == circle_id)
             .ok_or(StoreProtocolError::MissingCirclePackage(circle_id))?;
         verify_package_ref(&package.package, package_bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn operations_membership_authority(
+        &self,
+    ) -> Result<StoreOperationMembershipAuthority, StoreProtocolError> {
+        if self.operations().is_none() {
+            return Err(StoreProtocolError::Malformed(
+                "Store commit does not carry operations".to_string(),
+            ));
+        }
+        let predecessor = self.membership_authority.clone().ok_or_else(|| {
+            StoreProtocolError::Malformed(
+                "operations commit omits its predecessor membership grant authority".to_string(),
+            )
+        })?;
+        validate_operation_membership_authority(&predecessor)?;
+        Ok(StoreOperationMembershipAuthority { predecessor })
     }
 }
 

@@ -119,6 +119,85 @@ impl PendingJoinJournal {
             .complete_into(database, current, activated)
             .await
     }
+
+    fn record_readiness(
+        &self,
+        bootstrap: ProviderReadyDeviceBootstrap,
+        readiness: DeviceJoinReadiness,
+    ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
+        let offer = &bootstrap.bootstrap.request.approval.request.offer;
+        if offer.attempt_id != self.attempt_id {
+            return Err(DeviceJoinError::AttemptMismatch);
+        }
+        let current = self.load()?.ok_or(DeviceJoinError::JournalConflict)?;
+        let prepared =
+            match &*current.progress {
+                DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::RegistrationPrepared(
+                    request,
+                )) if request == &*bootstrap.bootstrap.request => current,
+                DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(existing))
+                    if existing == &readiness =>
+                {
+                    return Ok(readiness)
+                }
+                _ => return Err(DeviceJoinError::JournalConflict),
+            };
+        let provider_ready = DeviceJoinJournalRecord {
+            attempt_id: offer.attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::ProviderReady(bootstrap.clone()),
+            )),
+        };
+        self.advance(&prepared, provider_ready.clone())?;
+        let registration_intent = DeviceJoinJournalRecord {
+            attempt_id: offer.attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::RegistrationCreateIntent(bootstrap.clone()),
+            )),
+        };
+        self.advance(&provider_ready, registration_intent.clone())?;
+        let registration_created = DeviceJoinJournalRecord {
+            attempt_id: offer.attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::RegistrationCreated(readiness.proof.registration.clone()),
+            )),
+        };
+        self.advance(&registration_intent, registration_created.clone())?;
+        let ack_intent = DeviceJoinJournalRecord {
+            attempt_id: offer.attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::AckCreateIntent(readiness.proof.registration.clone()),
+            )),
+        };
+        self.advance(&registration_created, ack_intent.clone())?;
+        let ack_created = DeviceJoinJournalRecord {
+            attempt_id: offer.attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::AckCreated(readiness.proof.initial_ack.clone()),
+            )),
+        };
+        self.advance(&ack_intent, ack_created.clone())?;
+        let ready_record = DeviceJoinJournalRecord {
+            attempt_id: offer.attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(
+                readiness.clone(),
+            ))),
+        };
+        match readiness.provider {
+            DeviceProviderReadiness::SamePrincipal => self.advance(&ack_created, ready_record)?,
+            DeviceProviderReadiness::CrossPrincipal(_) => {
+                let response_intent = DeviceJoinJournalRecord {
+                    attempt_id: offer.attempt_id,
+                    progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                        JoinerJoinProgress::ResponseCreateIntent(readiness.clone()),
+                    )),
+                };
+                self.advance(&ack_created, response_intent.clone())?;
+                self.advance(&response_intent, ready_record)?;
+            }
+        }
+        Ok(readiness)
+    }
 }
 
 fn progress_offer(progress: &JoinerJoinProgress) -> Option<&DeviceJoinOffer> {
@@ -135,7 +214,42 @@ fn progress_offer(progress: &JoinerJoinProgress) -> Option<&DeviceJoinOffer> {
     }
 }
 
-impl JoiningStore<'_> {
+impl<'storage> JoiningStore<'storage> {
+    pub(crate) async fn begin_from_restored_history(
+        mut history: super::AuthorizedStoreHistory<'storage>,
+        identity: UserKeypair,
+        pending: &DeviceJoinJournalDatabase,
+        offer: DeviceJoinOffer,
+    ) -> Result<Self, DeviceJoinError> {
+        history
+            .device_join()
+            .verify_offer(&identity, &offer)
+            .await?;
+        let journal = PendingJoinJournal::new(pending, offer.attempt_id);
+        journal.accept_offer(&offer)?;
+        let founder_pubkey = history
+            .verified_root_object()
+            .value
+            .descriptor
+            .founder_pubkey
+            .clone();
+        let membership = history
+            .load_and_install_owner_membership(&founder_pubkey)
+            .await
+            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+        history
+            .device_join()
+            .validate_store_owner()
+            .await
+            .map_err(database_error)?;
+        Ok(Self {
+            journal,
+            history,
+            membership,
+            identity,
+        })
+    }
+
     pub(crate) async fn materialize(
         &mut self,
         activation: DeviceJoinActivation,
@@ -188,42 +302,199 @@ impl JoiningStore<'_> {
             activation,
         })
     }
-}
 
-impl<'storage> JoiningStore<'storage> {
-    pub(crate) async fn begin_from_restored_history(
-        mut history: super::AuthorizedStoreHistory<'storage>,
-        identity: UserKeypair,
-        pending: &DeviceJoinJournalDatabase,
-        offer: DeviceJoinOffer,
-    ) -> Result<Self, DeviceJoinError> {
-        history
-            .device_join()
-            .verify_offer(&identity, &offer)
-            .await?;
-        let journal = PendingJoinJournal::new(pending, offer.attempt_id);
-        journal.accept_offer(&offer)?;
-        let founder_pubkey = history
-            .verified_root_object()
-            .value
-            .descriptor
-            .founder_pubkey
-            .clone();
-        let membership = history
-            .load_and_install_owner_membership(&founder_pubkey)
+    pub(crate) async fn pull_store_history(
+        &mut self,
+        routing_encryption: Option<&crate::encryption::EncryptionService>,
+    ) -> Result<crate::sync::store::StorePullResult, DeviceJoinError> {
+        let membership = self.membership.clone();
+        let execution = self
+            .history
+            .pull(&membership, Some(&self.identity), routing_encryption)
             .await
             .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        history
+        self.membership = execution.membership;
+        Ok(execution.result)
+    }
+
+    pub(crate) async fn bootstrap(
+        &mut self,
+        bootstrap: ProviderReadyDeviceBootstrap,
+        published_at: &str,
+    ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
+        let offer = &bootstrap.bootstrap.request.approval.request.offer;
+        if &offer.store_root != self.history.root()
+            || offer.member_pubkey != crate::keys::public_key_hex(&self.identity)
+            || self.history.device_join().sync_routing_hash()
+                != self
+                    .history
+                    .verified_root_object()
+                    .value
+                    .descriptor
+                    .sync_routing_hash
+        {
+            return Err(DeviceJoinError::OfferMismatch);
+        }
+        let attempt_owner = self
+            .history
             .device_join()
-            .validate_store_owner()
+            .load_registration(&offer.owner_registration)
+            .await?
+            .value;
+        let administrator = self
+            .history
+            .device_join()
+            .load_registration(&offer.provider_admin.administrator)
+            .await?
+            .value;
+        let (verified_attempt, bootstrap_plan) = Box::pin(
+            self.history
+                .device_join()
+                .verify_attempt_and_prepare_bootstrap(
+                    &bootstrap.bootstrap.publication_authorization.attempt,
+                    &attempt_owner,
+                    &bootstrap
+                        .bootstrap
+                        .publication_authorization
+                        .attempt_activation,
+                ),
+        )
+        .await?;
+        if verified_attempt.value.expected_registration
+            != bootstrap.bootstrap.request.expected_registration
+        {
+            return Err(DeviceJoinError::AttemptMismatch);
+        }
+        let proof = Box::pin(
+            self.history.device_join().bootstrap_pending_device(
+                &self.identity,
+                bootstrap
+                    .bootstrap
+                    .publication_authorization
+                    .attempt
+                    .clone(),
+                verified_attempt,
+                bootstrap_plan,
+                bootstrap
+                    .bootstrap
+                    .publication_authorization
+                    .attempt_activation
+                    .clone(),
+                &attempt_owner,
+                published_at,
+            ),
+        )
+        .await?;
+        let provider = match (
+            &bootstrap.bootstrap.request.approval.admission,
+            &bootstrap.bootstrap.request.response,
+            &bootstrap.challenge_publication,
+        ) {
+            (
+                DeviceProviderAdmissionChallenge::SamePrincipal,
+                DeviceProviderResponseReservation::SamePrincipal,
+                DeviceProviderChallengePublication::SamePrincipal,
+            ) => DeviceProviderReadiness::SamePrincipal,
+            (
+                DeviceProviderAdmissionChallenge::CrossPrincipal(challenge),
+                DeviceProviderResponseReservation::CrossPrincipal { response_slot },
+                DeviceProviderChallengePublication::CrossPrincipal {
+                    challenge: published,
+                },
+            ) if challenge == published => {
+                let context = crate::protocol::provider::CrossPrincipalResponseContext {
+                    challenge: bootstrap
+                        .bootstrap
+                        .request
+                        .approval
+                        .request
+                        .cross_challenge_context(),
+                    expected_registration_hash: bootstrap
+                        .bootstrap
+                        .request
+                        .expected_registration
+                        .registration_hash(),
+                    response_slot: response_slot.clone(),
+                };
+                DeviceProviderReadiness::CrossPrincipal(
+                    Box::pin(self.history.device_join().create_cross_principal_response(
+                        challenge,
+                        &context,
+                        &offer.provider,
+                        &administrator.device_signing_pubkey,
+                        &self.identity,
+                    ))
+                    .await
+                    .map_err(provider_error)?,
+                )
+            }
+            _ => return Err(DeviceJoinError::AttemptMismatch),
+        };
+        let readiness = DeviceJoinReadiness { proof, provider };
+        let journal = self.journal.clone();
+        let bootstrap = Box::new(bootstrap);
+        let readiness = Box::new(readiness);
+        tokio::task::spawn_blocking(move || journal.record_readiness(*bootstrap, *readiness))
             .await
-            .map_err(database_error)?;
-        Ok(Self {
-            journal,
-            history,
-            membership,
-            identity,
-        })
+            .map_err(|error| {
+                DeviceJoinError::Store(format!("joiner readiness journal task failed: {error}"))
+            })?
+    }
+
+    pub(crate) async fn complete(
+        &mut self,
+        activation: DeviceJoinActivation,
+    ) -> Result<JoinedStore, DeviceJoinError> {
+        let attempt_id = activation.outcome.attempt().attempt_id;
+        if let Some(record) = self
+            .history
+            .device_join()
+            .completed_join(attempt_id)
+            .await?
+        {
+            let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(existing)) =
+                &*record.progress
+            else {
+                return Err(DeviceJoinError::JournalConflict);
+            };
+            let joined = self.materialize(activation).await?;
+            return (existing == &joined)
+                .then_some(joined)
+                .ok_or(DeviceJoinError::JournalConflict);
+        }
+        let current_readiness = self
+            .journal
+            .observe_activation_if_pending(&activation)?
+            .ok_or(DeviceJoinError::JournalConflict)?;
+        let joined = self.materialize(activation).await?;
+        if current_readiness.proof.registration != joined.registration {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        let current = self
+            .journal
+            .load()?
+            .ok_or(DeviceJoinError::JournalConflict)?;
+        let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
+            readiness,
+            activation: current_activation,
+        }) = &*current.progress
+        else {
+            return Err(DeviceJoinError::JournalConflict);
+        };
+        if readiness != &current_readiness || current_activation != &joined.activation {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        let activated_record = DeviceJoinJournalRecord {
+            attempt_id,
+            progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                JoinerJoinProgress::Activated(joined.clone()),
+            )),
+        };
+        self.history
+            .device_join()
+            .complete_join(&self.journal, &current, &activated_record)
+            .await?;
+        Ok(joined)
     }
 }
 
@@ -240,6 +511,34 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
             offer,
             identity: identity.clone(),
         })
+    }
+
+    pub(crate) async fn prepare_provider_access_request(
+        &self,
+    ) -> Result<DeviceProviderAccessRequest, DeviceJoinError> {
+        self.observation
+            .prepare_provider_access_request(&self.offer, &self.identity)
+            .await
+    }
+
+    pub(crate) async fn prepare_registration_request(
+        &mut self,
+        approval: DeviceProviderAdmissionApproval,
+    ) -> Result<DeviceRegistrationRequest, DeviceJoinError> {
+        self.observation
+            .prepare_registration_request(&self.offer, &self.identity, approval)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn begin_joining_store(
+        self,
+        database: StoreDatabase,
+        store_dir: &'storage crate::store_dir::StoreDir,
+    ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
+        self.observation
+            .into_joining_store(database, store_dir, self.identity)
+            .await
     }
 }
 
@@ -355,25 +654,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             identity: identity.clone(),
         }
     }
-}
 
-impl JoiningStore<'_> {
-    pub(crate) async fn pull_store_history(
-        &mut self,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
-    ) -> Result<crate::sync::store::StorePullResult, DeviceJoinError> {
-        let membership = self.membership.clone();
-        let execution = self
-            .history
-            .pull(&membership, Some(&self.identity), routing_encryption)
-            .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        self.membership = execution.membership;
-        Ok(execution.result)
-    }
-}
-
-impl PendingDeviceJoinObservation<'_> {
     pub(crate) async fn observe_abandonment(
         &mut self,
         abandonment: DeviceJoinAbandonment,
@@ -437,9 +718,7 @@ impl PendingDeviceJoinObservation<'_> {
         self.journal.advance(&current, next)?;
         Ok(abandonment)
     }
-}
 
-impl PendingDeviceJoinObservation<'_> {
     async fn prepare_provider_access_request(
         &self,
         offer: &DeviceJoinOffer,
@@ -478,30 +757,7 @@ impl PendingDeviceJoinObservation<'_> {
             _ => Err(DeviceJoinError::JournalConflict),
         }
     }
-}
 
-impl<'a> PendingDeviceJoinAuthority<'a> {
-    #[cfg(test)]
-    pub(crate) async fn begin_joining_store(
-        self,
-        database: StoreDatabase,
-        store_dir: &'a crate::store_dir::StoreDir,
-    ) -> Result<JoiningStore<'a>, DeviceJoinError> {
-        self.observation
-            .into_joining_store(database, store_dir, self.identity)
-            .await
-    }
-
-    pub(crate) async fn prepare_provider_access_request(
-        &self,
-    ) -> Result<DeviceProviderAccessRequest, DeviceJoinError> {
-        self.observation
-            .prepare_provider_access_request(&self.offer, &self.identity)
-            .await
-    }
-}
-
-impl PendingDeviceJoinObservation<'_> {
     async fn prepare_registration_request(
         &mut self,
         offer: &DeviceJoinOffer,
@@ -692,227 +948,7 @@ impl PendingDeviceJoinObservation<'_> {
         )?;
         Ok(request)
     }
-}
 
-impl PendingDeviceJoinAuthority<'_> {
-    pub(crate) async fn prepare_registration_request(
-        &mut self,
-        approval: DeviceProviderAdmissionApproval,
-    ) -> Result<DeviceRegistrationRequest, DeviceJoinError> {
-        self.observation
-            .prepare_registration_request(&self.offer, &self.identity, approval)
-            .await
-    }
-}
-
-impl JoiningStore<'_> {
-    pub(crate) async fn bootstrap(
-        &mut self,
-        bootstrap: ProviderReadyDeviceBootstrap,
-        published_at: &str,
-    ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
-        let offer = &bootstrap.bootstrap.request.approval.request.offer;
-        if &offer.store_root != self.history.root()
-            || offer.member_pubkey != crate::keys::public_key_hex(&self.identity)
-            || self.history.device_join().sync_routing_hash()
-                != self
-                    .history
-                    .verified_root_object()
-                    .value
-                    .descriptor
-                    .sync_routing_hash
-        {
-            return Err(DeviceJoinError::OfferMismatch);
-        }
-        let attempt_owner = self
-            .history
-            .device_join()
-            .load_registration(&offer.owner_registration)
-            .await?
-            .value;
-        let administrator = self
-            .history
-            .device_join()
-            .load_registration(&offer.provider_admin.administrator)
-            .await?
-            .value;
-        let (verified_attempt, bootstrap_plan) = Box::pin(
-            self.history
-                .device_join()
-                .verify_attempt_and_prepare_bootstrap(
-                    &bootstrap.bootstrap.publication_authorization.attempt,
-                    &attempt_owner,
-                    &bootstrap
-                        .bootstrap
-                        .publication_authorization
-                        .attempt_activation,
-                ),
-        )
-        .await?;
-        if verified_attempt.value.expected_registration
-            != bootstrap.bootstrap.request.expected_registration
-        {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let proof = Box::pin(
-            self.history.device_join().bootstrap_pending_device(
-                &self.identity,
-                bootstrap
-                    .bootstrap
-                    .publication_authorization
-                    .attempt
-                    .clone(),
-                verified_attempt,
-                bootstrap_plan,
-                bootstrap
-                    .bootstrap
-                    .publication_authorization
-                    .attempt_activation
-                    .clone(),
-                &attempt_owner,
-                published_at,
-            ),
-        )
-        .await?;
-        let provider = match (
-            &bootstrap.bootstrap.request.approval.admission,
-            &bootstrap.bootstrap.request.response,
-            &bootstrap.challenge_publication,
-        ) {
-            (
-                DeviceProviderAdmissionChallenge::SamePrincipal,
-                DeviceProviderResponseReservation::SamePrincipal,
-                DeviceProviderChallengePublication::SamePrincipal,
-            ) => DeviceProviderReadiness::SamePrincipal,
-            (
-                DeviceProviderAdmissionChallenge::CrossPrincipal(challenge),
-                DeviceProviderResponseReservation::CrossPrincipal { response_slot },
-                DeviceProviderChallengePublication::CrossPrincipal {
-                    challenge: published,
-                },
-            ) if challenge == published => {
-                let context = crate::protocol::provider::CrossPrincipalResponseContext {
-                    challenge: bootstrap
-                        .bootstrap
-                        .request
-                        .approval
-                        .request
-                        .cross_challenge_context(),
-                    expected_registration_hash: bootstrap
-                        .bootstrap
-                        .request
-                        .expected_registration
-                        .registration_hash(),
-                    response_slot: response_slot.clone(),
-                };
-                DeviceProviderReadiness::CrossPrincipal(
-                    Box::pin(self.history.device_join().create_cross_principal_response(
-                        challenge,
-                        &context,
-                        &offer.provider,
-                        &administrator.device_signing_pubkey,
-                        &self.identity,
-                    ))
-                    .await
-                    .map_err(provider_error)?,
-                )
-            }
-            _ => return Err(DeviceJoinError::AttemptMismatch),
-        };
-        let readiness = DeviceJoinReadiness { proof, provider };
-        let journal = self.journal.clone();
-        let bootstrap = Box::new(bootstrap);
-        let readiness = Box::new(readiness);
-        tokio::task::spawn_blocking(move || journal.record_readiness(*bootstrap, *readiness))
-            .await
-            .map_err(|error| {
-                DeviceJoinError::Store(format!("joiner readiness journal task failed: {error}"))
-            })?
-    }
-}
-
-impl PendingJoinJournal {
-    fn record_readiness(
-        &self,
-        bootstrap: ProviderReadyDeviceBootstrap,
-        readiness: DeviceJoinReadiness,
-    ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
-        let offer = &bootstrap.bootstrap.request.approval.request.offer;
-        if offer.attempt_id != self.attempt_id {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
-        let current = self.load()?.ok_or(DeviceJoinError::JournalConflict)?;
-        let prepared =
-            match &*current.progress {
-                DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::RegistrationPrepared(
-                    request,
-                )) if request == &*bootstrap.bootstrap.request => current,
-                DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(existing))
-                    if existing == &readiness =>
-                {
-                    return Ok(readiness)
-                }
-                _ => return Err(DeviceJoinError::JournalConflict),
-            };
-        let provider_ready = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::ProviderReady(bootstrap.clone()),
-            )),
-        };
-        self.advance(&prepared, provider_ready.clone())?;
-        let registration_intent = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::RegistrationCreateIntent(bootstrap.clone()),
-            )),
-        };
-        self.advance(&provider_ready, registration_intent.clone())?;
-        let registration_created = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::RegistrationCreated(readiness.proof.registration.clone()),
-            )),
-        };
-        self.advance(&registration_intent, registration_created.clone())?;
-        let ack_intent = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::AckCreateIntent(readiness.proof.registration.clone()),
-            )),
-        };
-        self.advance(&registration_created, ack_intent.clone())?;
-        let ack_created = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::AckCreated(readiness.proof.initial_ack.clone()),
-            )),
-        };
-        self.advance(&ack_intent, ack_created.clone())?;
-        let ready_record = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(
-                readiness.clone(),
-            ))),
-        };
-        match readiness.provider {
-            DeviceProviderReadiness::SamePrincipal => self.advance(&ack_created, ready_record)?,
-            DeviceProviderReadiness::CrossPrincipal(_) => {
-                let response_intent = DeviceJoinJournalRecord {
-                    attempt_id: offer.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                        JoinerJoinProgress::ResponseCreateIntent(readiness.clone()),
-                    )),
-                };
-                self.advance(&ack_created, response_intent.clone())?;
-                self.advance(&response_intent, ready_record)?;
-            }
-        }
-        Ok(readiness)
-    }
-}
-
-impl PendingDeviceJoinObservation<'_> {
     async fn close(
         &mut self,
         identity: &UserKeypair,
@@ -1069,18 +1105,7 @@ impl PendingDeviceJoinObservation<'_> {
         )?;
         Ok(JoinerJoinTerminal::Cancelled(closure))
     }
-}
 
-impl PendingDeviceJoinClosure<'_> {
-    pub(crate) async fn close(
-        &mut self,
-        cancellation: DeviceJoinCancellation,
-    ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
-        self.observation.close(&self.identity, cancellation).await
-    }
-}
-
-impl PendingDeviceJoinObservation<'_> {
     pub(crate) async fn accept_cleanup(
         &mut self,
         activation: DeviceJoinCleanupActivation,
@@ -1175,60 +1200,11 @@ impl PendingDeviceJoinObservation<'_> {
     }
 }
 
-impl JoiningStore<'_> {
-    pub(crate) async fn complete(
+impl PendingDeviceJoinClosure<'_> {
+    pub(crate) async fn close(
         &mut self,
-        activation: DeviceJoinActivation,
-    ) -> Result<JoinedStore, DeviceJoinError> {
-        let attempt_id = activation.outcome.attempt().attempt_id;
-        if let Some(record) = self
-            .history
-            .device_join()
-            .completed_join(attempt_id)
-            .await?
-        {
-            let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(existing)) =
-                &*record.progress
-            else {
-                return Err(DeviceJoinError::JournalConflict);
-            };
-            let joined = self.materialize(activation).await?;
-            return (existing == &joined)
-                .then_some(joined)
-                .ok_or(DeviceJoinError::JournalConflict);
-        }
-        let current_readiness = self
-            .journal
-            .observe_activation_if_pending(&activation)?
-            .ok_or(DeviceJoinError::JournalConflict)?;
-        let joined = self.materialize(activation).await?;
-        if current_readiness.proof.registration != joined.registration {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let current = self
-            .journal
-            .load()?
-            .ok_or(DeviceJoinError::JournalConflict)?;
-        let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
-            readiness,
-            activation: current_activation,
-        }) = &*current.progress
-        else {
-            return Err(DeviceJoinError::JournalConflict);
-        };
-        if readiness != &current_readiness || current_activation != &joined.activation {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        let activated_record = DeviceJoinJournalRecord {
-            attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::Activated(joined.clone()),
-            )),
-        };
-        self.history
-            .device_join()
-            .complete_join(&self.journal, &current, &activated_record)
-            .await?;
-        Ok(joined)
+        cancellation: DeviceJoinCancellation,
+    ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
+        self.observation.close(&self.identity, cancellation).await
     }
 }

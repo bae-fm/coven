@@ -1081,9 +1081,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             stream_activations,
         ))
     }
-}
 
-impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     pub(super) fn new(
         announcement_stream_id: crate::protocol::membership::AuthorStreamId,
         database: StoreDatabase,

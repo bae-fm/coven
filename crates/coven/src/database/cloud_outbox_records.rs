@@ -8,22 +8,7 @@ impl<'connection> CloudOutboxRecords<'connection> {
     pub(crate) fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
-}
 
-pub(crate) enum OutboxIdentity {
-    Upload {
-        table: String,
-        row_id: String,
-        column: String,
-        row_stamp: String,
-    },
-    Stored {
-        operation: &'static str,
-        stored: String,
-    },
-}
-
-impl CloudOutboxRecords<'_> {
     fn upload_entry_for_identity(
         &self,
         table: &str,
@@ -335,6 +320,19 @@ impl CloudOutboxRecords<'_> {
         }
         Ok(true)
     }
+}
+
+pub(crate) enum OutboxIdentity {
+    Upload {
+        table: String,
+        row_id: String,
+        column: String,
+        row_stamp: String,
+    },
+    Stored {
+        operation: &'static str,
+        stored: String,
+    },
 }
 
 pub(crate) fn outbox_identity(operation: &OutboxOperation) -> Result<OutboxIdentity, DbError> {

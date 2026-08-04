@@ -704,6 +704,41 @@ impl StoreDeviceExclusionOutcomeRef {
             Self::Cancelled(reference) => &reference.object,
         }
     }
+
+    pub fn from_outcome(
+        outcome: &StoreDeviceExclusionOutcome,
+        proposal: &StoreDeviceExclusionProposal,
+        object: ExactObjectRef,
+    ) -> Result<Self, StoreProtocolError> {
+        if object.slot() != &proposal.outcome_slot
+            || outcome.proposal().proposal_id != proposal.proposal_id
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(match outcome {
+            StoreDeviceExclusionOutcome::Excluded(exclusion) => {
+                Self::Excluded(StoreDeviceExclusionRef {
+                    proposal: exclusion.proposal.clone(),
+                    outcome_hash: exclusion.outcome_hash(),
+                    object,
+                })
+            }
+            StoreDeviceExclusionOutcome::Cancelled(cancellation) => {
+                Self::Cancelled(StoreDeviceExclusionCancellationRef {
+                    proposal: cancellation.proposal.clone(),
+                    outcome_hash: cancellation.outcome_hash(),
+                    object,
+                })
+            }
+        })
+    }
+
+    pub fn outcome_hash(&self) -> ObjectHash {
+        match self {
+            Self::Excluded(reference) => reference.outcome_hash,
+            Self::Cancelled(reference) => reference.outcome_hash,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1098,43 +1133,6 @@ impl StoreDeviceExclusionOutcome {
             }
         }
         Ok(outcome)
-    }
-}
-
-impl StoreDeviceExclusionOutcomeRef {
-    pub fn from_outcome(
-        outcome: &StoreDeviceExclusionOutcome,
-        proposal: &StoreDeviceExclusionProposal,
-        object: ExactObjectRef,
-    ) -> Result<Self, StoreProtocolError> {
-        if object.slot() != &proposal.outcome_slot
-            || outcome.proposal().proposal_id != proposal.proposal_id
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        Ok(match outcome {
-            StoreDeviceExclusionOutcome::Excluded(exclusion) => {
-                Self::Excluded(StoreDeviceExclusionRef {
-                    proposal: exclusion.proposal.clone(),
-                    outcome_hash: exclusion.outcome_hash(),
-                    object,
-                })
-            }
-            StoreDeviceExclusionOutcome::Cancelled(cancellation) => {
-                Self::Cancelled(StoreDeviceExclusionCancellationRef {
-                    proposal: cancellation.proposal.clone(),
-                    outcome_hash: cancellation.outcome_hash(),
-                    object,
-                })
-            }
-        })
-    }
-
-    pub fn outcome_hash(&self) -> ObjectHash {
-        match self {
-            Self::Excluded(reference) => reference.outcome_hash,
-            Self::Cancelled(reference) => reference.outcome_hash,
-        }
     }
 }
 

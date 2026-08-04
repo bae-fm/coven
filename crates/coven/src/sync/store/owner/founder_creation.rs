@@ -785,23 +785,7 @@ impl<'operation> FounderStoreCreation<'operation> {
     pub(super) async fn execute(self) -> Result<InitializedStore, StoreInitializationError> {
         self.stage().await?.publish().await
     }
-}
 
-impl StagedFounderStoreCreation<'_> {
-    async fn reset_partial_publication(&mut self) -> Result<(), StoreInitializationError> {
-        Box::pin(self.creation.rollback_founder_publication(&self.graph))
-            .await
-            .map_err(|rollback| {
-                StoreInitializationError::ProtocolRoot(format!(
-                    "Store founder rollback before publication: {rollback}"
-                ))
-            })?;
-        self.graph = self.creation.reload_founder_graph().await?;
-        Ok(())
-    }
-}
-
-impl FounderStoreCreation<'_> {
     async fn reload_founder_graph(
         &self,
     ) -> Result<Box<crate::database::DurableFounderGraph>, StoreInitializationError> {
@@ -1002,6 +986,18 @@ impl FounderStoreCreation<'_> {
 }
 
 impl StagedFounderStoreCreation<'_> {
+    async fn reset_partial_publication(&mut self) -> Result<(), StoreInitializationError> {
+        Box::pin(self.creation.rollback_founder_publication(&self.graph))
+            .await
+            .map_err(|rollback| {
+                StoreInitializationError::ProtocolRoot(format!(
+                    "Store founder rollback before publication: {rollback}"
+                ))
+            })?;
+        self.graph = self.creation.reload_founder_graph().await?;
+        Ok(())
+    }
+
     async fn publish(self) -> Result<InitializedStore, StoreInitializationError> {
         let history = match self.creation.publish_history(&self.graph).await {
             Ok(history) => history,

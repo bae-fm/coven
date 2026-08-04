@@ -194,11 +194,6 @@ impl VerifiedCircleKeyring {
 }
 
 impl CircleEpochAccess {
-    #[cfg(test)]
-    pub(crate) fn authorizes_writer(&self, author_pubkey: &str) -> bool {
-        self.writers.contains(author_pubkey)
-    }
-
     pub(crate) fn key_fingerprint(&self) -> KeyFingerprint {
         self.key_fingerprint
     }
@@ -274,6 +269,11 @@ impl CircleEpochAccess {
             )));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorizes_writer(&self, author_pubkey: &str) -> bool {
+        self.writers.contains(author_pubkey)
     }
 }
 
@@ -596,24 +596,6 @@ impl VerifiedCircleActivations {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn parse_retained(
-        bytes: &[u8],
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
-        author: &StoreDeviceRegistration,
-        recipient_pubkey: Option<&str>,
-    ) -> Result<Self, CircleStateError> {
-        let verified = VerifiedStoreBatchCommit::parse(
-            &commit.to_bytes(),
-            commit.store_root_hash,
-            commit_ref,
-            author,
-        )
-        .map_err(|error| CircleStateError(error.to_string()))?;
-        Self::parse_retained_for_verified_commit(bytes, &verified, recipient_pubkey)
-    }
-
     pub(crate) fn parse_retained_for_verified_commit(
         bytes: &[u8],
         verified: &VerifiedStoreBatchCommit,
@@ -705,6 +687,24 @@ impl VerifiedCircleActivations {
             local_exclusions: Vec::new(),
             bootstrap_pending_exclusions: Vec::new(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_retained(
+        bytes: &[u8],
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        author: &StoreDeviceRegistration,
+        recipient_pubkey: Option<&str>,
+    ) -> Result<Self, CircleStateError> {
+        let verified = VerifiedStoreBatchCommit::parse(
+            &commit.to_bytes(),
+            commit.store_root_hash,
+            commit_ref,
+            author,
+        )
+        .map_err(|error| CircleStateError(error.to_string()))?;
+        Self::parse_retained_for_verified_commit(bytes, &verified, recipient_pubkey)
     }
 }
 
@@ -930,18 +930,8 @@ impl CircleCurrentControl {
         &self.control.coord
     }
 
-    #[cfg(test)]
-    pub(crate) fn control_mut_for_test(&mut self) -> &mut PreparedCircleControl {
-        &mut self.control
-    }
-
     pub(super) fn control_hash(&self) -> ObjectHash {
         self.control.coord.control_hash()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn control_hash_for_test(&self) -> ObjectHash {
-        self.control_hash()
     }
 
     fn causally_covers(&self, prior: &Self) -> bool {
@@ -950,6 +940,16 @@ impl CircleCurrentControl {
 
     fn verify(&self) -> bool {
         self.control.verify()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_mut_for_test(&mut self) -> &mut PreparedCircleControl {
+        &mut self.control
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_hash_for_test(&self) -> ObjectHash {
+        self.control_hash()
     }
 }
 
@@ -1325,14 +1325,6 @@ impl CircleCurrentState {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn active_current_mut_for_test(&mut self) -> Option<&mut CircleCurrentControl> {
-        match self {
-            Self::Active(active) => Some(&mut active.current),
-            _ => None,
-        }
-    }
-
     /// Whether this Circle's control history has terminated in a deletion.
     pub(crate) fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted(_))
@@ -1360,6 +1352,14 @@ impl CircleCurrentState {
             | Self::Inactive(_)
             | Self::Deleted(_)
             | Self::ControlConflict { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_current_mut_for_test(&mut self) -> Option<&mut CircleCurrentControl> {
+        match self {
+            Self::Active(active) => Some(&mut active.current),
+            _ => None,
         }
     }
 }

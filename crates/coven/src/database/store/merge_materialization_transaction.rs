@@ -194,9 +194,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     pub(crate) fn new(transaction: &'transaction rusqlite::Transaction<'connection>) -> Self {
         Self { transaction }
     }
-}
 
-impl MergeMaterializationTransaction<'_, '_> {
     pub(super) fn circle_current_state_is_deleted(
         &self,
         circle_id: crate::protocol::circle::CircleId,

@@ -535,6 +535,166 @@ impl StoreDatabase {
         }
         Ok(status)
     }
+
+    pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
+        self.connection
+            .call(move |conn| {
+                let stored = conn
+                .query_row(
+                "SELECT write_id, changeset, inverse_changeset, base, blob_facts FROM store_writes
+                 WHERE status = '\"pending\"'
+                   AND ordinal = (
+                       SELECT MIN(ordinal) FROM store_writes
+                       WHERE status != '\"local_only\"'
+                         AND json_extract(status, '$.published') IS NULL
+                         AND json_extract(status, '$.resolved') IS NULL
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
+                   )
+                 ORDER BY ordinal LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+                .optional()
+                .map_err(DbError::from)?;
+                let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored
+                else {
+                    return Ok(None);
+                };
+                let partitions = Self::store_write_partitions_on(conn, &write_id, &changeset)?;
+                Ok(Some(PreparedStoreWrite {
+                    write_id: WriteId::from_generated(write_id),
+                    changeset,
+                    partitions,
+                    inverse_changeset,
+                    base: serde_json::from_str(&base).map_err(|error| {
+                        DbError::Message(format!("pending write base: {error}"))
+                    })?,
+                    blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
+                        DbError::Message(format!("pending write blob facts: {error}"))
+                    })?,
+                }))
+            })
+            .await
+    }
+
+    pub(crate) fn store_write_partitions_on(
+        conn: &Connection,
+        write_id: &str,
+        stored_store_changeset: &[u8],
+    ) -> Result<PreparedStoreWritePartitions, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT audience, control_coord, changeset
+                 FROM store_write_partitions
+                 WHERE write_id = ?1
+                 ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
+                          audience, control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([write_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let mut store = None;
+        let mut circles = Vec::new();
+        let mut local = None;
+        for row in rows {
+            let (audience, control, changeset) = row.map_err(DbError::from)?;
+            if audience == "store" {
+                if control.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} Store partition carries a Circle control"
+                    )));
+                }
+                if store.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} carries more than one Store partition"
+                    )));
+                }
+                store = Some(AudiencePartition {
+                    audience: crate::protocol::circle::Audience::Store,
+                    control: None,
+                    changeset,
+                });
+                continue;
+            }
+            if audience == "local" {
+                if control.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} Local partition carries a Circle control"
+                    )));
+                }
+                if local.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} carries more than one Local partition"
+                    )));
+                }
+                local = Some(AudiencePartition {
+                    audience: crate::protocol::circle::Audience::Local,
+                    control: None,
+                    changeset,
+                });
+                continue;
+            }
+            let circle_id = audience
+                .parse::<crate::protocol::circle::CircleId>()
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "pending write {write_id} has invalid audience {audience:?}: {error}"
+                    ))
+                })?;
+            let control_json = control.ok_or_else(|| {
+                DbError::Message(format!(
+                    "pending write {write_id} Circle {circle_id} has no control coordinate"
+                ))
+            })?;
+            let control =
+                CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
+                    DbError::Message(format!(
+                        "pending write {write_id} Circle {circle_id} control coordinate: {error}"
+                    ))
+                })?;
+            circles.push(AudiencePartition {
+                audience: crate::protocol::circle::Audience::Circle(circle_id),
+                control: Some(control),
+                changeset,
+            });
+        }
+        drop(statement);
+        match &store {
+            Some(partition) if partition.changeset != stored_store_changeset => {
+                return Err(DbError::Message(format!(
+                    "pending write {write_id} Store partition differs from store_writes.changeset"
+                )));
+            }
+            None if !stored_store_changeset.is_empty() => {
+                return Err(DbError::Message(format!(
+                    "pending write {write_id} has a store_writes.changeset without a Store partition"
+                )));
+            }
+            Some(_) | None => {}
+        }
+        Ok(PreparedStoreWritePartitions {
+            store,
+            circles,
+            local,
+        })
+    }
 }
 
 impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operation> {
@@ -779,168 +939,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 status,
             })
         })()
-    }
-}
-
-impl StoreDatabase {
-    pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        self.connection
-            .call(move |conn| {
-                let stored = conn
-                .query_row(
-                "SELECT write_id, changeset, inverse_changeset, base, blob_facts FROM store_writes
-                 WHERE status = '\"pending\"'
-                   AND ordinal = (
-                       SELECT MIN(ordinal) FROM store_writes
-                       WHERE status != '\"local_only\"'
-                         AND json_extract(status, '$.published') IS NULL
-                         AND json_extract(status, '$.resolved') IS NULL
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
-                   )
-                 ORDER BY ordinal LIMIT 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
-                .optional()
-                .map_err(DbError::from)?;
-                let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored
-                else {
-                    return Ok(None);
-                };
-                let partitions = Self::store_write_partitions_on(conn, &write_id, &changeset)?;
-                Ok(Some(PreparedStoreWrite {
-                    write_id: WriteId::from_generated(write_id),
-                    changeset,
-                    partitions,
-                    inverse_changeset,
-                    base: serde_json::from_str(&base).map_err(|error| {
-                        DbError::Message(format!("pending write base: {error}"))
-                    })?,
-                    blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
-                        DbError::Message(format!("pending write blob facts: {error}"))
-                    })?,
-                }))
-            })
-            .await
-    }
-
-    pub(crate) fn store_write_partitions_on(
-        conn: &Connection,
-        write_id: &str,
-        stored_store_changeset: &[u8],
-    ) -> Result<PreparedStoreWritePartitions, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT audience, control_coord, changeset
-                 FROM store_write_partitions
-                 WHERE write_id = ?1
-                 ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
-                          audience, control_coord",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([write_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        let mut store = None;
-        let mut circles = Vec::new();
-        let mut local = None;
-        for row in rows {
-            let (audience, control, changeset) = row.map_err(DbError::from)?;
-            if audience == "store" {
-                if control.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} Store partition carries a Circle control"
-                    )));
-                }
-                if store.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} carries more than one Store partition"
-                    )));
-                }
-                store = Some(AudiencePartition {
-                    audience: crate::protocol::circle::Audience::Store,
-                    control: None,
-                    changeset,
-                });
-                continue;
-            }
-            if audience == "local" {
-                if control.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} Local partition carries a Circle control"
-                    )));
-                }
-                if local.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} carries more than one Local partition"
-                    )));
-                }
-                local = Some(AudiencePartition {
-                    audience: crate::protocol::circle::Audience::Local,
-                    control: None,
-                    changeset,
-                });
-                continue;
-            }
-            let circle_id = audience
-                .parse::<crate::protocol::circle::CircleId>()
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "pending write {write_id} has invalid audience {audience:?}: {error}"
-                    ))
-                })?;
-            let control_json = control.ok_or_else(|| {
-                DbError::Message(format!(
-                    "pending write {write_id} Circle {circle_id} has no control coordinate"
-                ))
-            })?;
-            let control =
-                CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
-                    DbError::Message(format!(
-                        "pending write {write_id} Circle {circle_id} control coordinate: {error}"
-                    ))
-                })?;
-            circles.push(AudiencePartition {
-                audience: crate::protocol::circle::Audience::Circle(circle_id),
-                control: Some(control),
-                changeset,
-            });
-        }
-        drop(statement);
-        match &store {
-            Some(partition) if partition.changeset != stored_store_changeset => {
-                return Err(DbError::Message(format!(
-                    "pending write {write_id} Store partition differs from store_writes.changeset"
-                )));
-            }
-            None if !stored_store_changeset.is_empty() => {
-                return Err(DbError::Message(format!(
-                    "pending write {write_id} has a store_writes.changeset without a Store partition"
-                )));
-            }
-            Some(_) | None => {}
-        }
-        Ok(PreparedStoreWritePartitions {
-            store,
-            circles,
-            local,
-        })
     }
 }
 

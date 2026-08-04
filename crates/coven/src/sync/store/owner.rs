@@ -97,30 +97,6 @@ impl BlobDownload {
 }
 
 impl Store {
-    #[cfg(test)]
-    pub(crate) fn with_test_storage(&self, storage: Arc<dyn SyncStorage>) -> Self {
-        Self::new(
-            self.database.clone(),
-            storage,
-            self.store_dir.clone(),
-            self.identity.clone(),
-            self.device_id.clone(),
-            self.root.clone(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_test_store_dir(&self, store_dir: StoreDir) -> Self {
-        Self::new(
-            self.database.clone(),
-            self.storage.clone(),
-            store_dir,
-            self.identity.clone(),
-            self.device_id.clone(),
-            self.root.clone(),
-        )
-    }
-
     pub(crate) fn device_join_transport(
         &self,
     ) -> device_join_transport::StoreDeviceJoinTransport<'_> {
@@ -425,20 +401,6 @@ impl Store {
         self.storage.self_uploader()
     }
 
-    #[cfg(test)]
-    pub(crate) async fn circle_epoch_access(
-        &self,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<
-        Option<crate::sync::store::circle_controls::CircleEpochAccess>,
-        crate::database::DbError,
-    > {
-        self.database
-            .circle_epoch_access(self.root.reference().clone(), circle_id, expected_control)
-            .await
-    }
-
     #[doc(hidden)]
     pub(crate) async fn discard_blocked_write(
         &self,
@@ -586,15 +548,6 @@ impl Store {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn owner_recovery_for_test(&self) -> Result<RestoringStore<'_>, String> {
-        Ok(self
-            .authorize()
-            .await
-            .map_err(|error| error.to_string())?
-            .bind_restore_for_test())
-    }
-
     pub(crate) async fn authorize_writer(
         &self,
     ) -> Result<AuthorizedWriterOperation<'_>, writer::StoreWriterAuthorizationError> {
@@ -608,44 +561,6 @@ impl Store {
             .into_writer()
             .await
             .map_err(writer::StoreWriterAuthorizationError::Registration)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn prepare_wrapped_key_for_test(
-        &self,
-        recipient: &str,
-        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<crate::protocol::wrapped_store_key::PreparedWrappedStoreKey, String> {
-        let authorization = self.authorize().await.map_err(|error| error.to_string())?;
-        authorization
-            .prepare_wrapped_key_for_test(recipient, value)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn open_membership_keyring_for_test(
-        &self,
-    ) -> Result<crate::encryption::EncryptionService, String> {
-        let authorization = self.authorize().await.map_err(|error| error.to_string())?;
-        authorization
-            .open_membership_keyring_for_test()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn blob_protection_for_test(
-        &self,
-        authority: &crate::protocol::blob::RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
-        self.authorize_history()
-            .await
-            .map_err(|error| error.to_string())?
-            .blob_protection_for_test(authority, stored)
-            .await
-            .map_err(|error| error.to_string())
     }
 
     #[doc(hidden)]
@@ -742,6 +657,144 @@ impl Store {
             .owner_promotion()
             .finalize(encryption, acceptance)
             .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn invite_member(
+        &self,
+        public_key_hex: &str,
+        invitee_email: Option<&str>,
+        role: crate::protocol::membership::MemberRole,
+        encryption: &crate::encryption::EncryptionService,
+        store_id: &str,
+        store_name: &str,
+    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
+    {
+        let mut authorization = self.authorize_writer().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        authorization
+            .invite_member(
+                public_key_hex,
+                invitee_email,
+                role,
+                encryption,
+                store_id,
+                store_name,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn remove_member(
+        &self,
+        public_key_hex: &str,
+        encryption: &crate::encryption::EncryptionService,
+        security: &dyn crate::sync::RotationKeyAdoption,
+        cipher: &dyn crate::storage::CloudCipherAccess,
+        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+    ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
+        let mut authorization = self.authorize_writer().await.map_err(|error| {
+            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
+                error.to_string(),
+            ))
+        })?;
+        authorization
+            .remove_member(
+                public_key_hex,
+                encryption,
+                security,
+                cipher,
+                pending_rotation,
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_storage(&self, storage: Arc<dyn SyncStorage>) -> Self {
+        Self::new(
+            self.database.clone(),
+            storage,
+            self.store_dir.clone(),
+            self.identity.clone(),
+            self.device_id.clone(),
+            self.root.clone(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_store_dir(&self, store_dir: StoreDir) -> Self {
+        Self::new(
+            self.database.clone(),
+            self.storage.clone(),
+            store_dir,
+            self.identity.clone(),
+            self.device_id.clone(),
+            self.root.clone(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn circle_epoch_access(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        expected_control: crate::protocol::circle::CircleControlCoord,
+    ) -> Result<
+        Option<crate::sync::store::circle_controls::CircleEpochAccess>,
+        crate::database::DbError,
+    > {
+        self.database
+            .circle_epoch_access(self.root.reference().clone(), circle_id, expected_control)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn owner_recovery_for_test(&self) -> Result<RestoringStore<'_>, String> {
+        Ok(self
+            .authorize()
+            .await
+            .map_err(|error| error.to_string())?
+            .bind_restore_for_test())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_wrapped_key_for_test(
+        &self,
+        recipient: &str,
+        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
+    ) -> Result<crate::protocol::wrapped_store_key::PreparedWrappedStoreKey, String> {
+        let authorization = self.authorize().await.map_err(|error| error.to_string())?;
+        authorization
+            .prepare_wrapped_key_for_test(recipient, value)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_membership_keyring_for_test(
+        &self,
+    ) -> Result<crate::encryption::EncryptionService, String> {
+        let authorization = self.authorize().await.map_err(|error| error.to_string())?;
+        authorization
+            .open_membership_keyring_for_test()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn blob_protection_for_test(
+        &self,
+        authority: &crate::protocol::blob::RowBlobAuthority,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
+        self.authorize_history()
+            .await
+            .map_err(|error| error.to_string())?
+            .blob_protection_for_test(authority, stored)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     #[cfg(test)]
@@ -1611,90 +1664,7 @@ impl Store {
             .load_head_for_test(reference, registration, commit)
             .await
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn invite_member(
-        &self,
-        public_key_hex: &str,
-        invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
-        encryption: &crate::encryption::EncryptionService,
-        store_id: &str,
-        store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
-    {
-        let mut authorization = self.authorize_writer().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
-        authorization
-            .invite_member(
-                public_key_hex,
-                invitee_email,
-                role,
-                encryption,
-                store_id,
-                store_name,
-            )
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn remove_member(
-        &self,
-        public_key_hex: &str,
-        encryption: &crate::encryption::EncryptionService,
-        security: &dyn crate::sync::RotationKeyAdoption,
-        cipher: &dyn crate::storage::CloudCipherAccess,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
-    ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
-        let mut authorization = self.authorize_writer().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
-        authorization
-            .remove_member(
-                public_key_hex,
-                encryption,
-                security,
-                cipher,
-                pending_rotation,
-            )
-            .await
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
-
-    #[tokio::test]
-    async fn loaded_store_authorization_retains_its_verified_root() {
-        let db = open_test_db();
-        let signer = UserKeypair::generate();
-        let home = crate::sync::test_helpers::test_cloud_home();
-        let fixture =
-            TestStore::create(&db, "retained-root-authority", signer.clone(), home.clone())
-                .await
-                .expect("create Store");
-        let (_store_dir_temp, store_dir) = temp_store_dir();
-        let store = Store::load(
-            crate::database::StoreDatabase::new(&db),
-            fixture.clone(),
-            store_dir,
-            signer,
-        )
-        .await
-        .expect("load Store");
-
-        home.remove_exact_object(fixture.root.object.slot());
-
-        store
-            .authorize()
-            .await
-            .expect("authorize from the root verified while loading");
-    }
-}
+mod tests;

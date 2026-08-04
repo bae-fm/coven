@@ -876,6 +876,100 @@ impl<'a> ExcludedPeer<'a> {
             ),
         }
     }
+
+    async fn finish_prepared_cleanup(
+        &self,
+        signer: &UserKeypair,
+        write_id: WriteId,
+        candidates: &crate::database::PreparedMergeAbandonmentCandidates,
+        candidate_commit_context: &ProtocolObjectContext,
+        publication: PreparedAbandonmentHeadPublication,
+    ) {
+        self.pull_exclusion(ExpectedHeldCandidate::None).await;
+        match publication {
+            PreparedAbandonmentHeadPublication::Absent => {}
+            PreparedAbandonmentHeadPublication::Original => {
+                self.store
+                    .publish_prepared_protocol_object(&candidates.candidate.head.prepared)
+                    .await
+                    .expect("publish exact original candidate head");
+            }
+            PreparedAbandonmentHeadPublication::Authority => {
+                self.store
+                    .publish_prepared_protocol_object(&candidates.authority.commit.prepared)
+                    .await
+                    .expect("publish abandonment authority commit");
+                self.store
+                    .publish_prepared_protocol_object(&candidates.authority.head.prepared)
+                    .await
+                    .expect("publish exact abandonment authority head");
+            }
+            PreparedAbandonmentHeadPublication::ThirdWinner => {
+                self.store
+                    .publish_third_candidate_winner(self.database, &candidates.candidate)
+                    .await;
+            }
+        }
+        assert_eq!(
+            self.store
+                .bind_device(self.database, signer)
+                .await
+                .expect("bind Merge abandonment Store")
+                .abandon_merge_candidate(write_id.clone())
+                .await
+                .expect("exclude prepared abandonment candidates"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+        for reference in [
+            &candidates.candidate.head.value.commit,
+            &candidates.authority.head.value.commit,
+        ] {
+            let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
+                &reference.object,
+                ".json",
+            )
+            .expect("derive cleaned candidate commit prefix");
+            assert!(matches!(
+                self.store
+                    .read_exact_protocol_object(
+                        candidate_commit_context,
+                        &reference.object,
+                        &prefix,
+                    )
+                    .await,
+                Err(crate::protocol::objects::StorageError::NotFound(_))
+            ));
+        }
+        let peer_store = self
+            .store
+            .bind_device(self.database, signer)
+            .await
+            .expect("bind exclusion cleanup Store");
+        for commit in [
+            &candidates.candidate.commit.value,
+            &candidates.authority.commit.value,
+        ] {
+            if commit.store_package().is_some() {
+                assert!(matches!(
+                    peer_store
+                        .load_store_package_for_test(commit.reference())
+                        .await,
+                    Err(StoreError::Object(
+                        crate::protocol::objects::StoreObjectError::Storage(
+                            crate::protocol::objects::StorageError::NotFound(_)
+                        )
+                    ))
+                ));
+            }
+        }
+        assert_eq!(
+            crate::database::StoreDatabase::new(self.database)
+                .discard_blocked_write(&write_id)
+                .await
+                .expect("discard excluded prepared abandonment write"),
+            crate::database::BlockedWriteDiscard::Discarded(vec![write_id]),
+        );
+    }
 }
 
 fn indexed_shared_blob(
@@ -1867,102 +1961,6 @@ async fn run_excluded_author_candidate_cleanup_case(
                 .pull_exclusion(ExpectedHeldCandidate::None),
         )
         .await;
-    }
-}
-
-impl ExcludedPeer<'_> {
-    async fn finish_prepared_cleanup(
-        &self,
-        signer: &UserKeypair,
-        write_id: WriteId,
-        candidates: &crate::database::PreparedMergeAbandonmentCandidates,
-        candidate_commit_context: &ProtocolObjectContext,
-        publication: PreparedAbandonmentHeadPublication,
-    ) {
-        self.pull_exclusion(ExpectedHeldCandidate::None).await;
-        match publication {
-            PreparedAbandonmentHeadPublication::Absent => {}
-            PreparedAbandonmentHeadPublication::Original => {
-                self.store
-                    .publish_prepared_protocol_object(&candidates.candidate.head.prepared)
-                    .await
-                    .expect("publish exact original candidate head");
-            }
-            PreparedAbandonmentHeadPublication::Authority => {
-                self.store
-                    .publish_prepared_protocol_object(&candidates.authority.commit.prepared)
-                    .await
-                    .expect("publish abandonment authority commit");
-                self.store
-                    .publish_prepared_protocol_object(&candidates.authority.head.prepared)
-                    .await
-                    .expect("publish exact abandonment authority head");
-            }
-            PreparedAbandonmentHeadPublication::ThirdWinner => {
-                self.store
-                    .publish_third_candidate_winner(self.database, &candidates.candidate)
-                    .await;
-            }
-        }
-        assert_eq!(
-            self.store
-                .bind_device(self.database, signer)
-                .await
-                .expect("bind Merge abandonment Store")
-                .abandon_merge_candidate(write_id.clone())
-                .await
-                .expect("exclude prepared abandonment candidates"),
-            MergeCandidateAbandonment::Abandoned,
-        );
-        for reference in [
-            &candidates.candidate.head.value.commit,
-            &candidates.authority.head.value.commit,
-        ] {
-            let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
-                &reference.object,
-                ".json",
-            )
-            .expect("derive cleaned candidate commit prefix");
-            assert!(matches!(
-                self.store
-                    .read_exact_protocol_object(
-                        candidate_commit_context,
-                        &reference.object,
-                        &prefix,
-                    )
-                    .await,
-                Err(crate::protocol::objects::StorageError::NotFound(_))
-            ));
-        }
-        let peer_store = self
-            .store
-            .bind_device(self.database, signer)
-            .await
-            .expect("bind exclusion cleanup Store");
-        for commit in [
-            &candidates.candidate.commit.value,
-            &candidates.authority.commit.value,
-        ] {
-            if commit.store_package().is_some() {
-                assert!(matches!(
-                    peer_store
-                        .load_store_package_for_test(commit.reference())
-                        .await,
-                    Err(StoreError::Object(
-                        crate::protocol::objects::StoreObjectError::Storage(
-                            crate::protocol::objects::StorageError::NotFound(_)
-                        )
-                    ))
-                ));
-            }
-        }
-        assert_eq!(
-            crate::database::StoreDatabase::new(self.database)
-                .discard_blocked_write(&write_id)
-                .await
-                .expect("discard excluded prepared abandonment write"),
-            crate::database::BlockedWriteDiscard::Discarded(vec![write_id]),
-        );
     }
 }
 

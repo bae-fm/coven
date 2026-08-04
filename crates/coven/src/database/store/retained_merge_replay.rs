@@ -2454,47 +2454,6 @@ impl StoreDatabase {
             .map_err(|error| DbError::Message(format!("retained Merge checkpoint: {error}")))
     }
 
-    #[cfg(test)]
-    pub(crate) fn load_retained_merge_replay_inputs_on(
-        conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT device_id, seq, commit_ref, input_hash
-                 FROM retained_merge_materializations
-                 ORDER BY device_id, seq",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
-        rows.into_iter()
-            .map(|(stream_id, sequence, encoded_ref, input_hash)| {
-                let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-                let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
-                Self::load_retained_merge_materialization_on(
-                    conn,
-                    root,
-                    &stream_id,
-                    sequence,
-                    &commit_ref,
-                    &input_hash,
-                )
-            })
-            .collect()
-    }
-
     pub(crate) fn load_merge_replay_write_overlays_on(
         conn: &Connection,
         active_accepted_writes: &BTreeSet<WriteId>,
@@ -2667,6 +2626,47 @@ impl StoreDatabase {
             ));
         }
         Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_retained_merge_replay_inputs_on(
+        conn: &Connection,
+        root: &crate::protocol::store_commit::StoreRootRef,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT device_id, seq, commit_ref, input_hash
+                 FROM retained_merge_materializations
+                 ORDER BY device_id, seq",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        rows.into_iter()
+            .map(|(stream_id, sequence, encoded_ref, input_hash)| {
+                let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
+                let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+                Self::load_retained_merge_materialization_on(
+                    conn,
+                    root,
+                    &stream_id,
+                    sequence,
+                    &commit_ref,
+                    &input_hash,
+                )
+            })
+            .collect()
     }
 }
 

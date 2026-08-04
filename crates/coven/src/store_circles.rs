@@ -49,16 +49,6 @@ impl StoreCircles {
         self.sync.create_circle(name).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn install_test_active_circle(
-        &self,
-        label: &str,
-    ) -> Result<crate::CircleId, crate::database::DbError> {
-        self.database
-            .install_test_active_circle(label.to_string())
-            .await
-    }
-
     pub(crate) async fn rename(
         &self,
         circle_id: crate::CircleId,
@@ -167,5 +157,15 @@ impl StoreCircles {
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleCloseStatus, crate::CircleError> {
         self.sync.circle_close_status(circle_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_test_active_circle(
+        &self,
+        label: &str,
+    ) -> Result<crate::CircleId, crate::database::DbError> {
+        self.database
+            .install_test_active_circle(label.to_string())
+            .await
     }
 }

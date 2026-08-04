@@ -177,17 +177,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             physical_copies_deleted: packages_deleted,
         })
     }
-}
 
-/// Authorize deletion of every Circle package the Circle's current epoch cutoff
-/// excludes. A package addressed to a closed epoch whose activating commit the
-/// close cutoff does not accept never materializes on any device — it is invalid
-/// by construction — so it is eligible once the successor epoch activated, with no
-/// snapshot coverage or acknowledgement evidence required. Enumerated from this
-/// device's accepted history rather than a snapshot cut, because such a package is
-/// by definition outside every snapshot's coverage.
-#[allow(clippy::too_many_arguments)]
-impl AuthorizedReclaim<'_, '_> {
     async fn prepare_beyond_cutoff_circle_authorizations(
         &mut self,
         circle_id: CircleId,
@@ -253,35 +243,7 @@ impl AuthorizedReclaim<'_, '_> {
         }
         Ok(())
     }
-}
 
-/// The package in one commit that could have published a blob of this audience.
-/// The blob's own locator names its audience, and a commit carries at most one
-/// package per audience, so the audience selects the package outright.
-fn audience_blob_binding_package(
-    commit: &crate::protocol::store_commit::StoreBatchCommit,
-    audience: crate::protocol::blob::locator::RemoteAudience,
-) -> Option<AudienceBlobBindingPackage> {
-    match audience {
-        crate::protocol::blob::locator::RemoteAudience::Store => commit
-            .store_package()
-            .cloned()
-            .map(AudienceBlobBindingPackage::Store),
-        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id) => commit
-            .circle_packages()
-            .iter()
-            .find(|package| package.circle_id == circle_id)
-            .cloned()
-            .map(AudienceBlobBindingPackage::Circle),
-    }
-}
-
-/// Authorize deletion of every row blob no live row still binds in its audience.
-/// Moving a row to another audience republishes its blob under a new locator and
-/// drops the old binding, stranding the source ciphertext; nothing else ever
-/// deletes it. The same orphan test the member-signed tombstone path applies
-/// decides eligibility, and an image that still pins the blob holds it back.
-impl AuthorizedReclaim<'_, '_> {
     async fn prepare_audience_blob_authorizations(&mut self) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
         for (blob, owners) in database.stored_blob_reclaim_candidates().await? {
@@ -330,16 +292,7 @@ impl AuthorizedReclaim<'_, '_> {
         }
         Ok(())
     }
-}
 
-/// Authorize deletion of every Circle snapshot image a later generation of the
-/// same device's stream has superseded: that later generation's cut strictly
-/// dominates the reclaimed one and every device holding active Circle access has
-/// acknowledged it, so no reader will ever install from the older image again.
-/// Only images are enumerated — the metadata chain is what a reader walks to find
-/// any generation at all, so it is never a target.
-#[allow(clippy::too_many_arguments)]
-impl AuthorizedReclaim<'_, '_> {
     async fn prepare_circle_snapshot_image_authorizations(
         &mut self,
         circle_id: CircleId,
@@ -385,14 +338,7 @@ impl AuthorizedReclaim<'_, '_> {
         }
         Ok(())
     }
-}
 
-/// Enumerate every reclaimable Circle package: for each Circle this device holds
-/// active access to, select the maximal acknowledgement-stable Circle snapshot,
-/// and authorize each package its cut covers that is not still a retained replay
-/// input. Mirrors the Store package pass over Circle coverage evidence.
-#[allow(clippy::too_many_arguments)]
-impl AuthorizedReclaim<'_, '_> {
     async fn prepare_circle_authorizations(
         &mut self,
         registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
@@ -466,46 +412,7 @@ impl AuthorizedReclaim<'_, '_> {
         }
         Ok(())
     }
-}
 
-/// The maximal stable Circle snapshot: the one whose cut no other stable
-/// snapshot strictly dominates.
-fn maximal_stable_circle_snapshot(
-    stable: &[SelectedCircleSnapshot],
-) -> Option<&SelectedCircleSnapshot> {
-    let coverages: Vec<&CommitFrontier> = stable
-        .iter()
-        .map(|candidate| &candidate.meta.bootstrap.coverage)
-        .collect();
-    stable
-        .iter()
-        .filter(|candidate| {
-            !coverages.iter().any(|other| {
-                super::snapshot::coverage_dominates(other, &candidate.meta.bootstrap.coverage)
-            })
-        })
-        .max_by_key(|candidate| candidate.reference.snapshot_hash)
-}
-
-/// A stable Circle snapshot strictly supersedes a bootstrap seed when its cut
-/// covers the seed and is not equal to it — the recipient has moved to a later
-/// sufficient snapshot, not merely re-published coverage at the seed's own cut.
-/// The strict inequality is load-bearing: a snapshot whose cut equals the seed
-/// leaves the recipient exactly at its bootstrap and must not reclaim it.
-fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFrontier) -> bool {
-    cut.covers(seed) && cut != seed
-}
-
-/// Authorize deletion of every Circle bootstrap image no recipient still needs.
-/// Each device's activated acknowledgement names the exact coverage its
-/// projection was seeded from; the seed image is superseded either when a stable
-/// Circle snapshot's cut strictly dominates it — the "later sufficient snapshot"
-/// every active-access device acknowledged — while the recipient still holds
-/// access, or when the recipient's owner lost Circle authority under a successor
-/// control. The coverage the Owner deletes is taken from the recipient's own
-/// signed acknowledgement, never fabricated.
-#[allow(clippy::too_many_arguments)]
-impl AuthorizedReclaim<'_, '_> {
     async fn prepare_circle_bootstrap_authorizations(
         &mut self,
         circle_id: CircleId,
@@ -587,9 +494,7 @@ impl AuthorizedReclaim<'_, '_> {
         }
         Ok(())
     }
-}
 
-impl AuthorizedReclaim<'_, '_> {
     async fn prepare_authorization(
         &mut self,
         claim: ReclaimClaim,
@@ -683,9 +588,7 @@ impl AuthorizedReclaim<'_, '_> {
         Box::pin(database.begin_store_reclaim_operation(operation)).await?;
         Ok(())
     }
-}
 
-impl AuthorizedReclaim<'_, '_> {
     async fn resume_operations(&mut self) -> Result<u64, StoreReclaimError> {
         let database = self.database.clone();
         let mut completed = 0_u64;
@@ -725,9 +628,7 @@ impl AuthorizedReclaim<'_, '_> {
             }
         }
     }
-}
 
-impl AuthorizedReclaim<'_, '_> {
     async fn execute_delete(
         &mut self,
         operation: DurableStoreReclaimOperation,
@@ -764,11 +665,7 @@ impl AuthorizedReclaim<'_, '_> {
             .await?;
         Ok(())
     }
-}
 
-/// Whether the reclaim target is still an accepted-replay input for its audience.
-/// The authority spine never becomes eligible while replay names it.
-impl AuthorizedReclaim<'_, '_> {
     async fn target_is_retained(&self, target: &ReclaimTarget) -> Result<bool, StoreReclaimError> {
         let database = &self.database;
         let root = &self.root;
@@ -798,9 +695,7 @@ impl AuthorizedReclaim<'_, '_> {
                 .await?),
         }
     }
-}
 
-impl AuthorizedReclaim<'_, '_> {
     async fn verify_authorized(
         &mut self,
         authorization_ref: &ReclaimAuthorizationRef,
@@ -814,9 +709,7 @@ impl AuthorizedReclaim<'_, '_> {
             .await?;
         self.verify_evidence(&opened.evidence.value).await
     }
-}
 
-impl AuthorizedReclaim<'_, '_> {
     async fn verify_authorization_activation(
         &mut self,
         authorization: &ReclaimAuthorizationRef,
@@ -864,13 +757,7 @@ impl AuthorizedReclaim<'_, '_> {
             .await
             .map_err(StoreReclaimError::from)
     }
-}
 
-/// Re-verify a reclaim's eligibility from its signed evidence and current live
-/// state, returning the exact object the authorization may delete. Runs both at
-/// prepare time and again before deletion, so a change in coverage, acknowledgement,
-/// or replay retention since authoring fails the delete loud.
-impl AuthorizedReclaim<'_, '_> {
     async fn verify_evidence(
         &mut self,
         evidence: &ReclaimEvidence,
@@ -1685,9 +1572,7 @@ impl AuthorizedReclaim<'_, '_> {
         .await?;
         Ok(())
     }
-}
 
-impl AuthorizedReclaim<'_, '_> {
     async fn verify_target_absent(&self, target: &ReclaimTarget) -> Result<(), StoreReclaimError> {
         let database = &self.database;
         let storage = self.storage.clone();
@@ -1823,15 +1708,7 @@ impl AuthorizedReclaim<'_, '_> {
             Err(error) => Err(StoreReclaimError::Storage(error)),
         }
     }
-}
 
-#[derive(Clone)]
-struct VerifiedReclaimSnapshot {
-    snapshot: crate::database::PublishedStoreSnapshot,
-    acknowledgements: Vec<StoreAckRef>,
-}
-
-impl AuthorizedReclaim<'_, '_> {
     async fn choose_snapshot(
         &mut self,
         registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
@@ -1905,6 +1782,61 @@ impl AuthorizedReclaim<'_, '_> {
             acknowledgements,
         })
     }
+}
+
+/// The package in one commit that could have published a blob of this audience.
+/// The blob's own locator names its audience, and a commit carries at most one
+/// package per audience, so the audience selects the package outright.
+fn audience_blob_binding_package(
+    commit: &crate::protocol::store_commit::StoreBatchCommit,
+    audience: crate::protocol::blob::locator::RemoteAudience,
+) -> Option<AudienceBlobBindingPackage> {
+    match audience {
+        crate::protocol::blob::locator::RemoteAudience::Store => commit
+            .store_package()
+            .cloned()
+            .map(AudienceBlobBindingPackage::Store),
+        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id) => commit
+            .circle_packages()
+            .iter()
+            .find(|package| package.circle_id == circle_id)
+            .cloned()
+            .map(AudienceBlobBindingPackage::Circle),
+    }
+}
+
+/// The maximal stable Circle snapshot: the one whose cut no other stable
+/// snapshot strictly dominates.
+fn maximal_stable_circle_snapshot(
+    stable: &[SelectedCircleSnapshot],
+) -> Option<&SelectedCircleSnapshot> {
+    let coverages: Vec<&CommitFrontier> = stable
+        .iter()
+        .map(|candidate| &candidate.meta.bootstrap.coverage)
+        .collect();
+    stable
+        .iter()
+        .filter(|candidate| {
+            !coverages.iter().any(|other| {
+                super::snapshot::coverage_dominates(other, &candidate.meta.bootstrap.coverage)
+            })
+        })
+        .max_by_key(|candidate| candidate.reference.snapshot_hash)
+}
+
+/// A stable Circle snapshot strictly supersedes a bootstrap seed when its cut
+/// covers the seed and is not equal to it — the recipient has moved to a later
+/// sufficient snapshot, not merely re-published coverage at the seed's own cut.
+/// The strict inequality is load-bearing: a snapshot whose cut equals the seed
+/// leaves the recipient exactly at its bootstrap and must not reclaim it.
+fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFrontier) -> bool {
+    cut.covers(seed) && cut != seed
+}
+
+#[derive(Clone)]
+struct VerifiedReclaimSnapshot {
+    snapshot: crate::database::PublishedStoreSnapshot,
+    acknowledgements: Vec<StoreAckRef>,
 }
 
 #[cfg(test)]

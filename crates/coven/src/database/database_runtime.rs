@@ -1,36 +1,6 @@
 use super::*;
 
 impl Database {
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn arm_test_pause(
-        &self,
-        point: DatabaseTestPoint,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.state.test_pause_points.arm(point)
-    }
-
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn observe_test_points(
-        &self,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<DatabaseTestPoint> {
-        self.state.test_pause_points.observe()
-    }
-
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn fail_next_merge_materialization_at(
-        &self,
-        point: MergeMaterializationFailurePoint,
-    ) {
-        *self
-            .state
-            .merge_materialization_failure
-            .lock()
-            .expect("Merge materialization failure lock poisoned") = Some(point);
-    }
-
     /// Open and own the connection at `path`.
     ///
     /// Runs the host migration ladder and validates its final sync-routing
@@ -81,32 +51,6 @@ impl Database {
             Arc::new(hlc),
             migrations,
             CovenMetadataOpen::VerifiedSnapshot(install),
-        )
-    }
-
-    /// Open with a caller-supplied register clock instead of a fresh
-    /// system-wall-clock one. Lets a test inject an [`Hlc`] over a controlled
-    /// wall clock to exercise the skew/restart-seeding guarantees, sharing the
-    /// production open path (migration, seed, session) so the test drives the
-    /// real unit.
-    ///
-    #[cfg(test)]
-    pub(crate) fn open_with_hlc(
-        path: &Path,
-        synced_tables: Vec<SyncedTable>,
-        blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::protocol::blob::TransferLimits,
-        hlc: Arc<Hlc>,
-        migrations: &[Migration],
-    ) -> Result<Database, OpenError> {
-        Self::open_with_hlc_and_coven_metadata(
-            path,
-            synced_tables,
-            blob_tombstone_grace,
-            transfer_limits,
-            hlc,
-            migrations,
-            CovenMetadataOpen::Detect,
         )
     }
 
@@ -175,6 +119,62 @@ impl Database {
             connection: DatabaseConnection::start(core, "coven-db-ro")?,
             state,
         })
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn arm_test_pause(
+        &self,
+        point: DatabaseTestPoint,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.state.test_pause_points.arm(point)
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn observe_test_points(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<DatabaseTestPoint> {
+        self.state.test_pause_points.observe()
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn fail_next_merge_materialization_at(
+        &self,
+        point: MergeMaterializationFailurePoint,
+    ) {
+        *self
+            .state
+            .merge_materialization_failure
+            .lock()
+            .expect("Merge materialization failure lock poisoned") = Some(point);
+    }
+
+    /// Open with a caller-supplied register clock instead of a fresh
+    /// system-wall-clock one. Lets a test inject an [`Hlc`] over a controlled
+    /// wall clock to exercise the skew/restart-seeding guarantees, sharing the
+    /// production open path (migration, seed, session) so the test drives the
+    /// real unit.
+    ///
+    #[cfg(test)]
+    pub(crate) fn open_with_hlc(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::protocol::blob::TransferLimits,
+        hlc: Arc<Hlc>,
+        migrations: &[Migration],
+    ) -> Result<Database, OpenError> {
+        Self::open_with_hlc_and_coven_metadata(
+            path,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            hlc,
+            migrations,
+            CovenMetadataOpen::Detect,
+        )
     }
 
     #[cfg(test)]

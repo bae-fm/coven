@@ -56,6 +56,376 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     fn root(&self) -> &StoreRootRef {
         self.history.verified_root().reference()
     }
+
+    async fn load_stream(
+        &self,
+        circle_id: CircleId,
+        encryption: EncryptionService,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
+        let context = ProtocolObjectContext::circle(
+            self.root().store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotMeta,
+            encryption,
+        );
+        Ok(self
+            .load_stream_refs_with_context(circle_id, context, registration_ref, registration)
+            .await?
+            .into_iter()
+            .map(|(_, meta)| meta)
+            .collect())
+    }
+
+    /// Each Circle snapshot in the per-(device, Circle) stream paired with its exact
+    /// reference — the reference a reclaim locator or restore selection binds.
+    pub(crate) async fn load_stream_refs(
+        &self,
+        circle_id: CircleId,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<
+        Vec<(
+            crate::protocol::store_commit::CircleSnapshotRef,
+            CircleSnapshotMeta,
+        )>,
+        SnapshotError,
+    > {
+        let context = access.protocol_context(
+            self.root().store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotMeta,
+        );
+        self.load_stream_refs_with_context(circle_id, context, registration_ref, registration)
+            .await
+    }
+
+    async fn load_stream_refs_with_context(
+        &self,
+        circle_id: CircleId,
+        context: ProtocolObjectContext,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<
+        Vec<(
+            crate::protocol::store_commit::CircleSnapshotRef,
+            CircleSnapshotMeta,
+        )>,
+        SnapshotError,
+    > {
+        let storage = self.storage;
+        let root = self.root();
+        if registration_ref.device_id != registration.device_id {
+            return Err(SnapshotError::Parse(
+                "Circle snapshot registration reference names another device".to_string(),
+            ));
+        }
+        let device_id = registration.device_id.to_string();
+        let mut slot = crate::protocol::objects::ObjectSlot::logical(format!(
+            "{}.json",
+            circle_snapshot_slot_prefix(circle_id, &device_id, 0)
+        ))
+        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        let mut generation = 0_u64;
+        let mut predecessor = None;
+        let mut snapshots = Vec::new();
+        loop {
+            let prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
+            let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
+                Ok(value) => value,
+                Err(crate::protocol::objects::StorageError::NotFound(_)) => break,
+                Err(error) => return Err(SnapshotError::Bucket(error)),
+            };
+            let semantic_hash = CircleSnapshotMeta::semantic_hash_from_bytes(&bytes)
+                .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            let reference = crate::protocol::store_commit::CircleSnapshotRef {
+                generation,
+                snapshot_hash: semantic_hash,
+                object,
+            };
+            let meta = CircleSnapshotMeta::parse_at(
+                &bytes,
+                root.store_root_hash,
+                &reference,
+                registration,
+            )
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            if meta.circle_id != circle_id || meta.successor.predecessor != predecessor {
+                return Err(SnapshotError::Parse(
+                    "Circle snapshot stream has an invalid exact predecessor".to_string(),
+                ));
+            }
+            slot = meta.successor.next_slot.clone();
+            predecessor = Some(reference.clone());
+            snapshots.push((reference, meta));
+            generation = generation.checked_add(1).ok_or_else(|| {
+                SnapshotError::Parse("Circle snapshot generation overflow".to_string())
+            })?;
+        }
+        Ok(snapshots)
+    }
+
+    pub(crate) async fn select_staged_decisions(
+        &mut self,
+        store_frontier: &CommitFrontier,
+        restorer_identity: &UserKeypair,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+    ) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
+        use crate::database::StagedCircleDecision;
+        let root = self.root().clone();
+        // The stream-activation index the control-stream authority resolves against is
+        // written by the pull, which has not run on a freshly restored device; seed it
+        // from the retained materializations selection reads anyway.
+        let selection = self
+            .database
+            .prepare_circle_restore_selection(root.clone())
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        let device_registrations = self
+            .database
+            .activated_store_device_registration_records()
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+
+        let mut decisions = Vec::new();
+        for (circle_id, controls) in selection.circles {
+            let head = self
+                .database
+                .circle_restore_head(root.clone(), circle_id, controls)
+                .await
+                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            let Some((head_control, head_commit)) = head else {
+                warn!(%circle_id, "restore selection: Circle has no head control; clearing coverage");
+                decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
+                continue;
+            };
+
+            let access = self
+                .resolve_restorer_access(
+                    restorer_identity,
+                    routing_key,
+                    circle_id,
+                    &head_control,
+                    &head_commit,
+                )
+                .await?;
+            let (epoch_encryption, leaf_bootstrap) = match access {
+                // The restoring identity cannot decrypt this Circle — delete any
+                // preserved coverage row so replay never reconstructs an image it has
+                // no access to.
+                super::activation::LocalCircleAccess::NoAccess => {
+                    decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
+                    continue;
+                }
+                super::activation::LocalCircleAccess::Active {
+                    epoch_encryption,
+                    leaf_bootstrap,
+                } => (epoch_encryption, leaf_bootstrap),
+            };
+
+            let mut candidates: Vec<StagedCircleImageCandidate> = Vec::new();
+            // The restoring identity's own leaf-named bootstrap: the baseline for a
+            // Circle whose accessible content predates the identity's join and which no
+            // forward replay reconstructs.
+            if let Some(image) = leaf_bootstrap {
+                candidates.push(StagedCircleImageCandidate {
+                    activation_commit: head_commit.clone(),
+                    image,
+                });
+            }
+            for (activation_commit, image) in &selection.preserved_images {
+                if image.circle_id() == circle_id {
+                    candidates.push(StagedCircleImageCandidate {
+                        activation_commit: activation_commit.clone(),
+                        image: image.clone(),
+                    });
+                }
+            }
+            // Standalone Circle snapshots are sealed under the Circle epoch key the
+            // identity's active leaf carries, not the Store routing key.
+            if let Some(candidate) = self
+                .select_standalone_snapshot_candidate(
+                    circle_id,
+                    &head_control,
+                    &epoch_encryption,
+                    routing_key,
+                    &device_registrations,
+                )
+                .await?
+            {
+                candidates.push(candidate);
+            }
+
+            match choose_maximal_installable_candidate(circle_id, store_frontier, candidates)? {
+                Some(candidate) => decisions.push(StagedCircleDecision::Install {
+                    activation_commit: candidate.activation_commit,
+                    image: candidate.image,
+                }),
+                None => {
+                    warn!(
+                        %circle_id,
+                        "restore selection: Circle has active access but no coverage image; \
+                         it replays from live history if retained"
+                    );
+                }
+            }
+        }
+        Ok(decisions)
+    }
+
+    async fn resolve_restorer_access(
+        &mut self,
+        restorer_identity: &UserKeypair,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        circle_id: CircleId,
+        head_control: &CircleControlCoord,
+        head_commit: &crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<super::activation::LocalCircleAccess, SnapshotError> {
+        let commit_lookup = head_commit.clone();
+        let root = self.root().clone();
+        let owned = self
+            .database
+            .retained_merge_materialization_by_ref(root, commit_lookup)
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        let commit = owned.commit().clone();
+        let reference = owned
+            .circle_activations()
+            .circles()
+            .iter()
+            .find(|reference| {
+                reference.circle_id == circle_id && reference.control.coord == *head_control
+            })
+            .ok_or_else(|| {
+                SnapshotError::BootstrapState(format!(
+                "restore selection: Circle {circle_id} head control is absent from its retained \
+                 activation"
+            ))
+            })?;
+        super::activation::CircleActivationVerifier::new(self.database, self.storage, self.history)
+            .resolve_local_access(
+                &commit,
+                &reference.reference,
+                &reference.control,
+                restorer_identity,
+                routing_key,
+            )
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
+    }
+
+    async fn select_standalone_snapshot_candidate(
+        &self,
+        circle_id: CircleId,
+        head_control: &CircleControlCoord,
+        encryption: &EncryptionService,
+        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        device_registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
+    ) -> Result<Option<StagedCircleImageCandidate>, SnapshotError> {
+        let mut installable: Vec<(
+            CircleSnapshotMeta,
+            crate::protocol::store_commit::StoreBatchCommitRef,
+        )> = Vec::new();
+        for registration in device_registrations {
+            let stream = self
+                .load_stream(
+                    circle_id,
+                    encryption.clone(),
+                    registration.reference(),
+                    registration.value(),
+                )
+                .await?;
+            for snapshot in stream {
+                // A control reclaimed after an epoch close leaves its standalone snapshot
+                // superseded by the successor bootstrap the other candidates provide.
+                // Resolve retention before the lineage walk: the walk itself reads every
+                // covered control's retained activation, so it must not descend into a
+                // reclaimed control.
+                let retained_control = snapshot.control.clone();
+                let activation_commit = self
+                    .database
+                    .retained_circle_activation_commit_ref(circle_id, retained_control)
+                    .await
+                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                let Some(activation_commit) = activation_commit else {
+                    tracing::debug!(
+                        %circle_id,
+                        snapshot = %snapshot.snapshot_hash(),
+                        "restore selection: standalone Circle snapshot control was reclaimed; \
+                         superseded by the retained lineage"
+                    );
+                    continue;
+                };
+                // The head control must prove the snapshot control's lineage.
+                let snapshot_control = snapshot.control.clone();
+                let head = head_control.clone();
+                let covered = self
+                    .database
+                    .verified_circle_control_coord_covers(
+                        self.root().clone(),
+                        circle_id,
+                        head,
+                        snapshot_control,
+                    )
+                    .await
+                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                if covered {
+                    installable.push((snapshot, activation_commit));
+                }
+            }
+        }
+        let Some(selected) = select_maximal_circle_snapshot(
+            installable
+                .iter()
+                .map(|(snapshot, _)| snapshot.clone())
+                .collect(),
+        ) else {
+            return Ok(None);
+        };
+        let activation_commit = installable
+            .into_iter()
+            .find(|(snapshot, _)| snapshot.snapshot_hash() == selected.snapshot_hash())
+            .map(|(_, activation_commit)| activation_commit)
+            .expect("the selected standalone snapshot is one of the installable candidates");
+        let author_device = selected.author_registration.device_id.to_string();
+        let image_context = ProtocolObjectContext::circle(
+            self.root().store_root_hash,
+            ProtocolObjectDomain::CircleSnapshotImage,
+            encryption.clone(),
+        );
+        let image_bytes = self
+            .storage
+            .read_protocol_object(
+                &image_context,
+                &selected.bootstrap.image.object,
+                &circle_snapshot_image_semantic_prefix(
+                    circle_id,
+                    &author_device,
+                    selected.bootstrap.image.image_hash,
+                ),
+            )
+            .await
+            .map_err(SnapshotError::Bucket)?;
+        verify_circle_bootstrap_image(
+            &image_bytes,
+            &selected.bootstrap,
+            circle_id,
+            self.database.synced_tables(),
+            routing_key,
+        )
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        let image = crate::sync::store::circle_controls::VerifiedCircleImage::from_stored_image(
+            circle_id,
+            selected.control.clone(),
+            selected.bootstrap.clone(),
+            image_bytes,
+        )
+        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        Ok(Some(StagedCircleImageCandidate {
+            activation_commit,
+            image,
+        }))
+    }
 }
 
 impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
@@ -414,10 +784,8 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             })?;
         publication.publish_circle(pending).await
     }
-}
 
-#[cfg(test)]
-impl CircleSnapshotWriter<'_, '_> {
+    #[cfg(test)]
     pub(crate) async fn load_circle_snapshot_refs_for_test(
         &mut self,
         circle_id: CircleId,
@@ -436,6 +804,7 @@ impl CircleSnapshotWriter<'_, '_> {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn load_circle_snapshot_metas_for_test(
         &mut self,
         circle_id: CircleId,
@@ -448,6 +817,7 @@ impl CircleSnapshotWriter<'_, '_> {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
         &mut self,
         circle_id: CircleId,
@@ -493,6 +863,7 @@ impl CircleSnapshotWriter<'_, '_> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn author_one_circle_snapshot_for_test(
         &self,
         temp_dir: std::path::PathBuf,
@@ -529,121 +900,6 @@ impl CircleSnapshotWriter<'_, '_> {
     }
 }
 
-/// Load one device's Circle snapshot stream, decrypting each metadata object
-/// with the Circle epoch key. Generation zero sits at a deterministic slot the
-/// reader computes from the author's device id (a per-Circle stream has no
-/// registration anchor); later generations follow the create-once successor
-/// slot. The predecessor chain is verified exact.
-impl CircleSnapshotReader<'_, '_> {
-    async fn load_stream(
-        &self,
-        circle_id: CircleId,
-        encryption: EncryptionService,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
-        let context = ProtocolObjectContext::circle(
-            self.root().store_root_hash,
-            ProtocolObjectDomain::CircleSnapshotMeta,
-            encryption,
-        );
-        Ok(self
-            .load_stream_refs_with_context(circle_id, context, registration_ref, registration)
-            .await?
-            .into_iter()
-            .map(|(_, meta)| meta)
-            .collect())
-    }
-
-    /// Each Circle snapshot in the per-(device, Circle) stream paired with its exact
-    /// reference — the reference a reclaim locator or restore selection binds.
-    pub(crate) async fn load_stream_refs(
-        &self,
-        circle_id: CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<
-        Vec<(
-            crate::protocol::store_commit::CircleSnapshotRef,
-            CircleSnapshotMeta,
-        )>,
-        SnapshotError,
-    > {
-        let context = access.protocol_context(
-            self.root().store_root_hash,
-            ProtocolObjectDomain::CircleSnapshotMeta,
-        );
-        self.load_stream_refs_with_context(circle_id, context, registration_ref, registration)
-            .await
-    }
-
-    async fn load_stream_refs_with_context(
-        &self,
-        circle_id: CircleId,
-        context: ProtocolObjectContext,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<
-        Vec<(
-            crate::protocol::store_commit::CircleSnapshotRef,
-            CircleSnapshotMeta,
-        )>,
-        SnapshotError,
-    > {
-        let storage = self.storage;
-        let root = self.root();
-        if registration_ref.device_id != registration.device_id {
-            return Err(SnapshotError::Parse(
-                "Circle snapshot registration reference names another device".to_string(),
-            ));
-        }
-        let device_id = registration.device_id.to_string();
-        let mut slot = crate::protocol::objects::ObjectSlot::logical(format!(
-            "{}.json",
-            circle_snapshot_slot_prefix(circle_id, &device_id, 0)
-        ))
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-        let mut generation = 0_u64;
-        let mut predecessor = None;
-        let mut snapshots = Vec::new();
-        loop {
-            let prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
-            let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
-                Ok(value) => value,
-                Err(crate::protocol::objects::StorageError::NotFound(_)) => break,
-                Err(error) => return Err(SnapshotError::Bucket(error)),
-            };
-            let semantic_hash = CircleSnapshotMeta::semantic_hash_from_bytes(&bytes)
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-            let reference = crate::protocol::store_commit::CircleSnapshotRef {
-                generation,
-                snapshot_hash: semantic_hash,
-                object,
-            };
-            let meta = CircleSnapshotMeta::parse_at(
-                &bytes,
-                root.store_root_hash,
-                &reference,
-                registration,
-            )
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-            if meta.circle_id != circle_id || meta.successor.predecessor != predecessor {
-                return Err(SnapshotError::Parse(
-                    "Circle snapshot stream has an invalid exact predecessor".to_string(),
-                ));
-            }
-            slot = meta.successor.next_slot.clone();
-            predecessor = Some(reference.clone());
-            snapshots.push((reference, meta));
-            generation = generation.checked_add(1).ok_or_else(|| {
-                SnapshotError::Parse("Circle snapshot generation overflow".to_string())
-            })?;
-        }
-        Ok(snapshots)
-    }
-}
-
 /// The maximal Circle snapshot by coverage domination among candidates. Stability
 /// against Circle acknowledgements is applied by the caller; this returns the
 /// snapshot whose cut no other candidate strictly dominates.
@@ -671,297 +927,6 @@ struct StagedCircleImageCandidate {
 impl StagedCircleImageCandidate {
     fn coverage(&self) -> &CommitFrontier {
         &self.image.reference().coverage
-    }
-}
-
-/// Decide, per retained Circle, what the restoring identity stages: install a
-/// verified image, or clear a preserved coverage row it cannot decrypt.
-///
-/// The restoring identity's access is re-resolved from the verified control chain
-/// on the just-installed Store image — never the snapshot author's preserved
-/// access caches, which belong to another identity. For each Circle the identity
-/// holds active access to, the maximal verified image whose lineage the retained
-/// controls prove and whose cut the Store frontier covers is chosen among three
-/// candidates: the preserved coverage row, the identity's own leaf-named
-/// bootstrap, and the maximal standalone snapshot across the activated devices. A
-/// Circle the identity cannot decrypt yields `ClearCoverage`, so no coverage row
-/// an inaccessible Circle could replay from survives the restore.
-#[allow(clippy::too_many_arguments)]
-impl CircleSnapshotReader<'_, '_> {
-    pub(crate) async fn select_staged_decisions(
-        &mut self,
-        store_frontier: &CommitFrontier,
-        restorer_identity: &UserKeypair,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-    ) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
-        use crate::database::StagedCircleDecision;
-        let root = self.root().clone();
-        // The stream-activation index the control-stream authority resolves against is
-        // written by the pull, which has not run on a freshly restored device; seed it
-        // from the retained materializations selection reads anyway.
-        let selection = self
-            .database
-            .prepare_circle_restore_selection(root.clone())
-            .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-        let device_registrations = self
-            .database
-            .activated_store_device_registration_records()
-            .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-
-        let mut decisions = Vec::new();
-        for (circle_id, controls) in selection.circles {
-            let head = self
-                .database
-                .circle_restore_head(root.clone(), circle_id, controls)
-                .await
-                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-            let Some((head_control, head_commit)) = head else {
-                warn!(%circle_id, "restore selection: Circle has no head control; clearing coverage");
-                decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
-                continue;
-            };
-
-            let access = self
-                .resolve_restorer_access(
-                    restorer_identity,
-                    routing_key,
-                    circle_id,
-                    &head_control,
-                    &head_commit,
-                )
-                .await?;
-            let (epoch_encryption, leaf_bootstrap) = match access {
-                // The restoring identity cannot decrypt this Circle — delete any
-                // preserved coverage row so replay never reconstructs an image it has
-                // no access to.
-                super::activation::LocalCircleAccess::NoAccess => {
-                    decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
-                    continue;
-                }
-                super::activation::LocalCircleAccess::Active {
-                    epoch_encryption,
-                    leaf_bootstrap,
-                } => (epoch_encryption, leaf_bootstrap),
-            };
-
-            let mut candidates: Vec<StagedCircleImageCandidate> = Vec::new();
-            // The restoring identity's own leaf-named bootstrap: the baseline for a
-            // Circle whose accessible content predates the identity's join and which no
-            // forward replay reconstructs.
-            if let Some(image) = leaf_bootstrap {
-                candidates.push(StagedCircleImageCandidate {
-                    activation_commit: head_commit.clone(),
-                    image,
-                });
-            }
-            for (activation_commit, image) in &selection.preserved_images {
-                if image.circle_id() == circle_id {
-                    candidates.push(StagedCircleImageCandidate {
-                        activation_commit: activation_commit.clone(),
-                        image: image.clone(),
-                    });
-                }
-            }
-            // Standalone Circle snapshots are sealed under the Circle epoch key the
-            // identity's active leaf carries, not the Store routing key.
-            if let Some(candidate) = self
-                .select_standalone_snapshot_candidate(
-                    circle_id,
-                    &head_control,
-                    &epoch_encryption,
-                    routing_key,
-                    &device_registrations,
-                )
-                .await?
-            {
-                candidates.push(candidate);
-            }
-
-            match choose_maximal_installable_candidate(circle_id, store_frontier, candidates)? {
-                Some(candidate) => decisions.push(StagedCircleDecision::Install {
-                    activation_commit: candidate.activation_commit,
-                    image: candidate.image,
-                }),
-                None => {
-                    warn!(
-                        %circle_id,
-                        "restore selection: Circle has active access but no coverage image; \
-                         it replays from live history if retained"
-                    );
-                }
-            }
-        }
-        Ok(decisions)
-    }
-}
-
-/// Resolve the restoring identity's own access at a Circle's head control. The
-/// head control's activating commit is retained, so its verified materialization
-/// carries the already-verified control; only the identity's own access envelope,
-/// the Store membership checkpoint, and (if the leaf names one) its own bootstrap
-/// image are read from storage. This never re-walks the control's covered-head
-/// lineage, which a reclaimed restore may no longer retain.
-#[allow(clippy::too_many_arguments)]
-impl CircleSnapshotReader<'_, '_> {
-    async fn resolve_restorer_access(
-        &mut self,
-        restorer_identity: &UserKeypair,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-        circle_id: CircleId,
-        head_control: &CircleControlCoord,
-        head_commit: &crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<super::activation::LocalCircleAccess, SnapshotError> {
-        let commit_lookup = head_commit.clone();
-        let root = self.root().clone();
-        let owned = self
-            .database
-            .retained_merge_materialization_by_ref(root, commit_lookup)
-            .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-        let commit = owned.commit().clone();
-        let reference = owned
-            .circle_activations()
-            .circles()
-            .iter()
-            .find(|reference| {
-                reference.circle_id == circle_id && reference.control.coord == *head_control
-            })
-            .ok_or_else(|| {
-                SnapshotError::BootstrapState(format!(
-                "restore selection: Circle {circle_id} head control is absent from its retained \
-                 activation"
-            ))
-            })?;
-        super::activation::CircleActivationVerifier::new(self.database, self.storage, self.history)
-            .resolve_local_access(
-                &commit,
-                &reference.reference,
-                &reference.control,
-                restorer_identity,
-                routing_key,
-            )
-            .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
-    }
-}
-
-/// The maximal standalone Circle snapshot across the activated devices whose
-/// lineage the retained head control proves, downloaded and verified byte-exact.
-#[allow(clippy::too_many_arguments)]
-impl CircleSnapshotReader<'_, '_> {
-    async fn select_standalone_snapshot_candidate(
-        &self,
-        circle_id: CircleId,
-        head_control: &CircleControlCoord,
-        encryption: &EncryptionService,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-        device_registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
-    ) -> Result<Option<StagedCircleImageCandidate>, SnapshotError> {
-        let mut installable: Vec<(
-            CircleSnapshotMeta,
-            crate::protocol::store_commit::StoreBatchCommitRef,
-        )> = Vec::new();
-        for registration in device_registrations {
-            let stream = self
-                .load_stream(
-                    circle_id,
-                    encryption.clone(),
-                    registration.reference(),
-                    registration.value(),
-                )
-                .await?;
-            for snapshot in stream {
-                // A control reclaimed after an epoch close leaves its standalone snapshot
-                // superseded by the successor bootstrap the other candidates provide.
-                // Resolve retention before the lineage walk: the walk itself reads every
-                // covered control's retained activation, so it must not descend into a
-                // reclaimed control.
-                let retained_control = snapshot.control.clone();
-                let activation_commit = self
-                    .database
-                    .retained_circle_activation_commit_ref(circle_id, retained_control)
-                    .await
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-                let Some(activation_commit) = activation_commit else {
-                    tracing::debug!(
-                        %circle_id,
-                        snapshot = %snapshot.snapshot_hash(),
-                        "restore selection: standalone Circle snapshot control was reclaimed; \
-                         superseded by the retained lineage"
-                    );
-                    continue;
-                };
-                // The head control must prove the snapshot control's lineage.
-                let snapshot_control = snapshot.control.clone();
-                let head = head_control.clone();
-                let covered = self
-                    .database
-                    .verified_circle_control_coord_covers(
-                        self.root().clone(),
-                        circle_id,
-                        head,
-                        snapshot_control,
-                    )
-                    .await
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-                if covered {
-                    installable.push((snapshot, activation_commit));
-                }
-            }
-        }
-        let Some(selected) = select_maximal_circle_snapshot(
-            installable
-                .iter()
-                .map(|(snapshot, _)| snapshot.clone())
-                .collect(),
-        ) else {
-            return Ok(None);
-        };
-        let activation_commit = installable
-            .into_iter()
-            .find(|(snapshot, _)| snapshot.snapshot_hash() == selected.snapshot_hash())
-            .map(|(_, activation_commit)| activation_commit)
-            .expect("the selected standalone snapshot is one of the installable candidates");
-        let author_device = selected.author_registration.device_id.to_string();
-        let image_context = ProtocolObjectContext::circle(
-            self.root().store_root_hash,
-            ProtocolObjectDomain::CircleSnapshotImage,
-            encryption.clone(),
-        );
-        let image_bytes = self
-            .storage
-            .read_protocol_object(
-                &image_context,
-                &selected.bootstrap.image.object,
-                &circle_snapshot_image_semantic_prefix(
-                    circle_id,
-                    &author_device,
-                    selected.bootstrap.image.image_hash,
-                ),
-            )
-            .await
-            .map_err(SnapshotError::Bucket)?;
-        verify_circle_bootstrap_image(
-            &image_bytes,
-            &selected.bootstrap,
-            circle_id,
-            self.database.synced_tables(),
-            routing_key,
-        )
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-        let image = crate::sync::store::circle_controls::VerifiedCircleImage::from_stored_image(
-            circle_id,
-            selected.control.clone(),
-            selected.bootstrap.clone(),
-            image_bytes,
-        )
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-        Ok(Some(StagedCircleImageCandidate {
-            activation_commit,
-            image,
-        }))
     }
 }
 

@@ -91,9 +91,7 @@ impl FacadeFixture {
             _snapshot_tmp: snapshot_tmp,
         }
     }
-}
 
-impl FacadeFixture {
     /// The joining device's side, over this fixture's home.
     async fn join_over_test_home(
         &self,

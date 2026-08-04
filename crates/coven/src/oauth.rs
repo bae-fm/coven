@@ -159,6 +159,434 @@ impl OAuthClients {
         ]))
         .expect("test clients contain only OAuth providers")
     }
+
+    #[cfg(feature = "oauth-providers")]
+    pub async fn authorize(
+        &self,
+        provider: crate::config::CloudProvider,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<OAuthTokens, OAuthError> {
+        let config = self.config_for(provider)?;
+        let client = &self.client;
+        let redirect_uri = format!("http://localhost:{}/callback", config.redirect_port);
+        let mut entropy = [0_u8; 64];
+        rand::rng().fill_bytes(&mut entropy);
+        let AuthorizeRequest {
+            auth_url,
+            verifier,
+            state,
+        } = AuthorizeRequest::from_entropy(&config, &redirect_uri, entropy)?;
+
+        // Channel to receive the authorization code from the callback handler
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+        let tx_for_handler = tx.clone();
+        let expected_state = state.clone();
+        let app = axum::Router::new().route(
+        "/callback",
+        axum::routing::get(
+            move |axum::extract::Query(params): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >| {
+                let tx = tx_for_handler.clone();
+                let expected_state = expected_state.clone();
+                async move {
+                    let mut guard = tx.lock().await;
+                    let callback =
+                        verify_callback_state(params.get("state").map(String::as_str), &expected_state)
+                            .and_then(|()| callback_code(&params));
+                    let is_error = callback.is_err();
+                    if let Some(sender) = guard.take() {
+                        if sender.send(callback).is_err() {
+                            warn!("OAuth callback receiver dropped before result delivery");
+                        }
+                    }
+                    let html = if is_error {
+                        oauth_callback_html(
+                            "Authorization denied",
+                            "Authorization was denied. You can close this window and try again in the app.",
+                        )
+                    } else {
+                        oauth_callback_html(
+                            "Authorization complete",
+                            "You can close this window and return to the app.",
+                        )
+                    };
+                    (
+                        [
+                            (axum::http::header::CACHE_CONTROL, "no-store"),
+                            (axum::http::header::CONNECTION, "close"),
+                        ],
+                        axum::response::Html(html),
+                    )
+                }
+            },
+        ),
+    );
+
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", config.redirect_port))
+            .await
+            .map_err(|e| OAuthError::Server(format!("failed to bind port: {e}")))?;
+
+        // Spawn the server. The guard aborts the task on drop so future
+        // cancellation (parent .await dropped) tears the listener down too.
+        let server_guard = AbortOnDrop::new(tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                })
+                .await
+            {
+                warn!("OAuth callback server exited with error: {e}");
+            }
+        }));
+
+        // Open the browser
+        open::that(&auth_url).map_err(|e| OAuthError::BrowserOpen(format!("{e}")))?;
+
+        info!("Opened browser for OAuth authorization, waiting for callback");
+
+        // Wait for the callback, cancellation, or timeout
+        let mut cancel = cancel;
+        let result = tokio::select! {
+            result = rx => {
+                result
+                    .map_err(|_| OAuthError::Server("callback channel closed".to_string()))
+                    .and_then(|r| r.map_err(OAuthError::Denied))
+            }
+            _ = cancel.wait_for(|&v| v) => {
+                Err(OAuthError::Denied("cancelled".to_string()))
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                Err(OAuthError::Timeout)
+            }
+        };
+
+        // Disarm the abort-on-drop and await the listener task's termination
+        // briefly. Bounded timeout because awaiting the abort could otherwise
+        // deadlock on a small thread pool with no idle worker. This matters
+        // for back-to-back sign-in flows: without the wait, the next bind on
+        // the same port can race the not-yet-released listener (no SO_REUSEADDR).
+        if let Some(handle) = server_guard.take_handle() {
+            handle.abort();
+            match tokio::time::timeout(std::time::Duration::from_millis(500), handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if e.is_cancelled() => {}
+                Ok(Err(e)) => {
+                    warn!("OAuth callback server task panicked on shutdown: {e}");
+                }
+                Err(_) => {
+                    warn!(
+                        "OAuth callback server did not exit within 500ms; \
+                     port {} may briefly remain in use",
+                        config.redirect_port
+                    );
+                }
+            }
+        }
+
+        let code = result?;
+
+        info!("Received authorization code, exchanging for tokens");
+
+        // Exchange the code for tokens
+        exchange_code(client, &config, &code, &verifier, &redirect_uri, clock).await
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    /// Build an authorization request for a host-managed redirect flow.
+    pub fn build_authorize_request(
+        &self,
+        provider: crate::config::CloudProvider,
+        redirect_uri: &str,
+    ) -> Result<AuthorizeRequest, OAuthError> {
+        let mut entropy = [0_u8; 64];
+        rand::rng().fill_bytes(&mut entropy);
+        AuthorizeRequest::from_entropy(&self.config_for(provider)?, redirect_uri, entropy)
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    /// Exchange the result of [`Self::build_authorize_request`] for tokens.
+    pub async fn exchange_code(
+        &self,
+        provider: crate::config::CloudProvider,
+        code: &str,
+        callback_state: Option<&str>,
+        request: &AuthorizeRequest,
+        redirect_uri: &str,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<OAuthTokens, OAuthError> {
+        request.verify_callback_state(callback_state)?;
+        exchange_code(
+            &self.client,
+            &self.config_for(provider)?,
+            code,
+            &request.verifier,
+            redirect_uri,
+            clock,
+        )
+        .await
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    /// Authorize Google Drive, prepare this store's folder, and retain the
+    /// resulting tokens in the store key service.
+    pub async fn sign_in_google_drive(
+        &self,
+        key_service: &crate::keys::StoreKeys,
+        store_name: &str,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<String, crate::storage::cloud::SetupError> {
+        let tokens = self
+            .authorize(crate::config::CloudProvider::GoogleDrive, cancel, clock)
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Google Drive authorization failed: {error}"
+                ))
+            })?;
+        let folder_name = format!("your-app - {store_name}");
+        let search_query = crate::storage::cloud::folder_search_query(&folder_name);
+        let search_resp = crate::storage::cloud::supports_all_drives(
+            self.client.get("https://www.googleapis.com/drive/v3/files"),
+        )
+        .bearer_auth(&tokens.access_token)
+        .query(&[
+            ("q", search_query.as_str()),
+            ("fields", "files(id)"),
+            ("includeItemsFromAllDrives", "true"),
+        ])
+        .send()
+        .await
+        .map_err(|error| {
+            crate::storage::cloud::SetupError(format!(
+                "Failed to search for existing Google Drive folder: {error}"
+            ))
+        })?;
+        if !search_resp.status().is_success() {
+            let status = search_resp.status();
+            let body = search_resp.text().await.map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to read Google Drive folder search error (HTTP {status}): {error}"
+                ))
+            })?;
+            return Err(crate::storage::cloud::SetupError(format!(
+                "Failed to search for existing Google Drive folder (HTTP {status}): {body}"
+            )));
+        }
+        let search_json: serde_json::Value = search_resp.json().await.map_err(|error| {
+            crate::storage::cloud::SetupError(format!(
+                "Failed to parse Google Drive search response: {error}"
+            ))
+        })?;
+        let existing_folder_id = search_json["files"][0]["id"].as_str().map(str::to_string);
+        let folder_id = if let Some(id) = existing_folder_id {
+            id
+        } else {
+            let create_body = serde_json::json!({
+                "name": folder_name,
+                "mimeType": "application/vnd.google-apps.folder",
+            });
+            let response = crate::storage::cloud::supports_all_drives(
+                self.client
+                    .post("https://www.googleapis.com/drive/v3/files"),
+            )
+            .bearer_auth(&tokens.access_token)
+            .json(&create_body)
+            .send()
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to create Google Drive folder: {error}"
+                ))
+            })?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.map_err(|error| {
+                    crate::storage::cloud::SetupError(format!(
+                        "Failed to read Google Drive folder creation error (HTTP {status}): {error}"
+                    ))
+                })?;
+                return Err(crate::storage::cloud::SetupError(format!(
+                    "Failed to create Google Drive folder (HTTP {status}): {body}"
+                )));
+            }
+            let folder: serde_json::Value = response.json().await.map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to parse Google Drive folder response: {error}"
+                ))
+            })?;
+            folder["id"]
+                .as_str()
+                .ok_or_else(|| {
+                    crate::storage::cloud::SetupError(
+                        "Google Drive folder response missing 'id'".to_string(),
+                    )
+                })?
+                .to_string()
+        };
+        key_service
+            .set_cloud_home_oauth_tokens(&tokens)
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
+            })?;
+        info!("Authorized Google Drive; folder ready");
+        Ok(folder_id)
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    /// Authorize Dropbox, prepare this store's folder, and retain the resulting
+    /// tokens in the store key service.
+    pub async fn sign_in_dropbox(
+        &self,
+        key_service: &crate::keys::StoreKeys,
+        store_name: &str,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<String, crate::storage::cloud::SetupError> {
+        let tokens = self
+            .authorize(crate::config::CloudProvider::Dropbox, cancel, clock)
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!("Dropbox authorization failed: {error}"))
+            })?;
+        let folder_path = format!("/Apps/your-app/{store_name}");
+        let response = self
+            .client
+            .post("https://api.dropboxapi.com/2/files/create_folder_v2")
+            .bearer_auth(&tokens.access_token)
+            .json(&serde_json::json!({
+                "path": folder_path,
+                "autorename": false,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to create Dropbox folder: {error}"
+                ))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to read Dropbox folder creation error (HTTP {status}): {error}"
+                ))
+            })?;
+            if !(status == reqwest::StatusCode::CONFLICT && body.contains("conflict")) {
+                return Err(crate::storage::cloud::SetupError(format!(
+                    "Failed to create Dropbox folder (HTTP {status}): {body}"
+                )));
+            }
+        }
+        key_service
+            .set_cloud_home_oauth_tokens(&tokens)
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
+            })?;
+        info!("Authorized Dropbox; folder ready");
+        Ok(folder_path)
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    /// Authorize OneDrive, prepare this store's folder, and retain the
+    /// resulting tokens in the store key service.
+    pub async fn sign_in_onedrive(
+        &self,
+        key_service: &crate::keys::StoreKeys,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<(String, String), crate::storage::cloud::SetupError> {
+        let tokens = self
+            .authorize(crate::config::CloudProvider::OneDrive, cancel, clock)
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!("OneDrive authorization failed: {error}"))
+            })?;
+        let drive_response = self
+            .client
+            .get("https://graph.microsoft.com/v1.0/me/drive")
+            .bearer_auth(&tokens.access_token)
+            .send()
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!("Failed to get OneDrive info: {error}"))
+            })?;
+        if !drive_response.status().is_success() {
+            let status = drive_response.status();
+            let body = drive_response.text().await.map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to read OneDrive info error (HTTP {status}): {error}"
+                ))
+            })?;
+            return Err(crate::storage::cloud::SetupError(format!(
+                "Failed to get OneDrive info (HTTP {status}): {body}"
+            )));
+        }
+        let drive: serde_json::Value = drive_response.json().await.map_err(|error| {
+            crate::storage::cloud::SetupError(format!("Failed to parse OneDrive response: {error}"))
+        })?;
+        let drive_id = drive["id"]
+            .as_str()
+            .ok_or_else(|| {
+                crate::storage::cloud::SetupError(
+                    "OneDrive response missing 'id' field".to_string(),
+                )
+            })?
+            .to_string();
+        let folder_response = self
+            .client
+            .post(format!(
+                "https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children"
+            ))
+            .bearer_auth(&tokens.access_token)
+            .json(&serde_json::json!({
+                "name": "your-app",
+                "folder": {},
+                "@microsoft.graph.conflictBehavior": "useExisting",
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to create OneDrive folder: {error}"
+                ))
+            })?;
+        if !folder_response.status().is_success() {
+            let status = folder_response.status();
+            let body = folder_response.text().await.map_err(|error| {
+                crate::storage::cloud::SetupError(format!(
+                    "Failed to read OneDrive folder creation error (HTTP {status}): {error}"
+                ))
+            })?;
+            return Err(crate::storage::cloud::SetupError(format!(
+                "Failed to create OneDrive folder (HTTP {status}): {body}"
+            )));
+        }
+        let folder: serde_json::Value = folder_response.json().await.map_err(|error| {
+            crate::storage::cloud::SetupError(format!(
+                "Failed to parse OneDrive folder response: {error}"
+            ))
+        })?;
+        let folder_id = folder["id"]
+            .as_str()
+            .ok_or_else(|| {
+                crate::storage::cloud::SetupError(
+                    "OneDrive folder response missing 'id' field".to_string(),
+                )
+            })?
+            .to_string();
+        key_service
+            .set_cloud_home_oauth_tokens(&tokens)
+            .map_err(|error| {
+                crate::storage::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
+            })?;
+        info!("Authorized OneDrive; folder ready");
+        Ok((drive_id, folder_id))
+    }
 }
 
 pub use crate::keys::OAuthTokens;
@@ -412,156 +840,6 @@ fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> 
     }
 }
 
-/// Open the user's browser, wait for the OAuth callback, and exchange the
-/// authorization code for tokens.
-///
-/// Flow:
-/// 1. Generate PKCE verifier + challenge
-/// 2. Open browser to `auth_url` with the required parameters
-/// 3. Spawn a one-shot HTTP server on `localhost:{redirect_port}`
-/// 4. Wait for the callback with the authorization code
-/// 5. Exchange the code for tokens at `token_url`
-///
-/// Binds a localhost TCP port (`tokio::net`), serves the callback with axum, and
-/// opens the system browser (`open`). Gated on `oauth-providers`, which pulls in
-/// `open`.
-#[cfg(feature = "oauth-providers")]
-impl OAuthClients {
-    pub async fn authorize(
-        &self,
-        provider: crate::config::CloudProvider,
-        cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
-    ) -> Result<OAuthTokens, OAuthError> {
-        let config = self.config_for(provider)?;
-        let client = &self.client;
-        let redirect_uri = format!("http://localhost:{}/callback", config.redirect_port);
-        let mut entropy = [0_u8; 64];
-        rand::rng().fill_bytes(&mut entropy);
-        let AuthorizeRequest {
-            auth_url,
-            verifier,
-            state,
-        } = AuthorizeRequest::from_entropy(&config, &redirect_uri, entropy)?;
-
-        // Channel to receive the authorization code from the callback handler
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
-        let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
-
-        let tx_for_handler = tx.clone();
-        let expected_state = state.clone();
-        let app = axum::Router::new().route(
-        "/callback",
-        axum::routing::get(
-            move |axum::extract::Query(params): axum::extract::Query<
-                std::collections::HashMap<String, String>,
-            >| {
-                let tx = tx_for_handler.clone();
-                let expected_state = expected_state.clone();
-                async move {
-                    let mut guard = tx.lock().await;
-                    let callback =
-                        verify_callback_state(params.get("state").map(String::as_str), &expected_state)
-                            .and_then(|()| callback_code(&params));
-                    let is_error = callback.is_err();
-                    if let Some(sender) = guard.take() {
-                        if sender.send(callback).is_err() {
-                            warn!("OAuth callback receiver dropped before result delivery");
-                        }
-                    }
-                    let html = if is_error {
-                        oauth_callback_html(
-                            "Authorization denied",
-                            "Authorization was denied. You can close this window and try again in the app.",
-                        )
-                    } else {
-                        oauth_callback_html(
-                            "Authorization complete",
-                            "You can close this window and return to the app.",
-                        )
-                    };
-                    (
-                        [
-                            (axum::http::header::CACHE_CONTROL, "no-store"),
-                            (axum::http::header::CONNECTION, "close"),
-                        ],
-                        axum::response::Html(html),
-                    )
-                }
-            },
-        ),
-    );
-
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", config.redirect_port))
-            .await
-            .map_err(|e| OAuthError::Server(format!("failed to bind port: {e}")))?;
-
-        // Spawn the server. The guard aborts the task on drop so future
-        // cancellation (parent .await dropped) tears the listener down too.
-        let server_guard = AbortOnDrop::new(tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-                })
-                .await
-            {
-                warn!("OAuth callback server exited with error: {e}");
-            }
-        }));
-
-        // Open the browser
-        open::that(&auth_url).map_err(|e| OAuthError::BrowserOpen(format!("{e}")))?;
-
-        info!("Opened browser for OAuth authorization, waiting for callback");
-
-        // Wait for the callback, cancellation, or timeout
-        let mut cancel = cancel;
-        let result = tokio::select! {
-            result = rx => {
-                result
-                    .map_err(|_| OAuthError::Server("callback channel closed".to_string()))
-                    .and_then(|r| r.map_err(OAuthError::Denied))
-            }
-            _ = cancel.wait_for(|&v| v) => {
-                Err(OAuthError::Denied("cancelled".to_string()))
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-                Err(OAuthError::Timeout)
-            }
-        };
-
-        // Disarm the abort-on-drop and await the listener task's termination
-        // briefly. Bounded timeout because awaiting the abort could otherwise
-        // deadlock on a small thread pool with no idle worker. This matters
-        // for back-to-back sign-in flows: without the wait, the next bind on
-        // the same port can race the not-yet-released listener (no SO_REUSEADDR).
-        if let Some(handle) = server_guard.take_handle() {
-            handle.abort();
-            match tokio::time::timeout(std::time::Duration::from_millis(500), handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) if e.is_cancelled() => {}
-                Ok(Err(e)) => {
-                    warn!("OAuth callback server task panicked on shutdown: {e}");
-                }
-                Err(_) => {
-                    warn!(
-                        "OAuth callback server did not exit within 500ms; \
-                     port {} may briefly remain in use",
-                        config.redirect_port
-                    );
-                }
-            }
-        }
-
-        let code = result?;
-
-        info!("Received authorization code, exchanging for tokens");
-
-        // Exchange the code for tokens
-        exchange_code(client, &config, &code, &verifier, &redirect_uri, clock).await
-    }
-}
-
 #[cfg(feature = "oauth-providers")]
 async fn exchange_code(
     client: &reqwest::Client,
@@ -611,297 +889,6 @@ pub(crate) async fn refresh(
         tokens.refresh_token = Some(refresh_token.to_string());
     }
     Ok(tokens)
-}
-
-#[cfg(feature = "oauth-providers")]
-impl OAuthClients {
-    /// Build an authorization request for a host-managed redirect flow.
-    pub fn build_authorize_request(
-        &self,
-        provider: crate::config::CloudProvider,
-        redirect_uri: &str,
-    ) -> Result<AuthorizeRequest, OAuthError> {
-        let mut entropy = [0_u8; 64];
-        rand::rng().fill_bytes(&mut entropy);
-        AuthorizeRequest::from_entropy(&self.config_for(provider)?, redirect_uri, entropy)
-    }
-
-    /// Exchange the result of [`Self::build_authorize_request`] for tokens.
-    pub async fn exchange_code(
-        &self,
-        provider: crate::config::CloudProvider,
-        code: &str,
-        callback_state: Option<&str>,
-        request: &AuthorizeRequest,
-        redirect_uri: &str,
-        clock: &dyn crate::clock::Clock,
-    ) -> Result<OAuthTokens, OAuthError> {
-        request.verify_callback_state(callback_state)?;
-        exchange_code(
-            &self.client,
-            &self.config_for(provider)?,
-            code,
-            &request.verifier,
-            redirect_uri,
-            clock,
-        )
-        .await
-    }
-
-    /// Authorize Google Drive, prepare this store's folder, and retain the
-    /// resulting tokens in the store key service.
-    pub async fn sign_in_google_drive(
-        &self,
-        key_service: &crate::keys::StoreKeys,
-        store_name: &str,
-        cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
-    ) -> Result<String, crate::storage::cloud::SetupError> {
-        let tokens = self
-            .authorize(crate::config::CloudProvider::GoogleDrive, cancel, clock)
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Google Drive authorization failed: {error}"
-                ))
-            })?;
-        let folder_name = format!("your-app - {store_name}");
-        let search_query = crate::storage::cloud::folder_search_query(&folder_name);
-        let search_resp = crate::storage::cloud::supports_all_drives(
-            self.client.get("https://www.googleapis.com/drive/v3/files"),
-        )
-        .bearer_auth(&tokens.access_token)
-        .query(&[
-            ("q", search_query.as_str()),
-            ("fields", "files(id)"),
-            ("includeItemsFromAllDrives", "true"),
-        ])
-        .send()
-        .await
-        .map_err(|error| {
-            crate::storage::cloud::SetupError(format!(
-                "Failed to search for existing Google Drive folder: {error}"
-            ))
-        })?;
-        if !search_resp.status().is_success() {
-            let status = search_resp.status();
-            let body = search_resp.text().await.map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to read Google Drive folder search error (HTTP {status}): {error}"
-                ))
-            })?;
-            return Err(crate::storage::cloud::SetupError(format!(
-                "Failed to search for existing Google Drive folder (HTTP {status}): {body}"
-            )));
-        }
-        let search_json: serde_json::Value = search_resp.json().await.map_err(|error| {
-            crate::storage::cloud::SetupError(format!(
-                "Failed to parse Google Drive search response: {error}"
-            ))
-        })?;
-        let existing_folder_id = search_json["files"][0]["id"].as_str().map(str::to_string);
-        let folder_id = if let Some(id) = existing_folder_id {
-            id
-        } else {
-            let create_body = serde_json::json!({
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-            });
-            let response = crate::storage::cloud::supports_all_drives(
-                self.client
-                    .post("https://www.googleapis.com/drive/v3/files"),
-            )
-            .bearer_auth(&tokens.access_token)
-            .json(&create_body)
-            .send()
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to create Google Drive folder: {error}"
-                ))
-            })?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.map_err(|error| {
-                    crate::storage::cloud::SetupError(format!(
-                        "Failed to read Google Drive folder creation error (HTTP {status}): {error}"
-                    ))
-                })?;
-                return Err(crate::storage::cloud::SetupError(format!(
-                    "Failed to create Google Drive folder (HTTP {status}): {body}"
-                )));
-            }
-            let folder: serde_json::Value = response.json().await.map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to parse Google Drive folder response: {error}"
-                ))
-            })?;
-            folder["id"]
-                .as_str()
-                .ok_or_else(|| {
-                    crate::storage::cloud::SetupError(
-                        "Google Drive folder response missing 'id'".to_string(),
-                    )
-                })?
-                .to_string()
-        };
-        key_service
-            .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
-            })?;
-        info!("Authorized Google Drive; folder ready");
-        Ok(folder_id)
-    }
-
-    /// Authorize Dropbox, prepare this store's folder, and retain the resulting
-    /// tokens in the store key service.
-    pub async fn sign_in_dropbox(
-        &self,
-        key_service: &crate::keys::StoreKeys,
-        store_name: &str,
-        cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
-    ) -> Result<String, crate::storage::cloud::SetupError> {
-        let tokens = self
-            .authorize(crate::config::CloudProvider::Dropbox, cancel, clock)
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!("Dropbox authorization failed: {error}"))
-            })?;
-        let folder_path = format!("/Apps/your-app/{store_name}");
-        let response = self
-            .client
-            .post("https://api.dropboxapi.com/2/files/create_folder_v2")
-            .bearer_auth(&tokens.access_token)
-            .json(&serde_json::json!({
-                "path": folder_path,
-                "autorename": false,
-            }))
-            .send()
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to create Dropbox folder: {error}"
-                ))
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to read Dropbox folder creation error (HTTP {status}): {error}"
-                ))
-            })?;
-            if !(status == reqwest::StatusCode::CONFLICT && body.contains("conflict")) {
-                return Err(crate::storage::cloud::SetupError(format!(
-                    "Failed to create Dropbox folder (HTTP {status}): {body}"
-                )));
-            }
-        }
-        key_service
-            .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
-            })?;
-        info!("Authorized Dropbox; folder ready");
-        Ok(folder_path)
-    }
-
-    /// Authorize OneDrive, prepare this store's folder, and retain the
-    /// resulting tokens in the store key service.
-    pub async fn sign_in_onedrive(
-        &self,
-        key_service: &crate::keys::StoreKeys,
-        cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
-    ) -> Result<(String, String), crate::storage::cloud::SetupError> {
-        let tokens = self
-            .authorize(crate::config::CloudProvider::OneDrive, cancel, clock)
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!("OneDrive authorization failed: {error}"))
-            })?;
-        let drive_response = self
-            .client
-            .get("https://graph.microsoft.com/v1.0/me/drive")
-            .bearer_auth(&tokens.access_token)
-            .send()
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!("Failed to get OneDrive info: {error}"))
-            })?;
-        if !drive_response.status().is_success() {
-            let status = drive_response.status();
-            let body = drive_response.text().await.map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to read OneDrive info error (HTTP {status}): {error}"
-                ))
-            })?;
-            return Err(crate::storage::cloud::SetupError(format!(
-                "Failed to get OneDrive info (HTTP {status}): {body}"
-            )));
-        }
-        let drive: serde_json::Value = drive_response.json().await.map_err(|error| {
-            crate::storage::cloud::SetupError(format!("Failed to parse OneDrive response: {error}"))
-        })?;
-        let drive_id = drive["id"]
-            .as_str()
-            .ok_or_else(|| {
-                crate::storage::cloud::SetupError(
-                    "OneDrive response missing 'id' field".to_string(),
-                )
-            })?
-            .to_string();
-        let folder_response = self
-            .client
-            .post(format!(
-                "https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children"
-            ))
-            .bearer_auth(&tokens.access_token)
-            .json(&serde_json::json!({
-                "name": "your-app",
-                "folder": {},
-                "@microsoft.graph.conflictBehavior": "useExisting",
-            }))
-            .send()
-            .await
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to create OneDrive folder: {error}"
-                ))
-            })?;
-        if !folder_response.status().is_success() {
-            let status = folder_response.status();
-            let body = folder_response.text().await.map_err(|error| {
-                crate::storage::cloud::SetupError(format!(
-                    "Failed to read OneDrive folder creation error (HTTP {status}): {error}"
-                ))
-            })?;
-            return Err(crate::storage::cloud::SetupError(format!(
-                "Failed to create OneDrive folder (HTTP {status}): {body}"
-            )));
-        }
-        let folder: serde_json::Value = folder_response.json().await.map_err(|error| {
-            crate::storage::cloud::SetupError(format!(
-                "Failed to parse OneDrive folder response: {error}"
-            ))
-        })?;
-        let folder_id = folder["id"]
-            .as_str()
-            .ok_or_else(|| {
-                crate::storage::cloud::SetupError(
-                    "OneDrive folder response missing 'id' field".to_string(),
-                )
-            })?
-            .to_string();
-        key_service
-            .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(|error| {
-                crate::storage::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
-            })?;
-        info!("Authorized OneDrive; folder ready");
-        Ok((drive_id, folder_id))
-    }
 }
 
 #[cfg(all(test, feature = "oauth-providers"))]
@@ -978,400 +965,5 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(feature = "oauth-providers")]
-    use test_support::{oauth_config, serve_token_response};
-
-    #[cfg(feature = "oauth-providers")]
-    #[test]
-    fn pkce_verifier_is_url_safe() {
-        let request = OAuthClients::for_tests()
-            .build_authorize_request(
-                crate::config::CloudProvider::GoogleDrive,
-                "http://localhost/callback",
-            )
-            .expect("build authorize request");
-        let verifier = request.verifier;
-        assert!(verifier.len() >= 43);
-        assert!(verifier
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-    }
-
-    #[test]
-    fn pkce_challenge_is_deterministic() {
-        let verifier = "test-verifier-string";
-        let c1 = code_challenge(verifier);
-        let c2 = code_challenge(verifier);
-        assert_eq!(c1, c2);
-    }
-
-    #[test]
-    fn pkce_challenge_is_base64url() {
-        let verifier = "test-verifier-string";
-        let challenge = code_challenge(verifier);
-        assert!(challenge
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-    }
-
-    #[test]
-    fn oauth_tokens_serialization_roundtrip() {
-        let tokens = OAuthTokens {
-            access_token: "at_123".to_string(),
-            refresh_token: Some("rt_456".to_string()),
-            expires_at: Some(1700000000),
-        };
-        let json = serde_json::to_string(&tokens).unwrap();
-        let parsed: OAuthTokens = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.access_token, "at_123");
-        assert_eq!(parsed.refresh_token, Some("rt_456".to_string()));
-        assert_eq!(parsed.expires_at, Some(1700000000));
-    }
-
-    #[test]
-    fn debug_redacts_access_and_refresh_tokens() {
-        let tokens = OAuthTokens {
-            access_token: "access-token-do-not-print".to_string(),
-            refresh_token: Some("refresh-token-do-not-print".to_string()),
-            expires_at: Some(1700000000),
-        };
-        let debug = format!("{tokens:?}");
-
-        assert!(debug.contains("<redacted>"), "{debug}");
-        // Non-secret expiry stays visible.
-        assert!(debug.contains("1700000000"), "{debug}");
-        assert!(
-            !debug.contains("access-token-do-not-print"),
-            "access token leaked: {debug}"
-        );
-        assert!(
-            !debug.contains("refresh-token-do-not-print"),
-            "refresh token leaked: {debug}"
-        );
-        // refresh_token presence is still observable.
-        assert!(debug.contains("refresh_token: Some"), "{debug}");
-    }
-
-    fn parse_token_response(body: &str) -> TokenResponse {
-        serde_json::from_str(body).expect("parse TokenResponse")
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    fn authorize_url_params(auth_url: &str) -> HashMap<String, String> {
-        let (_, query) = auth_url.split_once('?').expect("authorize URL has query");
-        serde_urlencoded::from_str(query).expect("parse authorize query")
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[test]
-    fn oauth_callback_html_renders_result_text() {
-        let html = oauth_callback_html("Authorization denied", "Denied message");
-
-        assert!(html.contains("<h1>Authorization denied</h1>"));
-        assert!(html.contains("<p>Denied message</p>"));
-        assert!(!html.contains("{{title}}"));
-        assert!(!html.contains("{{message}}"));
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[test]
-    fn build_authorize_request_includes_matching_random_state() {
-        let clients = OAuthClients::for_tests();
-
-        let first = clients
-            .build_authorize_request(
-                crate::config::CloudProvider::GoogleDrive,
-                "http://localhost/callback",
-            )
-            .expect("build first authorize URL");
-        let second = clients
-            .build_authorize_request(
-                crate::config::CloudProvider::GoogleDrive,
-                "http://localhost/callback",
-            )
-            .expect("build second authorize URL");
-
-        let first_params = authorize_url_params(&first.auth_url);
-        let first_state = first_params
-            .get("state")
-            .expect("authorize URL includes state");
-        assert!(
-            first
-                .verify_callback_state(Some(first_state.as_str()))
-                .is_ok(),
-            "AuthorizeRequest verifies the state it put in the URL",
-        );
-        assert!(
-            !first_state.is_empty(),
-            "state must be present for callback validation",
-        );
-        let second_params = authorize_url_params(&second.auth_url);
-        let second_state = second_params
-            .get("state")
-            .expect("second authorize URL includes state");
-        assert_ne!(
-            first_state, second_state,
-            "separate OAuth flows must carry separate state values",
-        );
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[test]
-    fn callback_rejects_missing_or_wrong_state() {
-        let expected_state = "expected-state";
-        let valid = HashMap::from([
-            ("code".to_string(), "auth-code".to_string()),
-            ("state".to_string(), expected_state.to_string()),
-        ]);
-        let wrong = HashMap::from([
-            ("code".to_string(), "auth-code".to_string()),
-            ("state".to_string(), "wrong-state".to_string()),
-        ]);
-        let missing = HashMap::from([("code".to_string(), "auth-code".to_string())]);
-
-        assert_eq!(
-            verify_callback_state(valid.get("state").map(String::as_str), expected_state)
-                .and_then(|()| callback_code(&valid))
-                .as_deref(),
-            Ok("auth-code"),
-        );
-        assert!(
-            verify_callback_state(wrong.get("state").map(String::as_str), expected_state).is_err(),
-            "wrong state must reject the callback",
-        );
-        assert!(
-            verify_callback_state(missing.get("state").map(String::as_str), expected_state)
-                .is_err(),
-            "missing state must reject the callback",
-        );
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[tokio::test]
-    async fn exchange_code_rejects_wrong_state_before_token_request() {
-        let clients = OAuthClients::for_tests();
-        let request = clients
-            .build_authorize_request(
-                crate::config::CloudProvider::GoogleDrive,
-                "http://localhost/callback",
-            )
-            .expect("build authorize request");
-
-        let result = clients
-            .exchange_code(
-                crate::config::CloudProvider::GoogleDrive,
-                "auth-code",
-                Some("wrong-state"),
-                &request,
-                "http://localhost/callback",
-                &crate::clock::SystemClock,
-            )
-            .await;
-
-        assert!(
-            matches!(result, Err(OAuthError::Denied(ref msg)) if msg.contains("state mismatch")),
-            "expected state rejection before token request, got {result:?}",
-        );
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[tokio::test]
-    async fn exchange_code_posts_authorization_code_params() {
-        let (token_url, request_body, server) = serve_token_response(
-            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
-        )
-        .await;
-        let config = oauth_config(token_url);
-        let client = reqwest::Client::new();
-
-        let tokens = exchange_code(
-            &client,
-            &config,
-            "auth-code",
-            "pkce-verifier",
-            "http://localhost/callback",
-            &crate::clock::SystemClock,
-        )
-        .await
-        .expect("exchange code");
-
-        let body = request_body.await.expect("request body");
-        server.await.expect("token server");
-        assert_eq!(
-            body.get("grant_type").map(String::as_str),
-            Some("authorization_code")
-        );
-        assert_eq!(body.get("code").map(String::as_str), Some("auth-code"));
-        assert_eq!(
-            body.get("redirect_uri").map(String::as_str),
-            Some("http://localhost/callback")
-        );
-        assert_eq!(body.get("client_id").map(String::as_str), Some("client-id"));
-        assert_eq!(
-            body.get("code_verifier").map(String::as_str),
-            Some("pkce-verifier")
-        );
-        assert_eq!(
-            body.get("client_secret").map(String::as_str),
-            Some("client-secret")
-        );
-        assert_eq!(tokens.access_token, "new-access");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[tokio::test]
-    async fn refresh_posts_refresh_token_params_and_reuses_existing_refresh_token() {
-        let (token_url, request_body, server) =
-            serve_token_response(r#"{"access_token":"refreshed-access","expires_in":3600}"#).await;
-        let config = oauth_config(token_url);
-        let client = reqwest::Client::new();
-
-        let tokens = refresh(
-            &client,
-            &config,
-            "existing-refresh",
-            &crate::clock::SystemClock,
-        )
-        .await
-        .expect("refresh");
-
-        let body = request_body.await.expect("request body");
-        server.await.expect("token server");
-        assert_eq!(
-            body.get("grant_type").map(String::as_str),
-            Some("refresh_token")
-        );
-        assert_eq!(
-            body.get("refresh_token").map(String::as_str),
-            Some("existing-refresh")
-        );
-        assert_eq!(body.get("client_id").map(String::as_str), Some("client-id"));
-        assert_eq!(
-            body.get("client_secret").map(String::as_str),
-            Some("client-secret")
-        );
-        assert_eq!(tokens.access_token, "refreshed-access");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("existing-refresh"));
-    }
-
-    #[test]
-    fn into_tokens_classifies_invalid_grant_as_reauthorize() {
-        let body =
-            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked"}"#;
-        let result = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
-        match result {
-            Err(OAuthError::Reauthorize(detail)) => {
-                assert!(
-                    detail.contains("expired or revoked"),
-                    "expected error_description in detail, got: {detail}",
-                );
-            }
-            other => panic!("expected Reauthorize, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn into_tokens_classifies_unauthorized_client_as_reauthorize() {
-        let body =
-            r#"{"error":"unauthorized_client","error_description":"Client has been revoked"}"#;
-        let result = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
-        assert!(
-            matches!(result, Err(OAuthError::Reauthorize(_))),
-            "expected Reauthorize, got {result:?}",
-        );
-    }
-
-    #[test]
-    fn into_tokens_leaves_other_provider_errors_as_token_exchange() {
-        let body = r#"{"error":"invalid_request","error_description":"missing parameter"}"#;
-        let result = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
-        match result {
-            Err(OAuthError::TokenExchange(msg)) => {
-                assert!(
-                    msg.contains("missing parameter"),
-                    "expected description in message, got: {msg}",
-                );
-            }
-            other => panic!("expected TokenExchange, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn into_tokens_returns_tokens_on_success() {
-        let body = r#"{"access_token":"new_at","refresh_token":"new_rt","expires_in":3600}"#;
-        let tokens = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock)
-            .expect("into_tokens");
-        assert_eq!(tokens.access_token, "new_at");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("new_rt"));
-        assert!(tokens.expires_at.is_some());
-    }
-
-    #[test]
-    fn into_tokens_missing_access_token_error_does_not_include_tokens() {
-        let body = r#"{"refresh_token":"refresh-token-that-must-not-be-logged"}"#;
-        let result = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock);
-        match result {
-            Err(OAuthError::TokenExchange(msg)) => {
-                assert!(
-                    msg.contains("missing access_token"),
-                    "expected access_token error, got: {msg}",
-                );
-                assert!(
-                    msg.contains("HTTP 200"),
-                    "expected status in error, got: {msg}",
-                );
-                assert!(
-                    !msg.contains("refresh-token-that-must-not-be-logged"),
-                    "error included refresh token: {msg}",
-                );
-            }
-            other => panic!("expected TokenExchange, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "oauth-providers")]
-    #[tokio::test]
-    async fn parse_failure_error_does_not_include_tokens() {
-        let (token_url, _request_body, server) =
-            serve_token_response(r#"{"access_token":"access-token-that-must-not-be-logged""#).await;
-        let config = oauth_config(token_url);
-        let client = reqwest::Client::new();
-
-        let result = exchange_code(
-            &client,
-            &config,
-            "auth-code",
-            "pkce-verifier",
-            "http://localhost/callback",
-            &crate::clock::SystemClock,
-        )
-        .await;
-
-        server.await.expect("token server");
-        match result {
-            Err(OAuthError::TokenExchange(msg)) => {
-                assert!(
-                    msg.contains("parse token response"),
-                    "expected parse error, got: {msg}",
-                );
-                assert!(
-                    msg.contains("HTTP 200"),
-                    "expected status in error, got: {msg}",
-                );
-                assert!(
-                    !msg.contains("access-token-that-must-not-be-logged"),
-                    "error included access token: {msg}",
-                );
-            }
-            other => panic!("expected TokenExchange, got {other:?}"),
-        }
-    }
-}
+#[path = "oauth_tests.rs"]
+mod tests;

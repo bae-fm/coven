@@ -2319,6 +2319,95 @@ impl ClosingFounderCircle {
             prior_fingerprint,
         }
     }
+
+    /// Persist the exact `Finalizing` state a crash leaves before cancellation
+    /// publication begins.
+    async fn begin_cancellation_finalization(&self) {
+        let device = self
+            .store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("load Circle cancellation Store");
+        let mut writer = device
+            .authorize_writer()
+            .await
+            .expect("authorize Circle cancellation writer");
+        let operation_id = writer
+            .circles()
+            .begin_circle_epoch_close_cancellation_for_test(self.circle_id)
+            .await
+            .expect("persist Circle cancellation finalization");
+        assert_eq!(operation_id, self.operation_id);
+    }
+
+    async fn member_pull(&self) {
+        self.store
+            .bind_device(&self.member_db, &self.member)
+            .await
+            .expect("load Circle member Store")
+            .authorize_writer()
+            .await
+            .expect("authorize Circle member Store")
+            .pull(Some(&EncryptionService::from_key([42; 32])))
+            .await
+            .expect("member pull");
+    }
+
+    /// Publish the member device's oldest pending durable write, returning the
+    /// number of Store packages published. Errors while old-epoch publication is
+    /// frozen — the closing Circle has no active control to resolve.
+    async fn member_push(&self) -> Result<u64, String> {
+        self.store
+            .bind_device(&self.member_db, &self.member)
+            .await
+            .map_err(|error| error.to_string())?
+            .authorize_writer()
+            .await
+            .map_err(|error| error.to_string())?
+            .publish_pending_store_writes()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Publish one scoped Circle row as the owner and drive the cycle that
+    /// commits it.
+    async fn publish_owner_circle_row(&self, row_id: &str, stamp: &str) {
+        let write_id = self
+            .db
+            .capture_circle_document_for_test(row_id, self.circle_id, stamp)
+            .await
+            .expect("capture owner Circle row");
+        self.components
+            .run_cycle(&crate::clock::SystemClock, None, None)
+            .await
+            .expect("publish owner Circle row");
+        match crate::database::StoreDatabase::new(&self.db)
+            .write_status(&write_id)
+            .await
+            .expect("read owner Circle write status")
+        {
+            crate::WriteStatus::Published(_) => {}
+            status => panic!("owner Circle write was not published: {status:?}"),
+        }
+    }
+
+    async fn assert_cancellation_reopened(&self) {
+        assert!(StoreDatabase::new(&self.db)
+            .circle_operation(&self.operation_id)
+            .await
+            .expect("read completed cancellation operation")
+            .is_none());
+        let (reopened, _) = StoreDatabase::new(&self.db)
+            .circle_authoring_context(self.circle_id, &keys::public_key_hex(&self.signer))
+            .await
+            .expect("load reopened Circle authoring state");
+        assert_eq!(reopened.control.value.epoch_id(), self.prior_epoch);
+        assert_eq!(
+            reopened.control.value.key_fingerprint(),
+            self.prior_fingerprint
+        );
+        assert!(reopened.roster.members().contains_key(&self.member_pubkey));
+    }
 }
 
 #[tokio::test]
@@ -2813,97 +2902,6 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
             .contains("active successor of an epoch close carries no settlement"),
         "{error}"
     );
-}
-
-impl ClosingFounderCircle {
-    /// Persist the exact `Finalizing` state a crash leaves before cancellation
-    /// publication begins.
-    async fn begin_cancellation_finalization(&self) {
-        let device = self
-            .store
-            .bind_device(&self.db, &self.signer)
-            .await
-            .expect("load Circle cancellation Store");
-        let mut writer = device
-            .authorize_writer()
-            .await
-            .expect("authorize Circle cancellation writer");
-        let operation_id = writer
-            .circles()
-            .begin_circle_epoch_close_cancellation_for_test(self.circle_id)
-            .await
-            .expect("persist Circle cancellation finalization");
-        assert_eq!(operation_id, self.operation_id);
-    }
-
-    async fn member_pull(&self) {
-        self.store
-            .bind_device(&self.member_db, &self.member)
-            .await
-            .expect("load Circle member Store")
-            .authorize_writer()
-            .await
-            .expect("authorize Circle member Store")
-            .pull(Some(&EncryptionService::from_key([42; 32])))
-            .await
-            .expect("member pull");
-    }
-
-    /// Publish the member device's oldest pending durable write, returning the
-    /// number of Store packages published. Errors while old-epoch publication is
-    /// frozen — the closing Circle has no active control to resolve.
-    async fn member_push(&self) -> Result<u64, String> {
-        self.store
-            .bind_device(&self.member_db, &self.member)
-            .await
-            .map_err(|error| error.to_string())?
-            .authorize_writer()
-            .await
-            .map_err(|error| error.to_string())?
-            .publish_pending_store_writes()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    /// Publish one scoped Circle row as the owner and drive the cycle that
-    /// commits it.
-    async fn publish_owner_circle_row(&self, row_id: &str, stamp: &str) {
-        let write_id = self
-            .db
-            .capture_circle_document_for_test(row_id, self.circle_id, stamp)
-            .await
-            .expect("capture owner Circle row");
-        self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
-            .await
-            .expect("publish owner Circle row");
-        match crate::database::StoreDatabase::new(&self.db)
-            .write_status(&write_id)
-            .await
-            .expect("read owner Circle write status")
-        {
-            crate::WriteStatus::Published(_) => {}
-            status => panic!("owner Circle write was not published: {status:?}"),
-        }
-    }
-
-    async fn assert_cancellation_reopened(&self) {
-        assert!(StoreDatabase::new(&self.db)
-            .circle_operation(&self.operation_id)
-            .await
-            .expect("read completed cancellation operation")
-            .is_none());
-        let (reopened, _) = StoreDatabase::new(&self.db)
-            .circle_authoring_context(self.circle_id, &keys::public_key_hex(&self.signer))
-            .await
-            .expect("load reopened Circle authoring state");
-        assert_eq!(reopened.control.value.epoch_id(), self.prior_epoch);
-        assert_eq!(
-            reopened.control.value.key_fingerprint(),
-            self.prior_fingerprint
-        );
-        assert!(reopened.roster.members().contains_key(&self.member_pubkey));
-    }
 }
 
 // Runs `flow` on a thread whose stack is capped at 1 MiB — below the 2 MiB

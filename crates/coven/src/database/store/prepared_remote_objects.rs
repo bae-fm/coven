@@ -123,48 +123,6 @@ impl StoreDatabase {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) async fn prepared_audience_objects(
-        &self,
-        write_id: &WriteId,
-    ) -> Result<PreparedAudienceObjects, DbError> {
-        let write_id = write_id.clone();
-        let loaded = self
-            .connection
-            .call(move |conn| load_prepared_audience_objects_on(conn, &write_id))
-            .await?;
-
-        let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
-        for prepared in loaded.blobs {
-            if let Some(spool_path) = prepared.spool_path() {
-                {
-                    let (size, digest) =
-                        crate::local_file::file_facts(spool_path)
-                            .await
-                            .map_err(|error| {
-                                DbError::Message(format!("prepared blob spool: {error}"))
-                            })?;
-                    prepared
-                        .blob()
-                        .object()
-                        .verify_stored_facts(
-                            spool_path,
-                            size,
-                            crate::protocol::store_commit::ObjectHash::from_digest(digest),
-                        )
-                        .map_err(|error| {
-                            DbError::Message(format!("prepared blob spool: {error}"))
-                        })?;
-                }
-            }
-            verified_blobs.push(prepared);
-        }
-        Ok(PreparedAudienceObjects {
-            packages: loaded.packages,
-            blobs: verified_blobs,
-        })
-    }
-
     pub(crate) async fn prepared_remote_objects(
         &self,
         write_id: &WriteId,
@@ -332,30 +290,6 @@ impl StoreDatabase {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn protocol_inert_object(
-        &self,
-        object: ExactObjectRef,
-    ) -> Result<Option<crate::protocol::remote_object::ProtocolInertObject>, DbError> {
-        self.connection
-            .call(move |conn| {
-                let object_id = remote_object_id(&object);
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(
-                         SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
-                     )",
-                        [object_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                exists
-                    .then(|| load_protocol_inert_object_on(conn, object_id))
-                    .transpose()
-            })
-            .await
-    }
-
     pub(crate) async fn mark_candidate_commit_uploaded(
         &self,
         commit: StoreBatchCommitRef,
@@ -416,6 +350,72 @@ impl StoreDatabase {
                 }
                 mark_remote_object_uploaded_on(conn, current)?;
                 Ok(())
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepared_audience_objects(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<PreparedAudienceObjects, DbError> {
+        let write_id = write_id.clone();
+        let loaded = self
+            .connection
+            .call(move |conn| load_prepared_audience_objects_on(conn, &write_id))
+            .await?;
+
+        let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
+        for prepared in loaded.blobs {
+            if let Some(spool_path) = prepared.spool_path() {
+                {
+                    let (size, digest) =
+                        crate::local_file::file_facts(spool_path)
+                            .await
+                            .map_err(|error| {
+                                DbError::Message(format!("prepared blob spool: {error}"))
+                            })?;
+                    prepared
+                        .blob()
+                        .object()
+                        .verify_stored_facts(
+                            spool_path,
+                            size,
+                            crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                        )
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared blob spool: {error}"))
+                        })?;
+                }
+            }
+            verified_blobs.push(prepared);
+        }
+        Ok(PreparedAudienceObjects {
+            packages: loaded.packages,
+            blobs: verified_blobs,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn protocol_inert_object(
+        &self,
+        object: ExactObjectRef,
+    ) -> Result<Option<crate::protocol::remote_object::ProtocolInertObject>, DbError> {
+        self.connection
+            .call(move |conn| {
+                let object_id = remote_object_id(&object);
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(
+                         SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
+                     )",
+                        [object_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                exists
+                    .then(|| load_protocol_inert_object_on(conn, object_id))
+                    .transpose()
             })
             .await
     }

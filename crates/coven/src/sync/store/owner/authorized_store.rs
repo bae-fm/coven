@@ -239,6 +239,50 @@ impl<'storage> AuthorizedStore<'storage> {
         })
     }
 
+    pub(super) async fn into_writer(
+        self,
+    ) -> Result<super::AuthorizedWriterOperation<'storage>, super::StoreRegistrationError> {
+        let Self {
+            history,
+            identity,
+            local_device,
+            membership,
+        } = self;
+        let local_device = local_device.ok_or(crate::sync::store::StoreError::MissingState {
+            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+        })?;
+        if local_device.activation.is_none() {
+            return Err(super::StoreRegistrationError::ActivationRequired);
+        }
+        if &local_device.registration.value().store_root != history.root() {
+            return Err(crate::sync::store::StoreError::InvalidOutbound(
+                "local Store writer belongs to another Store root".to_string(),
+            )
+            .into());
+        }
+        let live_provider = history
+            .provider_binding()
+            .await
+            .map_err(crate::protocol::objects::StoreObjectError::from)
+            .map_err(crate::sync::store::StoreError::from)?;
+        if live_provider.device != local_device.registration.value().provider {
+            return Err(super::StoreRegistrationError::Invalid(
+                "live provider principal differs from the local registration".to_string(),
+            ));
+        }
+        let device_signer = local_device
+            .registration
+            .value()
+            .device_signer(identity)
+            .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
+        Ok(history.authorize_writer(
+            membership,
+            identity,
+            local_device.registration,
+            device_signer,
+        ))
+    }
+
     #[cfg(test)]
     pub(super) fn membership_for_test(&self) -> MembershipChain {
         self.membership.clone()
@@ -314,50 +358,6 @@ impl<'storage> AuthorizedStore<'storage> {
                 evidence,
             )
             .await
-    }
-
-    pub(super) async fn into_writer(
-        self,
-    ) -> Result<super::AuthorizedWriterOperation<'storage>, super::StoreRegistrationError> {
-        let Self {
-            history,
-            identity,
-            local_device,
-            membership,
-        } = self;
-        let local_device = local_device.ok_or(crate::sync::store::StoreError::MissingState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
-        })?;
-        if local_device.activation.is_none() {
-            return Err(super::StoreRegistrationError::ActivationRequired);
-        }
-        if &local_device.registration.value().store_root != history.root() {
-            return Err(crate::sync::store::StoreError::InvalidOutbound(
-                "local Store writer belongs to another Store root".to_string(),
-            )
-            .into());
-        }
-        let live_provider = history
-            .provider_binding()
-            .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)
-            .map_err(crate::sync::store::StoreError::from)?;
-        if live_provider.device != local_device.registration.value().provider {
-            return Err(super::StoreRegistrationError::Invalid(
-                "live provider principal differs from the local registration".to_string(),
-            ));
-        }
-        let device_signer = local_device
-            .registration
-            .value()
-            .device_signer(identity)
-            .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
-        Ok(history.authorize_writer(
-            membership,
-            identity,
-            local_device.registration,
-            device_signer,
-        ))
     }
 }
 

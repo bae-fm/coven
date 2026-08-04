@@ -369,11 +369,6 @@ impl PreparedStoreOperationCommit {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn publication_for_test(&self) -> (&StoreDeviceHead, &PreparedExactObject) {
-        self.publication()
-    }
-
     pub(crate) fn acknowledgement_remote_objects(
         &self,
         acknowledgement: &crate::protocol::objects::ExactProtocolObject<
@@ -617,6 +612,11 @@ impl PreparedStoreOperationCommit {
         *head = replacement;
         self.validate_closed_shape().map_err(PreparedCommitError)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publication_for_test(&self) -> (&StoreDeviceHead, &PreparedExactObject) {
+        self.publication()
     }
 }
 

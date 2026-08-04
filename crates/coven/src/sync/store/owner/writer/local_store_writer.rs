@@ -902,102 +902,6 @@ impl LocalStoreWriter {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) async fn load_local_circle_snapshot_refs(
-        &self,
-        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-    ) -> Result<
-        Vec<(
-            crate::protocol::store_commit::CircleSnapshotRef,
-            crate::protocol::store_commit::CircleSnapshotMeta,
-        )>,
-        crate::sync::store::owner::snapshot::SnapshotError,
-    > {
-        history
-            .snapshots()
-            .load_stream_refs(
-                circle_id,
-                access,
-                self.registration.reference(),
-                self.registration.value(),
-            )
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn load_local_circle_snapshots(
-        &self,
-        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-    ) -> Result<
-        Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
-        crate::sync::store::owner::snapshot::SnapshotError,
-    > {
-        Ok(history
-            .snapshots()
-            .load_stream_refs(
-                circle_id,
-                access,
-                self.registration.reference(),
-                self.registration.value(),
-            )
-            .await?
-            .into_iter()
-            .map(|(_, snapshot)| snapshot)
-            .collect())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn sign_circle_commit_for_test(
-        &self,
-        old_commit: &crate::protocol::store_commit::StoreBatchCommit,
-        coord: crate::protocol::store_commit::StoreCommitCoord,
-        reference: crate::protocol::store_commit::CircleControlRef,
-        stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
-    ) -> Result<
-        crate::protocol::store_commit::StoreBatchCommit,
-        crate::sync::store::circle_controls::CircleOperationError,
-    > {
-        if old_commit.author_registration != *self.registration.reference() {
-            return Err(
-                crate::sync::store::circle_controls::CircleOperationError::InvalidState(
-                    "test Circle commit is not authored by the local writer".to_string(),
-                ),
-            );
-        }
-        self.sign_circle_commit(
-            old_commit.store_root_hash,
-            old_commit.write_id.clone(),
-            coord,
-            old_commit.order.clone(),
-            old_commit.membership_state.clone(),
-            old_commit.device_state.clone(),
-            old_commit
-                .operations_membership_authority()
-                .map_err(|error| {
-                    crate::sync::store::circle_controls::CircleOperationError::InvalidState(
-                        format!(
-                            "prepared Circle commit has no validated operations authority: {error}"
-                        ),
-                    )
-                })?,
-            reference,
-            stream_activations,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn resign_store_commit_for_test(
-        &self,
-        commit: &mut crate::protocol::store_commit::StoreBatchCommit,
-    ) {
-        commit.signature =
-            crate::keys::sign_hex(&self.device_signer, &commit.canonical_signed_bytes()).1;
-    }
-
     pub(super) fn sign_reclaim_evidence(
         &self,
         store_root_hash: crate::protocol::store_commit::ObjectHash,
@@ -1106,93 +1010,6 @@ impl LocalStoreWriter {
         history
             .pull(membership, Some(&self.identity), routing_encryption)
             .await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn load_own_snapshot(
-        &self,
-        history: &mut super::AuthorizedStoreHistory<'_>,
-        reference: &crate::protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<
-        crate::protocol::store_commit::SnapshotMeta,
-        crate::protocol::objects::StoreObjectError,
-    > {
-        history
-            .load_store_snapshot(
-                self.registration.reference(),
-                self.registration.value(),
-                reference,
-            )
-            .await
-            .map(|(_, meta)| meta)
-    }
-
-    #[cfg(test)]
-    pub(super) fn resign_snapshot(
-        &self,
-        meta: crate::protocol::store_commit::SnapshotMeta,
-    ) -> Result<
-        crate::protocol::store_commit::SnapshotMeta,
-        crate::protocol::store_commit::StoreProtocolError,
-    > {
-        crate::protocol::store_commit::SnapshotMeta::signed(
-            meta.store_root_hash,
-            self.registration.reference().clone(),
-            meta.generation,
-            meta.predecessor,
-            meta.image,
-            meta.coverage,
-            meta.state,
-            meta.history_summary,
-            meta.schema_version,
-            meta.created_at,
-            meta.successor,
-            &self.device_signer,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn parse_snapshot(
-        &self,
-        bytes: &[u8],
-        store_root_hash: crate::protocol::store_commit::ObjectHash,
-        reference: &crate::protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<
-        crate::protocol::store_commit::SnapshotMeta,
-        crate::protocol::store_commit::StoreProtocolError,
-    > {
-        crate::protocol::store_commit::SnapshotMeta::parse_at(
-            bytes,
-            store_root_hash,
-            reference,
-            self.registration.value(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn parse_snapshot_stream_entry(
-        &self,
-        bytes: &[u8],
-        root: &crate::protocol::store_commit::StoreRootRef,
-        reference: &crate::protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<
-        crate::protocol::store_commit::SnapshotMeta,
-        crate::protocol::store_commit::StoreProtocolError,
-    > {
-        crate::protocol::store_commit::SnapshotMeta::parse_stream_entry_at(
-            bytes,
-            root,
-            self.registration.reference(),
-            self.registration.value(),
-            reference,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn registration_reference_for_test(
-        &self,
-    ) -> crate::protocol::store_commit::StoreDeviceRegistrationRef {
-        self.registration.reference().clone()
     }
 
     pub(super) fn sign_device_acknowledgement(
@@ -2153,6 +1970,189 @@ impl LocalStoreWriter {
             &self.device_signer,
         )
         .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_local_circle_snapshot_refs(
+        &self,
+        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
+        circle_id: crate::protocol::circle::CircleId,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
+    ) -> Result<
+        Vec<(
+            crate::protocol::store_commit::CircleSnapshotRef,
+            crate::protocol::store_commit::CircleSnapshotMeta,
+        )>,
+        crate::sync::store::owner::snapshot::SnapshotError,
+    > {
+        history
+            .snapshots()
+            .load_stream_refs(
+                circle_id,
+                access,
+                self.registration.reference(),
+                self.registration.value(),
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_local_circle_snapshots(
+        &self,
+        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
+        circle_id: crate::protocol::circle::CircleId,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
+    ) -> Result<
+        Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
+        crate::sync::store::owner::snapshot::SnapshotError,
+    > {
+        Ok(history
+            .snapshots()
+            .load_stream_refs(
+                circle_id,
+                access,
+                self.registration.reference(),
+                self.registration.value(),
+            )
+            .await?
+            .into_iter()
+            .map(|(_, snapshot)| snapshot)
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sign_circle_commit_for_test(
+        &self,
+        old_commit: &crate::protocol::store_commit::StoreBatchCommit,
+        coord: crate::protocol::store_commit::StoreCommitCoord,
+        reference: crate::protocol::store_commit::CircleControlRef,
+        stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
+    ) -> Result<
+        crate::protocol::store_commit::StoreBatchCommit,
+        crate::sync::store::circle_controls::CircleOperationError,
+    > {
+        if old_commit.author_registration != *self.registration.reference() {
+            return Err(
+                crate::sync::store::circle_controls::CircleOperationError::InvalidState(
+                    "test Circle commit is not authored by the local writer".to_string(),
+                ),
+            );
+        }
+        self.sign_circle_commit(
+            old_commit.store_root_hash,
+            old_commit.write_id.clone(),
+            coord,
+            old_commit.order.clone(),
+            old_commit.membership_state.clone(),
+            old_commit.device_state.clone(),
+            old_commit
+                .operations_membership_authority()
+                .map_err(|error| {
+                    crate::sync::store::circle_controls::CircleOperationError::InvalidState(
+                        format!(
+                            "prepared Circle commit has no validated operations authority: {error}"
+                        ),
+                    )
+                })?,
+            reference,
+            stream_activations,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resign_store_commit_for_test(
+        &self,
+        commit: &mut crate::protocol::store_commit::StoreBatchCommit,
+    ) {
+        commit.signature =
+            crate::keys::sign_hex(&self.device_signer, &commit.canonical_signed_bytes()).1;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn load_own_snapshot(
+        &self,
+        history: &mut super::AuthorizedStoreHistory<'_>,
+        reference: &crate::protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<
+        crate::protocol::store_commit::SnapshotMeta,
+        crate::protocol::objects::StoreObjectError,
+    > {
+        history
+            .load_store_snapshot(
+                self.registration.reference(),
+                self.registration.value(),
+                reference,
+            )
+            .await
+            .map(|(_, meta)| meta)
+    }
+
+    #[cfg(test)]
+    pub(super) fn resign_snapshot(
+        &self,
+        meta: crate::protocol::store_commit::SnapshotMeta,
+    ) -> Result<
+        crate::protocol::store_commit::SnapshotMeta,
+        crate::protocol::store_commit::StoreProtocolError,
+    > {
+        crate::protocol::store_commit::SnapshotMeta::signed(
+            meta.store_root_hash,
+            self.registration.reference().clone(),
+            meta.generation,
+            meta.predecessor,
+            meta.image,
+            meta.coverage,
+            meta.state,
+            meta.history_summary,
+            meta.schema_version,
+            meta.created_at,
+            meta.successor,
+            &self.device_signer,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn parse_snapshot(
+        &self,
+        bytes: &[u8],
+        store_root_hash: crate::protocol::store_commit::ObjectHash,
+        reference: &crate::protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<
+        crate::protocol::store_commit::SnapshotMeta,
+        crate::protocol::store_commit::StoreProtocolError,
+    > {
+        crate::protocol::store_commit::SnapshotMeta::parse_at(
+            bytes,
+            store_root_hash,
+            reference,
+            self.registration.value(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn parse_snapshot_stream_entry(
+        &self,
+        bytes: &[u8],
+        root: &crate::protocol::store_commit::StoreRootRef,
+        reference: &crate::protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<
+        crate::protocol::store_commit::SnapshotMeta,
+        crate::protocol::store_commit::StoreProtocolError,
+    > {
+        crate::protocol::store_commit::SnapshotMeta::parse_stream_entry_at(
+            bytes,
+            root,
+            self.registration.reference(),
+            self.registration.value(),
+            reference,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn registration_reference_for_test(
+        &self,
+    ) -> crate::protocol::store_commit::StoreDeviceRegistrationRef {
+        self.registration.reference().clone()
     }
 }
 

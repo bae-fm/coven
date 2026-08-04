@@ -325,24 +325,6 @@ where
         (**self).delete_blob_tombstone(key).await
     }
 
-    #[cfg(test)]
-    async fn list_provider_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
-        (**self).list_provider_objects_for_test(prefix).await
-    }
-
-    #[cfg(test)]
-    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        (**self).read_provider_object_for_test(key).await
-    }
-
-    #[cfg(test)]
-    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
-        (**self).provider_object_exists_for_test(key).await
-    }
-
     async fn probe_exact_slots(
         &self,
         journal: &dyn crate::protocol::provider::ProviderProbeJournal,
@@ -627,5 +609,23 @@ where
         blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         (**self).delete_blob_object(blob).await
+    }
+
+    #[cfg(test)]
+    async fn list_provider_objects_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        (**self).list_provider_objects_for_test(prefix).await
+    }
+
+    #[cfg(test)]
+    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        (**self).read_provider_object_for_test(key).await
+    }
+
+    #[cfg(test)]
+    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
+        (**self).provider_object_exists_for_test(key).await
     }
 }

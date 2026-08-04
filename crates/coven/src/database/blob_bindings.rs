@@ -147,30 +147,6 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) async fn row_blob_ref(
-        &self,
-        table: &str,
-        row_id: &str,
-    ) -> Result<RowBlobRef, DbError> {
-        let table = self
-            .synced_tables()
-            .iter()
-            .find(|candidate| candidate.name() == table)
-            .cloned()
-            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
-        if table.blob().is_none() {
-            return Err(DbError::Message(format!(
-                "synced table {:?} has no blob declaration",
-                table.name()
-            )));
-        }
-        let row_id = row_id.to_string();
-        let gates = self.state.gates.clone();
-        self.call(move |conn| Self::row_blob_ref_on(conn, &gates, &table, &row_id))
-            .await
-    }
-
     pub(crate) fn row_blob_refs_for_root_on(
         conn: &Connection,
         gates: &Gates,
@@ -440,5 +416,29 @@ impl Database {
             stored,
         )
         .map_err(DbError::Message)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn row_blob_ref(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<RowBlobRef, DbError> {
+        let table = self
+            .synced_tables()
+            .iter()
+            .find(|candidate| candidate.name() == table)
+            .cloned()
+            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
+        if table.blob().is_none() {
+            return Err(DbError::Message(format!(
+                "synced table {:?} has no blob declaration",
+                table.name()
+            )));
+        }
+        let row_id = row_id.to_string();
+        let gates = self.state.gates.clone();
+        self.call(move |conn| Self::row_blob_ref_on(conn, &gates, &table, &row_id))
+            .await
     }
 }

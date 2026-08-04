@@ -13,9 +13,7 @@ impl<'store> StoreCircleCommands<'store> {
     pub(crate) fn new(store: &'store super::Store) -> Self {
         Self { store }
     }
-}
 
-impl StoreCircleCommands<'_> {
     /// The read-only settlement status of a Circle's in-flight epoch close: for
     /// each participant device, whether its create-once response slot holds a
     /// response, an Owner exclusion, or is still empty. Reports each slot's

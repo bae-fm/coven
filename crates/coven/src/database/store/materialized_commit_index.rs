@@ -376,6 +376,249 @@ impl StoreDatabase {
             .into_iter()
             .max_by_key(|reference| reference.coord.sequence()))
     }
+
+    pub(crate) async fn store_device_state_for_order(
+        &self,
+        order: &crate::protocol::store_commit::StoreCommitOrder,
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
+        let cut = order
+            .predecessor_cut()
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        self.connection
+            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+            .await
+    }
+
+    pub(crate) async fn store_device_state_for_history_cut(
+        &self,
+        cut: &StoreHistoryCut,
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
+        let cut = cut.clone();
+        self.connection
+            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+            .await
+    }
+
+    pub(crate) async fn resolved_store_device_state(
+        &self,
+        reference: &StoreDeviceStateRef,
+    ) -> Result<ResolvedStoreDeviceState, DbError> {
+        let reference = reference.clone();
+        self.connection
+            .call(move |conn| load_declared_store_device_state_on(conn, &reference))
+            .await
+    }
+
+    pub(crate) async fn store_device_exclusion_freezes(
+        &self,
+    ) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading exclusion freezes".to_string())
+        })?;
+        self.connection
+            .call(move |conn| {
+                Ok(load_store_device_exclusion_freezes_on(conn, &root)?
+                    .into_values()
+                    .collect())
+            })
+            .await
+    }
+
+    pub(crate) async fn activated_store_device_registration_records(
+        &self,
+    ) -> Result<Vec<crate::protocol::store_commit::ReferencedStoreDeviceRegistration>, DbError>
+    {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading activated devices".to_string())
+        })?;
+        self.connection.call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT device_id, registration_hash, registration_bytes,
+                            registration_object
+                     FROM store_device_registration_activations ORDER BY device_id",
+                )
+                .map_err(DbError::from)?;
+                let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            rows
+                .map(|row| {
+                    let (device_id, registration_hash, bytes, object) =
+                        row.map_err(DbError::from)?;
+                    let device_id = device_id.parse().map_err(|error| {
+                        DbError::Message(format!("activated Store device id: {error}"))
+                    })?;
+                    let registration_hash = registration_hash.parse().map_err(|error| {
+                        DbError::Message(format!(
+                            "activated Store device registration hash: {error}"
+                        ))
+                    })?;
+                    let reference: StoreDeviceRegistrationRef =
+                        serde_json::from_str(&object).map_err(|error| {
+                        DbError::Message(format!(
+                            "activated Store device exact reference: {error}"
+                        ))
+                    })?;
+                    if reference.device_id != device_id
+                        || reference.registration_hash != registration_hash
+                    {
+                        return Err(DbError::Message(
+                            "activated Store registration columns differ from its exact reference"
+                                .to_string(),
+                        ));
+                    }
+                    let registration = StoreDeviceRegistration::parse_at(&bytes, &root, device_id)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "activated Store device registration {device_id}: {error}"
+                            ))
+                        })?;
+                    crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                        reference,
+                        registration,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "activated Store device registration {device_id} exact reference: {error}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, DbError>>()
+        })
+        .await
+    }
+
+    pub(crate) async fn activated_store_device_registration(
+        &self,
+        reference: StoreDeviceRegistrationRef,
+    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading an activated device".to_string())
+        })?;
+        self.connection
+            .call(move |conn| {
+                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                    reference,
+                    registration,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .await
+    }
+
+    /// The exact registration this device is activated under, or `None` before
+    /// it has one. This is the identity a signed artifact names when it names a
+    /// device, so it is what a role check compares against.
+    pub(crate) async fn local_activated_registration_ref(
+        &self,
+    ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
+        self.connection
+            .call(local_activated_registration_ref_on)
+            .await
+    }
+
+    pub(crate) async fn local_blob_write_authority(
+        &self,
+    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+        self.connection.call(local_store_authority_on).await
+    }
+
+    pub(crate) async fn activated_store_device_registration_with_authority(
+        &self,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        reference: StoreDeviceRegistrationRef,
+    ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
+        let root = root.clone();
+        self.connection
+            .call(move |conn| {
+                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                let authority: String = conn
+                    .query_row(
+                        "SELECT activation_authority FROM store_device_registration_activations \
+                     WHERE device_id = ?1 AND registration_hash = ?2",
+                        (
+                            reference.device_id.to_string(),
+                            reference.registration_hash.to_string(),
+                        ),
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let authority = serde_json::from_str(&authority).map_err(|error| {
+                    DbError::Message(format!("activated Store registration authority: {error}"))
+                })?;
+                let registration =
+                    ReferencedStoreDeviceRegistration::verified(reference, registration)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                ActivatedStoreDeviceRegistration::verified(registration, authority)
+                    .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .await
+    }
+
+    pub(crate) async fn activated_store_device_registration_for_device(
+        &self,
+        device_id: crate::protocol::store_commit::StoreDeviceId,
+    ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading an activated device".to_string())
+        })?;
+        self.connection
+            .call(move |conn| {
+                let stored: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT registration_object, activation_authority \
+                     FROM store_device_registration_activations WHERE device_id = ?1",
+                        [device_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                let Some((reference, authority)) = stored else {
+                    return Ok(None);
+                };
+                let reference: StoreDeviceRegistrationRef = serde_json::from_str(&reference)
+                    .map_err(|error| {
+                        DbError::Message(format!("activated Store registration ref: {error}"))
+                    })?;
+                if reference.device_id != device_id {
+                    return Err(DbError::Message(
+                        "activated Store registration row names another device".to_string(),
+                    ));
+                }
+                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                let authority = serde_json::from_str(&authority).map_err(|error| {
+                    DbError::Message(format!("activated Store registration authority: {error}"))
+                })?;
+                let registration =
+                    ReferencedStoreDeviceRegistration::verified(reference, registration)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                ActivatedStoreDeviceRegistration::verified(registration, authority)
+                    .map(Some)
+                    .map_err(|error| DbError::Message(error.to_string()))
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn activated_store_device_registrations(
+        &self,
+    ) -> Result<Vec<StoreDeviceRegistration>, DbError> {
+        Ok(self
+            .activated_store_device_registration_records()
+            .await?
+            .into_iter()
+            .map(|registration| registration.value().clone())
+            .collect())
+    }
 }
 
 pub(super) fn record_activated_store_device_registrations_on(
@@ -673,249 +916,4 @@ pub(super) fn record_activated_store_device_registrations_on(
         }
     }
     Ok(())
-}
-
-impl StoreDatabase {
-    #[cfg(test)]
-    pub(crate) async fn activated_store_device_registrations(
-        &self,
-    ) -> Result<Vec<StoreDeviceRegistration>, DbError> {
-        Ok(self
-            .activated_store_device_registration_records()
-            .await?
-            .into_iter()
-            .map(|registration| registration.value().clone())
-            .collect())
-    }
-
-    pub(crate) async fn store_device_state_for_order(
-        &self,
-        order: &crate::protocol::store_commit::StoreCommitOrder,
-    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
-        let cut = order
-            .predecessor_cut()
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        self.connection
-            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
-            .await
-    }
-
-    pub(crate) async fn store_device_state_for_history_cut(
-        &self,
-        cut: &StoreHistoryCut,
-    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
-        let cut = cut.clone();
-        self.connection
-            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
-            .await
-    }
-
-    pub(crate) async fn resolved_store_device_state(
-        &self,
-        reference: &StoreDeviceStateRef,
-    ) -> Result<ResolvedStoreDeviceState, DbError> {
-        let reference = reference.clone();
-        self.connection
-            .call(move |conn| load_declared_store_device_state_on(conn, &reference))
-            .await
-    }
-
-    pub(crate) async fn store_device_exclusion_freezes(
-        &self,
-    ) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
-            DbError::Message("Store root is absent while loading exclusion freezes".to_string())
-        })?;
-        self.connection
-            .call(move |conn| {
-                Ok(load_store_device_exclusion_freezes_on(conn, &root)?
-                    .into_values()
-                    .collect())
-            })
-            .await
-    }
-
-    pub(crate) async fn activated_store_device_registration_records(
-        &self,
-    ) -> Result<Vec<crate::protocol::store_commit::ReferencedStoreDeviceRegistration>, DbError>
-    {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
-            DbError::Message("Store root is absent while loading activated devices".to_string())
-        })?;
-        self.connection.call(move |conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT device_id, registration_hash, registration_bytes,
-                            registration_object
-                     FROM store_device_registration_activations ORDER BY device_id",
-                )
-                .map_err(DbError::from)?;
-                let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(DbError::from)?;
-            rows
-                .map(|row| {
-                    let (device_id, registration_hash, bytes, object) =
-                        row.map_err(DbError::from)?;
-                    let device_id = device_id.parse().map_err(|error| {
-                        DbError::Message(format!("activated Store device id: {error}"))
-                    })?;
-                    let registration_hash = registration_hash.parse().map_err(|error| {
-                        DbError::Message(format!(
-                            "activated Store device registration hash: {error}"
-                        ))
-                    })?;
-                    let reference: StoreDeviceRegistrationRef =
-                        serde_json::from_str(&object).map_err(|error| {
-                        DbError::Message(format!(
-                            "activated Store device exact reference: {error}"
-                        ))
-                    })?;
-                    if reference.device_id != device_id
-                        || reference.registration_hash != registration_hash
-                    {
-                        return Err(DbError::Message(
-                            "activated Store registration columns differ from its exact reference"
-                                .to_string(),
-                        ));
-                    }
-                    let registration = StoreDeviceRegistration::parse_at(&bytes, &root, device_id)
-                        .map_err(|error| {
-                            DbError::Message(format!(
-                                "activated Store device registration {device_id}: {error}"
-                            ))
-                        })?;
-                    crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-                        reference,
-                        registration,
-                    )
-                    .map_err(|error| {
-                        DbError::Message(format!(
-                            "activated Store device registration {device_id} exact reference: {error}"
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>, DbError>>()
-        })
-        .await
-    }
-
-    pub(crate) async fn activated_store_device_registration(
-        &self,
-        reference: StoreDeviceRegistrationRef,
-    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
-            DbError::Message("Store root is absent while loading an activated device".to_string())
-        })?;
-        self.connection
-            .call(move |conn| {
-                let registration = load_activated_registration_on(conn, &root, &reference)?;
-                crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-                    reference,
-                    registration,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))
-            })
-            .await
-    }
-
-    /// The exact registration this device is activated under, or `None` before
-    /// it has one. This is the identity a signed artifact names when it names a
-    /// device, so it is what a role check compares against.
-    pub(crate) async fn local_activated_registration_ref(
-        &self,
-    ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
-        self.connection
-            .call(local_activated_registration_ref_on)
-            .await
-    }
-
-    pub(crate) async fn local_blob_write_authority(
-        &self,
-    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
-        self.connection.call(local_store_authority_on).await
-    }
-
-    pub(crate) async fn activated_store_device_registration_with_authority(
-        &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        reference: StoreDeviceRegistrationRef,
-    ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
-        let root = root.clone();
-        self.connection
-            .call(move |conn| {
-                let registration = load_activated_registration_on(conn, &root, &reference)?;
-                let authority: String = conn
-                    .query_row(
-                        "SELECT activation_authority FROM store_device_registration_activations \
-                     WHERE device_id = ?1 AND registration_hash = ?2",
-                        (
-                            reference.device_id.to_string(),
-                            reference.registration_hash.to_string(),
-                        ),
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let authority = serde_json::from_str(&authority).map_err(|error| {
-                    DbError::Message(format!("activated Store registration authority: {error}"))
-                })?;
-                let registration =
-                    ReferencedStoreDeviceRegistration::verified(reference, registration)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                ActivatedStoreDeviceRegistration::verified(registration, authority)
-                    .map_err(|error| DbError::Message(error.to_string()))
-            })
-            .await
-    }
-
-    pub(crate) async fn activated_store_device_registration_for_device(
-        &self,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
-    ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
-        let root = self.local_store_root_ref().await?.ok_or_else(|| {
-            DbError::Message("Store root is absent while loading an activated device".to_string())
-        })?;
-        self.connection
-            .call(move |conn| {
-                let stored: Option<(String, String)> = conn
-                    .query_row(
-                        "SELECT registration_object, activation_authority \
-                     FROM store_device_registration_activations WHERE device_id = ?1",
-                        [device_id.to_string()],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let Some((reference, authority)) = stored else {
-                    return Ok(None);
-                };
-                let reference: StoreDeviceRegistrationRef = serde_json::from_str(&reference)
-                    .map_err(|error| {
-                        DbError::Message(format!("activated Store registration ref: {error}"))
-                    })?;
-                if reference.device_id != device_id {
-                    return Err(DbError::Message(
-                        "activated Store registration row names another device".to_string(),
-                    ));
-                }
-                let registration = load_activated_registration_on(conn, &root, &reference)?;
-                let authority = serde_json::from_str(&authority).map_err(|error| {
-                    DbError::Message(format!("activated Store registration authority: {error}"))
-                })?;
-                let registration =
-                    ReferencedStoreDeviceRegistration::verified(reference, registration)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                ActivatedStoreDeviceRegistration::verified(registration, authority)
-                    .map(Some)
-                    .map_err(|error| DbError::Message(error.to_string()))
-            })
-            .await
-    }
 }

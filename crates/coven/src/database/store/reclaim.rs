@@ -257,35 +257,6 @@ impl StoreDatabase {
             .await
     }
 
-    /// Whether a published snapshot generation lists this blob in its image, read
-    /// straight off the ownership record.
-    #[cfg(test)]
-    pub(crate) async fn stored_blob_has_snapshot_owner_for_test(
-        &self,
-        stored: crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<bool, DbError> {
-        self.connection
-            .call(move |conn| {
-                let remote = load_remote_object_on(conn, remote_object_id(stored.object()))?;
-                let pinned = remote.snapshot_owners().next().is_some();
-                Ok(pinned)
-            })
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn stored_blob_reclaim_candidates_for_test(
-        &self,
-    ) -> Result<
-        Vec<(
-            crate::protocol::blob::locator::StoredBlobRef,
-            Vec<StoreBatchCommitRef>,
-        )>,
-        DbError,
-    > {
-        self.stored_blob_reclaim_candidates().await
-    }
-
     /// Whether no live row in this device's materialized state binds the blob as a
     /// remote reference — the same predicate the member-signed tombstone path
     /// applies before deleting a blob body. An unresolved reference is not an
@@ -822,5 +793,34 @@ impl StoreDatabase {
                 Ok(next)
             })
             .await
+    }
+
+    /// Whether a published snapshot generation lists this blob in its image, read
+    /// straight off the ownership record.
+    #[cfg(test)]
+    pub(crate) async fn stored_blob_has_snapshot_owner_for_test(
+        &self,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        self.connection
+            .call(move |conn| {
+                let remote = load_remote_object_on(conn, remote_object_id(stored.object()))?;
+                let pinned = remote.snapshot_owners().next().is_some();
+                Ok(pinned)
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stored_blob_reclaim_candidates_for_test(
+        &self,
+    ) -> Result<
+        Vec<(
+            crate::protocol::blob::locator::StoredBlobRef,
+            Vec<StoreBatchCommitRef>,
+        )>,
+        DbError,
+    > {
+        self.stored_blob_reclaim_candidates().await
     }
 }

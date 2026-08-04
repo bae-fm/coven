@@ -469,135 +469,7 @@ impl ConnectedBlobTransitions {
     ) -> Result<(), MakeRemoteError> {
         self.local.cancel_make_remote(root_table, root_id).await
     }
-}
 
-/// The gate column of `root_table`, or `None` if it is not a gated root.
-fn gate_column<'a>(tables: &'a [SyncedTable], root_table: &str) -> Option<&'a str> {
-    tables
-        .iter()
-        .find(|t| t.name() == root_table)
-        .and_then(|t| t.gate_column())
-}
-
-fn is_remote_root(tables: &[SyncedTable], root_table: &str) -> bool {
-    tables
-        .iter()
-        .any(|t| t.name() == root_table && t.is_remote_root())
-}
-
-/// Validate that `root_table` is a coven-owned gated root (rejecting a remote root
-/// and a non-gated table) and return its gate column. The gate column names the row
-/// whose truth is the root's Local/Remote state —
-/// [`LocalBlobTransitions::make_remote`] reads it to refuse a root already Remote.
-fn gated_root_gate_col(
-    tables: &[SyncedTable],
-    root_table: &str,
-) -> Result<String, MakeRemoteError> {
-    if is_remote_root(tables, root_table) {
-        return Err(MakeRemoteError::RemoteRoot(root_table.to_string()));
-    }
-    gate_column(tables, root_table)
-        .map(str::to_string)
-        .ok_or_else(|| MakeRemoteError::NotGated(root_table.to_string()))
-}
-
-// ===========================================================================
-// make_local — foreground operation with a cancel signal
-// ===========================================================================
-
-/// Local files and database records produced by one make-local attempt before
-/// its atomic database commit. Until that commit succeeds, every file created by
-/// the attempt remains a rollback obligation owned by this value.
-struct MakeLocalMaterialization<'operation> {
-    transitions: &'operation ConnectedBlobTransitions,
-    root_table: &'operation str,
-    root_id: &'operation str,
-    gate_column: String,
-    records: Vec<crate::database::MaterializedLocalBlob>,
-    created_files: Vec<ExactPlaintextFile>,
-}
-
-impl<'operation> MakeLocalMaterialization<'operation> {
-    fn new(
-        transitions: &'operation ConnectedBlobTransitions,
-        root_table: &'operation str,
-        root_id: &'operation str,
-        gate_column: String,
-    ) -> Self {
-        Self {
-            transitions,
-            root_table,
-            root_id,
-            gate_column,
-            records: Vec::new(),
-            created_files: Vec::new(),
-        }
-    }
-
-    fn record_created_file(&mut self, file: ExactPlaintextFile) {
-        self.created_files.push(file);
-    }
-
-    fn record_blob(&mut self, record: crate::database::MaterializedLocalBlob) {
-        self.records.push(record);
-    }
-
-    async fn abort(self, cause: MakeLocalError) -> MakeLocalError {
-        for file in self.created_files {
-            if let Err(detail) = file.remove().await {
-                return MakeLocalError::Cleanup {
-                    path: file.path().display().to_string(),
-                    detail,
-                };
-            }
-        }
-        cause
-    }
-
-    async fn commit(self) -> Result<(), MakeLocalError> {
-        let records = self.records.clone();
-        match self
-            .transitions
-            .local
-            .commit_make_local(
-                self.root_table,
-                self.root_id,
-                &self.gate_column,
-                self.transitions.routing_encryption.clone(),
-                records,
-            )
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => Err(self.abort(MakeLocalError::Db(error)).await),
-        }
-    }
-}
-
-/// One blob materialized back to a local file by
-/// [`ConnectedBlobTransitions::make_local`], carrying what the single commit needs.
-/// `dest` is present for a user-provided blob whose local home is the user's path;
-/// absent for a host-provided blob whose local home is coven's local store.
-/// Bring a Remote root's blobs back to local files, then flip it Local in one atomic
-/// commit. Foreground and awaitable, with per-blob materialize progress and
-/// cooperative cancellation.
-///
-/// Durability-first, exactly the ordering a Remote→Local transition needs: for each
-/// blob, read it (cache or cloud) and write its local copy — a **user-provided**
-/// blob to `dest[blob_id]` (path required), a **host-provided** blob to coven's
-/// local store (no path) — each via temp + rename + fsync (file and directory) +
-/// length verify, emitting progress. Only after ALL blobs are durable does the
-/// single commit run: flip the gate false, register each user-provided file as an
-/// external ref, and enqueue each cloud blob's delete — together, so a crash can't
-/// flip the root Local while leaving the cloud blobs un-tombstoned. The gate retract
-/// removes the subtree from peers next push.
-///
-/// `dest` carries user-provided ids only; a missing host-provided dest is not an
-/// error. Cancellation, or any failure (a missing user-provided dest, a read error,
-/// a write error) before the commit, deletes the partial local copies already
-/// written and aborts: the gate is still on and the cloud is intact, so the root
-/// stays Remote and a retry re-materializes cleanly.
-impl ConnectedBlobTransitions {
     pub(crate) async fn make_local(
         &self,
         root_table: &str,
@@ -809,5 +681,108 @@ impl ConnectedBlobTransitions {
             return Err(MakeLocalError::Cancelled);
         }
         Ok(())
+    }
+}
+
+/// The gate column of `root_table`, or `None` if it is not a gated root.
+fn gate_column<'a>(tables: &'a [SyncedTable], root_table: &str) -> Option<&'a str> {
+    tables
+        .iter()
+        .find(|t| t.name() == root_table)
+        .and_then(|t| t.gate_column())
+}
+
+fn is_remote_root(tables: &[SyncedTable], root_table: &str) -> bool {
+    tables
+        .iter()
+        .any(|t| t.name() == root_table && t.is_remote_root())
+}
+
+/// Validate that `root_table` is a coven-owned gated root (rejecting a remote root
+/// and a non-gated table) and return its gate column. The gate column names the row
+/// whose truth is the root's Local/Remote state —
+/// [`LocalBlobTransitions::make_remote`] reads it to refuse a root already Remote.
+fn gated_root_gate_col(
+    tables: &[SyncedTable],
+    root_table: &str,
+) -> Result<String, MakeRemoteError> {
+    if is_remote_root(tables, root_table) {
+        return Err(MakeRemoteError::RemoteRoot(root_table.to_string()));
+    }
+    gate_column(tables, root_table)
+        .map(str::to_string)
+        .ok_or_else(|| MakeRemoteError::NotGated(root_table.to_string()))
+}
+
+// ===========================================================================
+// make_local — foreground operation with a cancel signal
+// ===========================================================================
+
+/// Local files and database records produced by one make-local attempt before
+/// its atomic database commit. Until that commit succeeds, every file created by
+/// the attempt remains a rollback obligation owned by this value.
+struct MakeLocalMaterialization<'operation> {
+    transitions: &'operation ConnectedBlobTransitions,
+    root_table: &'operation str,
+    root_id: &'operation str,
+    gate_column: String,
+    records: Vec<crate::database::MaterializedLocalBlob>,
+    created_files: Vec<ExactPlaintextFile>,
+}
+
+impl<'operation> MakeLocalMaterialization<'operation> {
+    fn new(
+        transitions: &'operation ConnectedBlobTransitions,
+        root_table: &'operation str,
+        root_id: &'operation str,
+        gate_column: String,
+    ) -> Self {
+        Self {
+            transitions,
+            root_table,
+            root_id,
+            gate_column,
+            records: Vec::new(),
+            created_files: Vec::new(),
+        }
+    }
+
+    fn record_created_file(&mut self, file: ExactPlaintextFile) {
+        self.created_files.push(file);
+    }
+
+    fn record_blob(&mut self, record: crate::database::MaterializedLocalBlob) {
+        self.records.push(record);
+    }
+
+    async fn abort(self, cause: MakeLocalError) -> MakeLocalError {
+        for file in self.created_files {
+            if let Err(detail) = file.remove().await {
+                return MakeLocalError::Cleanup {
+                    path: file.path().display().to_string(),
+                    detail,
+                };
+            }
+        }
+        cause
+    }
+
+    async fn commit(self) -> Result<(), MakeLocalError> {
+        let records = self.records.clone();
+        match self
+            .transitions
+            .local
+            .commit_make_local(
+                self.root_table,
+                self.root_id,
+                &self.gate_column,
+                self.transitions.routing_encryption.clone(),
+                records,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.abort(MakeLocalError::Db(error)).await),
+        }
     }
 }

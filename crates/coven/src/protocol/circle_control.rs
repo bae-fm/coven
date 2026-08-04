@@ -1855,11 +1855,6 @@ impl CircleControl {
         self.access_epoch().store_membership.clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn membership_authority(&self) -> &MembershipGrantCreationAuthority {
-        &self.value.membership_authority
-    }
-
     pub(crate) fn previous_control_hash(&self) -> Option<ObjectHash> {
         self.value.order.previous_control_hash
     }
@@ -2007,6 +2002,11 @@ impl CircleControl {
             seq: order.seq,
             control_hash: self.control_hash(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn membership_authority(&self) -> &MembershipGrantCreationAuthority {
+        &self.value.membership_authority
     }
 }
 
@@ -4153,37 +4153,5 @@ pub enum CircleTransitionError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::circle_roster;
-
-    #[test]
-    fn semantic_paths_bind_writer_and_author_stream_id() {
-        let grant = MembershipGrantId(ObjectHash::digest(b"path grant"));
-        let first = circle_roster::CircleRosterCoord {
-            author_pubkey: "owner".to_string(),
-            device_id: "device".to_string(),
-            stream_id: AuthorStreamId::from_bytes([1; 32]),
-            author_owner_grant: grant.clone(),
-            seq: 1,
-            entry_hash: ObjectHash::digest(b"entry"),
-        };
-        let mut substituted = first.clone();
-        substituted.stream_id = AuthorStreamId::from_bytes([2; 32]);
-        let circle_id = CircleId::from_bytes([7; 16]);
-        let first_path = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
-            circle_id,
-            coord: &first,
-        });
-
-        assert!(first_path.contains(&first.stream_id.to_string()));
-        assert!(verify_circle_semantic_prefix(
-            &first_path,
-            CircleSemanticSlot::RosterEntry {
-                circle_id,
-                coord: &substituted,
-            },
-        )
-        .is_err());
-    }
-}
+#[path = "circle_control_tests.rs"]
+mod tests;

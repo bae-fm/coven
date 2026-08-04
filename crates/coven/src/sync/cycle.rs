@@ -647,30 +647,6 @@ pub(crate) struct SyncComponents {
 }
 
 impl SyncComponents {
-    #[cfg(test)]
-    pub(crate) fn from_retained_test_device<S>(
-        store: std::sync::Arc<Store>,
-        database: crate::database::StoreDatabase,
-        local_blob_access: super::store::blob::LocalStoreBlobAccess,
-        storage: std::sync::Arc<S>,
-        store_id: String,
-        device_id: String,
-    ) -> Self
-    where
-        S: SyncCycleStorage + 'static,
-    {
-        let storage: std::sync::Arc<dyn SyncCycleStorage> = storage;
-        Self {
-            store,
-            database,
-            local_blob_access,
-            store_id,
-            storage,
-            device_id,
-            routing_encryption: None,
-        }
-    }
-
     pub(crate) async fn probe_storage(&self) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.probe_provider().await
     }
@@ -930,23 +906,6 @@ impl SyncComponents {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn list_storage_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
-        self.storage.list_provider_objects_for_test(prefix).await
-    }
-
-    #[cfg(test)]
-    pub(crate) fn uses_storage_for_test(
-        &self,
-        expected: &std::sync::Arc<dyn crate::storage::SyncStorage>,
-    ) -> bool {
-        let actual: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
-        std::sync::Arc::ptr_eq(&actual, expected)
-    }
-
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
         self.store.blob_path_scheme()
     }
@@ -960,30 +919,6 @@ impl SyncComponents {
 
     pub(crate) fn is_encrypted(&self) -> bool {
         self.current_encryption().is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
-        self.current_encryption()
-            .map(|encryption| encryption.current_generation())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_sealed_blob_for_test(
-        &self,
-        stored: &[u8],
-        aad_context: &[u8],
-    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
-        let encryption = self
-            .current_encryption()
-            .ok_or_else(|| "session is not encrypted".to_string())?;
-        let (fingerprint, header, chunks) =
-            crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
-        let plaintext = encryption
-            .blob_opener(header, aad_context)
-            .open_chunks(0..header.chunk_count(), chunks)
-            .map_err(|error| error.to_string())?;
-        Ok((fingerprint, plaintext))
     }
 
     pub(crate) fn self_uploader(&self) -> String {
@@ -1052,15 +987,6 @@ impl SyncComponents {
             .resolve_membership_conflict(choice, &self.database.stamp())
             .await?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn adopt_key_rotation(
-        &self,
-        encryption: crate::encryption::EncryptionService,
-        security: &dyn RotationKeyAdoption,
-    ) -> Result<String, crate::keys::KeyError> {
-        security.adopt_key_rotation(self.storage.as_ref(), &encryption)
     }
 
     pub(crate) async fn create_circle(
@@ -1226,5 +1152,79 @@ impl SyncComponents {
         }
         .run()
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_retained_test_device<S>(
+        store: std::sync::Arc<Store>,
+        database: crate::database::StoreDatabase,
+        local_blob_access: super::store::blob::LocalStoreBlobAccess,
+        storage: std::sync::Arc<S>,
+        store_id: String,
+        device_id: String,
+    ) -> Self
+    where
+        S: SyncCycleStorage + 'static,
+    {
+        let storage: std::sync::Arc<dyn SyncCycleStorage> = storage;
+        Self {
+            store,
+            database,
+            local_blob_access,
+            store_id,
+            storage,
+            device_id,
+            routing_encryption: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn list_storage_objects_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
+        self.storage.list_provider_objects_for_test(prefix).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uses_storage_for_test(
+        &self,
+        expected: &std::sync::Arc<dyn crate::storage::SyncStorage>,
+    ) -> bool {
+        let actual: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
+        std::sync::Arc::ptr_eq(&actual, expected)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
+        self.current_encryption()
+            .map(|encryption| encryption.current_generation())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
+        let encryption = self
+            .current_encryption()
+            .ok_or_else(|| "session is not encrypted".to_string())?;
+        let (fingerprint, header, chunks) =
+            crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
+        let plaintext = encryption
+            .blob_opener(header, aad_context)
+            .open_chunks(0..header.chunk_count(), chunks)
+            .map_err(|error| error.to_string())?;
+        Ok((fingerprint, plaintext))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adopt_key_rotation(
+        &self,
+        encryption: crate::encryption::EncryptionService,
+        security: &dyn RotationKeyAdoption,
+    ) -> Result<String, crate::keys::KeyError> {
+        security.adopt_key_rotation(self.storage.as_ref(), &encryption)
     }
 }

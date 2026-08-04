@@ -3360,145 +3360,6 @@ impl TestStore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn install_cross_principal_device<'a>(
-        &'a self,
-        local_database: crate::database::StoreDatabase,
-        identity: &'a UserKeypair,
-        peer_account_id: &'a str,
-        published_at: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
-        Box::pin(async move {
-            let observer = self.founder.clone();
-            let provider_binding = crate::storage::SyncStorage::provider_binding(&*self.storage)
-                .await
-                .map_err(|error| error.to_string())?;
-            let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
-                &provider_binding.store
-            else {
-                return Err("cross-principal test Store is not Dropbox".to_string());
-            };
-            let namespace_id = namespace_id.clone();
-            let peer_binding = crate::protocol::objects::ResolvedProviderBinding {
-                store: provider_binding.store.clone(),
-                device: crate::protocol::objects::ProviderDeviceBinding {
-                    principal: crate::protocol::objects::ProviderPrincipalId::Dropbox {
-                        account_id: peer_account_id.to_string(),
-                    },
-                },
-            };
-            let peer_home = std::sync::Arc::new(
-                self.home
-                    .as_ref()
-                    .clone()
-                    .with_provider_binding(peer_binding),
-            );
-            let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
-                crate::storage::CloudSyncStorage::new(
-                    peer_home.clone(),
-                    crate::storage::CloudCipher::Encrypted(
-                        crate::encryption::EncryptionService::from_key([42; 32]),
-                    ),
-                    crate::storage::BlobPathScheme::Hashed,
-                    "cross-principal-test-store",
-                    identity.clone(),
-                )
-                .map_err(|error| error.to_string())?,
-            );
-            let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
-                pending_dir.path().join("pending-device-join.sqlite"),
-            )
-            .map_err(|error| error.to_string())?;
-            let offer = observer
-                .begin_device_join(&pubkey_hex(identity))
-                .await
-                .map_err(|error| error.to_string())?;
-            let join_history =
-                crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
-                    .open_pinned(peer_storage.as_ref(), &offer.store_root)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            let observation = crate::sync::store::PendingDeviceJoinObservation::new(
-                &pending,
-                &peer_storage,
-                join_history,
-                offer.attempt_id,
-            );
-            let mut pending_join =
-                crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            let access_request = pending_join
-                .prepare_provider_access_request()
-                .await
-                .map_err(|error| error.to_string())?;
-            let access_administrator = TestDropboxAccessAdministrator { namespace_id };
-            let approval = observer
-                .authorize_device_provider_access(access_request, Some(&access_administrator))
-                .await
-                .map_err(|error| error.to_string())?;
-            if !matches!(
-                approval.admission,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
-            ) {
-                return Err(
-                    "distinct provider principals produced same-principal admission".into(),
-                );
-            }
-            let registration_request = pending_join
-                .prepare_registration_request(approval)
-                .await
-                .map_err(|error| error.to_string())?;
-            let provisional = observer
-                .accept_device_registration_request(registration_request)
-                .await
-                .map_err(|error| error.to_string())?;
-            let provider_ready = observer
-                .publish_device_provider_challenge(provisional)
-                .await
-                .map_err(|error| error.to_string())?;
-            let (_store_dir_temp, store_dir) = temp_store_dir();
-            let mut joining = pending_join
-                .begin_joining_store(local_database, &store_dir)
-                .await
-                .map_err(|error| error.to_string())?;
-            let readiness = joining
-                .bootstrap(provider_ready, published_at)
-                .await
-                .map_err(|error| error.to_string())?;
-            if !matches!(
-                readiness.provider,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderReadiness::CrossPrincipal(_)
-            ) {
-                return Err(
-                    "distinct provider principals produced same-principal readiness".into(),
-                );
-            }
-            let completion = observer
-                .complete_device_provider_admission(readiness)
-                .await
-                .map_err(|error| error.to_string())?;
-            if !matches!(
-                completion.admission,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal(_)
-            ) {
-                return Err(
-                    "distinct provider principals produced same-principal completion".into(),
-                );
-            }
-            let activation = observer
-                .finalize_device_join(completion)
-                .await
-                .map_err(|error| error.to_string())?;
-            joining
-                .complete(activation)
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(())
-        })
-    }
-
     pub(crate) async fn run_founder_cycle(
         &self,
         store_dir: &StoreDir,
@@ -4328,167 +4189,6 @@ impl TestStore {
             .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn push_circle_snapshots(
-        &self,
-        db: &Database,
-        temp_dir: std::path::PathBuf,
-        schema_version: u32,
-        created_at: &str,
-        store_routing: &crate::encryption::EncryptionService,
-    ) -> Result<crate::protocol::store_commit::CircleSnapshotMeta, crate::sync::store::SnapshotError>
-    {
-        self.bind_device(db, &self.signer)
-            .await
-            .map_err(crate::sync::store::SnapshotError::PublicationState)?
-            .authorize_writer()
-            .await
-            .map_err(|error| {
-                crate::sync::store::SnapshotError::PublicationState(error.to_string())
-            })?
-            .circles()
-            .snapshots()
-            .author_one_circle_snapshot_for_test(
-                temp_dir,
-                schema_version,
-                created_at,
-                store_routing,
-            )
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn load_circle_snapshot_metas(
-        &self,
-        db: &Database,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-    ) -> Result<
-        Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
-        crate::sync::store::SnapshotError,
-    > {
-        self.bind_device(db, &self.signer)
-            .await
-            .map_err(crate::sync::store::SnapshotError::PublicationState)?
-            .authorize_writer()
-            .await
-            .map_err(|error| {
-                crate::sync::store::SnapshotError::PublicationState(error.to_string())
-            })?
-            .circles()
-            .snapshots()
-            .load_circle_snapshot_metas_for_test(circle_id, access)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn verify_standalone_circle_snapshot_image(
-        &self,
-        db: &Database,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-        store_routing: &crate::encryption::EncryptionService,
-    ) -> Result<(), crate::sync::store::SnapshotError> {
-        self.bind_device(db, &self.signer)
-            .await
-            .map_err(crate::sync::store::SnapshotError::PublicationState)?
-            .authorize_writer()
-            .await
-            .map_err(|error| {
-                crate::sync::store::SnapshotError::PublicationState(error.to_string())
-            })?
-            .circles()
-            .snapshots()
-            .verify_standalone_circle_snapshot_image_for_test(circle_id, access, store_routing)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn circle_snapshot_is_stable(
-        &self,
-        db: &Database,
-        circle_id: crate::protocol::circle::CircleId,
-        snapshot_cut: &crate::protocol::store_commit::CommitFrontier,
-    ) -> Result<bool, crate::sync::store::SnapshotError> {
-        self.bind_device(db, &self.signer)
-            .await
-            .map_err(crate::sync::store::SnapshotError::PublicationState)?
-            .authorize_writer()
-            .await
-            .map_err(|error| {
-                crate::sync::store::SnapshotError::PublicationState(error.to_string())
-            })?
-            .circles()
-            .snapshots()
-            .circle_snapshot_is_stable(circle_id, snapshot_cut)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn load_circle_acknowledgement(
-        &self,
-        db: &Database,
-        reference: &crate::protocol::store_commit::CircleAckRef,
-    ) -> Result<crate::protocol::store_commit::CircleAck, crate::sync::store::StoreAckError> {
-        self.bind_device(db, &self.signer)
-            .await
-            .map_err(crate::sync::store::StoreAckError::InvalidOutbound)?
-            .load_circle_acknowledgement_for_test(reference)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn read_circle_snapshot_image(
-        &self,
-        selected: &crate::protocol::store_commit::CircleSnapshotMeta,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
-        let context = access.protocol_context(
-            self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
-        );
-        self.storage
-            .read_protocol_object(
-                &context,
-                &selected.bootstrap.image.object,
-                &crate::protocol::store_commit::circle_snapshot_image_semantic_prefix(
-                    selected.circle_id,
-                    &selected.author_registration.device_id.to_string(),
-                    selected.bootstrap.image.image_hash,
-                ),
-            )
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn circle_snapshot_meta_is_unreadable(
-        &self,
-        circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
-    ) -> bool {
-        let context = crate::protocol::objects::ProtocolObjectContext::circle(
-            self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotMeta,
-            encryption,
-        );
-        let prefix = crate::protocol::store_commit::circle_snapshot_slot_prefix(
-            circle_id,
-            &self.founder.device_id,
-            0,
-        );
-        let slot = crate::protocol::objects::ObjectSlot::logical(format!("{prefix}.json"))
-            .expect("valid generation-zero Circle snapshot slot");
-        self.storage
-            .read_protocol_slot(&context, &slot, &prefix)
-            .await
-            .is_err()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn store_root_hash(&self) -> crate::protocol::store_commit::ObjectHash {
-        self.root.store_root_hash
-    }
-
     pub(crate) async fn drain_uploads(
         &self,
         database: &crate::database::StoreDatabase,
@@ -4722,53 +4422,6 @@ impl TestStore {
         device.device_authority_for_test().await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn retained_merge_history_summary(
-        &self,
-        device_id: &crate::protocol::store_commit::StoreDeviceId,
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary, String> {
-        let device = {
-            let producers = self.producers.lock().await;
-            producers
-                .by_name
-                .values()
-                .chain(producers.unassigned.iter())
-                .find(|producer| producer.device_id == device_id.to_string())
-                .cloned()
-                .ok_or_else(|| format!("test Store has no producer for device {device_id}"))?
-        };
-        device
-            .retained_merge_history_summary_for_test(reference)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn publish_changeset(
-        &self,
-        name: &str,
-        sequence: u64,
-        changeset: &[u8],
-        schema_version: u32,
-    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
-        let device = self.ensure_producer(name).await?;
-        device
-            .publish_changeset_for_test(sequence, changeset.to_vec(), schema_version)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn publish_founder_changeset(
-        &self,
-        store_dir: &StoreDir,
-        changeset: Vec<u8>,
-        previous_sequence: u64,
-    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
-        self.founder
-            .publish_changeset_after_for_test(store_dir, changeset, previous_sequence)
-            .await
-    }
-
     async fn ensure_producer(&self, name: &str) -> Result<TestDevice, String> {
         {
             let producers = self.producers.lock().await;
@@ -4852,6 +4505,353 @@ impl TestStore {
     ) -> Result<bool, String> {
         let device = self.bind_store_device(database, &self.signer).await?;
         device.publish_pending_store_database(store_dir).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_cross_principal_device<'a>(
+        &'a self,
+        local_database: crate::database::StoreDatabase,
+        identity: &'a UserKeypair,
+        peer_account_id: &'a str,
+        published_at: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
+        Box::pin(async move {
+            let observer = self.founder.clone();
+            let provider_binding = crate::storage::SyncStorage::provider_binding(&*self.storage)
+                .await
+                .map_err(|error| error.to_string())?;
+            let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
+                &provider_binding.store
+            else {
+                return Err("cross-principal test Store is not Dropbox".to_string());
+            };
+            let namespace_id = namespace_id.clone();
+            let peer_binding = crate::protocol::objects::ResolvedProviderBinding {
+                store: provider_binding.store.clone(),
+                device: crate::protocol::objects::ProviderDeviceBinding {
+                    principal: crate::protocol::objects::ProviderPrincipalId::Dropbox {
+                        account_id: peer_account_id.to_string(),
+                    },
+                },
+            };
+            let peer_home = std::sync::Arc::new(
+                self.home
+                    .as_ref()
+                    .clone()
+                    .with_provider_binding(peer_binding),
+            );
+            let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
+                crate::storage::CloudSyncStorage::new(
+                    peer_home.clone(),
+                    crate::storage::CloudCipher::Encrypted(
+                        crate::encryption::EncryptionService::from_key([42; 32]),
+                    ),
+                    crate::storage::BlobPathScheme::Hashed,
+                    "cross-principal-test-store",
+                    identity.clone(),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+            let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+                pending_dir.path().join("pending-device-join.sqlite"),
+            )
+            .map_err(|error| error.to_string())?;
+            let offer = observer
+                .begin_device_join(&pubkey_hex(identity))
+                .await
+                .map_err(|error| error.to_string())?;
+            let join_history =
+                crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
+                    .open_pinned(peer_storage.as_ref(), &offer.store_root)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let observation = crate::sync::store::PendingDeviceJoinObservation::new(
+                &pending,
+                &peer_storage,
+                join_history,
+                offer.attempt_id,
+            );
+            let mut pending_join =
+                crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let access_request = pending_join
+                .prepare_provider_access_request()
+                .await
+                .map_err(|error| error.to_string())?;
+            let access_administrator = TestDropboxAccessAdministrator { namespace_id };
+            let approval = observer
+                .authorize_device_provider_access(access_request, Some(&access_administrator))
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                approval.admission,
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+            ) {
+                return Err(
+                    "distinct provider principals produced same-principal admission".into(),
+                );
+            }
+            let registration_request = pending_join
+                .prepare_registration_request(approval)
+                .await
+                .map_err(|error| error.to_string())?;
+            let provisional = observer
+                .accept_device_registration_request(registration_request)
+                .await
+                .map_err(|error| error.to_string())?;
+            let provider_ready = observer
+                .publish_device_provider_challenge(provisional)
+                .await
+                .map_err(|error| error.to_string())?;
+            let (_store_dir_temp, store_dir) = temp_store_dir();
+            let mut joining = pending_join
+                .begin_joining_store(local_database, &store_dir)
+                .await
+                .map_err(|error| error.to_string())?;
+            let readiness = joining
+                .bootstrap(provider_ready, published_at)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                readiness.provider,
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderReadiness::CrossPrincipal(_)
+            ) {
+                return Err(
+                    "distinct provider principals produced same-principal readiness".into(),
+                );
+            }
+            let completion = observer
+                .complete_device_provider_admission(readiness)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !matches!(
+                completion.admission,
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal(_)
+            ) {
+                return Err(
+                    "distinct provider principals produced same-principal completion".into(),
+                );
+            }
+            let activation = observer
+                .finalize_device_join(completion)
+                .await
+                .map_err(|error| error.to_string())?;
+            joining
+                .complete(activation)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn push_circle_snapshots(
+        &self,
+        db: &Database,
+        temp_dir: std::path::PathBuf,
+        schema_version: u32,
+        created_at: &str,
+        store_routing: &crate::encryption::EncryptionService,
+    ) -> Result<crate::protocol::store_commit::CircleSnapshotMeta, crate::sync::store::SnapshotError>
+    {
+        self.bind_device(db, &self.signer)
+            .await
+            .map_err(crate::sync::store::SnapshotError::PublicationState)?
+            .authorize_writer()
+            .await
+            .map_err(|error| {
+                crate::sync::store::SnapshotError::PublicationState(error.to_string())
+            })?
+            .circles()
+            .snapshots()
+            .author_one_circle_snapshot_for_test(
+                temp_dir,
+                schema_version,
+                created_at,
+                store_routing,
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_circle_snapshot_metas(
+        &self,
+        db: &Database,
+        circle_id: crate::protocol::circle::CircleId,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
+    ) -> Result<
+        Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
+        crate::sync::store::SnapshotError,
+    > {
+        self.bind_device(db, &self.signer)
+            .await
+            .map_err(crate::sync::store::SnapshotError::PublicationState)?
+            .authorize_writer()
+            .await
+            .map_err(|error| {
+                crate::sync::store::SnapshotError::PublicationState(error.to_string())
+            })?
+            .circles()
+            .snapshots()
+            .load_circle_snapshot_metas_for_test(circle_id, access)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn verify_standalone_circle_snapshot_image(
+        &self,
+        db: &Database,
+        circle_id: crate::protocol::circle::CircleId,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        store_routing: &crate::encryption::EncryptionService,
+    ) -> Result<(), crate::sync::store::SnapshotError> {
+        self.bind_device(db, &self.signer)
+            .await
+            .map_err(crate::sync::store::SnapshotError::PublicationState)?
+            .authorize_writer()
+            .await
+            .map_err(|error| {
+                crate::sync::store::SnapshotError::PublicationState(error.to_string())
+            })?
+            .circles()
+            .snapshots()
+            .verify_standalone_circle_snapshot_image_for_test(circle_id, access, store_routing)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn circle_snapshot_is_stable(
+        &self,
+        db: &Database,
+        circle_id: crate::protocol::circle::CircleId,
+        snapshot_cut: &crate::protocol::store_commit::CommitFrontier,
+    ) -> Result<bool, crate::sync::store::SnapshotError> {
+        self.bind_device(db, &self.signer)
+            .await
+            .map_err(crate::sync::store::SnapshotError::PublicationState)?
+            .authorize_writer()
+            .await
+            .map_err(|error| {
+                crate::sync::store::SnapshotError::PublicationState(error.to_string())
+            })?
+            .circles()
+            .snapshots()
+            .circle_snapshot_is_stable(circle_id, snapshot_cut)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_circle_acknowledgement(
+        &self,
+        db: &Database,
+        reference: &crate::protocol::store_commit::CircleAckRef,
+    ) -> Result<crate::protocol::store_commit::CircleAck, crate::sync::store::StoreAckError> {
+        self.bind_device(db, &self.signer)
+            .await
+            .map_err(crate::sync::store::StoreAckError::InvalidOutbound)?
+            .load_circle_acknowledgement_for_test(reference)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn read_circle_snapshot_image(
+        &self,
+        selected: &crate::protocol::store_commit::CircleSnapshotMeta,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
+        let context = access.protocol_context(
+            self.root.store_root_hash,
+            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
+        );
+        self.storage
+            .read_protocol_object(
+                &context,
+                &selected.bootstrap.image.object,
+                &crate::protocol::store_commit::circle_snapshot_image_semantic_prefix(
+                    selected.circle_id,
+                    &selected.author_registration.device_id.to_string(),
+                    selected.bootstrap.image.image_hash,
+                ),
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn circle_snapshot_meta_is_unreadable(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        encryption: crate::encryption::EncryptionService,
+    ) -> bool {
+        let context = crate::protocol::objects::ProtocolObjectContext::circle(
+            self.root.store_root_hash,
+            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotMeta,
+            encryption,
+        );
+        let prefix = crate::protocol::store_commit::circle_snapshot_slot_prefix(
+            circle_id,
+            &self.founder.device_id,
+            0,
+        );
+        let slot = crate::protocol::objects::ObjectSlot::logical(format!("{prefix}.json"))
+            .expect("valid generation-zero Circle snapshot slot");
+        self.storage
+            .read_protocol_slot(&context, &slot, &prefix)
+            .await
+            .is_err()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store_root_hash(&self) -> crate::protocol::store_commit::ObjectHash {
+        self.root.store_root_hash
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn retained_merge_history_summary(
+        &self,
+        device_id: &crate::protocol::store_commit::StoreDeviceId,
+        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary, String> {
+        let device = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .values()
+                .chain(producers.unassigned.iter())
+                .find(|producer| producer.device_id == device_id.to_string())
+                .cloned()
+                .ok_or_else(|| format!("test Store has no producer for device {device_id}"))?
+        };
+        device
+            .retained_merge_history_summary_for_test(reference)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_changeset(
+        &self,
+        name: &str,
+        sequence: u64,
+        changeset: &[u8],
+        schema_version: u32,
+    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+        let device = self.ensure_producer(name).await?;
+        device
+            .publish_changeset_for_test(sequence, changeset.to_vec(), schema_version)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_founder_changeset(
+        &self,
+        store_dir: &StoreDir,
+        changeset: Vec<u8>,
+        previous_sequence: u64,
+    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+        self.founder
+            .publish_changeset_after_for_test(store_dir, changeset, previous_sequence)
+            .await
     }
 }
 

@@ -27,11 +27,6 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         self.history.circle_acknowledgements()
     }
 
-    #[cfg(test)]
-    pub(crate) fn snapshots(&mut self) -> super::snapshots::CircleSnapshotReader<'_, 'storage> {
-        self.history.circle_snapshots()
-    }
-
     pub(crate) fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
         self.history.root()
     }
@@ -115,5 +110,10 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
                 evidence,
             )
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshots(&mut self) -> super::snapshots::CircleSnapshotReader<'_, 'storage> {
+        self.history.circle_snapshots()
     }
 }
