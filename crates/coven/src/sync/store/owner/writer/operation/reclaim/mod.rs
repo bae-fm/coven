@@ -523,8 +523,7 @@ impl AuthorizedReclaim<'_, '_> {
         for acknowledgement in database.activated_circle_acks(circle_id).await? {
             let ack = match self
                 .history()
-                .circle_acknowledgements()
-                .load(&acknowledgement)
+                .load_circle_acknowledgement(&acknowledgement)
                 .await
             {
                 Ok(ack) => ack,
@@ -1074,8 +1073,7 @@ impl AuthorizedReclaim<'_, '_> {
                     .load_registration(&claim.covering_snapshot.author_registration)
                     .await?;
                 let stream = history
-                    .circle_snapshots()
-                    .load_stream_refs(
+                    .load_circle_snapshot_stream_refs(
                         circle_id,
                         access.into_encryption(),
                         &claim.covering_snapshot.author_registration,
@@ -1097,8 +1095,7 @@ impl AuthorizedReclaim<'_, '_> {
                 }
                 let cut = &snapshot.bootstrap.coverage;
                 let expected = history
-                    .circle_acknowledgements()
-                    .stable_dominating(circle_id, cut)
+                    .stable_circle_acknowledgements(circle_id, cut)
                     .await
                     .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
                     .ok_or_else(|| {
@@ -1296,8 +1293,7 @@ impl AuthorizedReclaim<'_, '_> {
         ));
         }
         if history
-            .circle_acknowledgements()
-            .stable_dominating(circle_id, &superseding.1.bootstrap.coverage)
+            .stable_circle_acknowledgements(circle_id, &superseding.1.bootstrap.coverage)
             .await
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
             .is_none()
@@ -1415,8 +1411,7 @@ impl AuthorizedReclaim<'_, '_> {
             })?;
         let acknowledgement_ref = claim.proof.acknowledgement();
         let acknowledgement = history
-            .circle_acknowledgements()
-            .load(acknowledgement_ref)
+            .load_circle_acknowledgement(acknowledgement_ref)
             .await
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
         // The recipient's signed acknowledgement is the sole authority for the coverage

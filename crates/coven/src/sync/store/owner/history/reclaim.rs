@@ -44,24 +44,54 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         self.history.verified_root().reference()
     }
 
-    pub(crate) fn circle_acknowledgements(
+    pub(crate) async fn load_circle_acknowledgement(
         &mut self,
-    ) -> super::super::circles::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
+        reference: &crate::protocol::store_commit::CircleAckRef,
+    ) -> Result<crate::protocol::store_commit::CircleAck, super::super::StoreAckError> {
         super::super::circles::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
             self.storage,
             self.root(),
         )
+        .load(reference)
+        .await
     }
 
-    pub(crate) fn circle_snapshots(
+    pub(crate) async fn stable_circle_acknowledgements(
         &mut self,
-    ) -> super::super::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
+        circle_id: crate::protocol::circle::CircleId,
+        coverage: &CommitFrontier,
+    ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, super::super::StoreAckError>
+    {
+        super::super::circles::acknowledgements::CircleAcknowledgementReader::new(
+            &self.database,
+            self.storage,
+            self.root(),
+        )
+        .stable_dominating(circle_id, coverage)
+        .await
+    }
+
+    pub(crate) async fn load_circle_snapshot_stream_refs(
+        &mut self,
+        circle_id: crate::protocol::circle::CircleId,
+        encryption: crate::encryption::EncryptionService,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<
+        Vec<(
+            crate::protocol::store_commit::CircleSnapshotRef,
+            crate::protocol::store_commit::CircleSnapshotMeta,
+        )>,
+        super::super::writer::snapshot::SnapshotError,
+    > {
         super::super::circles::snapshots::CircleSnapshotReader::new(
             &self.database,
             self.storage,
             self.history,
         )
+        .load_stream_refs(circle_id, encryption, registration_ref, registration)
+        .await
     }
 
     pub(crate) async fn load_ref(
@@ -183,8 +213,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             // A device's stream can span epochs. If this reader cannot resolve one
             // generation's key, that stream cannot establish current coverage.
             let generations = match self
-                .circle_snapshots()
-                .load_stream_refs(
+                .load_circle_snapshot_stream_refs(
                     circle_id,
                     encryption.clone(),
                     registration_ref,
@@ -221,8 +250,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         for stream in streams {
             for (reference, meta) in &stream.generations {
                 if let Some(acknowledgements) = self
-                    .circle_acknowledgements()
-                    .stable_dominating(circle_id, &meta.bootstrap.coverage)
+                    .stable_circle_acknowledgements(circle_id, &meta.bootstrap.coverage)
                     .await
                     .map_err(|error| {
                         crate::sync::store::StoreReclaimError::Authorization(error.to_string())
