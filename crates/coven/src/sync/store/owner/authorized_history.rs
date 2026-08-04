@@ -298,22 +298,157 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(super) async fn bind_pull_package_materializer(
+    pub(super) async fn pull_package_schema(
         &self,
+    ) -> Result<std::sync::Arc<crate::database::TableSchema>, crate::database::DbError> {
+        Ok(std::sync::Arc::new(
+            self.database.table_schema_for_apply().await?,
+        ))
+    }
+
+    pub(super) fn pull_store_blob_protection(
+        &self,
+    ) -> Result<crate::storage::BlobSpoolProtection, crate::storage::StorageError> {
+        self.blob_source.store_protection()
+    }
+
+    pub(super) async fn prepare_pull_package(
+        &self,
+        package: crate::protocol::audience_package::AudiencePackage,
+        blob_protection: crate::storage::BlobSpoolProtection,
+        schema: std::sync::Arc<crate::database::TableSchema>,
     ) -> Result<
-        super::pull_package_materializer::PullPackageMaterializer<'storage>,
-        crate::database::DbError,
+        Result<pull::PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
+        pull::StorePullError,
     > {
-        let schema = std::sync::Arc::new(self.database.table_schema_for_apply().await?);
-        Ok(
-            super::pull_package_materializer::PullPackageMaterializer::new(
-                self.database.clone(),
-                self.blob_source.clone(),
-                self.blob_cache.clone(),
-                self.store_dir.clone(),
-                schema,
-            ),
-        )
+        let changeset =
+            match crate::database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
+                Ok(changeset) => changeset,
+                Err(crate::database::ChangesetIdentityError::Row(error)) => {
+                    return Ok(Err(pull::HeldStorePositionReason::InvalidRowIdentity {
+                        table: error.table().to_string(),
+                        reason: error.to_string(),
+                    }))
+                }
+                Err(error) => {
+                    return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                        error.to_string(),
+                    )))
+                }
+            };
+        let changes = match crate::database::walk_changeset(changeset.bytes()) {
+            Ok(changes) => changes,
+            Err(error) => return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(error))),
+        };
+        let old_changes = match crate::database::walk_old_changeset(changeset.bytes()) {
+            Ok(changes) => changes,
+            Err(error) => return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(error))),
+        };
+        let mut eager = Vec::new();
+        for change in &changes {
+            if change.op == crate::changeset::ChangeOp::Delete {
+                continue;
+            }
+            let blob = match self.database.blob_ref_from_change(change) {
+                Ok(blob) => blob,
+                Err(error) => {
+                    return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                        error.to_string(),
+                    )))
+                }
+            };
+            let Some(blob) = blob else {
+                continue;
+            };
+            if blob.fill != crate::blob::CacheFill::CacheEager {
+                continue;
+            }
+            let row_id = match change.pk() {
+                Some(row_id) => row_id,
+                None => {
+                    return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                        format!(
+                            "blob-bearing incoming row {:?} has no primary key",
+                            change.table
+                        ),
+                    )))
+                }
+            };
+            let matches = package
+                .blob_bindings()
+                .iter()
+                .filter(|binding| {
+                    binding.table() == change.table
+                        && binding.row_id() == row_id
+                        && binding.blob().locator().namespace() == blob.namespace
+                        && binding.blob().locator().blob_id() == blob.id
+                })
+                .collect::<Vec<_>>();
+            let [binding] = matches.as_slice() else {
+                return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                    format!(
+                        "incoming eager blob row {:?}/{row_id:?} has {} exact locator bindings",
+                        change.table,
+                        matches.len()
+                    ),
+                )));
+            };
+            eager.push(binding.blob().clone());
+        }
+        let mut verified = Vec::new();
+        let mut failures = Vec::new();
+        for binding in package.blob_bindings() {
+            let stored = binding.blob();
+            if verified.iter().any(|candidate| candidate == stored) {
+                continue;
+            }
+            verified.push(stored.clone());
+            let locator = stored.locator();
+            let retain = eager.iter().any(|download| download == stored);
+            if let Err(cause) = self
+                .blob_source
+                .verify_plaintext_with_protection(
+                    &self.blob_cache,
+                    stored,
+                    blob_protection.clone(),
+                    retain,
+                )
+                .await
+            {
+                failures.push(pull::BlobDownloadFailure {
+                    namespace: locator.namespace().to_string(),
+                    id: locator.blob_id().to_string(),
+                    cause,
+                });
+            }
+        }
+        if !failures.is_empty() {
+            let failures = pull::BlobDownloadFailures::new(failures);
+            if failures.has_transport_failure() {
+                return Err(pull::StorePullError::BlobDownloads(failures));
+            }
+            return Ok(Err(pull::HeldStorePositionReason::BlobDownloadFailed));
+        }
+        if let Err(error) = self
+            .database
+            .validate_local_blob_cleanup_changes(&old_changes, &changes)
+        {
+            return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                error.to_string(),
+            )));
+        }
+        Ok(Ok(pull::PreparedMergeMaterializationPackage {
+            package,
+            changeset,
+        }))
+    }
+
+    pub(super) async fn finish_pull_package_cleanup(
+        &self,
+    ) -> Result<bool, crate::database::DbError> {
+        crate::database::LocalBlobCleanup::new(&self.database, self.store_dir)
+            .drain()
+            .await
     }
 
     pub(super) fn circles(&mut self) -> super::circles::VerifiedCircleHistory<'_, 'storage> {

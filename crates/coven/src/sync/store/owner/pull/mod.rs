@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use super::circles::CirclePackageReadError;
-use super::pull_package_materializer::PullPackageMaterializer;
 use super::verification::VerifiedMergeMembershipClosure;
 use super::verified_history::registration::*;
 use super::verified_history::*;

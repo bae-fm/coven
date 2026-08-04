@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 pub(crate) struct AuthorizedPull<'operation, 'storage> {
     history: &'operation mut super::AuthorizedStoreHistory<'storage>,
-    packages: super::PullPackageMaterializer<'storage>,
+    package_schema: std::sync::Arc<crate::database::TableSchema>,
     membership: &'operation MembershipChain,
     identity: Option<&'operation UserKeypair>,
     routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
@@ -20,15 +20,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         identity: Option<&'operation UserKeypair>,
         routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
     ) -> Result<Self, StorePullError> {
-        let packages = history
-            .bind_pull_package_materializer()
-            .await
-            .map_err(|error| {
-                StorePullError::Database(format!("load pull package materializer: {error}"))
-            })?;
+        let package_schema = history.pull_package_schema().await.map_err(|error| {
+            StorePullError::Database(format!("load pull package schema: {error}"))
+        })?;
         Ok(Self {
             history,
-            packages,
+            package_schema,
             membership,
             identity,
             routing_encryption,
@@ -396,9 +393,13 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             (left.coordinate.device_id(), left.coordinate.seq())
                 .cmp(&(right.coordinate.device_id(), right.coordinate.seq()))
         });
-        let local_blob_cleanup_pending = self.packages.finish_cleanup().await.map_err(|error| {
-            StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
-        })?;
+        let local_blob_cleanup_pending =
+            self.history
+                .finish_pull_package_cleanup()
+                .await
+                .map_err(|error| {
+                    StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
+                })?;
         Ok(StorePullExecution {
             result: StorePullResult {
                 changesets_applied,
@@ -533,8 +534,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     ))
                 }
             };
-            let protection = self.packages.store_blob_protection()?;
-            match self.packages.prepare(package, protection).await? {
+            let protection = self.history.pull_store_blob_protection()?;
+            match self
+                .history
+                .prepare_pull_package(package, protection, self.package_schema.clone())
+                .await?
+            {
                 Ok(package) => packages.push(package),
                 Err(reason) => return Ok(ApplyOutcome::Held(reason)),
             }
@@ -549,8 +554,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 }
             };
             match self
-                .packages
-                .prepare(package, loaded.blob_protection.clone())
+                .history
+                .prepare_pull_package(
+                    package,
+                    loaded.blob_protection.clone(),
+                    self.package_schema.clone(),
+                )
                 .await?
             {
                 Ok(package) => packages.push(package),
