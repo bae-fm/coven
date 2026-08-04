@@ -15,6 +15,7 @@ pub(crate) mod owner_promotion_journal;
 pub(crate) mod prepared_commit;
 pub(crate) mod provider;
 pub(crate) mod reclaim;
+pub(crate) mod recovery;
 pub(crate) mod remote_object;
 pub(crate) mod store_commit;
 pub(crate) mod store_creation;

@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 #[cfg(feature = "oauth-providers")]
 use rand::RngCore;
+#[cfg(any(test, feature = "oauth-providers"))]
+#[cfg(any(test, feature = "oauth-providers"))]
 use serde::Deserialize;
 #[cfg(any(test, feature = "oauth-providers"))]
 use sha2::{Digest, Sha256};

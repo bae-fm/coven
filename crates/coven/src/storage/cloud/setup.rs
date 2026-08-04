@@ -161,7 +161,7 @@ mod tests {
         }
     }
 
-    fn restore_authority() -> crate::restore_code::RestoreAuthority {
+    fn restore_authority() -> crate::protocol::recovery::RestoreAuthority {
         let owner_grant = crate::protocol::membership::MembershipGrantId(
             crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
         );
@@ -180,8 +180,8 @@ mod tests {
             &anchor,
         )
         .expect("valid recovery activation");
-        crate::restore_code::RestoreAuthority::OwnerRecovery(
-            crate::restore_code::OwnerRecoveryAuthority {
+        crate::protocol::recovery::RestoreAuthority::OwnerRecovery(
+            crate::protocol::recovery::OwnerRecoveryAuthority {
                 owner_identity_secret: hex::encode(
                     crate::keys::UserKeypair::generate().to_keypair_bytes(),
                 ),
