@@ -275,20 +275,58 @@ impl<E> From<std::io::Error> for HostWriteError<E> {
     }
 }
 
-pub(crate) struct HostWriteExecution<'operation> {
-    database: &'operation StoreDatabase,
-    store_dir: &'operation StoreDir,
+#[derive(Clone)]
+pub(crate) struct StoreRowWrites {
+    database: StoreDatabase,
+    store_dir: StoreDir,
 }
 
-impl<'operation> HostWriteExecution<'operation> {
-    pub(crate) fn new(
-        database: &'operation StoreDatabase,
-        store_dir: &'operation StoreDir,
-    ) -> Self {
+impl StoreRowWrites {
+    pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
         Self {
             database,
             store_dir,
         }
+    }
+
+    pub(crate) fn requires_routing_encryption(&self) -> bool {
+        self.database.has_scoped_graph()
+    }
+
+    pub(crate) async fn pending_writes(&self) -> Result<Vec<crate::PendingWrite>, DbError> {
+        self.database.pending_writes().await
+    }
+
+    pub(crate) async fn blocked_writes(&self) -> Result<Vec<crate::PendingWrite>, DbError> {
+        self.database.blocked_writes().await
+    }
+
+    pub(crate) async fn retry_blocked_write(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<crate::WriteId>, DbError> {
+        self.database.retry_blocked_write(write_id).await
+    }
+
+    pub(crate) async fn discard_blocked_write(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<super::BlockedWriteDiscard, DbError> {
+        self.database.discard_blocked_write(write_id).await
+    }
+
+    pub(crate) async fn write_status(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<crate::WriteStatus, DbError> {
+        self.database.write_status(write_id).await
+    }
+
+    pub(crate) async fn subscribe_write_status(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<tokio::sync::watch::Receiver<crate::WriteStatus>, DbError> {
+        self.database.subscribe_write_status(write_id).await
     }
 
     pub(crate) async fn execute<R, E>(
@@ -301,9 +339,9 @@ impl<'operation> HostWriteExecution<'operation> {
         R: Send + 'static,
         E: Send + 'static,
     {
-        let database = self.database;
+        let database = &self.database;
         let HostWriteOperation { batch, sql } = operation;
-        let staged = StagedBlobBatch::stage(self.store_dir, batch.new_blobs).await?;
+        let staged = StagedBlobBatch::stage(&self.store_dir, batch.new_blobs).await?;
         let tables = database.synced_tables.to_vec();
         let gates = database.gates.clone();
         let blob_decls = database.blob_decls.clone();
@@ -438,7 +476,7 @@ impl<'operation> HostWriteExecution<'operation> {
         };
 
         if let Err(error) =
-            super::local_blob_cleanup::LocalBlobCleanup::new(database, self.store_dir)
+            super::local_blob_cleanup::LocalBlobCleanup::new(database, &self.store_dir)
                 .drain()
                 .await
         {
@@ -448,5 +486,64 @@ impl<'operation> HostWriteExecution<'operation> {
             );
         }
         Ok(receipt)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_changeset_for_test(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<Vec<u8>, DbError> {
+        self.database.write_changeset_for_test(write_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_blob_lease_count_for_test(
+        &self,
+        write_id: &crate::WriteId,
+    ) -> Result<i64, DbError> {
+        self.database
+            .write_blob_lease_count_for_test(write_id)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn cleanup_intent_count_for_test(
+        &self,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<i64, DbError> {
+        self.database
+            .cleanup_intent_count_for_test(namespace, blob_id)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn coven_table_exists_for_test(
+        &self,
+        table: crate::database::DatabaseTestTable,
+    ) -> Result<bool, DbError> {
+        self.database.coven_table_exists_for_test(table).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        self.database
+            .install_store_write_failure_trigger_for_test()
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn remove_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        self.database
+            .remove_store_write_failure_trigger_for_test()
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn write_blob_facts_for_test(
+        &self,
+        write_id: crate::WriteId,
+    ) -> Result<String, DbError> {
+        self.database.write_blob_facts_for_test(write_id).await
     }
 }

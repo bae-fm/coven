@@ -194,9 +194,8 @@ impl CovenHandle {
             local_blob_transitions,
         );
         let rows = StoreRows::new(
-            database.clone(),
+            crate::database::StoreRowWrites::new(database.clone(), store_dir.clone()),
             read_database,
-            store_dir.clone(),
             security.clone(),
             sync.clone(),
         );
