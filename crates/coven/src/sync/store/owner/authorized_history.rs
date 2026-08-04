@@ -3,12 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::authorized_store::LocalStoreDevice;
-use super::history::{abandonment, OwnerPromotionHistory, ReclaimHistory, RestoreHistory};
+use super::history::{abandonment, OwnerPromotionHistory, RestoreHistory};
 use super::pull;
 use super::verification::StoreMembershipObjectVerifier;
 use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
 use crate::protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
+
+mod reclaim;
+pub(super) use reclaim::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot};
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
@@ -355,7 +358,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )
     }
 
-    #[cfg(test)]
     pub(super) fn circle_snapshots(
         &mut self,
     ) -> super::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
@@ -383,11 +385,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     pub(super) fn reclaim(&mut self) -> ReclaimHistory<'_, 'storage> {
-        ReclaimHistory::new(
-            self.database.clone(),
-            self.storage.as_ref(),
-            &mut self.history_verifier,
-        )
+        ReclaimHistory::new(self)
     }
 
     pub(super) fn restore_history(&self) -> RestoreHistory<'_, 'storage> {
