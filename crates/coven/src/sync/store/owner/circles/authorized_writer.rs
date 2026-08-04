@@ -9,6 +9,8 @@ use crate::protocol::circle::{
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 
+mod acknowledgements;
+
 pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     writer: &'writer mut AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
@@ -266,13 +268,24 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         )
     }
 
-    pub(crate) fn acknowledgements(&mut self) -> acknowledgements::CircleAcknowledgementWriter {
-        acknowledgements::CircleAcknowledgementWriter::new(
-            self.database.clone(),
-            self.storage.clone(),
-            self.root.clone(),
-            std::sync::Arc::clone(&self.local_writer),
-        )
+    pub(crate) async fn stage_acknowledgements(
+        &self,
+        frontier: &crate::protocol::store_commit::CommitFrontier,
+        sync_time: &str,
+    ) -> Result<(), StoreAckError> {
+        acknowledgements::CircleAcknowledgementWriter::new(self)
+            .stage(frontier, sync_time)
+            .await
+    }
+
+    pub(crate) async fn publish_acknowledgement_objects(
+        &self,
+        outbound: &crate::database::OutboundStoreAck,
+        candidate: &crate::sync::store::operations::PreparedStoreOperationCommit,
+    ) -> Result<(), StoreAckError> {
+        acknowledgements::CircleAcknowledgementWriter::new(self)
+            .publish_objects(outbound, candidate)
+            .await
     }
 
     pub(crate) fn snapshots(&mut self) -> snapshots::CircleSnapshotWriter<'_, 'storage> {

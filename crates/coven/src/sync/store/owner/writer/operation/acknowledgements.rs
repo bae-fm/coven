@@ -44,13 +44,9 @@ impl AuthorizedWriterOperation<'_> {
         Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
             .await
             .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-        Box::pin(
-            self.circles()
-                .acknowledgements()
-                .stage(&frontier, sync_time),
-        )
-        .await
-        .map_err(|error| format!("stage Circle acknowledgements: {error}"))?;
+        Box::pin(self.circles().stage_acknowledgements(&frontier, sync_time))
+            .await
+            .map_err(|error| format!("stage Circle acknowledgements: {error}"))?;
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
@@ -264,8 +260,7 @@ impl AuthorizedWriterOperation<'_> {
                 .mark_remote_object_uploaded(acknowledgement_remote)
                 .await?;
             self.circles()
-                .acknowledgements()
-                .publish_objects(&outbound, &candidate)
+                .publish_acknowledgement_objects(&outbound, &candidate)
                 .await?;
             let _authorship = self.database.author_own_stream().await;
             let publication =

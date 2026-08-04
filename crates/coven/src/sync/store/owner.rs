@@ -1348,8 +1348,7 @@ impl Store {
             .await
             .map_err(|error| writer::StoreAckError::InvalidOutbound(error.to_string()))?
             .circles()
-            .acknowledgements()
-            .stage(frontier, sync_time)
+            .stage_acknowledgements(frontier, sync_time)
             .await
     }
 
