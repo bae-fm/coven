@@ -4,10 +4,18 @@ use super::*;
 
 mod provider_administrator;
 
-pub(crate) use provider_administrator::AuthorizedProviderAdministratorJoin;
 pub use provider_administrator::DeviceProviderAccessAdministrator;
 
-pub(crate) struct AuthorizedJoin<'operation, 'storage> {
+pub(crate) struct OwnerJoinAuthority;
+
+pub(crate) struct ProviderAdministratorJoinAuthority {
+    grants: std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
+}
+
+pub(crate) type AuthorizedProviderAdministratorJoin<'operation, 'storage> =
+    AuthorizedJoin<'operation, 'storage, ProviderAdministratorJoinAuthority>;
+
+pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuthority> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
@@ -16,6 +24,7 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage> {
     verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
     membership: crate::protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+    authority: Authority,
 }
 
 impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
@@ -38,6 +47,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             verified_root,
             membership,
             local_writer,
+            authority: OwnerJoinAuthority,
         }
     }
 
@@ -54,7 +64,28 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if grants.is_empty() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        Ok(AuthorizedProviderAdministratorJoin::new(self, grants))
+        let Self {
+            writer,
+            database,
+            storage,
+            root,
+            protocol_root,
+            verified_root,
+            membership,
+            local_writer,
+            authority: _,
+        } = self;
+        Ok(AuthorizedJoin {
+            writer,
+            database,
+            storage,
+            root,
+            protocol_root,
+            verified_root,
+            membership,
+            local_writer,
+            authority: ProviderAdministratorJoinAuthority { grants },
+        })
     }
 
     fn history(&mut self) -> history::DeviceJoinHistory<'_, 'storage> {
