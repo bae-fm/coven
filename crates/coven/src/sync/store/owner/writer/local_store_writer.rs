@@ -2171,7 +2171,7 @@ impl<'storage> LocalWriterKeyrings<'storage> {
         membership: &crate::protocol::membership::MembershipChain,
     ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
     {
-        self.keyrings.open(&self.writer.identity, membership).await
+        self.keyrings.open(self.writer.as_ref(), membership).await
     }
 
     pub(super) async fn open_or(
@@ -2181,7 +2181,7 @@ impl<'storage> LocalWriterKeyrings<'storage> {
     ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
     {
         self.keyrings
-            .open_or(&self.writer.identity, membership, initial)
+            .open_or(self.writer.as_ref(), membership, initial)
             .await
     }
 

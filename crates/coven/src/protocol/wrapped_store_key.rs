@@ -169,7 +169,7 @@ impl WrappedStoreKey {
         recipient_pubkey: &str,
         expected_owners: impl IntoIterator<Item = &'a str>,
         expected_generation: u64,
-        recipient: &UserKeypair,
+        recipient: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<crate::encryption::EncryptionService, WrappedKeyringError> {
         let sealed = self.verify_and_unwrap(store_id, recipient_pubkey, expected_owners)?;
         let plaintext = keys::seal_box_decrypt(&sealed, &recipient.to_x25519_secret_key())?;

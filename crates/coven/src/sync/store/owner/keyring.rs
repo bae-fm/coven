@@ -1,5 +1,5 @@
 use crate::encryption::EncryptionService;
-use crate::keys::{self, UserKeypair};
+use crate::keys::{IdentityKeyAuthority, UserKeypair};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::wrapped_store_key::{
     load_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
@@ -24,7 +24,7 @@ impl<'storage> StoreKeyrings<'storage> {
 
     pub(super) async fn open(
         &self,
-        identity: &UserKeypair,
+        identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
     ) -> Result<EncryptionService, InviteError> {
         let references = Self::references(identity, membership)?;
@@ -48,7 +48,7 @@ impl<'storage> StoreKeyrings<'storage> {
 
     pub(super) async fn open_or(
         &self,
-        identity: &UserKeypair,
+        identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
         initial: &EncryptionService,
     ) -> Result<EncryptionService, InviteError> {
@@ -104,20 +104,20 @@ impl<'storage> StoreKeyrings<'storage> {
     }
 
     fn references(
-        identity: &UserKeypair,
+        identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
     ) -> Result<Vec<WrappedStoreKeyRef>, InviteError> {
         membership
-            .wrapped_key_authority_for(&keys::public_key_hex(identity))
+            .wrapped_key_authority_for(&hex::encode(identity.public_key()))
             .map_err(InviteError::from)
     }
 
     async fn open_references(
         &self,
-        identity: &UserKeypair,
+        identity: &dyn IdentityKeyAuthority,
         references: &[WrappedStoreKeyRef],
     ) -> Result<EncryptionService, InviteError> {
-        let recipient = keys::public_key_hex(identity);
+        let recipient = hex::encode(identity.public_key());
         let root = &self.root;
         let store_id = root.store_root_id.to_string();
         let mut merged: Option<EncryptionService> = None;
