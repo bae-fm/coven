@@ -12,7 +12,6 @@ pub(super) mod activation;
 mod authorized_writer;
 mod bootstrap_blobs;
 mod commands;
-mod discard;
 mod history;
 pub(super) mod packages;
 mod preparation;
@@ -21,7 +20,6 @@ pub(super) mod snapshots;
 
 pub(crate) use authorized_writer::AuthorizedCircleWriter;
 pub(crate) use commands::StoreCircleCommands;
-pub(crate) use discard::CircleOperationDiscarder;
 pub(super) use history::VerifiedCircleHistory;
 pub(crate) use packages::CirclePackageReadError;
 

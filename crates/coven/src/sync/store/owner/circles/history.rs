@@ -86,19 +86,6 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
             .await
     }
 
-    pub(crate) async fn discard_candidate_nonactivation(
-        &mut self,
-        candidate: &crate::database::BlockedMergeCandidate,
-        revoked_grant: Option<&crate::protocol::membership::MembershipGrantId>,
-    ) -> Result<
-        Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
-        crate::sync::store::StoreError,
-    > {
-        self.history
-            .discard_candidate_nonactivation(candidate, revoked_grant)
-            .await
-    }
-
     pub(crate) async fn cleanup_operation_candidate(
         &mut self,
         operation_id: &crate::protocol::circle::CircleOperationId,

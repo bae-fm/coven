@@ -455,12 +455,50 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         super::circles::VerifiedCircleHistory::new(self)
     }
 
-    pub(super) fn circle_operation_discarder(
+    pub(super) async fn discard_circle_operation(
         &mut self,
-    ) -> super::circles::CircleOperationDiscarder<'_, 'storage> {
-        let database = self.database.clone();
-        let history = self.circles();
-        super::circles::CircleOperationDiscarder::new(database, history)
+        operation_id: &crate::protocol::circle::CircleOperationId,
+    ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
+        use crate::sync::store::circle_controls::CircleOperationError;
+
+        let journal = self
+            .database
+            .circle_operation(operation_id)
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+            })?;
+        if !journal.is_discarding() {
+            let discard_candidate = self
+                .database
+                .circle_operation_discard_candidate(operation_id)
+                .await?;
+            let Some(nonactivation) = self
+                .discard_candidate_nonactivation(
+                    &discard_candidate.candidate,
+                    discard_candidate.revoked_grant.as_ref(),
+                )
+                .await?
+            else {
+                return Err(CircleOperationError::DiscardRequiresNonactivation {
+                    operation_id: operation_id.clone(),
+                });
+            };
+            self.database
+                .begin_circle_operation_discard(self.root().clone(), operation_id, nonactivation)
+                .await?;
+        }
+        self.cleanup_circle_operation_candidate(operation_id)
+            .await
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle operation {operation_id} discard cleanup: {error}"
+                ))
+            })?;
+        self.database
+            .finish_circle_operation_discard(operation_id)
+            .await?;
+        Ok(())
     }
 
     pub(super) fn circle_activations(

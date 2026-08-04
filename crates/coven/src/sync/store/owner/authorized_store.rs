@@ -100,10 +100,7 @@ impl<'storage> AuthorizedStore<'storage> {
         &mut self,
         operation_id: &crate::protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
-        self.history
-            .circle_operation_discarder()
-            .discard(operation_id)
-            .await
+        self.history.discard_circle_operation(operation_id).await
     }
 
     fn resolved_membership(
