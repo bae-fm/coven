@@ -1,7 +1,4 @@
-use crate::protocol::store_commit::{
-    circle_ack_slot_prefix, CircleAck, CommitFrontier, DeviceStreamAnchor, StreamActivation,
-    SuccessorLink,
-};
+use crate::protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFrontier};
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::operations;
 
@@ -10,9 +7,7 @@ pub(crate) struct CircleAcknowledgementWriter {
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     root: crate::protocol::store_commit::StoreRootRef,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    device_signer: crate::keys::UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
@@ -112,17 +107,13 @@ impl CircleAcknowledgementWriter {
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
         root: crate::protocol::store_commit::StoreRootRef,
-        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: crate::protocol::store_commit::StoreDeviceRegistration,
-        device_signer: crate::keys::UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
             database,
             storage,
             root,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         }
     }
 
@@ -138,10 +129,7 @@ impl CircleAcknowledgementWriter {
         if inputs.is_empty() {
             return Ok(());
         }
-        let device_id = self.registration.device_id.to_string();
         let root = self.root.clone();
-        let registration_ref = self.registration_ref.clone();
-        let device_signer = self.device_signer.clone();
         for input in inputs {
             let previous = self
                 .database
@@ -172,7 +160,9 @@ impl CircleAcknowledgementWriter {
                 ProtocolObjectDomain::CircleAcknowledgement,
                 input.epoch_encryption,
             );
-            let semantic_prefix = circle_ack_slot_prefix(input.circle_id, &device_id, sequence);
+            let semantic_prefix = self
+                .local_writer
+                .circle_ack_semantic_prefix(input.circle_id, sequence);
             let current_slot = match &previous {
                 Some(previous) => previous.successor_slot.clone(),
                 None => self
@@ -185,9 +175,8 @@ impl CircleAcknowledgementWriter {
                 .storage
                 .allocate_protocol_slot(
                     &context,
-                    &circle_ack_slot_prefix(
+                    &self.local_writer.circle_ack_semantic_prefix(
                         input.circle_id,
-                        &device_id,
                         sequence.checked_add(1).ok_or_else(|| {
                             StoreAckError::InvalidOutbound(
                                 "Circle acknowledgement sequence overflow".to_string(),
@@ -198,39 +187,22 @@ impl CircleAcknowledgementWriter {
                 )
                 .await
                 .map_err(StoreObjectError::from)?;
-            let stream_first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
-                "{}.json",
-                circle_ack_slot_prefix(input.circle_id, &device_id, 1)
-            ))
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
-            let activation = StreamActivation::device_authorized(
-                root.store_root_hash,
-                registration_ref.clone(),
-                DeviceStreamAnchor::CircleAcknowledgements {
-                    circle_id: input.circle_id,
-                    first_slot: stream_first_slot,
-                },
-            )
-            .activation_id();
-            let ack = CircleAck::signed(
-                root.store_root_hash,
-                input.circle_id,
-                registration_ref.clone(),
-                sequence,
-                frontier.clone(),
-                input.control,
-                input.epoch_id,
-                input.key_fingerprint,
-                input.seeded_from,
-                sync_time.to_owned(),
-                SuccessorLink {
-                    activation,
+            let ack = self
+                .local_writer
+                .sign_circle_acknowledgement(
+                    root.store_root_hash,
+                    input.circle_id,
+                    sequence,
+                    frontier.clone(),
+                    input.control,
+                    input.epoch_id,
+                    input.key_fingerprint,
+                    input.seeded_from,
+                    sync_time.to_owned(),
                     predecessor,
                     next_slot,
-                },
-                &device_signer,
-            )
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+                )
+                .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
             let prepared = self
                 .storage
                 .prepare_protocol_object(&context, current_slot, &semantic_prefix, ack.to_bytes())

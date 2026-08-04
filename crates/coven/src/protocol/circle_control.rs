@@ -204,7 +204,7 @@ impl CircleMetadata {
         owner_grant: MembershipGrantId,
         author_roster: CircleRosterStateRef,
         key_fingerprint: KeyFingerprint,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if name.trim().is_empty() {
             return Err(CircleTransitionError::EmptyName);
@@ -764,7 +764,7 @@ impl CircleEpochCloseIntent {
         predecessor_roster: MergeCircleRosterStateRef,
         removal: CircleRosterEntry,
         remaining_roster_state_hash: ObjectHash,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let owner_pubkey = keys::public_key_hex(signer);
         let mut intent = Self {
@@ -1081,7 +1081,7 @@ impl CircleEpochCloseExclusion {
     pub(crate) fn signed(
         control: &PreparedCircleControl,
         excluded: StoreDeviceRegistrationRef,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -1295,7 +1295,7 @@ impl CircleEpochCloseOutcome {
         intent: &CircleEpochCloseIntent,
         responses: Vec<CircleEpochCloseSettlement>,
         successor: CircleEpochSuccessor,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -1523,7 +1523,7 @@ pub(crate) struct CircleEpochCloseCancellation {
 impl CircleEpochCloseCancellation {
     pub(crate) fn signed(
         control: &PreparedCircleControl,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -2291,7 +2291,7 @@ struct CircleAccessDraft<'identity> {
     access_root: ObjectHash,
     leaves: Vec<PreparedAccessLeaf>,
     proofs: Vec<Vec<MerkleStep>>,
-    signer: &'identity UserKeypair,
+    signer: &'identity dyn crate::keys::IdentityKeyAuthority,
 }
 
 impl<'identity> CircleAccessDraft<'identity> {
@@ -2309,7 +2309,7 @@ impl<'identity> CircleAccessDraft<'identity> {
         store_members: &[(String, MemberRole)],
         bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &'identity UserKeypair,
+        signer: &'identity dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let author_pubkey = keys::public_key_hex(signer);
         let leaves = store_members
@@ -2479,7 +2479,7 @@ fn circle_successor_context<'a>(
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
-    signer: &UserKeypair,
+    signer: &dyn crate::keys::IdentityKeyAuthority,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     let epoch = current_control
         .value
@@ -2507,7 +2507,7 @@ fn circle_delete_successor_context<'a>(
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
-    signer: &UserKeypair,
+    signer: &dyn crate::keys::IdentityKeyAuthority,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     let epoch = current_control.value.access_epoch();
     circle_authored_successor_context(
@@ -2527,7 +2527,7 @@ fn circle_authored_successor_context<'a>(
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
-    signer: &UserKeypair,
+    signer: &dyn crate::keys::IdentityKeyAuthority,
     epoch: &'a MergeActiveCircleEpoch,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     if !current_control.verify()
@@ -2601,7 +2601,7 @@ impl CircleTransitionDraft {
         membership_authority: MembershipGrantCreationAuthority,
         mut store_members: Vec<(String, MemberRole)>,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let author_pubkey = keys::public_key_hex(signer);
         store_members.sort_by(|left, right| left.0.cmp(&right.0));
@@ -2758,7 +2758,7 @@ impl CircleTransitionDraft {
         role: super::circle::CircleRole,
         bootstrap: CircleBootstrapRef,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if current_roster_chain.try_resolved()? != *current_roster {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -2908,7 +2908,7 @@ impl CircleTransitionDraft {
         provisional_frontier: CommitFrontier,
         outcome_slot: ObjectSlot,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
             store_members,
@@ -3055,7 +3055,7 @@ impl CircleTransitionDraft {
         intent: CircleEpochCloseIntent,
         responses: Vec<CircleEpochCloseSettlement>,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -3290,7 +3290,7 @@ impl CircleTransitionDraft {
         current_metadata: &CircleMetadata,
         keyring: &str,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -3446,7 +3446,7 @@ impl CircleTransitionDraft {
         current_metadata: &CircleMetadata,
         keyring: &str,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if name.trim().is_empty() {
             return Err(CircleTransitionError::EmptyName);
@@ -3649,7 +3649,7 @@ impl CircleTransitionDraft {
         keyring: &str,
         losing_branches: Vec<ResolvedConflictBranch>,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
             store_members,
@@ -3844,7 +3844,7 @@ impl CircleTransitionDraft {
         current_metadata: &CircleMetadata,
         keyring: &str,
         ids: &dyn crate::id_provider::IdProvider,
-        signer: &UserKeypair,
+        signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_delete_successor_context(
             store_members,
@@ -4106,7 +4106,7 @@ pub(crate) struct CircleSemanticPathError {
 }
 
 pub(crate) fn recipient_slot(
-    owner: &UserKeypair,
+    owner: &dyn crate::keys::IdentityKeyAuthority,
     recipient_pubkey: &str,
     circle_id: CircleId,
 ) -> Result<String, CircleTransitionError> {
@@ -4114,7 +4114,7 @@ pub(crate) fn recipient_slot(
 }
 
 pub(crate) fn recipient_slot_with_peer(
-    local_identity: &UserKeypair,
+    local_identity: &dyn crate::keys::IdentityKeyAuthority,
     peer_pubkey: &str,
     circle_id: CircleId,
 ) -> Result<String, CircleTransitionError> {

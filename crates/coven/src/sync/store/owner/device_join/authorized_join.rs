@@ -9,14 +9,10 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage> {
     protocol_root: StoreProtocolRoot,
     verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
     membership: crate::protocol::membership::MembershipChain,
-    identity: &'storage UserKeypair,
-    registration_ref: StoreDeviceRegistrationRef,
-    registration: StoreDeviceRegistration,
-    device_signer: UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
 
 impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
@@ -25,10 +21,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         protocol_root: StoreProtocolRoot,
         verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
         membership: crate::protocol::membership::MembershipChain,
-        identity: &'storage UserKeypair,
-        registration_ref: StoreDeviceRegistrationRef,
-        registration: StoreDeviceRegistration,
-        device_signer: UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
             writer,
@@ -38,10 +31,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             protocol_root,
             verified_root,
             membership,
-            identity,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         }
     }
 
@@ -54,16 +44,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::MembershipConflict);
         };
         let state = resolved.provider_admin.combined_state();
-        let administrator = &self.registration_ref;
-        let grants = state
-            .records()
-            .iter()
-            .filter(|(grant_id, record)| {
-                &record.administrator == administrator
-                    && state.authorizes(grant_id, &record.administrator)
-            })
-            .map(|(grant_id, record)| (grant_id.clone(), record.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let grants = self.local_writer.provider_administrator_grants(state);
         if grants.is_empty() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
@@ -74,9 +55,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             self.protocol_root,
             self.verified_root,
             self.membership,
-            self.registration_ref,
-            self.registration,
-            self.device_signer,
+            self.local_writer,
             grants,
         ))
     }
@@ -88,10 +67,13 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     fn verify_device_admission_approval(
         &self,
         approval: &DeviceProviderAdmissionApproval,
-        owner: &StoreDeviceRegistration,
         administrator: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinError> {
-        approval.verify(&self.verified_root, owner, administrator)
+        self.local_writer.verify_device_admission_approval_as_owner(
+            approval,
+            &self.verified_root,
+            administrator,
+        )
     }
 
     pub(crate) async fn begin(
@@ -105,15 +87,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .founder_provider_admin
             .grant_id
             .clone();
-        let owner_pubkey = keys::public_key_hex(self.identity);
+        let owner_pubkey = self.local_writer.author_pubkey();
         let owner_grant = self
             .membership
             .active_owner_grant(&owner_pubkey)
             .ok_or(DeviceJoinError::OwnerAuthorityRequired)?;
         let provider_admin = self.resolve_provider_admin(&provider_admin_grant)?;
-        let owner_registration = &self.registration_ref;
-        let owner = &self.registration;
-        let owner_device_signer = &self.device_signer;
         let root = self.root.clone();
         let binding = self.storage.provider_binding().await?;
         let attempt_id = self.database.new_device_join_attempt_id();
@@ -141,18 +120,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 ".json",
             )
             .await?;
-        let offer = DeviceJoinOffer::signed(
+        let offer = self.local_writer.sign_device_join_offer(
             attempt_id,
             member_pubkey.to_string(),
             root,
             binding.store,
             attempt_slot,
             outcome_slot,
-            owner_registration.clone(),
             owner_grant,
             provider_admin,
-            owner,
-            owner_device_signer,
         )?;
         self.database
             .begin_device_join(DeviceJoinJournalRecord::owner_offered(offer.clone()))
@@ -205,20 +181,17 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Ok(existing.clone());
         }
-        let owner_registration = &self.registration_ref;
-        let owner = &self.registration;
-        let owner_signer = &self.device_signer;
-        if owner_registration != &offer.owner_registration {
-            return Err(DeviceJoinError::OwnerAuthorityRequired);
-        }
-        offer.verify(owner)?;
         if !self
-            .membership
-            .is_owner_now(&keys::public_key_hex(self.identity))
+            .local_writer
+            .is_authored_by_registration(&offer.owner_registration)
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let abandonment_object = DeviceJoinAbandonmentObject::signed(&offer, owner, owner_signer)?;
+        self.local_writer.verify_device_join_offer(&offer)?;
+        if !self.local_writer.is_current_owner(&self.membership) {
+            return Err(DeviceJoinError::OwnerAuthorityRequired);
+        }
+        let abandonment_object = self.local_writer.sign_device_join_abandonment(&offer)?;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
@@ -279,7 +252,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if opened != abandonment_object.to_bytes() {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        abandonment_ref.verify(&abandonment_object, owner)?;
+        self.local_writer
+            .verify_device_join_abandonment(&abandonment_ref, &abandonment_object)?;
         let plan = self.writer.prepare_plan().await?;
         let activation = self
             .writer
@@ -317,10 +291,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
-        let owner_registration = self.registration_ref.clone();
-        let owner = self.registration.clone();
-        let owner_signer = self.device_signer.clone();
-        if owner_registration != offer.owner_registration {
+        if !self
+            .local_writer
+            .is_authored_by_registration(&offer.owner_registration)
+        {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
@@ -332,7 +306,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .load_registration(&provider_admin.administrator)
             .await?
             .value;
-        self.verify_device_admission_approval(&request.approval, &owner, &administrator)?;
+        self.verify_device_admission_approval(&request.approval, &administrator)?;
         self.history()
             .verify_accepted_provider_access_activation(
                 &request.approval.access_grant,
@@ -340,10 +314,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 &administrator,
             )
             .await?;
-        if !self
-            .membership
-            .is_owner_now(&keys::public_key_hex(self.identity))
-        {
+        if !self.local_writer.is_current_owner(&self.membership) {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let database = self.database.clone();
@@ -387,7 +358,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         database
             .advance_device_join(&offered, requested.clone())
             .await?;
-        let attempt = DeviceJoinAttempt::signed(
+        let attempt = self.local_writer.sign_device_join_attempt(
             offer.store_root.clone(),
             offer.attempt_id,
             offer.attempt_slot.clone(),
@@ -399,10 +370,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             offer.provider_admin.grant_id.clone(),
             *request.approval.clone(),
             request.response.clone(),
-            offer.owner_registration.clone(),
             offer.owner_grant.clone(),
-            &owner,
-            &owner_signer,
         )?;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
@@ -488,28 +456,22 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if expected_attempt != &attempt_ref {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let owner_registration = self.registration_ref.clone();
-        let owner = self.registration.clone();
-        let owner_signer = self.device_signer.clone();
-        let attempt = self
-            .history()
-            .load_verified_attempt(&attempt_ref, &owner)
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let attempt = local_writer
+            .load_verified_device_join_attempt(&mut self.history(), &attempt_ref)
             .await?
             .value;
-        if attempt.owner_registration != owner_registration
-            || !self
-                .membership
-                .is_owner_now(&keys::public_key_hex(self.identity))
+        if !self
+            .local_writer
+            .is_authored_by_registration(&attempt.owner_registration)
+            || !self.local_writer.is_current_owner(&self.membership)
         {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let outcome = crate::protocol::store_commit::DeviceJoinOutcome::signed(
+        let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
             crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled,
-            attempt.owner_registration.clone(),
             attempt.owner_grant.clone(),
-            &owner,
-            &owner_signer,
         )?;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
@@ -562,7 +524,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if opened != outcome.to_bytes() {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let verified_outcome = self.history().load_outcome(&outcome_ref, &owner).await?;
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let verified_outcome = local_writer
+            .load_own_device_join_outcome(&self.history(), &outcome_ref)
+            .await?;
         if verified_outcome.value != outcome {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -631,15 +596,15 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
-        let owner_registration = self.registration_ref.clone();
-        let owner = self.registration.clone();
-        let owner_signer = self.device_signer.clone();
-        if owner_registration != offer.owner_registration {
+        if !self
+            .local_writer
+            .is_authored_by_registration(&offer.owner_registration)
+        {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let attempt = self
-            .history()
-            .load_verified_attempt(&attempt_ref, &owner)
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let attempt = local_writer
+            .load_verified_device_join_attempt(&mut self.history(), &attempt_ref)
             .await?
             .value;
         let registration = self
@@ -704,15 +669,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => return Err(DeviceJoinError::AttemptMismatch),
         }
-        let outcome = crate::protocol::store_commit::DeviceJoinOutcome::signed(
+        let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
             crate::protocol::store_commit::DeviceJoinOutcomeBody::Activated {
                 readiness: completion.readiness.proof.clone(),
             },
-            offer.owner_registration.clone(),
             offer.owner_grant.clone(),
-            &owner,
-            &owner_signer,
         )?;
         let context = crate::storage::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
@@ -909,10 +871,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         )?;
         self.verify_cleanup_terminals(&administrator_terminal, &joiner_terminal)
             .await?;
-        let executor_ref = self.registration_ref.clone();
-        let executor = self.registration.clone();
-        let executor_signer = self.device_signer.clone();
-        if !self.membership.is_owner_now(&executor.author_pubkey) {
+        if !self.local_writer.is_current_owner(&self.membership) {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let executor_admin = self.resolve_provider_admin(
@@ -925,8 +884,9 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 .grant_id,
         )?;
         if executor_admin != *attempt.value.provider_approval.request.offer.provider_admin
-            || executor_admin.administrator != executor_ref
-            || executor_admin.provider != executor.provider
+            || !self
+                .local_writer
+                .is_effective_provider_administrator(&executor_admin)
         {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
@@ -940,7 +900,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let (receipt_object, receipt_ref, prepared, intent) = match &*current.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(_)) => {
                 let plan = self.writer.prepare_plan().await?;
-                let receipt_object = DeviceJoinCleanupReceiptObject::signed(
+                let receipt_object = self.local_writer.sign_device_join_cleanup_receipt(
                     &attempt.value,
                     cancellation.outcome.clone(),
                     administrator_terminal.clone(),
@@ -955,9 +915,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                         .provider_admin
                         .grant_id
                         .clone(),
-                    executor_ref,
-                    &executor,
-                    &executor_signer,
                 )?;
                 let slot = self
                     .storage
@@ -1020,7 +977,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        receipt_object.verify(&attempt.value, &executor)?;
+        self.local_writer.verify_device_join_cleanup_receipt(
+            &receipt_ref,
+            &receipt_object,
+            &attempt.value,
+        )?;
         for slot in &receipt_object.deleted_slots {
             self.storage
                 .delete_exact_slot_and_verify_absent(slot)
@@ -1035,7 +996,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if opened != receipt_object.to_bytes() {
             return Err(DeviceJoinError::CleanupMismatch);
         }
-        receipt_ref.verify(&receipt_object, &executor)?;
         let receipt = DeviceJoinCleanupReceipt {
             receipt: receipt_ref,
         };

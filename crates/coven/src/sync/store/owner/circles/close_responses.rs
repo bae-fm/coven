@@ -2,8 +2,8 @@ use super::commands::{CircleFinalizeEpochCloseRequest, CircleOperationRequest};
 use super::{CircleOperationError, CircleOperationIntent};
 use crate::protocol::circle::{
     circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseExclusionRef,
-    CircleEpochCloseResponse, CircleEpochCloseResponseRef, CircleEpochCloseResponseSlotValue,
-    CircleEpochCloseSettlement, PreparedCircleControl,
+    CircleEpochCloseResponseRef, CircleEpochCloseResponseSlotValue, CircleEpochCloseSettlement,
+    PreparedCircleControl,
 };
 use crate::protocol::store_commit::CommitFrontier;
 use crate::storage::StoreObjectError;
@@ -16,14 +16,10 @@ pub(crate) struct CircleCloseCoordinator<'operation, 'storage> {
     store_dir: &'storage crate::store_dir::StoreDir,
     root: crate::protocol::store_commit::StoreRootRef,
     membership: crate::protocol::membership::MembershipChain,
-    identity: &'storage crate::keys::UserKeypair,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    device_signer: crate::keys::UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
 
 impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
@@ -31,10 +27,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
         store_dir: &'storage crate::store_dir::StoreDir,
         root: crate::protocol::store_commit::StoreRootRef,
         membership: crate::protocol::membership::MembershipChain,
-        identity: &'storage crate::keys::UserKeypair,
-        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: crate::protocol::store_commit::StoreDeviceRegistration,
-        device_signer: crate::keys::UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
             writer,
@@ -43,10 +36,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             store_dir,
             root,
             membership,
-            identity,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         }
     }
 
@@ -57,9 +47,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             self.storage.clone(),
             self.store_dir,
             self.root.clone(),
-            self.registration_ref.clone(),
-            self.registration.clone(),
-            self.device_signer.clone(),
+            std::sync::Arc::clone(&self.local_writer),
         )
     }
 
@@ -76,10 +64,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             self.membership.clone(),
             self.root.clone(),
             self.storage.clone(),
-            self.registration_ref.clone(),
-            self.registration.clone(),
-            self.device_signer.clone(),
-            self.identity,
+            std::sync::Arc::clone(&self.local_writer),
             history,
         )
     }
@@ -90,7 +75,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             self.database.clone(),
             self.storage.clone(),
             self.membership.clone(),
-            self.identity,
+            std::sync::Arc::clone(&self.local_writer),
             history,
         )
     }
@@ -114,7 +99,7 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                     )));
                 }
             };
-            let identity_pubkey = crate::keys::public_key_hex(self.identity);
+            let identity_pubkey = self.local_writer.author_pubkey();
             let (current, activation_commit_ref) = self
                 .database
                 .circle_closing_context(journal.circle_id, &identity_pubkey)
@@ -345,9 +330,6 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             return Ok(());
         }
         let root = self.root.clone();
-        let registration_ref = self.registration_ref.clone();
-        let registration = self.registration.clone();
-        let device_signer = self.device_signer.clone();
         let storage = self.storage.clone();
         let frontier = CommitFrontier::from_refs(self.database.materialized_frontier().await?)
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -357,30 +339,22 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                     "closing Circle state contains an active control".to_string(),
                 ));
             };
-            let Some(participant) = close
-                .participants
-                .iter()
-                .find(|participant| participant.registration == registration_ref)
-            else {
+            let Some(participant) = self.local_writer.local_circle_close_participant(close) else {
                 tracing::debug!(
                     circle_id = %control.value.circle_id,
                     close_id = %close.close_id,
-                    device_id = %registration_ref.device_id,
                     "local device is not a participant in the Circle epoch close"
                 );
                 continue;
             };
-            let response = CircleEpochCloseResponse::signed(
-                &control,
-                registration_ref.clone(),
-                frontier.clone(),
-                &registration,
-                &device_signer,
-            )?;
+            let response = self
+                .local_writer
+                .sign_circle_epoch_close_response(&control, frontier.clone())?;
+            let response_device_id = response.registration.device_id;
             let prefix = circle_epoch_close_response_semantic_prefix(
                 control.value.circle_id,
                 close.close_id,
-                registration_ref.device_id,
+                response_device_id,
             );
             let context = ProtocolObjectContext::store_encrypted(
                 root.store_root_hash,
@@ -407,10 +381,13 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
             // is adopted — the device was excluded before it could respond.
             match CircleEpochCloseResponseSlotValue::parse(&winner_bytes)? {
                 CircleEpochCloseResponseSlotValue::Response(winner) => {
-                    if !winner.verify_for(&control, &registration) {
+                    if !self
+                        .local_writer
+                        .verify_local_circle_epoch_close_response(&winner, &control)
+                    {
                         return Err(CircleOperationError::InvalidState(format!(
                             "Circle epoch-close response slot for device {} holds an unverifiable response",
-                            registration_ref.device_id
+                            response_device_id
                         )));
                     }
                 }
@@ -418,13 +395,13 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
                     if !exclusion.verify_for(&control) {
                         return Err(CircleOperationError::InvalidState(format!(
                             "Circle epoch-close exclusion for device {} holds an unverifiable exclusion",
-                            registration_ref.device_id
+                            response_device_id
                         )));
                     }
                     tracing::debug!(
                         circle_id = %control.value.circle_id,
                         close_id = %close.close_id,
-                        device_id = %registration_ref.device_id,
+                        device_id = %response_device_id,
                         "local device was excluded from the Circle epoch close before it responded"
                     );
                 }

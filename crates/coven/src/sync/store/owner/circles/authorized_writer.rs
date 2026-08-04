@@ -4,7 +4,6 @@ use super::commands::{
     CircleResolveControlRequest, CircleResolveLosingBranch,
 };
 use super::*;
-use crate::keys;
 use crate::protocol::circle::{
     CircleControlState, CircleEpochCloseResponseSlotValue, CircleId, CircleRole,
 };
@@ -17,10 +16,7 @@ pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     store_dir: &'storage crate::store_dir::StoreDir,
     root: crate::protocol::store_commit::StoreRootRef,
     membership: crate::protocol::membership::MembershipChain,
-    identity: &'storage crate::keys::UserKeypair,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    device_signer: crate::keys::UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
 
 impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
@@ -32,10 +28,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         store_dir: &'storage crate::store_dir::StoreDir,
         root: crate::protocol::store_commit::StoreRootRef,
         membership: crate::protocol::membership::MembershipChain,
-        identity: &'storage crate::keys::UserKeypair,
-        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: crate::protocol::store_commit::StoreDeviceRegistration,
-        device_signer: crate::keys::UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
             writer,
@@ -44,10 +37,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             store_dir,
             root,
             membership,
-            identity,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         }
     }
 
@@ -55,9 +45,14 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let database = self.database.clone();
         let storage = self.storage.clone();
         let membership = self.membership.clone();
-        let identity = self.identity;
         let history = self.writer.circle_history();
-        publication::CircleCandidatePublisher::new(database, storage, membership, identity, history)
+        publication::CircleCandidatePublisher::new(
+            database,
+            storage,
+            membership,
+            std::sync::Arc::clone(&self.local_writer),
+            history,
+        )
     }
 
     pub(super) fn preparer(&mut self) -> preparation::CircleCandidatePreparer<'_, 'storage> {
@@ -66,10 +61,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let membership = self.membership.clone();
         let root = self.root.clone();
         let storage = self.storage.clone();
-        let registration_ref = self.registration_ref.clone();
-        let registration = self.registration.clone();
-        let device_signer = self.device_signer.clone();
-        let identity = self.identity;
         let history = self.writer.circle_history();
         preparation::CircleCandidatePreparer::new(
             announcement_stream_id,
@@ -77,10 +68,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             membership,
             root,
             storage,
-            registration_ref,
-            registration,
-            device_signer,
-            identity,
+            std::sync::Arc::clone(&self.local_writer),
             history,
         )
     }
@@ -136,43 +124,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         mutate_commit: impl FnOnce(&mut crate::protocol::store_commit::StoreBatchCommit),
     ) -> Result<(), CircleOperationError> {
         let old_commit = journal.commit()?;
-        let author = self
-            .database
-            .activated_store_device_registration(old_commit.author_registration.clone())
-            .await?;
-        let device_signer = author
-            .value()
-            .device_signer(self.identity)
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "derive Circle commit device signer: {error}"
-                ))
-            })?;
         let coord = journal.operation().commit_ref.coord.clone();
-        let stream_activations = old_commit.stream_activations().to_vec();
-        let mut commit = super::preparation::signed_circle_commit(
-            old_commit.store_root_hash,
-            old_commit.write_id.clone(),
-            coord.clone(),
-            old_commit.author_registration.clone(),
-            author.value(),
-            old_commit.order.clone(),
-            old_commit.membership_state.clone(),
-            old_commit.device_state.clone(),
-            old_commit
-                .operations_membership_authority()
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "prepared Circle commit has no validated operations authority: {error}"
-                    ))
-                })?,
-            reference,
-            stream_activations,
-            &device_signer,
-        )?;
+        let mut commit =
+            self.local_writer
+                .sign_circle_commit_for_test(&old_commit, coord.clone(), reference)?;
         mutate_commit(&mut commit);
-        commit.signature =
-            crate::keys::sign_hex(&device_signer, &commit.canonical_signed_bytes()).1;
+        self.local_writer.resign_store_commit_for_test(&mut commit);
         let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
         let commit_prepared = self
             .preparer()
@@ -203,19 +160,19 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         })?;
         let old_head = journal.operation().policy.head.clone();
         let history_summary = journal.operation().policy.history_summary.clone();
-        let head = crate::protocol::store_commit::StoreDeviceHead::signed(
-            commit.store_root_hash,
-            commit.author_registration.clone(),
-            commit_ref.clone(),
-            history_summary.digest(),
-            old_head.successor,
-            &device_signer,
-        )
-        .map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "sign replacement Circle Store head: {error}"
-            ))
-        })?;
+        let head = self
+            .local_writer
+            .sign_device_head(
+                commit.store_root_hash,
+                commit_ref.clone(),
+                history_summary.digest(),
+                old_head.successor,
+            )
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "sign replacement Circle Store head: {error}"
+                ))
+            })?;
         let head_slot = journal
             .operation()
             .prepared_objects
@@ -286,10 +243,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.store_dir,
             self.root.clone(),
             self.membership.clone(),
-            self.identity,
-            self.registration_ref.clone(),
-            self.registration.clone(),
-            self.device_signer.clone(),
+            std::sync::Arc::clone(&self.local_writer),
         )
     }
 
@@ -298,9 +252,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.database.clone(),
             self.storage.clone(),
             self.root.clone(),
-            self.registration_ref.clone(),
-            self.registration.clone(),
-            self.device_signer.clone(),
+            std::sync::Arc::clone(&self.local_writer),
         )
     }
 
@@ -311,9 +263,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.storage.clone(),
             self.store_dir,
             self.root.clone(),
-            self.registration_ref.clone(),
-            self.registration.clone(),
-            self.device_signer.clone(),
+            std::sync::Arc::clone(&self.local_writer),
         )
     }
 
@@ -342,7 +292,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         CircleOperationError,
     > {
         self.ensure_not_deleted(circle_id).await?;
-        let identity_pubkey = keys::public_key_hex(self.identity);
+        let identity_pubkey = self.local_writer.author_pubkey();
         let (current, activation_commit_ref) = self
             .database
             .circle_authoring_context(circle_id, &identity_pubkey)
@@ -383,7 +333,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         ),
         CircleOperationError,
     > {
-        let identity_pubkey = keys::public_key_hex(self.identity);
+        let identity_pubkey = self.local_writer.author_pubkey();
         let (current, activation_commit_ref) = self
             .database
             .circle_delete_context(circle_id, &identity_pubkey)
@@ -534,7 +484,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         if !retained_branches.contains(chosen) {
             return Err(CircleOperationError::ChosenBranchNotRetained { circle_id });
         }
-        let identity_pubkey = keys::public_key_hex(self.identity);
+        let identity_pubkey = self.local_writer.author_pubkey();
         let chosen_activation = self
             .database
             .verified_circle_activation(self.root.clone(), circle_id, chosen.clone())
@@ -616,7 +566,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         circle_id: CircleId,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
         self.ensure_not_deleted(circle_id).await?;
-        let identity_pubkey = keys::public_key_hex(self.identity);
+        let identity_pubkey = self.local_writer.author_pubkey();
         let mut journal = self
             .database
             .waiting_circle_operations()
@@ -767,7 +717,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         circle_id: CircleId,
         excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
     ) -> Result<(), CircleOperationError> {
-        let identity_pubkey = keys::public_key_hex(self.identity);
+        let identity_pubkey = self.local_writer.author_pubkey();
         let journal = self
             .database
             .waiting_circle_operations()
@@ -800,10 +750,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 circle_id,
                 device_id: excluded_device_id,
             })?;
-        let exclusion = crate::protocol::circle::CircleEpochCloseExclusion::signed(
+        let exclusion = self.local_writer.sign_circle_epoch_close_exclusion(
             &current.control,
             participant.registration.clone(),
-            self.identity,
         )?;
         let prefix = crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
             circle_id,

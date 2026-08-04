@@ -1,4 +1,5 @@
 use super::*;
+use crate::keys::{self, UserKeypair};
 use crate::protocol::store_commit::{StoreCommitCoord, StoreProtocolError};
 use crate::storage::cloud::ObjectSlot;
 use crate::storage::{ExactObjectRef, SyncStorage};

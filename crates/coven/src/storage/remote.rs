@@ -1987,7 +1987,7 @@ impl SyncStorage for CloudSyncStorage {
         probe_id: crate::protocol::provider::ProviderProbeId,
         store: &crate::storage::StoreProviderBinding,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
@@ -2054,7 +2054,7 @@ impl SyncStorage for CloudSyncStorage {
         response: &crate::protocol::provider::CrossPrincipalProbeResponse,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
         store: &crate::storage::StoreProviderBinding,
-        administrator_signer: &UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeReceipt,

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::database::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation, StoreDatabase,
 };
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{
     CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId,
 };
@@ -84,7 +83,6 @@ pub(super) struct AuthorizedReclaim<'operation, 'storage> {
     storage: Arc<dyn SyncStorage>,
     root: StoreRootRef,
     membership: crate::protocol::membership::MembershipChain,
-    identity: UserKeypair,
 }
 
 impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
@@ -94,7 +92,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         storage: Arc<dyn SyncStorage>,
         root: StoreRootRef,
         membership: crate::protocol::membership::MembershipChain,
-        identity: UserKeypair,
     ) -> Self {
         Self {
             writer,
@@ -102,7 +99,6 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             storage,
             root,
             membership,
-            identity,
         }
     }
 
@@ -114,7 +110,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         let database = self.database.clone();
         let membership = self.membership.clone();
         let mut packages_deleted = Box::pin(self.resume_operations()).await?;
-        if !membership.is_owner_now(&keys::public_key_hex(&self.identity)) {
+        if !self.writer.is_current_owner(&membership) {
             return Ok(StoreReclaimResult {
                 packages_deleted,
                 physical_copies_deleted: packages_deleted,
@@ -597,7 +593,6 @@ impl AuthorizedReclaim<'_, '_> {
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
         let root = self.root.clone();
-        let identity_signer = self.identity.clone();
         let target = claim.target();
         if database
             .store_reclaim_operations()
@@ -613,7 +608,8 @@ impl AuthorizedReclaim<'_, '_> {
                 "Store reclaim authorization requires an active Owner grant".to_string(),
             )
         })?;
-        let evidence = ReclaimEvidence::signed(root.store_root_hash, claim, &identity_signer)
+        let evidence = plan
+            .sign_reclaim_evidence(claim)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
         self.verify_evidence(&evidence).await?;
         let evidence_context = ProtocolObjectContext::store_encrypted(
@@ -633,15 +629,13 @@ impl AuthorizedReclaim<'_, '_> {
         )?;
         let evidence_ref =
             ReclaimEvidenceRef::from_evidence(&evidence, evidence_prepared.reference().clone());
-        let authorization = ReclaimAuthorization::signed(
-            root.store_root_hash,
+        let authorization = plan.sign_reclaim_authorization(
             evidence.claim.target(),
             evidence_ref.clone(),
             StoreReclaimAuthority {
                 membership: plan.membership_state().clone(),
                 owner_grant,
             },
-            &identity_signer,
         );
         let authorization_context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -1642,10 +1636,8 @@ impl AuthorizedReclaim<'_, '_> {
             ));
         };
         let provider_admin = resolved.provider_admin.combined_state().clone();
-        let provider_admin_grant = provider_admin
-            .active()
-            .into_iter()
-            .find(|grant| provider_admin.authorizes(grant, plan.registration_ref()))
+        let provider_admin_grant = plan
+            .effective_provider_admin_grant(&provider_admin)
             .ok_or_else(|| {
                 StoreReclaimError::Authorization(
                     "local Store device is not an effective provider administrator".to_string(),

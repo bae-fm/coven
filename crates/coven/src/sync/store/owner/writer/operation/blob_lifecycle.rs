@@ -33,17 +33,16 @@ impl AuthorizedWriterOperation<'_> {
         clock: &dyn crate::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
-        crate::blob::delete::TombstoneDrain::new(
-            &self.database,
-            self.storage.as_ref(),
-            cipher,
-            pending_rotation,
-            &store_id,
-            self.writer.identity,
-            clock,
-        )
-        .drain()
-        .await
+        self.writer
+            .drain_tombstones(
+                &self.database,
+                self.storage.as_ref(),
+                cipher,
+                pending_rotation,
+                &store_id,
+                clock,
+            )
+            .await
     }
 
     /// Reclaim blobs whose authentic tombstones have aged past the configured
@@ -67,7 +66,7 @@ impl AuthorizedWriterOperation<'_> {
             .activated_store_device_registration_records()
             .await
             .map_err(|error| error.to_string())?;
-        let self_pubkey = crate::keys::public_key_hex(self.writer.identity);
+        let self_pubkey = self.writer.author_pubkey();
         let grace = self.database.blob_tombstone_grace();
         let suffix = cipher.snapshot().suffix();
         let keys = self

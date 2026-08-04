@@ -1,9 +1,8 @@
 use super::close_prepared_packages;
 use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use crate::protocol::store_commit::{
-    commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CirclePackageInput,
-    StoreBatchCommit, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
-    StoreDeviceHead, StorePackageInput, SuccessorLink,
+    commit_semantic_prefix, head_slot_prefix, CirclePackageInput, StoreCommitCoord,
+    StoreCommitOperationsInput, StoreCommitOrder, StorePackageInput, SuccessorLink,
 };
 use crate::storage::StoreObjectError;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -29,9 +28,6 @@ impl AuthorizedWriterOperation<'_> {
         };
         let stream_id = self.announcement_stream_id();
         let membership = self.membership.clone();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
         let db = &database;
         let PreparedStoreWrite {
             write_id,
@@ -65,7 +61,7 @@ impl AuthorizedWriterOperation<'_> {
                 dependencies,
             };
             let authorization = self
-                .authorize_retained_outbound(&order, membership.head_refs(), &registration_ref)
+                .authorize_retained_outbound(&order, membership.head_refs())
                 .await
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let membership_authority = self.membership_authority(&authorization.membership)?;
@@ -130,7 +126,8 @@ impl AuthorizedWriterOperation<'_> {
                 .map(|(pubkey, _)| pubkey)
                 .collect();
             let candidate_family =
-                CandidateFamilyId::derive(store_root_hash, &registration_ref, &write_id, &order);
+                self.writer
+                    .candidate_family_id(store_root_hash, &write_id, &order);
             let mut prepared_packages = Vec::new();
             if let Some(partition) = partitions.store {
                 prepared_packages.push(
@@ -173,7 +170,7 @@ impl AuthorizedWriterOperation<'_> {
                 store_root_hash,
                 ProtocolObjectDomain::StoreHead,
             );
-            let device_id = registration_ref.device_id.to_string();
+            let device_id = self.local_device_id().to_string();
             let head_prefix = head_slot_prefix(&device_id, seq);
             let next_head_prefix = head_slot_prefix(&device_id, successor_store_sequence(seq)?);
             let next_head_slot = storage
@@ -216,35 +213,34 @@ impl AuthorizedWriterOperation<'_> {
                     })
                 })
                 .collect::<Vec<_>>();
-            let commit = StoreBatchCommit::signed_operations(
-                store_root_hash,
-                write_id.clone(),
-                coord.clone(),
-                registration_ref.clone(),
-                &registration,
-                order,
-                membership_state,
-                device_state,
-                membership_authority,
-                StoreCommitOperationsInput {
-                    acknowledgement: None,
-                    circle_acknowledgements: Vec::new(),
-                    control: None,
-                    device_join_attempt_decisions: Vec::new(),
-                    device_join_outcomes: Vec::new(),
-                    device_join_cleanup_receipts: Vec::new(),
-                    provider_access_grants: Vec::new(),
-                    device_registrations: Vec::new(),
-                    device_exclusion_proposals: Vec::new(),
-                    device_exclusion_outcomes: Vec::new(),
-                    stream_activations: Vec::new(),
-                    circle_controls: Vec::new(),
-                    store_package,
-                    circle_packages: &circle_packages,
-                },
-                &device_signer,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            let commit = self
+                .writer
+                .sign_store_write_commit(
+                    store_root_hash,
+                    write_id.clone(),
+                    coord.clone(),
+                    order,
+                    membership_state,
+                    device_state,
+                    membership_authority,
+                    StoreCommitOperationsInput {
+                        acknowledgement: None,
+                        circle_acknowledgements: Vec::new(),
+                        control: None,
+                        device_join_attempt_decisions: Vec::new(),
+                        device_join_outcomes: Vec::new(),
+                        device_join_cleanup_receipts: Vec::new(),
+                        provider_access_grants: Vec::new(),
+                        device_registrations: Vec::new(),
+                        device_exclusion_proposals: Vec::new(),
+                        device_exclusion_outcomes: Vec::new(),
+                        stream_activations: Vec::new(),
+                        circle_controls: Vec::new(),
+                        store_package,
+                        circle_packages: &circle_packages,
+                    },
+                )
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let commit_prefix = commit_semantic_prefix(
                 commit.candidate_family(),
                 &stream_id.to_string(),
@@ -263,14 +259,15 @@ impl AuthorizedWriterOperation<'_> {
                     commit.to_bytes(),
                 )
                 .map_err(StoreObjectError::from)?;
-            let commit = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
-                &commit.to_bytes(),
-                store_root_hash,
-                coord,
-                commit_prepared.reference().clone(),
-                &registration,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            let commit = self
+                .writer
+                .verify_prepared_commit(
+                    &commit.to_bytes(),
+                    store_root_hash,
+                    coord,
+                    commit_prepared.reference().clone(),
+                )
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let commit_ref = commit.reference().clone();
             let successor = self
             .prepare_merge_history_successor(
@@ -283,13 +280,12 @@ impl AuthorizedWriterOperation<'_> {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             let storage = self.storage.as_ref();
-            let activation = registration
-                .store_announcement_activation(&registration_ref)
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
-                .activation_id();
-            let head = StoreDeviceHead::signed(
+            let activation = self
+                .writer
+                .announcement_activation_id()
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            let head = self.writer.sign_device_head(
                 store_root_hash,
-                registration_ref.clone(),
                 commit_ref.clone(),
                 successor.summary.digest(),
                 SuccessorLink {
@@ -297,9 +293,7 @@ impl AuthorizedWriterOperation<'_> {
                     predecessor: successor.predecessor_head.map(|reference| reference.object),
                     next_slot: next_head_slot,
                 },
-                &device_signer,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            )?;
             let head_prepared = storage
                 .prepare_protocol_object(
                     &head_context,

@@ -65,9 +65,6 @@ impl AuthorizedWriterOperation<'_> {
         let commits = frontier.commits();
         let device_id = self.local_device_id().to_string();
         let root = self.store_root().clone();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
         let history_cut =
             crate::protocol::store_commit::StoreHistoryCut::from_commits(commits.clone());
         let (device_state, _) = self
@@ -96,7 +93,7 @@ impl AuthorizedWriterOperation<'_> {
                 Some(previous.reference.object),
                 previous.successor_slot,
             ),
-            None => (1, None, registration.acknowledgements.first_slot().clone()),
+            None => (1, None, self.writer.first_acknowledgement_slot()),
         };
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -119,27 +116,27 @@ impl AuthorizedWriterOperation<'_> {
             )
             .await
             .map_err(StoreObjectError::from)?;
-        let activation = registration
-            .store_acknowledgement_activation(&registration_ref)
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
-            .activation_id();
-        let acknowledgement = StoreAck::signed(
-            root.store_root_hash,
-            registration_ref,
-            sequence,
-            history_cut,
-            device_state,
-            snapshot,
-            exclusions,
-            sync_time,
-            SuccessorLink {
-                activation,
-                predecessor,
-                next_slot,
-            },
-            &device_signer,
-        )
-        .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+        let activation = self
+            .writer
+            .acknowledgement_activation_id()
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+        let acknowledgement = self
+            .writer
+            .sign_device_acknowledgement(
+                root.store_root_hash,
+                sequence,
+                history_cut,
+                device_state,
+                snapshot,
+                exclusions,
+                sync_time,
+                SuccessorLink {
+                    activation,
+                    predecessor,
+                    next_slot,
+                },
+            )
+            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
         let prepared = self
             .storage
             .prepare_protocol_object(

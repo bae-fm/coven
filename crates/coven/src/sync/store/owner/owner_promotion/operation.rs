@@ -9,7 +9,7 @@ use crate::protocol::store_commit::{
     OwnerPromotionRequest, OwnerPromotionRequestActivation, OwnerPromotionStaleReason,
     StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
 };
-use crate::protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKey};
+use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
@@ -31,9 +31,6 @@ pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     root: crate::protocol::store_commit::StoreRootRef,
     membership: crate::protocol::membership::MembershipChain,
-    identity: crate::keys::UserKeypair,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
 }
 
 enum OwnerPromotionPreparation {
@@ -74,16 +71,12 @@ enum OwnerPromotionResumeOutcome {
 }
 
 impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
         root: crate::protocol::store_commit::StoreRootRef,
         membership: crate::protocol::membership::MembershipChain,
-        identity: crate::keys::UserKeypair,
-        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Self {
         Self {
             writer,
@@ -91,9 +84,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             storage,
             root,
             membership,
-            identity,
-            registration_ref,
-            registration,
         }
     }
 
@@ -212,10 +202,9 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 "promotion id is already bound to another journal state".to_string(),
             ));
         }
-        let registration_ref = self.registration_ref.clone();
-        let registration = self.registration.clone();
-        if registration_ref != request.member_registration
-            || registration.author_pubkey != request.member_pubkey
+        if !self
+            .writer
+            .matches_local_author(&request.member_registration, &request.member_pubkey)
         {
             return Err(OwnerPromotionError::Protocol(
                 "promotion request targets another local device".to_string(),
@@ -228,9 +217,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .await
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let root = self.root.clone();
-        let membership_stream = StreamActivation::grant_authorized_stream_id(
-            root.store_root_hash,
-            &registration_ref,
+        let membership_stream = self.writer.grant_authorized_stream_id(
             &request.intended_owner_grant,
             StreamAnchorDomain::StoreMembership,
         );
@@ -269,14 +256,14 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 first_slot: recovery_slot,
             },
         };
-        let acceptance = OwnerPromotionAcceptance::signed(
-            request.clone(),
-            verified_activation.activation().clone(),
-            anchors,
-            &registration,
-            &self.identity,
-        )
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        let acceptance = self
+            .writer
+            .sign_owner_promotion_acceptance(
+                request.clone(),
+                verified_activation.activation().clone(),
+                anchors,
+            )
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         self.writer
             .owner_promotion_history()
             .verify_acceptance_from_request(&acceptance, verified_activation)
@@ -401,23 +388,16 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
             OwnerPromotionError::Protocol("promotion author is not an Owner".to_string())
         })?;
+        let author_pubkey = plan.author_pubkey();
         let reusable = operation
             .membership
-            .reusable_author_streams(&plan.registration().author_pubkey, &owner_grant);
+            .reusable_author_streams(&author_pubkey, &owner_grant);
         let author_stream = database
-            .select_membership_author_stream(
-                &plan.registration().author_pubkey,
-                &owner_grant,
-                reusable,
-            )
+            .select_membership_author_stream(&author_pubkey, &owner_grant, reusable)
             .await?;
         let (seq, previous_hash) = operation
             .membership
-            .next_stream_position(
-                &plan.registration().author_pubkey,
-                &owner_grant,
-                author_stream,
-            )
+            .next_stream_position(&author_pubkey, &owner_grant, author_stream)
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let finalization = OwnerPromotionFinalizationPoint {
             author_stream,
@@ -466,7 +446,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             member.value.author_pubkey,
             member_grant,
             finalization,
-            &operation.identity,
         )?;
         let candidate = operation
             .writer
@@ -503,7 +482,10 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         )
         .await
         .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        if self.registration_ref != acceptance.request.promoter_registration {
+        if !self
+            .writer
+            .is_local_registration(&acceptance.request.promoter_registration)
+        {
             return Err(OwnerPromotionError::Protocol(
                 "promotion finalizer is not the request promoter".to_string(),
             ));
@@ -619,9 +601,10 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let database = operation.database.clone();
         let root = operation.root.clone();
         let db = &database;
-        let promoter = operation.registration.clone();
-        if operation.registration_ref != acceptance.request.promoter_registration
-            || promoter.author_pubkey != keys::public_key_hex(&operation.identity)
+        let promoter_pubkey = operation.writer.local_author_pubkey();
+        if !operation
+            .writer
+            .is_local_registration(&acceptance.request.promoter_registration)
         {
             return Err(OwnerPromotionError::Protocol(
                 "promotion finalizer is not the request promoter".to_string(),
@@ -629,7 +612,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         }
         let membership = operation.membership.clone();
         if let Some(winner) = membership.head_refs().iter().find(|head| {
-            head.coord.author_pubkey == promoter.author_pubkey
+            head.coord.author_pubkey == promoter_pubkey
                 && head.coord.author_owner_grant == acceptance.request.promoter_owner_grant
                 && head.coord.stream_id == author_stream
                 && head.coord.seq >= seq
@@ -651,7 +634,6 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 reason,
             });
         }
-        let identity = operation.identity.clone();
         let authorized = operation
             .writer
             .open_keyring_or_for_membership(&membership, encryption)
@@ -660,16 +642,17 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let recipient = &acceptance.request.member_pubkey;
         let recipient_key = keys::ed25519_hex_to_x25519_public_key(recipient)
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let wrapped_key = WrappedStoreKey::seal_keyring(
-            membership.store_id().ok_or_else(|| {
-                OwnerPromotionError::Protocol("membership Store id is absent".to_string())
-            })?,
-            recipient,
-            &recipient_key,
-            &authorized,
-            &identity,
-        )
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        let wrapped_key = operation
+            .writer
+            .seal_local_keyring(
+                membership.store_id().ok_or_else(|| {
+                    OwnerPromotionError::Protocol("membership Store id is absent".to_string())
+                })?,
+                recipient,
+                &recipient_key,
+                &authorized,
+            )
+            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         let wrapped_key = operation
             .writer
             .prepare_wrapped_key(recipient, wrapped_key)
@@ -680,14 +663,13 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .load_registration(&acceptance.request.member_registration)
             .await
             .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-        let identity = operation.identity.clone();
-        let entry = membership
-            .signed_finalize_owner_promotion_in_stream(
+        let entry = operation
+            .writer
+            .sign_finalize_owner_promotion(
+                &membership,
                 &root,
-                &promoter,
                 &candidate.value,
                 acceptance.clone(),
-                &identity,
                 wrapped_key.reference.clone(),
                 db.stamp(),
             )

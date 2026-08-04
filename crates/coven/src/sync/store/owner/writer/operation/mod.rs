@@ -1,13 +1,11 @@
 use super::*;
 use crate::database::VerifiedMergeMembershipObjects;
-use crate::keys;
 use crate::protocol::membership::{
-    self, AuthorHead, MembershipChain, MembershipChange, MembershipEntry, MembershipError,
-    MembershipHeadRef,
+    self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
 };
 use crate::protocol::store_commit::{
     self, commit_semantic_prefix, head_slot_prefix, membership_head_slot_prefix,
-    StoreBatchCommitDeletionTarget, StoreDeviceHeadRef, SuccessorLink,
+    StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
 use crate::protocol::wrapped_store_key::{
     load_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKeyRef,
@@ -40,10 +38,8 @@ use membership_mutation_journal::{
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
     authorship: crate::database::store::OwnStreamAuthorship,
+    writer: Arc<LocalStoreWriter>,
     root: crate::protocol::store_commit::StoreRootRef,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: Box<crate::protocol::store_commit::StoreDeviceRegistration>,
-    device_signer: UserKeypair,
     coord: crate::protocol::store_commit::StoreCommitCoord,
     order: crate::protocol::store_commit::StoreCommitOrder,
     membership: crate::protocol::membership::MembershipChain,
@@ -55,20 +51,16 @@ impl MergeConflictResolutionCommitPlan {
     #[allow(clippy::too_many_arguments)]
     fn new(
         authorship: crate::database::store::OwnStreamAuthorship,
+        writer: Arc<LocalStoreWriter>,
         root: crate::protocol::store_commit::StoreRootRef,
-        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: crate::protocol::store_commit::StoreDeviceRegistration,
-        device_signer: UserKeypair,
         coord: crate::protocol::store_commit::StoreCommitCoord,
         order: crate::protocol::store_commit::StoreCommitOrder,
         authorization: super::history::MergeConflictResolutionAuthorization,
     ) -> Self {
         Self {
             authorship,
+            writer,
             root,
-            registration_ref,
-            registration: Box::new(registration),
-            device_signer,
             coord,
             order,
             membership: authorization.membership,
@@ -81,22 +73,57 @@ impl MergeConflictResolutionCommitPlan {
         &self.root
     }
 
-    pub(super) fn registration_ref(
-        &self,
-    ) -> &crate::protocol::store_commit::StoreDeviceRegistrationRef {
-        &self.registration_ref
-    }
-
-    pub(super) fn registration(&self) -> &crate::protocol::store_commit::StoreDeviceRegistration {
-        &self.registration
-    }
-
-    pub(super) fn device_state(&self) -> &crate::protocol::store_commit::StoreDeviceStateRef {
-        &self.device_state
-    }
-
     pub(super) fn membership(&self) -> &crate::protocol::membership::MembershipChain {
         &self.membership
+    }
+
+    pub(super) fn grant_authorized_stream_id(
+        &self,
+        grant: &crate::protocol::membership::MembershipGrantId,
+        domain: crate::protocol::store_commit::StreamAnchorDomain,
+    ) -> crate::protocol::membership::AuthorStreamId {
+        self.writer
+            .grant_authorized_stream_id(self.root.store_root_hash, grant, domain)
+    }
+
+    pub(super) fn sign_conflict_resolution(
+        &self,
+        chain: &crate::protocol::membership::MembershipChain,
+        selection: crate::protocol::membership::MembershipConflictSelection,
+        replacement_grant: crate::protocol::membership::MembershipGrantId,
+        membership: crate::protocol::store_commit::GrantStreamAnchor,
+        recovery: crate::protocol::store_commit::GrantStreamAnchor,
+    ) -> Result<crate::protocol::membership::StoreMembershipConflictResolution, InviteError> {
+        self.writer.sign_conflict_resolution(
+            chain,
+            self.root.store_root_hash,
+            selection,
+            replacement_grant,
+            membership,
+            recovery,
+            self.device_state.clone(),
+        )
+    }
+
+    pub(super) fn sign_conflict_resolution_activation(
+        &self,
+        chain: &crate::protocol::membership::MembershipChain,
+        stream_id: crate::protocol::membership::AuthorStreamId,
+        reference: crate::protocol::membership::StoreMembershipConflictResolutionRef,
+        resolution: &crate::protocol::membership::StoreMembershipConflictResolution,
+        created_at: String,
+    ) -> Result<
+        crate::protocol::membership::MembershipEntry,
+        crate::protocol::membership::MembershipError,
+    > {
+        self.writer.sign_conflict_resolution_activation(
+            chain,
+            self.root.store_root_hash,
+            stream_id,
+            reference,
+            resolution,
+            created_at,
+        )
     }
 
     pub(super) fn finish(
@@ -130,7 +157,7 @@ impl MergeConflictResolutionCommitPlan {
         if membership
             .active_grant(&replacement_grant)
             .is_none_or(|record| {
-                record.member_pubkey != self.registration.author_pubkey
+                record.member_pubkey != self.writer.author_pubkey()
                     || record.creation_authority != authority
             })
         {
@@ -149,10 +176,8 @@ impl MergeConflictResolutionCommitPlan {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let common = operations::StoreOperationPlanCommon::new(
             self.authorship,
+            self.writer,
             self.root,
-            self.registration_ref,
-            *self.registration,
-            self.device_signer,
             self.coord,
             self.order,
             membership_state,
@@ -236,18 +261,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     async fn open_keyring(
         &self,
     ) -> Result<crate::encryption::EncryptionService, super::membership::InviteError> {
-        self.history
-            .open_keyring(self.writer.identity, &self.membership)
-            .await
+        self.keyrings.open(&self.membership).await
     }
 
     pub(super) async fn open_keyring_for_membership(
         &self,
         membership: &crate::protocol::membership::MembershipChain,
     ) -> Result<crate::encryption::EncryptionService, super::membership::InviteError> {
-        self.history
-            .open_keyring(self.writer.identity, membership)
-            .await
+        self.keyrings.open(membership).await
     }
 
     pub(crate) async fn open_keyring_or_for_membership(
@@ -255,9 +276,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership: &crate::protocol::membership::MembershipChain,
         initial: &crate::encryption::EncryptionService,
     ) -> Result<crate::encryption::EncryptionService, super::membership::InviteError> {
-        self.history
-            .open_keyring_or(self.writer.identity, membership, initial)
-            .await
+        self.keyrings.open_or(membership, initial).await
     }
 
     pub(crate) async fn prepare_wrapped_key(
@@ -268,7 +287,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
         crate::storage::StorageError,
     > {
-        self.history.prepare_wrapped_key(recipient, value).await
+        self.keyrings.prepare(recipient, value).await
     }
 
     /// Select the exact author stream without overwriting its committed prefix.
@@ -278,7 +297,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         chain: &crate::protocol::membership::MembershipChain,
     ) -> Result<crate::protocol::membership::AuthorStreamId, super::membership::InviteError> {
-        let author = crate::keys::public_key_hex(self.writer.identity);
+        let author = self.writer.author_pubkey();
         let grant = chain.active_owner_grant(&author).ok_or_else(|| {
             crate::protocol::membership::MembershipError::SignerIsNotOwner(author.clone())
         })?;
@@ -371,11 +390,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         order: &crate::protocol::store_commit::StoreCommitOrder,
         membership_heads: &[crate::protocol::membership::MembershipHeadRef],
-        registration: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<super::verified_history::MergeOutboundAuthorization, super::pull::StorePullError>
     {
-        self.history
-            .authorize_retained_outbound(order, membership_heads, registration)
+        self.writer
+            .authorize_retained_outbound(&self.history, order, membership_heads)
             .await
     }
 
@@ -445,35 +463,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(())
     }
 
-    pub(super) async fn prepare_merge_snapshot_history_summary(
-        &self,
-        coverage: &crate::protocol::store_commit::CommitFrontier,
-        membership: &crate::protocol::membership::MembershipChain,
-        state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
-        author_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        author: &crate::protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<
-        crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-        super::pull::StorePullError,
-    > {
-        self.history
-            .prepare_merge_snapshot_history_summary(coverage, membership, state, author_ref, author)
-            .await
-    }
-
     #[cfg(test)]
     pub(super) async fn load_own_snapshot_for_test(
         &mut self,
         reference: &crate::protocol::store_commit::StoreSnapshotRef,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, snapshot::SnapshotError> {
-        self.history
-            .load_store_snapshot(
-                self.writer.registration_ref(),
-                self.writer.registration(),
-                reference,
-            )
+        self.writer
+            .load_own_snapshot(&mut self.history, reference)
             .await
-            .map(|(_, meta)| meta)
             .map_err(snapshot::SnapshotError::StoreObject)
     }
 
@@ -481,11 +478,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, SyncCycleFailure> {
-        let identity = self.writer.identity;
         let membership = self.membership.clone();
         let execution = self
-            .history
-            .pull(&membership, Some(identity), routing_encryption)
+            .writer
+            .pull(&mut self.history, &membership, routing_encryption)
             .await
             .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
         self.membership = execution.membership;
@@ -511,15 +507,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         history_summary: crate::protocol::store_commit::ObjectHash,
         successor: crate::protocol::store_commit::SuccessorLink,
     ) -> Result<crate::protocol::store_commit::StoreDeviceHead, StoreError> {
-        crate::protocol::store_commit::StoreDeviceHead::signed(
+        self.writer.sign_device_head(
             self.store_root().store_root_hash,
-            self.writer.registration_ref().clone(),
             commit,
             history_summary,
             successor,
-            &self.writer.device_signer,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     #[cfg(test)]
@@ -528,27 +521,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         meta: crate::protocol::store_commit::SnapshotMeta,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, StoreError> {
         if meta.store_root_hash != self.store_root().store_root_hash
-            || &meta.author_registration != self.writer.registration_ref()
+            || !self
+                .writer
+                .is_authored_by_registration(&meta.author_registration)
         {
             return Err(StoreError::InvalidOutbound(
                 "snapshot test input belongs to another Store writer".to_string(),
             ));
         }
-        crate::protocol::store_commit::SnapshotMeta::signed(
-            meta.store_root_hash,
-            self.writer.registration_ref().clone(),
-            meta.generation,
-            meta.predecessor,
-            meta.image,
-            meta.coverage,
-            meta.state,
-            meta.history_summary,
-            meta.schema_version,
-            meta.created_at,
-            meta.successor,
-            &self.writer.device_signer,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        self.writer
+            .resign_snapshot(meta)
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     #[cfg(test)]
@@ -557,20 +540,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         bytes: &[u8],
         reference: &crate::protocol::store_commit::StoreSnapshotRef,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, StoreError> {
-        crate::protocol::store_commit::SnapshotMeta::parse_at(
-            bytes,
-            self.store_root().store_root_hash,
-            reference,
-            self.writer.registration(),
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        self.writer
+            .parse_snapshot(bytes, self.store_root().store_root_hash, reference)
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     #[cfg(test)]
     pub(crate) fn local_registration_ref_for_test(
         &self,
     ) -> crate::protocol::store_commit::StoreDeviceRegistrationRef {
-        self.writer.registration_ref().clone()
+        self.writer.registration_reference_for_test()
     }
 
     pub(super) fn reclaim_history(&mut self) -> super::history::ReclaimHistory<'_, 'storage> {
@@ -584,18 +563,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let storage = self.storage.clone();
         let root = self.store_root().clone();
         let membership = self.membership.clone();
-        let identity = self.writer.identity.clone();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
         super::owner_promotion::AuthorizedOwnerPromotion::new(
-            self,
-            database,
-            storage,
-            root,
-            membership,
-            identity,
-            registration_ref,
-            registration,
+            self, database, storage, root, membership,
         )
     }
 
@@ -617,8 +586,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 return Ok(());
             }
 
-            let user_keypair = self.writer.identity;
-            let recipient = crate::keys::public_key_hex(user_keypair);
+            let recipient = self.writer.author_pubkey();
             let wrapped_keys = self
                 .membership
                 .wrapped_key_authority_for(&recipient)
@@ -725,7 +693,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 ),
             ));
         }
-        if public_key_hex == crate::keys::public_key_hex(self.writer.identity) {
+        if public_key_hex == self.writer.author_pubkey() {
             return Err(crate::sync::store::membership::MembershipOpsError::SelfInvite);
         }
         self.resolved_membership()?;
@@ -735,7 +703,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let (join_info, wrapped_key, validated_chain) = async {
             let storage = self.storage.clone();
             let database = self.database.clone();
-            let owner_keypair = self.writer.identity.clone();
             let chain = self.membership.clone();
             let _mutation = database.membership_mutation_permit().await;
             let (plan, mut progress, intent_hash) =
@@ -768,38 +735,22 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     let authorized_keyring = self
                         .open_keyring_or_for_membership(&chain, encryption)
                         .await?;
-                    let signing_store_id = protocol_store_id.clone();
-                    let signing_recipient = public_key_hex.to_string();
-                    let signing_keyring = authorized_keyring.clone();
-                    let signing_owner = owner_keypair.clone();
-                    let signed = crate::sync::blocking::run(move || {
-                        crate::protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
-                            &signing_store_id,
-                            &signing_recipient,
-                            &invitee_x25519_pk,
-                            &signing_keyring,
-                            &signing_owner,
+                    let signed = self
+                        .writer
+                        .seal_keyring_for_member(
+                            protocol_store_id.clone(),
+                            public_key_hex.to_string(),
+                            invitee_x25519_pk,
+                            authorized_keyring,
                         )
-                        .map_err(|error| {
-                            crate::sync::store::membership::InviteError::Crypto(format!(
-                                "serialize invited member keyring: {error}"
-                            ))
-                        })
-                    })
-                    .await
-                    .map_err(|error| {
-                        crate::sync::store::membership::InviteError::Crypto(format!(
-                            "seal invited member Store key: {error}"
-                        ))
-                    })??;
+                        .await?;
                     let wrapped_key = self.prepare_wrapped_key(public_key_hex, signed).await?;
-                    let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
-                        &owner_keypair,
+                    let entry = self.writer.sign_set_member(
+                        &chain,
                         stream_id,
                         public_key_hex.to_string(),
                         invitee_email.map(str::to_string),
                         role.clone(),
-                        None,
                         wrapped_key.reference.clone(),
                         invite_timestamp.clone(),
                     )?;
@@ -1090,7 +1041,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         selection: membership::MembershipConflictSelection,
         created_at: &str,
     ) -> Result<ResolveMutationPlan, InviteError> {
-        let signer = self.writer.identity.clone();
         let base = self
             .prepare_conflict_resolution_plan(chain.head_refs())
             .await
@@ -1110,12 +1060,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         if current != conflict_hash {
             return Err(MembershipError::InvalidConflictResolution.into());
         }
-        let resolver_pubkey = keys::public_key_hex(&signer);
+        let resolver_pubkey = self.writer.author_pubkey();
         let replacement_grant =
             membership::derive_store_resolution_grant(&conflict_hash, &resolver_pubkey);
-        let stream_id = store_commit::StreamActivation::grant_authorized_stream_id(
-            base.root().store_root_hash,
-            base.registration_ref(),
+        let stream_id = base.grant_authorized_stream_id(
             &replacement_grant,
             store_commit::StreamAnchorDomain::StoreMembership,
         );
@@ -1155,23 +1103,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let recovery = store_commit::GrantStreamAnchor::OwnerRecovery {
             first_slot: recovery_slot,
         };
-        let acceptance = store_commit::OwnerConflictResolutionAcceptance::signed(
-            base.root().store_root_hash,
-            replacement_grant,
-            base.registration_ref().clone(),
-            membership.clone(),
-            recovery,
-            base.device_state().clone(),
-            base.registration(),
-            &signer,
-        )
-        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-        let resolution = chain.signed_conflict_resolution(
-            base.root().store_root_hash,
+        let resolution = base.sign_conflict_resolution(
+            &chain,
             selection,
+            replacement_grant,
             membership,
-            acceptance,
-            &signer,
+            recovery,
         )?;
         let resolution_bytes = serde_json::to_vec(&resolution).map_err(|error| {
             InviteError::InvalidDurableMutation(format!("serialize membership resolution: {error}"))
@@ -1203,9 +1140,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             base.root().store_root_hash,
             &[(reference.clone(), resolution.clone())],
         )?;
-        let entry = resolved_chain.signed_resolution_activation_in_stream(
-            base.root().store_root_hash,
-            &signer,
+        let entry = base.sign_conflict_resolution_activation(
+            &resolved_chain,
             stream_id,
             reference.clone(),
             &resolution,
@@ -1314,7 +1250,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let conflict_hash = choice.conflict_hash();
         let selection = choice.selection().clone();
         let database = self.database.clone();
-        let signer = self.writer.identity.clone();
+        let signer_pubkey = self.writer.author_pubkey();
         let _mutation = database.membership_mutation_permit().await;
         let (mut plan, progress, intent_hash) = match database
             .outbound_membership_mutation()
@@ -1331,7 +1267,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .into());
                 };
                 if plan.resolution.conflict_hash != conflict_hash
-                    || plan.resolution.resolver_pubkey != keys::public_key_hex(&signer)
+                    || plan.resolution.resolver_pubkey != signer_pubkey
                     || plan.resolution.selection != selection
                 {
                     return Err(InviteError::PendingMutation(
@@ -1522,10 +1458,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let store_dir = self.store_dir;
         let root = self.store_root().clone();
         let membership = self.membership.clone();
-        let identity = self.writer.identity;
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
+        let local_writer = Arc::clone(&self.writer);
         super::AuthorizedCircleWriter::from_parts(
             self,
             database,
@@ -1533,10 +1466,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             store_dir,
             root,
             membership,
-            identity,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         )
     }
 
@@ -1571,10 +1501,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let protocol_root = self.protocol_root().clone();
         let verified_root = self.history.verified_root_object().clone();
         let membership = self.membership.clone();
-        let identity = self.writer.identity;
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
+        let local_writer = Arc::clone(&self.writer);
         super::device_join::AuthorizedJoin::from_parts(
             self,
             database,
@@ -1583,10 +1510,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             protocol_root,
             verified_root,
             membership,
-            identity,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         )
     }
 
@@ -1650,7 +1574,91 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     fn writer_pubkey(&self) -> String {
-        crate::keys::public_key_hex(self.writer.identity)
+        self.writer.author_pubkey()
+    }
+
+    pub(crate) fn local_author_pubkey(&self) -> String {
+        self.writer.author_pubkey()
+    }
+
+    pub(crate) fn is_local_registration(
+        &self,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> bool {
+        self.writer.is_authored_by_registration(registration)
+    }
+
+    pub(crate) fn is_current_owner(
+        &self,
+        membership: &crate::protocol::membership::MembershipChain,
+    ) -> bool {
+        self.writer.is_current_owner(membership)
+    }
+
+    pub(crate) fn matches_local_author(
+        &self,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        author_pubkey: &str,
+    ) -> bool {
+        self.writer.matches_author(registration, author_pubkey)
+    }
+
+    pub(crate) fn grant_authorized_stream_id(
+        &self,
+        grant: &crate::protocol::membership::MembershipGrantId,
+        domain: crate::protocol::store_commit::StreamAnchorDomain,
+    ) -> crate::protocol::membership::AuthorStreamId {
+        self.writer
+            .grant_authorized_stream_id(self.store_root().store_root_hash, grant, domain)
+    }
+
+    pub(crate) fn sign_owner_promotion_acceptance(
+        &self,
+        request: crate::protocol::store_commit::OwnerPromotionRequest,
+        activation: crate::protocol::store_commit::OwnerPromotionRequestActivation,
+        anchors: crate::protocol::store_commit::OwnerPromotionAnchors,
+    ) -> Result<
+        crate::protocol::store_commit::OwnerPromotionAcceptance,
+        crate::protocol::store_commit::StoreProtocolError,
+    > {
+        self.writer
+            .sign_owner_promotion_acceptance(request, activation, anchors)
+    }
+
+    pub(crate) fn seal_local_keyring(
+        &self,
+        store_id: &str,
+        recipient: &str,
+        recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: &crate::encryption::EncryptionService,
+    ) -> Result<
+        crate::protocol::wrapped_store_key::WrappedStoreKey,
+        crate::encryption::EncryptionError,
+    > {
+        self.writer
+            .seal_keyring(store_id, recipient, recipient_key, keyring)
+    }
+
+    pub(crate) fn sign_finalize_owner_promotion(
+        &self,
+        membership: &crate::protocol::membership::MembershipChain,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        candidate: &crate::protocol::store_commit::StoreDeviceRegistration,
+        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+        wrapped_key: crate::protocol::wrapped_store_key::WrappedStoreKeyRef,
+        timestamp: String,
+    ) -> Result<
+        crate::protocol::membership::MembershipEntry,
+        crate::protocol::membership::MembershipError,
+    > {
+        self.writer.sign_finalize_owner_promotion(
+            membership,
+            root,
+            candidate,
+            acceptance,
+            wrapped_key,
+            timestamp,
+        )
     }
 
     async fn prepare_replacement_wrapped_key(
@@ -1660,14 +1668,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
         keyring: &crate::encryption::EncryptionService,
     ) -> Result<PreparedWrappedStoreKey, InviteError> {
-        let wrapped = crate::protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
-            store_id,
-            recipient,
-            recipient_key,
-            keyring,
-            self.writer.identity,
-        )
-        .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?;
+        let wrapped = self
+            .writer
+            .seal_keyring(store_id, recipient, recipient_key, keyring)
+            .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?;
         self.prepare_wrapped_key(recipient, wrapped)
             .await
             .map_err(InviteError::from)
@@ -1682,9 +1686,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         device_state: crate::protocol::store_commit::StoreDeviceStateRef,
         timestamp: String,
     ) -> Result<MembershipEntry, InviteError> {
-        chain
-            .signed_remove_member_with_owner_barrier_state(
-                self.writer.identity,
+        self.writer
+            .sign_owner_barrier_removal(
+                chain,
                 stream_id,
                 revokee_pubkey,
                 wrapped_keys,
@@ -1702,14 +1706,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         wrapped_keys: Vec<WrappedStoreKeyRef>,
         timestamp: String,
     ) -> Result<MembershipEntry, InviteError> {
-        chain
-            .signed_remove_member_with_wrapped_keys_in_stream(
-                self.writer.identity,
-                stream_id,
-                revokee_pubkey,
-                wrapped_keys,
-                timestamp,
-            )
+        self.writer
+            .sign_direct_removal(chain, stream_id, revokee_pubkey, wrapped_keys, timestamp)
             .map_err(InviteError::from)
     }
 
@@ -1719,10 +1717,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         publication: &PreparedMembershipPublication,
         resolution: Option<&membership::StoreMembershipConflictResolution>,
     ) -> Result<(), StoreError> {
-        candidate.attach_merge_membership_proof_with(
+        self.writer.attach_merge_membership_proof(
+            candidate,
             publication,
             resolution,
-            self.writer.identity,
             |context, slot, prefix, bytes| {
                 self.storage
                     .prepare_protocol_object(context, slot, prefix, bytes)
@@ -1803,15 +1801,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         entry: MembershipEntry,
     ) -> Result<PreparedMembershipTransition, InviteError> {
         let root = self.store_root().clone();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        if registration.author_pubkey != entry.author_pubkey
-            || registration_ref.device_id != registration.device_id
-        {
-            return Err(InviteError::InvalidDurableMutation(
-                "membership author differs from the active exact device registration".to_string(),
-            ));
-        }
         let storage = self.storage.as_ref();
         let (entry_object, entry_ref) =
             store_objects::prepare_membership_entry(storage, root.store_root_hash, &entry)
@@ -1828,8 +1817,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let current_slot = match predecessor.as_ref() {
             Some(reference) => {
                 let loaded = self
-                    .membership_objects()
-                    .load_head_for_registration(reference, &registration)
+                    .writer
+                    .load_membership_head(self.membership_objects(), reference)
                     .await
                     .map_err(|error| InviteError::Crypto(error.to_string()))?;
                 loaded.value.body.successor.next_slot.clone()
@@ -1881,28 +1870,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     coord.author_owner_grant
                 ))
             })?;
-        let transition = membership::MergeMembershipHeadTransition {
-            body: membership::MembershipHeadBody {
-                author_registration: registration_ref.clone(),
-                entry: entry_ref.clone(),
-                predecessor: predecessor.clone(),
-                resolutions: entry.resolution_dependencies.clone(),
-                successor: SuccessorLink {
-                    activation: store_commit::StreamActivation::grant_authorized(
-                        root.store_root_hash,
-                        registration_ref,
-                        coord.author_owner_grant.clone(),
-                        anchor.clone(),
-                    )
-                    .activation_id(),
-                    predecessor: predecessor
-                        .as_ref()
-                        .map(|reference| reference.object.clone()),
-                    next_slot,
-                },
-            },
-            head_slot: current_slot,
-        };
+        let transition = self.writer.build_membership_transition(
+            root.store_root_hash,
+            &entry,
+            entry_ref.clone(),
+            predecessor,
+            anchor.clone(),
+            next_slot,
+            current_slot,
+        )?;
         Ok(PreparedMembershipTransition {
             entry,
             entry_ref,
@@ -1927,23 +1903,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         activation: membership::MembershipHeadActivation,
     ) -> Result<PreparedMembershipPublication, InviteError> {
         let root = self.store_root().clone();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
-        if registration.author_pubkey != prepared.entry.author_pubkey
-            || registration_ref != prepared.transition.body.author_registration
-        {
-            return Err(InviteError::InvalidDurableMutation(
-                "membership transition author differs from the active exact device registration"
-                    .to_string(),
-            ));
-        }
-        let head = AuthorHead::signed(
-            prepared.entry.store_id.clone(),
-            prepared.transition.body.clone(),
-            activation,
-            &device_signer,
-        );
+        let head =
+            self.writer
+                .sign_membership_head(&prepared.entry, &prepared.transition, activation)?;
         let coord = prepared.entry.coord();
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -2042,7 +2004,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         candidate
             .validate_closed_shape()
             .map_err(InviteError::InvalidDurableMutation)?;
-        let author = self.writer.registration();
         if candidate.commit.control()
             != Some(&store_commit::StoreControl {
                 transition: transition.transition.clone(),
@@ -2055,7 +2016,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 membership::MembershipHeadActivation::StoreCommit { commit }
                     if commit == &candidate.reference
             )
-            || !publication.head.verify(author)
+            || !self.writer.verify_membership_head(&publication.head)
         {
             return Err(InviteError::InvalidDurableMutation(
                 "prepared Merge membership head differs from its exact Store activation"
@@ -2067,8 +2028,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .create_protocol_object(&publication.head_object)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
-        self.membership_objects()
-            .load_head_for_registration(&publication.head_ref, author)
+        self.writer
+            .load_membership_head(self.membership_objects(), &publication.head_ref)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         let database = self.database.clone();
@@ -2124,9 +2085,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<operations::StoreOperationCommitPlan, StoreError> {
         let root = self.store_root().clone();
         let candidate_membership_heads = self.membership.head_refs().to_vec();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
+        let author = self.writer.author_pubkey();
         let stream_id = self.announcement_stream_id();
         let base = self.database.local_commit_base(stream_id).await?;
         let previous = base.predecessor;
@@ -2144,29 +2103,24 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             dependencies,
         };
         let authorization = self
-            .history
-            .authorize_retained_outbound(&order, &candidate_membership_heads, &registration_ref)
+            .writer
+            .authorize_retained_outbound(&self.history, &order, &candidate_membership_heads)
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let owner_grant = authorization
-            .membership
-            .active_owner_grant(&registration.author_pubkey);
+        let owner_grant = authorization.membership.active_owner_grant(&author);
         let predecessor = authorization
             .membership
-            .write_grant_authority(&registration.author_pubkey)
+            .write_grant_authority(&author)
             .ok_or_else(|| {
                 StoreError::InvalidOutbound(format!(
-                    "Merge Store operation author {} has no active write grant",
-                    registration.author_pubkey
+                    "Merge Store operation author {author} has no active write grant"
                 ))
             })?;
         Ok(operations::StoreOperationCommitPlan::new(
             operations::StoreOperationPlanCommon::new(
                 base.authorship,
+                Arc::clone(&self.writer),
                 root,
-                registration_ref,
-                registration,
-                device_signer,
                 coord,
                 order,
                 authorization.membership_state,
@@ -2183,7 +2137,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         membership: &crate::protocol::membership::MembershipChain,
     ) -> Result<crate::protocol::store_commit::StoreOperationMembershipAuthority, StoreError> {
-        let writer = crate::keys::public_key_hex(self.writer.identity);
+        let writer = self.writer.author_pubkey();
         let predecessor = membership.write_grant_authority(&writer).ok_or_else(|| {
             StoreError::Preparation(crate::sync::store::StorePreparationError::Gate(format!(
                 "Store writer {writer} has no active membership grant"
@@ -2197,9 +2151,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
     ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
         let root = self.store_root().clone();
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
         let stream_id = self.announcement_stream_id();
         let base = self.database.local_commit_base(stream_id).await?;
         let previous = base.predecessor;
@@ -2216,21 +2167,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             dependencies: dependencies.0,
         };
         let authorization = self
-            .history
+            .writer
             .authorize_retained_conflict_resolution(
+                &self.history,
                 &order,
                 candidate_membership_heads,
-                &registration_ref,
-                &registration.author_pubkey,
             )
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(MergeConflictResolutionCommitPlan::new(
             base.authorship,
+            Arc::clone(&self.writer),
             root,
-            registration_ref,
-            registration,
-            device_signer,
             coord,
             order,
             authorization,
@@ -2534,14 +2482,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
             .map_err(crate::storage::StoreObjectError::from)?;
         let verified_commit =
-            crate::protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
-                &commit.to_bytes(),
-                plan.root().store_root_hash,
-                plan.coord().clone(),
-                prepared.reference().clone(),
-                plan.registration(),
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            plan.verify_prepared_commit(&commit.to_bytes(), prepared.reference().clone())?;
         let common = operations::PreparedStoreOperationCommon {
             reference: verified_commit.reference().clone(),
             commit,
@@ -2550,16 +2491,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let acknowledgement = match acknowledgement_evidence {
             Some((reference, value)) => Some(
-                self.history
-                    .retain_acknowledgement(
-                        &common.reference,
-                        &common.commit,
-                        plan.registration(),
-                        reference,
-                        value,
-                    )
-                    .await
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                plan.retain_acknowledgement(
+                    &self.history,
+                    &common.reference,
+                    &common.commit,
+                    reference,
+                    value,
+                )
+                .await
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             ),
             None => None,
         };
@@ -2596,7 +2536,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             common.commit.store_root_hash,
             crate::storage::ProtocolObjectDomain::StoreHead,
         );
-        let device_id = plan.registration_ref().device_id.to_string();
+        let device_id = plan.device_id().to_string();
         let successor = self
             .history
             .prepare_merge_history_successor(
@@ -2620,11 +2560,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             common.reference.clone(),
             successor.summary.digest(),
             crate::protocol::store_commit::SuccessorLink {
-                activation: plan
-                    .registration()
-                    .store_announcement_activation(plan.registration_ref())
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
-                    .activation_id(),
+                activation: plan.announcement_activation_id()?,
                 predecessor: successor.predecessor_head.map(|reference| reference.object),
                 next_slot,
             },
@@ -2735,15 +2671,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     pub(super) fn local_device_id(&self) -> &crate::protocol::store_commit::StoreDeviceId {
-        &self.writer.registration().device_id
+        self.writer.device_id()
     }
 
     pub(crate) fn announcement_stream_id(&self) -> crate::protocol::membership::AuthorStreamId {
-        crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
-            self.store_root().store_root_hash,
-            self.writer.registration_ref(),
-            crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        )
+        self.writer
+            .announcement_stream_id(self.store_root().store_root_hash)
     }
 
     pub(crate) async fn latest_local_store_position(
@@ -3027,8 +2960,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let storage = self.storage.clone();
         let root = self.store_root().clone();
         let membership = self.membership.clone();
-        let identity = self.writer.identity.clone();
-        reclaim::AuthorizedReclaim::new(self, database, storage, root, membership, identity)
+        reclaim::AuthorizedReclaim::new(self, database, storage, root, membership)
     }
 
     pub(crate) async fn resume_operations(

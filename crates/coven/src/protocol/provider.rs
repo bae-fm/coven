@@ -551,7 +551,7 @@ impl CrossPrincipalProbeReceipt {
         transcript: CrossPrincipalProbeTranscript,
         context: &CrossPrincipalResponseContext,
         store: &StoreProviderBinding,
-        administrator_signer: &UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<Self, ProviderProbeError> {
         validate_cross_transcript_payloads(&transcript, context)?;
         let transcript_hash = cross_transcript_hash(store, context, &transcript);
@@ -891,7 +891,7 @@ struct StoreMemberProviderAccessGrantSignedFields<'a> {
 
 impl StoreMemberProviderAccessGrant {
     #[allow(clippy::too_many_arguments)]
-    pub fn signed(
+    pub(crate) fn signed(
         grant_id: ProviderAccessGrantId,
         member_pubkey: String,
         provider: ProviderDeviceBinding,
@@ -900,13 +900,12 @@ impl StoreMemberProviderAccessGrant {
         administrator: StoreDeviceRegistrationRef,
         store: &StoreProviderBinding,
         administrator_registration: &StoreDeviceRegistration,
-        administrator_signer: &UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<Self, ProviderProbeError> {
         administrator
             .verify_registration(administrator_registration)
             .map_err(|error| ProviderProbeError::InvalidReceipt(error.to_string()))?;
-        if crate::keys::public_key_hex(administrator_signer)
-            != administrator_registration.device_signing_pubkey
+        if administrator_signer.public_key_hex() != administrator_registration.device_signing_pubkey
         {
             return invalid("provider access grant signer is not the administrator device");
         }
@@ -1777,7 +1776,7 @@ pub(crate) async fn prepare_cross_principal_challenge(
     probe_id: ProviderProbeId,
     store: &StoreProviderBinding,
     context: &CrossPrincipalChallengeContext,
-    administrator_signer: &UserKeypair,
+    administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
 ) -> Result<CrossPrincipalProbeChallenge, ProviderProbeError> {
     let administrator_live = administrator
         .provider_binding()
@@ -1820,11 +1819,7 @@ pub(crate) async fn prepare_cross_principal_challenge(
         administrator_signature: hex::encode(administrator_signer.sign(challenge_hash.as_bytes())),
         ..unsigned
     };
-    challenge.verify(
-        context,
-        store,
-        &crate::keys::public_key_hex(administrator_signer),
-    )?;
+    challenge.verify(context, store, &administrator_signer.public_key_hex())?;
     let durable = publication_journal.prepare(&challenge).await?;
     if durable.challenge != challenge {
         return invalid("durable cross-principal challenge differs from its prepared bytes");
@@ -1956,10 +1951,10 @@ pub(crate) async fn complete_cross_principal_probe(
     response: &CrossPrincipalProbeResponse,
     context: &CrossPrincipalResponseContext,
     store: &StoreProviderBinding,
-    administrator_signer: &UserKeypair,
+    administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     peer_signing_pubkey: &str,
 ) -> Result<CrossPrincipalProbeReceipt, ProviderProbeError> {
-    let administrator_pubkey = crate::keys::public_key_hex(administrator_signer);
+    let administrator_pubkey = administrator_signer.public_key_hex();
     challenge.verify(&context.challenge, store, &administrator_pubkey)?;
     response.verify(
         challenge,

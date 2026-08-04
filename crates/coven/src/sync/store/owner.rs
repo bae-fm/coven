@@ -102,7 +102,6 @@ impl Store {
             self.database.clone(),
             storage,
             self.store_dir.clone(),
-            self.blob_cache.clone(),
             self.identity.clone(),
             self.device_id.clone(),
             self.root.clone(),
@@ -115,7 +114,6 @@ impl Store {
             self.database.clone(),
             self.storage.clone(),
             store_dir,
-            self.blob_cache.clone(),
             self.identity.clone(),
             self.device_id.clone(),
             self.root.clone(),
@@ -137,9 +135,12 @@ impl Store {
             self,
             self.database.clone(),
             self.storage.clone(),
-            &self.identity,
             self.storage.blob_path_scheme(),
         )
+    }
+
+    fn local_author_pubkey(&self) -> String {
+        crate::keys::public_key_hex(&self.identity)
     }
 
     #[doc(hidden)]
@@ -241,10 +242,8 @@ impl Store {
         let device_id = database
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
-        let blob_cache =
-            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         Ok(Self::new(
-            database, storage, store_dir, blob_cache, identity, device_id, root,
+            database, storage, store_dir, identity, device_id, root,
         ))
     }
 
@@ -252,11 +251,12 @@ impl Store {
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
         store_dir: StoreDir,
-        blob_cache: crate::sync::store::blob::StoreBlobCache,
         identity: UserKeypair,
         device_id: Option<String>,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     ) -> Self {
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         Self {
             database,
             storage,

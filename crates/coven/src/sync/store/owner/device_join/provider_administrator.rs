@@ -9,14 +9,11 @@ pub(crate) struct AuthorizedProviderAdministratorJoin<'operation, 'storage> {
     protocol_root: StoreProtocolRoot,
     verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
     membership: crate::protocol::membership::MembershipChain,
-    registration_ref: StoreDeviceRegistrationRef,
-    registration: StoreDeviceRegistration,
-    device_signer: UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     grants: std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
 }
 
 impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn from_parts(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
@@ -24,9 +21,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         protocol_root: StoreProtocolRoot,
         verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
         membership: crate::protocol::membership::MembershipChain,
-        registration_ref: StoreDeviceRegistrationRef,
-        registration: StoreDeviceRegistration,
-        device_signer: UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
         grants: std::collections::BTreeMap<ProviderAdminGrantId, ProviderAdminGrantRecord>,
     ) -> Self {
         Self {
@@ -36,9 +31,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
             protocol_root,
             verified_root,
             membership,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
             grants,
         }
     }
@@ -52,7 +45,8 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         approval: &DeviceProviderAdmissionApproval,
         owner: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinError> {
-        approval.verify(&self.verified_root, owner, &self.registration)
+        self.local_writer
+            .verify_device_admission_approval_as_administrator(approval, &self.verified_root, owner)
     }
 
     fn sign_device_admission_approval(
@@ -61,13 +55,11 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         access_grant: ActivatedStoreMemberProviderAccessGrant,
         admission: DeviceProviderAdmissionChallenge,
     ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-        DeviceProviderAdmissionApproval::signed(
+        self.local_writer.sign_device_admission_approval(
             request,
             access_grant,
             admission,
             &self.verified_root,
-            &self.registration,
-            &self.device_signer,
         )
     }
 
@@ -96,9 +88,8 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         store: &StoreProviderBinding,
         attempt_owner: &StoreDeviceRegistration,
     ) -> Result<CrossPrincipalProbeChallenge, DeviceJoinError> {
-        let administrator_signing_pubkey = self.registration.device_signing_pubkey.clone();
-        challenge
-            .verify(context, store, &administrator_signing_pubkey)
+        self.local_writer
+            .verify_cross_principal_challenge(challenge, context, store)
             .map_err(provider_error)?;
         if authorization.attempt.attempt_id != context.attempt_id {
             return Err(DeviceJoinError::AttemptMismatch);
@@ -160,10 +151,10 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
             .await?
             .value;
         request.verify(&owner)?;
-        let administrator_ref = self.registration_ref.clone();
-        let administrator = self.registration.clone();
-        let administrator_signer = self.device_signer.clone();
-        if administrator_ref != provider_admin.administrator {
+        if !self
+            .local_writer
+            .is_authored_by_registration(&provider_admin.administrator)
+        {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let database = self.database.clone();
@@ -213,18 +204,18 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                     *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes())
                         .as_bytes(),
                 );
-                let grant = StoreMemberProviderAccessGrant::signed(
-                    grant_id,
-                    request.offer.member_pubkey.clone(),
-                    request.peer_provider.clone(),
-                    locator,
-                    provider_admin.grant_id.clone(),
-                    provider_admin.administrator.clone(),
-                    &request.offer.provider,
-                    &administrator,
-                    &administrator_signer,
-                )
-                .map_err(provider_error)?;
+                let grant = self
+                    .local_writer
+                    .sign_provider_access_grant(
+                        grant_id,
+                        request.offer.member_pubkey.clone(),
+                        request.peer_provider.clone(),
+                        locator,
+                        provider_admin.grant_id.clone(),
+                        provider_admin.administrator.clone(),
+                        &request.offer.provider,
+                    )
+                    .map_err(provider_error)?;
                 let context = crate::storage::ProtocolObjectContext::signed_plaintext(
                     request.offer.store_root.store_root_hash,
                     ProtocolObjectDomain::ProviderAccessGrant,
@@ -298,7 +289,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                         probe_id,
                         &request.offer.provider,
                         &challenge_context,
-                        &administrator_signer,
+                        self.local_writer.as_ref(),
                     )
                     .await
                     .map_err(provider_error)?,
@@ -456,7 +447,6 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         if provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let administrator_signer = self.device_signer.clone();
         let admission = match (
             &bootstrap.bootstrap.request.approval.admission,
             &bootstrap.bootstrap.request.response,
@@ -494,7 +484,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                             response,
                             &context,
                             &offer.provider,
-                            &administrator_signer,
+                            self.local_writer.as_ref(),
                             &offer.member_pubkey,
                         )
                         .await
@@ -573,8 +563,6 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         if provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let administrator = self.registration.clone();
-        let administrator_signer = self.device_signer.clone();
         let (challenge, prior_state_hash) = match &*current.progress {
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::CleanupIntent {
@@ -635,13 +623,11 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
                 .await
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }
-        let closure = ProviderAdminJoinClosure::signed(
+        let closure = self.local_writer.sign_provider_join_closure(
             cancellation.outcome,
             offer.provider_admin.administrator.clone(),
             challenge,
             prior_state_hash,
-            &administrator,
-            &administrator_signer,
         )?;
         let intent = database
             .load_device_join(
@@ -686,8 +672,6 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let executor_admin = self.require_grant(executor_grant)?.clone();
-        let executor = self.registration.clone();
-        let executor_signer = self.device_signer.clone();
         let (authority, protected_slots, locator) = match producer {
             DeviceJoinProducer::ProviderAdministrator => {
                 let DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
@@ -751,7 +735,7 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
         withdrawal
             .verify_for_locator(locator)
             .map_err(|_| DeviceJoinError::CleanupMismatch)?;
-        DeviceJoinProducerWriteRevocation::signed(
+        self.local_writer.sign_device_join_write_revocation(
             cancellation.outcome,
             producer,
             authority,
@@ -759,8 +743,6 @@ impl<'operation, 'storage> AuthorizedProviderAdministratorJoin<'operation, 'stor
             withdrawal,
             executor_grant.clone(),
             executor_admin.administrator,
-            &executor,
-            &executor_signer,
         )
     }
 

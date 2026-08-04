@@ -31,7 +31,7 @@ impl AuthorizedWriterOperation<'_> {
         let database = &self.database;
         let storage = self.storage.as_ref();
         let store_root_hash = self.store_root().store_root_hash;
-        let authority = BlobWriteAuthority::new(self.writer.referenced_registration());
+        let authority = self.writer.blob_write_authority();
         let partition = if let circle::Audience::Circle(circle_id) = partition.audience {
             if let Some(blocked) = database
                 .circle_publication_rotation_block(circle_id, active_store_members.clone())

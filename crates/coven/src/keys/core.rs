@@ -118,6 +118,43 @@ pub struct UserKeypair {
     signing_key: SigningKey,
 }
 
+/// A retained capability that can sign as one device without exposing its key.
+pub(crate) trait DeviceSigningAuthority: Send + Sync {
+    fn public_key_hex(&self) -> String;
+    fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES];
+}
+
+/// A retained capability that acts as one Store identity without exposing its key.
+pub(crate) trait IdentityKeyAuthority: Send + Sync {
+    fn public_key(&self) -> [u8; SIGN_PUBLICKEYBYTES];
+    fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES];
+    fn to_x25519_secret_key(&self) -> [u8; CURVE25519_SECRETKEYBYTES];
+}
+
+impl IdentityKeyAuthority for UserKeypair {
+    fn public_key(&self) -> [u8; SIGN_PUBLICKEYBYTES] {
+        self.public_key()
+    }
+
+    fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES] {
+        self.sign(message)
+    }
+
+    fn to_x25519_secret_key(&self) -> [u8; CURVE25519_SECRETKEYBYTES] {
+        self.to_x25519_secret_key()
+    }
+}
+
+impl DeviceSigningAuthority for UserKeypair {
+    fn public_key_hex(&self) -> String {
+        public_key_hex(self)
+    }
+
+    fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES] {
+        self.sign(message)
+    }
+}
+
 impl UserKeypair {
     /// Generate a new random Ed25519 keypair. The unmanaged primitive behind
     /// every identity-establishing act — creating, joining, or restoring a
@@ -180,12 +217,15 @@ impl UserKeypair {
 }
 
 /// Hex-encode the public key attached to `keypair`.
-pub(crate) fn public_key_hex(keypair: &UserKeypair) -> String {
+pub(crate) fn public_key_hex<A: IdentityKeyAuthority + ?Sized>(keypair: &A) -> String {
     hex::encode(keypair.public_key())
 }
 
 /// Sign `message` and return the hex-encoded public key and detached signature.
-pub(crate) fn sign_hex(keypair: &UserKeypair, message: &[u8]) -> (String, String) {
+pub(crate) fn sign_hex<A: IdentityKeyAuthority + ?Sized>(
+    keypair: &A,
+    message: &[u8],
+) -> (String, String) {
     (public_key_hex(keypair), hex::encode(keypair.sign(message)))
 }
 

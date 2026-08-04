@@ -581,7 +581,11 @@ impl Store {
             .await
             .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
         let plan = writer.prepare_plan().await?;
-        let target = plan.registration_ref().clone();
+        let target = plan.local_registration_reference_for_test();
+        let target_registration = self
+            .database
+            .activated_store_device_registration(target.clone())
+            .await?;
         let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
             b"restart exclusion proposal",
         ));
@@ -598,7 +602,7 @@ impl Store {
         let proposal = plan.sign_device_exclusion_proposal(
             proposal_id,
             target.clone(),
-            plan.registration(),
+            target_registration.value(),
             outcome_slot,
             plan.owner_grant()
                 .ok_or(StoreDeviceExclusionError::OwnerAuthorityRequired)?
@@ -624,13 +628,11 @@ impl Store {
             &proposal,
             prepared.reference().clone(),
         )?;
-        let retained =
-            crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
-                reference.clone(),
-                &proposal,
-                plan.registration(),
-                plan.registration(),
-            )?;
+        let retained = plan.retain_device_exclusion_proposal(
+            reference.clone(),
+            &proposal,
+            target_registration.value(),
+        )?;
         let candidate = writer
             .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionProposal(retained))
             .await?;
@@ -820,7 +822,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
     ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
         let database = self.database.clone();
         let plan = Box::new(self.writer.prepare_plan().await?);
-        if plan.registration_ref() == target {
+        if plan.is_local_registration(target) {
             return Err(StoreDeviceExclusionError::CannotExcludeLocalDevice);
         }
         let target_registration = database
@@ -879,13 +881,11 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             &proposal,
             prepared.reference().clone(),
         )?;
-        let retained =
-            crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_exact(
-                reference.clone(),
-                &proposal,
-                target_registration.value(),
-                plan.registration(),
-            )?;
+        let retained = plan.retain_device_exclusion_proposal(
+            reference.clone(),
+            &proposal,
+            target_registration.value(),
+        )?;
         let candidate = Box::pin(self.writer.prepare_candidate(
             *plan,
             StoreOperationBatch::DeviceExclusionProposal(retained),
@@ -995,12 +995,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
                 &proposal,
             );
         let retained =
-            crate::protocol::store_commit::RetainedStoreDeviceExclusionOutcome::from_exact(
-                &reference,
-                retained_proposal,
-                &outcome,
-                plan.registration(),
-            )?;
+            plan.retain_device_exclusion_outcome(&reference, retained_proposal, &outcome)?;
         let candidate = Box::pin(
             self.writer
                 .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionOutcome(retained)),
@@ -1263,15 +1258,13 @@ impl AuthorizedDeviceExclusion<'_, '_> {
             .device_exclusion_history()
             .load_proposal(reference.proposal())
             .await?;
-        let retained =
-            crate::protocol::store_commit::RetainedStoreDeviceExclusionOutcome::from_exact(
-                reference,
-                crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
-                    &proposal,
-                ),
-                value,
-                plan.registration(),
-            )?;
+        let retained = plan.retain_device_exclusion_outcome(
+            reference,
+            crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
+                &proposal,
+            ),
+            value,
+        )?;
         Box::pin(
             self.writer
                 .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionOutcome(retained)),

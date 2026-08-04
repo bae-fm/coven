@@ -1,8 +1,8 @@
 use super::*;
 use crate::database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
 use crate::protocol::store_commit::{
-    commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest, StoreBatchCommit,
-    StoreBatchCommitDeletionTarget, StoreDeviceHead, VerifiedStoreBatchCommit,
+    commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest,
+    StoreBatchCommitDeletionTarget,
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
@@ -21,37 +21,36 @@ impl AuthorizedWriterOperation<'_> {
         let candidate_summary = database
             .blocked_merge_history_summary(write_id.clone())
             .await?;
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
-        let device_id = registration_ref.device_id.to_string();
+        let device_id = self.local_device_id().to_string();
         let root = self.store_root().clone();
         let storage = Arc::clone(self.storage);
-        if candidate.commit.value.author_registration != registration_ref {
+        if !self
+            .writer
+            .is_authored_by_registration(&candidate.commit.value.author_registration)
+        {
             return Err(StoreError::InvalidOutbound(
                 "blocked Merge candidate belongs to another local registration".to_string(),
             ));
         }
         let coord = candidate.head.value.commit.coord.clone();
-        let commit = StoreBatchCommit::signed_with_candidate_abandonment(
-            root.store_root_hash,
-            write_id.clone(),
-            coord.clone(),
-            registration_ref.clone(),
-            &registration,
-            candidate.commit.value.order.clone(),
-            candidate.commit.value.membership_state.clone(),
-            candidate.commit.value.device_state.clone(),
-            vec![CandidateCleanupManifest {
-                candidate: StoreBatchCommitDeletionTarget {
-                    coord: coord.clone(),
-                    object: candidate.commit.object.clone(),
-                    canonical_signed_bytes: candidate.commit.bytes.clone(),
-                },
-            }],
-            &device_signer,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let commit = self
+            .writer
+            .sign_candidate_abandonment(
+                root.store_root_hash,
+                write_id.clone(),
+                coord.clone(),
+                candidate.commit.value.order.clone(),
+                candidate.commit.value.membership_state.clone(),
+                candidate.commit.value.device_state.clone(),
+                vec![CandidateCleanupManifest {
+                    candidate: StoreBatchCommitDeletionTarget {
+                        coord: coord.clone(),
+                        object: candidate.commit.object.clone(),
+                        canonical_signed_bytes: candidate.commit.bytes.clone(),
+                    },
+                }],
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let stream_id = coord.stream_id;
         let sequence = coord.sequence;
         let commit_context = ProtocolObjectContext::signed_plaintext(
@@ -76,14 +75,15 @@ impl AuthorizedWriterOperation<'_> {
                 commit.to_bytes(),
             )
             .map_err(StoreObjectError::from)?;
-        let commit = VerifiedStoreBatchCommit::parse_prepared(
-            &commit.to_bytes(),
-            root.store_root_hash,
-            coord,
-            commit_prepared.reference().clone(),
-            &registration,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let commit = self
+            .writer
+            .verify_prepared_commit(
+                &commit.to_bytes(),
+                root.store_root_hash,
+                coord,
+                commit_prepared.reference().clone(),
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let commit_ref = commit.reference().clone();
         let history_summary = prepare_merge_abandonment_history_summary(
             &candidate_summary,
@@ -91,15 +91,12 @@ impl AuthorizedWriterOperation<'_> {
             &commit,
         )
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let head = StoreDeviceHead::signed(
+        let head = self.writer.sign_device_head(
             root.store_root_hash,
-            registration_ref,
             commit_ref,
             history_summary.digest(),
             candidate.head.value.successor,
-            &device_signer,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        )?;
         let head_context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreHead,

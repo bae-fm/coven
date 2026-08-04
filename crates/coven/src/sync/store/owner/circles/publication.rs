@@ -21,7 +21,7 @@ pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
     membership: crate::protocol::membership::MembershipChain,
-    identity: &'storage crate::keys::UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
 
@@ -30,14 +30,14 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         database: StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
         membership: crate::protocol::membership::MembershipChain,
-        identity: &'storage crate::keys::UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
     ) -> Self {
         Self {
             database,
             storage,
             membership,
-            identity,
+            local_writer,
             history,
         }
     }
@@ -47,7 +47,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         operation_id: &CircleOperationId,
         routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
-        let identity = self.identity;
         let mut journal = self
             .database
             .circle_operation(operation_id)
@@ -486,9 +485,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .await?;
         }
         let verified = self
-            .history
-            .activations()
-            .load(&verified_commit, identity, routing_key)
+            .local_writer
+            .load_circle_activations(&mut self.history, &verified_commit, routing_key)
             .await?;
         let expected =
             expected_local_circle_activation(&creation, reference, &author.author_pubkey)?;

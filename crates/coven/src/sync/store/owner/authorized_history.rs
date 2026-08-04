@@ -17,7 +17,7 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-    keyrings: super::keyring::StoreKeyrings<'storage>,
+    keyrings: Arc<super::keyring::StoreKeyrings<'storage>>,
 }
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
@@ -41,7 +41,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             blob_cache,
             history_verifier,
             blob_source,
-            keyrings,
+            keyrings: Arc::new(keyrings),
         }
     }
 
@@ -94,7 +94,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             database,
             Arc::clone(self.storage),
             self.store_dir.clone(),
-            self.blob_cache,
             identity.clone(),
             Some(device_id.clone()),
             self.history_verifier.verified_root().clone(),
@@ -272,15 +271,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let database = self.database.clone();
         let storage = self.storage;
         let store_dir = self.store_dir;
-        super::writer::AuthorizedWriterOperation::from_parts(
-            database,
-            self,
-            storage,
-            store_dir,
-            membership,
-            identity,
+        let keyrings = Arc::clone(&self.keyrings);
+        let writer = Arc::new(super::writer::LocalStoreWriter::from_verified_parts(
+            identity.clone(),
             registration,
             device_signer,
+        ));
+        let keyrings = super::writer::LocalWriterKeyrings::new(Arc::clone(&writer), keyrings);
+        super::writer::AuthorizedWriterOperation::from_parts(
+            database, self, storage, store_dir, membership, writer, keyrings,
         )
     }
 
@@ -536,6 +535,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self.history_verifier.verified_root().object()
     }
 
+    #[cfg(test)]
     pub(super) async fn open_keyring(
         &self,
         identity: &UserKeypair,
@@ -545,16 +545,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self.keyrings.open(identity, membership).await
     }
 
-    pub(super) async fn open_keyring_or(
-        &self,
-        identity: &UserKeypair,
-        membership: &MembershipChain,
-        initial: &crate::encryption::EncryptionService,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
-    {
-        self.keyrings.open_or(identity, membership, initial).await
-    }
-
+    #[cfg(test)]
     pub(super) async fn prepare_wrapped_key(
         &self,
         recipient: &str,

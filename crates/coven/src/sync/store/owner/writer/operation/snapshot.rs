@@ -47,7 +47,6 @@ impl super::AuthorizedWriterOperation<'_> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
-        let keypair = self.writer.identity;
         let resumed = self
             .resume_snapshot_publication()
             .await
@@ -115,7 +114,7 @@ impl super::AuthorizedWriterOperation<'_> {
             return Ok(());
         }
 
-        let author_pubkey = hex::encode(keypair.public_key());
+        let author_pubkey = self.writer.author_pubkey();
         if let Err(reason) = self.require_current_owner(&author_pubkey) {
             info!(
                 device = %author_pubkey,
@@ -231,11 +230,8 @@ impl super::AuthorizedWriterOperation<'_> {
         {
             return publication.publish_store(pending).await;
         }
-        let registration_ref = self.writer.registration_ref().clone();
-        let registration = self.writer.registration().clone();
-        let device_signer = self.writer.device_signer.clone();
-        let device_id = registration_ref.device_id.to_string();
-        let author = registration.author_pubkey.clone();
+        let device_id = self.local_device_id().to_string();
+        let author = self.writer.author_pubkey();
         if !membership.is_owner_now(&author) {
             return Err(SnapshotError::UnauthorizedAuthor(author));
         }
@@ -263,12 +259,12 @@ impl super::AuthorizedWriterOperation<'_> {
             devices,
         };
         let history_summary = self
+            .writer
             .prepare_merge_snapshot_history_summary(
+                &self.history,
                 &coverage,
                 membership,
                 &resolved_devices,
-                &registration_ref,
-                &registration,
             )
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
@@ -291,14 +287,14 @@ impl super::AuthorizedWriterOperation<'_> {
                 Some(previous.reference),
                 previous.successor_slot,
             ),
-            None => (0, None, registration.snapshots.first_slot().clone()),
+            None => (0, None, self.writer.first_snapshot_slot()),
         };
 
         let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
-            activation: registration
-                .store_snapshot_activation(&registration_ref)
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?
-                .activation_id(),
+            activation: self
+                .writer
+                .snapshot_activation_id()
+                .map_err(|error| SnapshotError::Parse(error.to_string()))?,
             generation,
         };
         let (image_bytes, snapshot_blobs) = self
@@ -347,29 +343,29 @@ impl super::AuthorizedWriterOperation<'_> {
             )
             .await
             .map_err(SnapshotError::Bucket)?;
-        let activation = registration
-            .store_snapshot_activation(&registration_ref)
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?
-            .activation_id();
-        let meta = SnapshotMeta::signed(
-            store_root_hash,
-            registration_ref.clone(),
-            generation,
-            predecessor.clone(),
-            image,
-            coverage,
-            state,
-            history_summary,
-            schema_version,
-            created_at,
-            SnapshotSuccessorLink {
-                activation,
-                predecessor,
-                next_slot,
-            },
-            &device_signer,
-        )
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        let activation = self
+            .writer
+            .snapshot_activation_id()
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        let meta = self
+            .writer
+            .sign_snapshot(
+                store_root_hash,
+                generation,
+                predecessor.clone(),
+                image,
+                coverage,
+                state,
+                history_summary,
+                schema_version,
+                created_at,
+                SnapshotSuccessorLink {
+                    activation,
+                    predecessor,
+                    next_slot,
+                },
+            )
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
         let meta_prepared = storage
             .prepare_protocol_object(
                 &meta_context,
@@ -407,8 +403,7 @@ impl super::AuthorizedWriterOperation<'_> {
     ) -> Result<(Vec<u8>, Vec<crate::database::PreparedSnapshotBlob>), SnapshotError> {
         let database = &self.database;
         let storage = self.storage.as_ref();
-        let authority =
-            crate::storage::BlobWriteAuthority::new(self.writer.referenced_registration());
+        let authority = self.writer.blob_write_authority();
         let CreatedSnapshot {
             db_image,
             mut blobs,
@@ -591,14 +586,9 @@ impl super::AuthorizedWriterOperation<'_> {
         reference: &StoreSnapshotRef,
         bytes: &[u8],
     ) -> Result<SnapshotMeta, SnapshotError> {
-        SnapshotMeta::parse_stream_entry_at(
-            bytes,
-            self.store_root(),
-            self.writer.registration_ref(),
-            self.writer.registration(),
-            reference,
-        )
-        .map_err(|error| SnapshotError::Parse(error.to_string()))
+        self.writer
+            .parse_snapshot_stream_entry(bytes, self.store_root(), reference)
+            .map_err(|error| SnapshotError::Parse(error.to_string()))
     }
 }
 

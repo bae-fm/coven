@@ -1,7 +1,6 @@
 use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
-use crate::keys;
 use crate::protocol::circle::{
     circle_epoch_close_response_semantic_prefix, CircleCloseParticipant, CircleCloseSettlement,
     CircleCloseStatus, CircleControlState, CircleEpochCloseResponseSlotValue, CircleId, CircleRole,
@@ -16,7 +15,6 @@ pub(crate) struct StoreCircleCommands<'store> {
     store: &'store super::Store,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-    identity: &'store crate::keys::UserKeypair,
     blob_path_scheme: crate::storage::BlobPathScheme,
 }
 
@@ -25,14 +23,12 @@ impl<'store> StoreCircleCommands<'store> {
         store: &'store super::Store,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-        identity: &'store crate::keys::UserKeypair,
         blob_path_scheme: crate::storage::BlobPathScheme,
     ) -> Self {
         Self {
             store,
             database,
             storage,
-            identity,
             blob_path_scheme,
         }
     }
@@ -49,7 +45,7 @@ impl StoreCircleCommands<'_> {
         &self,
         circle_id: CircleId,
     ) -> Result<CircleCloseStatus, CircleOperationError> {
-        let identity_pubkey = keys::public_key_hex(self.identity);
+        let identity_pubkey = self.store.local_author_pubkey();
         let (current, _) = self
             .database
             .circle_closing_context(circle_id, &identity_pubkey)

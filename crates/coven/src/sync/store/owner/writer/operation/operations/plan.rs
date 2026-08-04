@@ -41,10 +41,8 @@ pub(crate) struct StoreOperationPlanCommon {
     /// that position: hold it until the commit has published its head, or until
     /// the candidate is durably persisted for a later publisher to activate.
     pub(super) _authorship: crate::database::OwnStreamAuthorship,
+    pub(super) writer: std::sync::Arc<LocalStoreWriter>,
     pub(super) root: StoreRootRef,
-    pub(super) registration_ref: StoreDeviceRegistrationRef,
-    pub(super) registration: Box<StoreDeviceRegistration>,
-    device_signer: UserKeypair,
     pub(super) coord: StoreCommitCoord,
     pub(super) order: StoreCommitOrder,
     pub(super) membership_state: super::circle_control::StoreMembershipStateRef,
@@ -71,10 +69,8 @@ impl StoreOperationPlanCommon {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         authorship: crate::database::OwnStreamAuthorship,
+        writer: std::sync::Arc<LocalStoreWriter>,
         root: StoreRootRef,
-        registration_ref: StoreDeviceRegistrationRef,
-        registration: StoreDeviceRegistration,
-        device_signer: UserKeypair,
         coord: StoreCommitCoord,
         order: StoreCommitOrder,
         membership_state: super::circle_control::StoreMembershipStateRef,
@@ -84,10 +80,8 @@ impl StoreOperationPlanCommon {
     ) -> Self {
         Self {
             _authorship: authorship,
+            writer,
             root,
-            registration_ref,
-            registration: Box::new(registration),
-            device_signer,
             coord,
             order,
             membership_state,
@@ -105,7 +99,9 @@ impl StoreOperationPlanCommon {
             .order
             .predecessor_cut()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        if acknowledgement.registration != self.registration_ref
+        if !self
+            .writer
+            .is_authored_by_registration(&acknowledgement.registration)
             || acknowledgement.store_cut != predecessor_cut
             || acknowledgement.device_state != self.device_state
         {
@@ -121,237 +117,18 @@ impl StoreOperationPlanCommon {
         write_id: crate::WriteId,
         batch: StoreOperationBatch,
     ) -> Result<(StoreBatchCommit, Option<ActivatedStoreDeviceRegistration>), StoreError> {
-        let registration_activation = match &batch {
-            StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
-            _ => None,
-        };
-        let commit = match batch {
-            StoreOperationBatch::Acknowledgement {
-                reference: acknowledgement,
-                value: _,
-                circle_acknowledgements,
-            } => StoreBatchCommit::signed_operations(
-                self.root.store_root_hash,
-                write_id,
-                self.coord.clone(),
-                self.registration_ref.clone(),
-                &self.registration,
-                self.order.clone(),
-                self.membership_state.clone(),
-                self.device_state.clone(),
-                self.membership_authority.clone(),
-                StoreCommitOperationsInput {
-                    acknowledgement: Some(acknowledgement),
-                    circle_acknowledgements: circle_acknowledgements
-                        .iter()
-                        .map(|circle| circle.reference.clone())
-                        .collect(),
-                    control: None,
-                    device_join_attempt_decisions: Vec::new(),
-                    device_join_outcomes: Vec::new(),
-                    device_join_cleanup_receipts: Vec::new(),
-                    provider_access_grants: Vec::new(),
-                    device_registrations: Vec::new(),
-                    device_exclusion_proposals: Vec::new(),
-                    device_exclusion_outcomes: Vec::new(),
-                    stream_activations: Vec::new(),
-                    circle_controls: Vec::new(),
-                    store_package: None,
-                    circle_packages: &[],
-                },
-                &self.device_signer,
-            ),
-            StoreOperationBatch::ProviderAccessGrant(grant) => {
-                StoreBatchCommit::signed_with_provider_access(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    self.membership_authority.clone(),
-                    vec![grant],
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::Attempt(attempt) => StoreBatchCommit::signed_with_join_attempts(
-                self.root.store_root_hash,
-                write_id,
-                self.coord.clone(),
-                self.registration_ref.clone(),
-                &self.registration,
-                self.order.clone(),
-                self.membership_state.clone(),
-                self.device_state.clone(),
-                self.membership_authority.clone(),
-                vec![attempt],
-                &self.device_signer,
-            ),
-            StoreOperationBatch::Abandonment(abandonment) => {
-                StoreBatchCommit::signed_with_join_abandonments(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    self.membership_authority.clone(),
-                    vec![abandonment],
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::Outcome {
-                outcome,
-                registration,
-            } => StoreBatchCommit::signed_with_join_outcomes(
-                self.root.store_root_hash,
-                write_id,
-                self.coord.clone(),
-                self.registration_ref.clone(),
-                &self.registration,
-                self.order.clone(),
-                self.membership_state.clone(),
-                self.device_state.clone(),
-                self.membership_authority.clone(),
-                vec![outcome],
-                registration
-                    .into_iter()
-                    .map(|activation| {
-                        activation
-                            .activated_reference()
-                            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                &self.device_signer,
-            ),
-            StoreOperationBatch::CleanupReceipt(receipt) => {
-                StoreBatchCommit::signed_with_join_cleanup_receipts(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    self.membership_authority.clone(),
-                    vec![receipt],
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::DeviceExclusionProposal(proposal) => {
-                StoreBatchCommit::signed_with_device_exclusions(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    self.membership_authority.clone(),
-                    vec![proposal.reference().clone()],
-                    Vec::new(),
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::DeviceExclusionOutcome(outcome) => {
-                StoreBatchCommit::signed_with_device_exclusions(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    self.membership_authority.clone(),
-                    Vec::new(),
-                    vec![outcome.wire_reference()],
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::ReclaimAuthorization(authorization) => {
-                StoreBatchCommit::signed_reclaim_authorization(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    *authorization,
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::ReclaimReceipt(receipt) => {
-                StoreBatchCommit::signed_reclaim_receipt(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    *receipt,
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::OwnerPromotionRequest(request) => {
-                StoreBatchCommit::signed_with_owner_promotion_request(
-                    self.root.store_root_hash,
-                    write_id,
-                    self.coord.clone(),
-                    self.registration_ref.clone(),
-                    &self.registration,
-                    self.order.clone(),
-                    self.membership_state.clone(),
-                    self.device_state.clone(),
-                    self.membership_authority.clone(),
-                    request,
-                    &self.device_signer,
-                )
-            }
-            StoreOperationBatch::MergeMembershipActivation {
-                transition,
-                stream_activations,
-            } => StoreBatchCommit::signed_operations(
-                self.root.store_root_hash,
-                write_id,
-                self.coord.clone(),
-                self.registration_ref.clone(),
-                &self.registration,
-                self.order.clone(),
-                self.membership_state.clone(),
-                self.device_state.clone(),
-                self.membership_authority.clone(),
-                StoreCommitOperationsInput {
-                    acknowledgement: None,
-                    circle_acknowledgements: Vec::new(),
-                    control: Some(StoreControl { transition }),
-                    device_join_attempt_decisions: Vec::new(),
-                    device_join_outcomes: Vec::new(),
-                    device_join_cleanup_receipts: Vec::new(),
-                    provider_access_grants: Vec::new(),
-                    device_registrations: Vec::new(),
-                    device_exclusion_proposals: Vec::new(),
-                    device_exclusion_outcomes: Vec::new(),
-                    stream_activations,
-                    circle_controls: Vec::new(),
-                    store_package: None,
-                    circle_packages: &[],
-                },
-                &self.device_signer,
-            ),
-        }
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        Ok((commit, registration_activation))
+        self.writer.sign_operation_batch(
+            write_id,
+            StoreOperationSigningContext {
+                root: self.root.clone(),
+                coord: self.coord.clone(),
+                order: self.order.clone(),
+                membership_state: self.membership_state.clone(),
+                device_state: self.device_state.clone(),
+                membership_authority: self.membership_authority.clone(),
+            },
+            batch,
+        )
     }
 }
 
@@ -398,18 +175,15 @@ impl StoreOperationCommitPlan {
         member_pubkey: String,
         member_grant: super::membership::MembershipGrantId,
         finalization: super::store_commit::OwnerPromotionFinalization,
-        identity_signer: &UserKeypair,
     ) -> Result<super::store_commit::OwnerPromotionRequest, StoreError> {
         let promoter_owner_grant = self.owner_grant.clone().ok_or_else(|| {
             StoreError::InvalidOutbound(
                 "Owner-promotion request author has no active Owner grant".to_string(),
             )
         })?;
-        super::store_commit::OwnerPromotionRequest::signed(
+        self.writer.sign_owner_promotion_request(
             promotion_id,
             &self.root,
-            self.registration_ref.clone(),
-            &self.registration,
             promoter_owner_grant,
             member_pubkey,
             member_grant,
@@ -417,9 +191,7 @@ impl StoreOperationCommitPlan {
             self.membership_state.clone(),
             self.device_state.clone(),
             finalization,
-            identity_signer,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 }
 
@@ -442,20 +214,123 @@ impl StoreOperationCommitPlan {
         &self.root
     }
 
-    pub(crate) fn registration_ref(&self) -> &StoreDeviceRegistrationRef {
-        &self.registration_ref
-    }
-
-    pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
-        &self.registration
-    }
-
     pub(crate) fn coord(&self) -> &StoreCommitCoord {
         &self.coord
     }
 
+    pub(crate) fn device_id(&self) -> &super::store_commit::StoreDeviceId {
+        self.writer.device_id()
+    }
+
+    pub(crate) fn author_pubkey(&self) -> String {
+        self.writer.author_pubkey()
+    }
+
+    pub(crate) fn is_local_registration(
+        &self,
+        registration: &super::store_commit::StoreDeviceRegistrationRef,
+    ) -> bool {
+        self.writer.is_authored_by_registration(registration)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_registration_reference_for_test(
+        &self,
+    ) -> super::store_commit::StoreDeviceRegistrationRef {
+        self.writer.registration_reference_for_test()
+    }
+
+    pub(crate) fn retain_device_exclusion_proposal(
+        &self,
+        reference: super::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &super::store_commit::StoreDeviceExclusionProposal,
+        target: &super::store_commit::StoreDeviceRegistration,
+    ) -> Result<super::store_commit::RetainedStoreDeviceExclusionProposal, StoreError> {
+        self.writer
+            .retain_device_exclusion_proposal(reference, proposal, target)
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+    }
+
+    pub(crate) fn retain_device_exclusion_outcome(
+        &self,
+        reference: &super::store_commit::StoreDeviceExclusionOutcomeRef,
+        proposal: super::store_commit::RetainedStoreDeviceExclusionProposal,
+        outcome: &super::store_commit::StoreDeviceExclusionOutcome,
+    ) -> Result<super::store_commit::RetainedStoreDeviceExclusionOutcome, StoreError> {
+        self.writer
+            .retain_device_exclusion_outcome(reference, proposal, outcome)
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+    }
+
+    pub(crate) fn announcement_activation_id(
+        &self,
+    ) -> Result<super::store_commit::StreamActivationId, StoreError> {
+        self.writer
+            .announcement_activation_id()
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+    }
+
+    pub(crate) fn verify_prepared_commit(
+        &self,
+        bytes: &[u8],
+        object: crate::storage::ExactObjectRef,
+    ) -> Result<super::store_commit::VerifiedStoreBatchCommit, StoreError> {
+        self.writer
+            .verify_prepared_commit(bytes, self.root.store_root_hash, self.coord.clone(), object)
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+    }
+
+    pub(crate) async fn retain_acknowledgement(
+        &self,
+        history: &AuthorizedStoreHistory<'_>,
+        activating_commit: &super::store_commit::StoreBatchCommitRef,
+        activating_commit_value: &super::store_commit::StoreBatchCommit,
+        reference: super::store_commit::StoreAckRef,
+        value: super::store_commit::StoreAck,
+    ) -> Result<super::store_commit::RetainedVerifiedActivatedAck, pull::StorePullError> {
+        self.writer
+            .retain_acknowledgement(
+                history,
+                activating_commit,
+                activating_commit_value,
+                reference,
+                value,
+            )
+            .await
+    }
+
     pub(crate) fn owner_grant(&self) -> Option<&super::membership::MembershipGrantId> {
         self.owner_grant.as_ref()
+    }
+
+    pub(crate) fn effective_provider_admin_grant(
+        &self,
+        state: &crate::protocol::provider::ProviderAdminState,
+    ) -> Option<crate::protocol::provider::ProviderAdminGrantId> {
+        self.writer.effective_provider_admin_grant(state)
+    }
+
+    pub(crate) fn sign_reclaim_evidence(
+        &self,
+        claim: crate::protocol::reclaim::ReclaimClaim,
+    ) -> Result<crate::protocol::reclaim::ReclaimEvidence, StoreError> {
+        self.writer
+            .sign_reclaim_evidence(self.root.store_root_hash, claim)
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+    }
+
+    pub(crate) fn sign_reclaim_authorization(
+        &self,
+        target: crate::protocol::reclaim::ReclaimTarget,
+        evidence: crate::protocol::reclaim::ReclaimEvidenceRef,
+        authority: crate::protocol::reclaim::StoreReclaimAuthority,
+    ) -> crate::protocol::reclaim::ReclaimAuthorization {
+        self.writer.sign_reclaim_authorization(
+            self.root.store_root_hash,
+            target,
+            evidence,
+            authority,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -467,19 +342,15 @@ impl StoreOperationCommitPlan {
         outcome_slot: crate::storage::cloud::ObjectSlot,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusionProposal, StoreError> {
-        super::store_commit::StoreDeviceExclusionProposal::signed(
+        self.writer.sign_device_exclusion_proposal(
             self.root.store_root_hash,
             proposal_id,
             target,
             target_registration,
             self.device_state.clone(),
             outcome_slot,
-            self.registration_ref.clone(),
             owner_grant,
-            &self.registration,
-            &self.device_signer,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     pub(crate) fn sign_device_exclusion_cancellation(
@@ -488,15 +359,8 @@ impl StoreOperationCommitPlan {
         proposal_value: &super::store_commit::StoreDeviceExclusionProposal,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusionCancellation, StoreError> {
-        super::store_commit::StoreDeviceExclusionCancellation::signed(
-            proposal,
-            proposal_value,
-            self.registration_ref.clone(),
-            owner_grant,
-            &self.registration,
-            &self.device_signer,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        self.writer
+            .sign_device_exclusion_cancellation(proposal, proposal_value, owner_grant)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -509,18 +373,14 @@ impl StoreOperationCommitPlan {
         proof: super::store_commit::StoreDeviceExclusionProof,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusion, StoreError> {
-        super::store_commit::StoreDeviceExclusion::signed(
+        self.writer.sign_device_exclusion(
             proposal,
             proposal_value,
             target,
             target_registration,
             proof,
-            self.registration_ref.clone(),
             owner_grant,
-            &self.registration,
-            &self.device_signer,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     pub(crate) fn sign_device_head(
@@ -529,15 +389,12 @@ impl StoreOperationCommitPlan {
         history_summary: ObjectHash,
         successor: super::store_commit::SuccessorLink,
     ) -> Result<super::store_commit::StoreDeviceHead, StoreError> {
-        super::store_commit::StoreDeviceHead::signed(
+        self.writer.sign_device_head(
             self.root.store_root_hash,
-            self.registration_ref.clone(),
             commit,
             history_summary,
             successor,
-            &self.device_signer,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 
     pub(crate) fn sign_reclaim_receipt(
@@ -545,15 +402,11 @@ impl StoreOperationCommitPlan {
         authorization: crate::protocol::reclaim::ReclaimAuthorizationRef,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
     ) -> Result<crate::protocol::reclaim::ReclaimReceipt, StoreError> {
-        crate::protocol::reclaim::ReclaimReceipt::signed(
+        self.writer.sign_reclaim_receipt(
             self.root.store_root_hash,
             authorization,
             self.membership_state.clone(),
             provider_admin_grant,
-            self.registration_ref.clone(),
-            &self.registration,
-            &self.device_signer,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
     }
 }

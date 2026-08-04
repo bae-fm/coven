@@ -98,6 +98,12 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "Database",
         "open_read_only",
     ),
+    (
+        "crates/coven/src/sync/store/owner/authorized_history.rs",
+        "AuthorizedStoreHistory",
+        "authorize_writer",
+    ),
+    ("crates/coven/src/sync/store/owner.rs", "Store", "new"),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
     ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
     (

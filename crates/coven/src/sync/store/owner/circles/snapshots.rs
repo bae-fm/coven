@@ -3,7 +3,7 @@ use crate::keys::UserKeypair;
 use crate::protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
 use crate::protocol::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
-    CircleSnapshotSuccessorLink, CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
+    CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
 };
 use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::KeyFingerprint;
@@ -19,9 +19,7 @@ pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     storage: std::sync::Arc<dyn SyncStorage>,
     store_dir: &'storage crate::store_dir::StoreDir,
     root: StoreRootRef,
-    registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
-    device_signer: UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
 
 pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
@@ -61,16 +59,13 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
 }
 
 impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
         store_dir: &'storage crate::store_dir::StoreDir,
         root: StoreRootRef,
-        registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: crate::protocol::store_commit::StoreDeviceRegistration,
-        device_signer: UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
             writer,
@@ -78,9 +73,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             storage,
             store_dir,
             root,
-            registration_ref,
-            registration,
-            device_signer,
+            local_writer,
         }
     }
 
@@ -288,10 +281,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let storage = self.storage.as_ref();
         let database = &self.database;
         let db = &database;
-        let device_id = self.registration.device_id.to_string();
         let root = &self.root;
-        let registration_ref = self.registration_ref.clone();
-        let device_signer = self.device_signer.clone();
         let publication = self.writer.snapshot_publication().await;
         publication.drain_spool_cleanup().await?;
         // The image references only already-published Circle blobs, verified exact —
@@ -307,7 +297,9 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             ProtocolObjectDomain::CircleSnapshotImage,
             encryption.clone(),
         );
-        let image_prefix = circle_snapshot_image_semantic_prefix(circle_id, &device_id, image_hash);
+        let image_prefix = self
+            .local_writer
+            .circle_snapshot_image_semantic_prefix(circle_id, image_hash);
         let image_slot = storage
             .allocate_protocol_slot(&image_context, &image_prefix, ".db")
             .await
@@ -339,7 +331,8 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         // generations occupy the predecessor's create-once successor slot.
         let stream_first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
             "{}.json",
-            circle_snapshot_slot_prefix(circle_id, &device_id, 0)
+            self.local_writer
+                .circle_snapshot_semantic_prefix(circle_id, 0)
         ))
         .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         let (generation, predecessor, current_slot) = match previous {
@@ -363,13 +356,14 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             ProtocolObjectDomain::CircleSnapshotMeta,
             encryption,
         );
-        let semantic_prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
+        let semantic_prefix = self
+            .local_writer
+            .circle_snapshot_semantic_prefix(circle_id, generation);
         let next_slot = storage
             .allocate_protocol_slot(
                 &meta_context,
-                &circle_snapshot_slot_prefix(
+                &self.local_writer.circle_snapshot_semantic_prefix(
                     circle_id,
-                    &device_id,
                     generation.checked_add(1).ok_or_else(|| {
                         SnapshotError::PublicationState(
                             "Circle snapshot generation overflow".to_string(),
@@ -380,31 +374,21 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             )
             .await
             .map_err(SnapshotError::Bucket)?;
-        let activation = crate::protocol::store_commit::circle_snapshot_stream_activation(
-            root.store_root_hash,
-            &registration_ref,
-            circle_id,
-            &device_id,
-        )
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-        let meta = CircleSnapshotMeta::signed(
-            root.store_root_hash,
-            circle_id,
-            registration_ref,
-            control,
-            epoch_id,
-            key_fingerprint,
-            generation,
-            bootstrap,
-            created_at,
-            CircleSnapshotSuccessorLink {
-                activation,
+        let meta = self
+            .local_writer
+            .sign_circle_snapshot_meta(
+                root.store_root_hash,
+                circle_id,
+                control,
+                epoch_id,
+                key_fingerprint,
+                generation,
+                bootstrap,
+                created_at,
                 predecessor,
                 next_slot,
-            },
-            &device_signer,
-        )
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            )
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
         let meta_prepared = storage
             .prepare_protocol_object(
                 &meta_context,
@@ -449,12 +433,10 @@ impl CircleSnapshotWriter<'_, '_> {
         )>,
         SnapshotError,
     > {
-        let registration_ref = self.registration_ref.clone();
-        let registration = self.registration.clone();
-        self.writer
-            .circle_history()
-            .snapshots()
-            .load_stream_refs(circle_id, encryption, &registration_ref, &registration)
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let mut history = self.writer.circle_history();
+        local_writer
+            .load_local_circle_snapshot_refs(&mut history, circle_id, encryption)
             .await
     }
 
@@ -463,12 +445,10 @@ impl CircleSnapshotWriter<'_, '_> {
         circle_id: CircleId,
         encryption: EncryptionService,
     ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
-        let registration_ref = self.registration_ref.clone();
-        let registration = self.registration.clone();
-        self.writer
-            .circle_history()
-            .snapshots()
-            .load_stream(circle_id, encryption, &registration_ref, &registration)
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let mut history = self.writer.circle_history();
+        local_writer
+            .load_local_circle_snapshots(&mut history, circle_id, encryption)
             .await
     }
 

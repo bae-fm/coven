@@ -8,7 +8,7 @@ use super::{
 };
 use crate::database::StoreDatabase;
 use crate::encryption::{EncryptionService, MasterKeyring};
-use crate::keys::{self, UserKeypair};
+use crate::keys;
 use crate::protocol::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
     circle_semantic_prefix, CircleAccessDisposition, CircleMetadataHeadRef, CircleOperationId,
@@ -19,10 +19,8 @@ use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
     CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects,
-    CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreCommitCoord,
-    StoreCommitOperationsInput, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreOperationMembershipAuthority, StreamActivation,
-    StreamAnchorDomain, SuccessorLink,
+    CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreCommitCoord, StoreCommitOrder,
+    StoreOperationMembershipAuthority, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
 use crate::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
@@ -34,10 +32,7 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     membership: crate::protocol::membership::MembershipChain,
     root: crate::protocol::store_commit::StoreRootRef,
     storage: std::sync::Arc<dyn SyncStorage>,
-    registration_ref: StoreDeviceRegistrationRef,
-    registration: StoreDeviceRegistration,
-    device_signer: UserKeypair,
-    identity: &'storage UserKeypair,
+    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
 
@@ -50,21 +45,23 @@ impl CircleBootstrapBlobVerification for CircleCandidatePreparer<'_, '_> {
     }
 }
 
-pub(super) fn signed_circle_commit(
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn signed_circle_commit(
     store_root_hash: ObjectHash,
     operation_id: crate::WriteId,
     coord: StoreCommitCoord,
-    author_registration: StoreDeviceRegistrationRef,
-    author: &StoreDeviceRegistration,
+    author_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    author: &crate::protocol::store_commit::StoreDeviceRegistration,
     order: StoreCommitOrder,
     membership_state: StoreMembershipStateRef,
     device_state: crate::protocol::store_commit::StoreDeviceStateRef,
     membership_authority: StoreOperationMembershipAuthority,
     circle_reference: crate::protocol::store_commit::CircleControlRef,
     stream_activations: Vec<StreamActivation>,
-    device_signer: &UserKeypair,
-) -> Result<StoreBatchCommit, CircleOperationError> {
-    StoreBatchCommit::signed_operations(
+    device_signer: &crate::keys::UserKeypair,
+) -> Result<crate::protocol::store_commit::StoreBatchCommit, CircleOperationError> {
+    crate::protocol::store_commit::StoreBatchCommit::signed_operations(
         store_root_hash,
         operation_id,
         coord,
@@ -74,7 +71,7 @@ pub(super) fn signed_circle_commit(
         membership_state,
         device_state,
         membership_authority,
-        StoreCommitOperationsInput {
+        crate::protocol::store_commit::StoreCommitOperationsInput {
             acknowledgement: None,
             circle_acknowledgements: Vec::new(),
             control: None,
@@ -142,10 +139,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     > {
         let storage = self.storage.as_ref();
         let root = &self.root;
-        let author_registration = &self.registration_ref;
-        let author = &self.registration;
-        let identity_signer = self.identity;
-        let device_signer = &self.device_signer;
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let identity_signer = local_writer.as_ref();
         let store_root_hash = root.store_root_hash;
         let encryption = EncryptionService::from(
             MasterKeyring::from_serialized(&draft.keyring)
@@ -226,25 +221,22 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 
         let policy_objects = {
             let owner_grant = draft.metadata.author_owner_grant.clone();
-            let roster_stream = StreamActivation::grant_authorized_stream_id(
+            let roster_stream = local_writer.circle_grant_authorized_stream_id(
                 store_root_hash,
-                author_registration,
                 &owner_grant,
                 StreamAnchorDomain::CircleRoster {
                     circle_id: draft.circle_id,
                 },
             );
-            let metadata_stream = StreamActivation::grant_authorized_stream_id(
+            let metadata_stream = local_writer.circle_grant_authorized_stream_id(
                 store_root_hash,
-                author_registration,
                 &owner_grant,
                 StreamAnchorDomain::CircleMetadata {
                     circle_id: draft.circle_id,
                 },
             );
-            let control_stream = StreamActivation::grant_authorized_stream_id(
+            let control_stream = local_writer.circle_grant_authorized_stream_id(
                 store_root_hash,
-                author_registration,
                 &owner_grant,
                 StreamAnchorDomain::CircleControl {
                     circle_id: draft.circle_id,
@@ -319,7 +311,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                     "parse predecessor Circle roster head: {error}"
                                 ))
                             })?;
-                        if !head.verify_for_registration(author)
+                        if !local_writer.verify_circle_roster_head(&head)
                             || head.entry_coord() != reference.coord
                             || head.head_hash() != reference.head_hash
                         {
@@ -345,9 +337,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
                             .await
                             .map_err(crate::storage::StoreObjectError::from)?;
-                        let activation = StreamActivation::grant_authorized(
+                        let activation = local_writer.circle_grant_authorized_activation(
                             store_root_hash,
-                            author_registration.clone(),
                             owner_grant.clone(),
                             GrantStreamAnchor::CircleRoster {
                                 circle_id: draft.circle_id,
@@ -390,7 +381,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                     .await
                     .map_err(crate::storage::StoreObjectError::from)?;
-                let head = crate::protocol::circle::CircleRosterHead::signed(
+                let head = local_writer.sign_circle_roster_head(
                     &entry,
                     entry_prepared.reference().clone(),
                     SuccessorLink {
@@ -398,7 +389,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         predecessor,
                         next_slot,
                     },
-                    device_signer,
                 );
                 let head_prepared = self.prepare_circle_object_at(
                     &roster_context,
@@ -476,7 +466,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                     "parse predecessor Circle metadata head: {error}"
                                 ))
                             })?;
-                        if !head.verify_for_registration(author) || head.coord() != reference.coord
+                        if !local_writer.verify_circle_metadata_head(&head)
+                            || head.coord() != reference.coord
                         {
                             return Err(CircleOperationError::InvalidState(
                                 "Circle metadata predecessor head failed verification".to_string(),
@@ -504,9 +495,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             .allocate_protocol_slot(&metadata_context, &prefix, ".json")
                             .await
                             .map_err(crate::storage::StoreObjectError::from)?;
-                        let activation = StreamActivation::grant_authorized(
+                        let activation = local_writer.circle_grant_authorized_activation(
                             store_root_hash,
-                            author_registration.clone(),
                             owner_grant.clone(),
                             GrantStreamAnchor::CircleMetadata {
                                 circle_id: draft.circle_id,
@@ -586,7 +576,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                     .await
                     .map_err(crate::storage::StoreObjectError::from)?;
-                let metadata_head = crate::protocol::circle::CircleMetadataHead::signed(
+                let metadata_head = local_writer.sign_circle_metadata_head(
                     &draft.metadata,
                     metadata_prepared.reference().clone(),
                     SuccessorLink {
@@ -594,7 +584,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         predecessor: prior_metadata.as_ref().map(|head| head.object.clone()),
                         next_slot: metadata_next_slot,
                     },
-                    device_signer,
                 );
                 let metadata_head_prefix = circle_metadata_head_prefix(
                     draft.circle_id,
@@ -770,7 +759,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 } else {
                     let stream_key = crate::protocol::circle::CircleAuthorStreamKey {
                         author_pubkey: draft.control.value.author_pubkey.clone(),
-                        device_id: author_registration.device_id.to_string(),
+                        device_id: local_writer.circle_device_id(),
                         stream_id: control_stream,
                         author_owner_grant: owner_grant.clone(),
                     };
@@ -779,9 +768,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .allocate_protocol_slot(&control_context, &prefix, ".json")
                         .await
                         .map_err(crate::storage::StoreObjectError::from)?;
-                    let activation = StreamActivation::grant_authorized(
+                    let activation = local_writer.circle_grant_authorized_activation(
                         store_root_hash,
-                        author_registration.clone(),
                         owner_grant.clone(),
                         GrantStreamAnchor::CircleControl {
                             circle_id: draft.circle_id,
@@ -798,7 +786,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 membership_authority: _,
             } = &mut draft.control.value.value;
             let access_epoch = state.access_epoch_mut();
-            order.device_id = author_registration.device_id.to_string();
+            order.device_id = local_writer.circle_device_id();
             order.stream_id = control_stream;
             order.author_owner_grant = owner_grant.clone();
             order.seq = control_seq;
@@ -985,7 +973,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 )
                 .await
                 .map_err(crate::storage::StoreObjectError::from)?;
-            let control_head = crate::protocol::circle::CircleControlHead::signed(
+            let control_head = local_writer.sign_circle_control_head(
                 &draft.control.value,
                 control_prepared.reference().clone(),
                 SuccessorLink {
@@ -993,7 +981,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     predecessor: prior_control.as_ref().map(|head| head.object.clone()),
                     next_slot: control_next_slot,
                 },
-                device_signer,
             );
             let control_head_prefix =
                 circle_control_head_prefix(draft.circle_id, &control_stream_key, control_seq);
@@ -1143,17 +1130,13 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 }
 
 impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         announcement_stream_id: crate::protocol::membership::AuthorStreamId,
         database: StoreDatabase,
         membership: crate::protocol::membership::MembershipChain,
         root: crate::protocol::store_commit::StoreRootRef,
         storage: std::sync::Arc<dyn SyncStorage>,
-        registration_ref: StoreDeviceRegistrationRef,
-        registration: StoreDeviceRegistration,
-        device_signer: UserKeypair,
-        identity: &'storage UserKeypair,
+        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
     ) -> Self {
         Self {
@@ -1162,10 +1145,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             membership,
             root,
             storage,
-            registration_ref,
-            registration,
-            device_signer,
-            identity,
+            local_writer,
             history,
         }
     }
@@ -1191,21 +1171,16 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         let current = self.membership.clone();
         let root = self.root.clone();
         let storage = self.storage.clone();
-        let author_registration = self.registration_ref.clone();
-        let author = self.registration.clone();
-        let device_signer = self.device_signer.clone();
-        let signer = self.identity;
+        let local_writer = std::sync::Arc::clone(&self.local_writer);
+        let signer = local_writer.as_ref();
         let database = &database;
         let current = &current;
         let root = &root;
         let storage = storage.as_ref();
         let db = database;
-        let author_registration = &author_registration;
-        let author = &author;
-        let device_signer = &device_signer;
         let store_root_hash = root.store_root_hash;
-        let circle_device_id = author.device_id.to_string();
-        let author_pubkey = keys::public_key_hex(signer);
+        let circle_device_id = local_writer.circle_device_id();
+        let author_pubkey = local_writer.author_pubkey();
         let (operation_id, write_id) = match request.settlement() {
             Some((operation_id, write_id)) => (operation_id, write_id),
             None => {
@@ -1297,7 +1272,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let candidate_family =
-                CandidateFamilyId::derive(store_root_hash, author_registration, &write_id, &order);
+                local_writer.candidate_family_id(store_root_hash, &write_id, &order);
             // A control-conflict resolution covers the losing branches' frontiers by
             // carrying their already-published activation objects (metadata and roster
             // heads and entries) into its own commit, so activation can verify the
@@ -1384,9 +1359,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                 "Circle member-addition author is not an active Owner".to_string(),
                             )
                         })?;
-                    let roster_stream = StreamActivation::grant_authorized_stream_id(
+                    let roster_stream = local_writer.circle_grant_authorized_stream_id(
                         store_root_hash,
-                        author_registration,
                         owner_grant,
                         StreamAnchorDomain::CircleRoster {
                             circle_id: request.circle_id,
@@ -1496,9 +1470,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                 "Circle member-removal author is not an active Owner".to_string(),
                             )
                         })?;
-                    let roster_stream = StreamActivation::grant_authorized_stream_id(
+                    let roster_stream = local_writer.circle_grant_authorized_stream_id(
                         store_root_hash,
-                        author_registration,
                         owner_grant,
                         StreamAnchorDomain::CircleRoster {
                             circle_id: request.circle_id,
@@ -1756,10 +1729,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             ));
                         }
                     };
-                    let mut draft = CircleTransitionDraft::finalize_epoch_close(
+                    let mut draft = local_writer.finalize_circle_epoch_close(
                         candidate_family,
-                        &circle_device_id,
-                        author_registration,
                         &request.metadata_stamp,
                         membership_state.clone(),
                         membership_authority.clone(),
@@ -1772,7 +1743,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         request.intent.clone(),
                         request.responses.clone(),
                         db,
-                        signer,
                     )?;
                     let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
@@ -1885,12 +1855,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 }
             }
             let circle_reference = creation.control_ref(objects, control_head_object);
-            let commit = signed_circle_commit(
+            let commit = local_writer.sign_circle_commit(
                 store_root_hash,
                 write_id.clone(),
                 coord.clone(),
-                author_registration.clone(),
-                author,
                 order,
                 membership_state,
                 device_state,
@@ -1899,7 +1867,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 },
                 circle_reference,
                 stream_activations,
-                device_signer,
             )?;
             let commit_context = ProtocolObjectContext::signed_plaintext(
                 store_root_hash,
@@ -1914,15 +1881,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let commit_prepared = self
                 .prepare_circle_object(&commit_context, &commit_prefix, ".json", commit.to_bytes())
                 .await?;
-            let verified_commit =
-                crate::protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
-                    &commit.to_bytes(),
-                    store_root_hash,
-                    coord,
-                    commit_prepared.reference().clone(),
-                    author,
-                )
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            let verified_commit = local_writer.verify_prepared_circle_commit(
+                &commit.to_bytes(),
+                store_root_hash,
+                coord,
+                commit_prepared.reference().clone(),
+            )?;
             let commit_ref = verified_commit.reference().clone();
             let history_summary = self
                 .history
@@ -1940,7 +1904,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 store_root_hash,
                 ProtocolObjectDomain::StoreHead,
             );
-            let device_id = author_registration.device_id.to_string();
+            let device_id = local_writer.circle_device_id();
             let head_prefix = head_slot_prefix(&device_id, seq);
             let next_head_slot = storage
                 .allocate_protocol_slot(
@@ -1950,24 +1914,20 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 )
                 .await
                 .map_err(crate::storage::StoreObjectError::from)?;
-            let head = StoreDeviceHead::signed(
+            let head = local_writer.sign_circle_store_head(
                 store_root_hash,
-                author_registration.clone(),
                 commit_ref.clone(),
                 history_summary.summary.digest(),
                 SuccessorLink {
-                    activation: author
-                        .store_announcement_activation(author_registration)
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
-                        .activation_id(),
+                    activation: local_writer
+                        .announcement_activation_id()
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
                     predecessor: history_summary
                         .predecessor_head
                         .map(|reference| reference.object),
                     next_slot: next_head_slot,
                 },
-                device_signer,
-            )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            )?;
             let head_prepared = storage
                 .prepare_protocol_object(
                     &head_context,

@@ -123,7 +123,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         self.history.history_cut_covers(cut, target).await
     }
 
-    pub(super) async fn load_verified_attempt(
+    pub(crate) async fn load_verified_attempt(
         &mut self,
         reference: &DeviceJoinAttemptRef,
         owner: &StoreDeviceRegistration,
@@ -133,7 +133,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .await
     }
 
-    pub(super) async fn load_outcome(
+    pub(crate) async fn load_outcome(
         &self,
         reference: &DeviceJoinOutcomeRef,
         owner: &StoreDeviceRegistration,

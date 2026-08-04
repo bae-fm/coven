@@ -521,7 +521,7 @@ impl crate::storage::SyncStorage for TestStore {
         probe_id: crate::protocol::provider::ProviderProbeId,
         store: &crate::storage::StoreProviderBinding,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &crate::keys::UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
@@ -588,7 +588,7 @@ impl crate::storage::SyncStorage for TestStore {
         response: &crate::protocol::provider::CrossPrincipalProbeResponse,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
         store: &crate::storage::StoreProviderBinding,
-        administrator_signer: &crate::keys::UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeReceipt,
@@ -5177,7 +5177,7 @@ where
         probe_id: crate::protocol::provider::ProviderProbeId,
         store: &crate::storage::StoreProviderBinding,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &crate::keys::UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
@@ -5244,7 +5244,7 @@ where
         response: &crate::protocol::provider::CrossPrincipalProbeResponse,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
         store: &crate::storage::StoreProviderBinding,
-        administrator_signer: &crate::keys::UserKeypair,
+        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeReceipt,

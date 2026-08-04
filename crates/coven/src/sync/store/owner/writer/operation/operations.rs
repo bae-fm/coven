@@ -5,9 +5,8 @@ use crate::database::StoreDatabase;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
     head_slot_prefix, ActivatedStoreDeviceRegistration, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
-    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreCommitOperationsInput, StoreCommitOrder, StoreControl, StoreDeviceHead,
-    StoreDeviceHeadRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut,
+    ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder,
+    StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreHistoryCut,
     StoreOperationMembershipAuthority, StoreRootRef,
 };
 use crate::protocol::{
