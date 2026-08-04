@@ -46,11 +46,7 @@ impl StoreCircles {
     }
 
     pub(crate) async fn create(&self, name: &str) -> Result<crate::CircleId, crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .create(name)
-            .await
-            .map_err(Into::into)
+        self.sync.create_circle(name).await
     }
 
     #[cfg(test)]
@@ -68,11 +64,7 @@ impl StoreCircles {
         circle_id: crate::CircleId,
         name: &str,
     ) -> Result<(), crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .rename(circle_id, name)
-            .await
-            .map_err(Into::into)
+        self.sync.rename_circle(circle_id, name).await
     }
 
     pub(crate) async fn add_member(
@@ -82,10 +74,8 @@ impl StoreCircles {
         role: crate::CircleRole,
     ) -> Result<(), crate::CircleError> {
         self.sync
-            .active_circles()?
-            .add_member(circle_id, member_pubkey, role)
+            .add_circle_member(circle_id, member_pubkey, role)
             .await
-            .map_err(Into::into)
     }
 
     pub(crate) async fn remove_member(
@@ -94,10 +84,8 @@ impl StoreCircles {
         member_pubkey: String,
     ) -> Result<crate::CircleOperationId, crate::CircleError> {
         self.sync
-            .active_circles()?
-            .remove_member(circle_id, member_pubkey)
+            .remove_circle_member(circle_id, member_pubkey)
             .await
-            .map_err(Into::into)
     }
 
     pub(crate) async fn resolve(
@@ -105,22 +93,14 @@ impl StoreCircles {
         circle_id: crate::CircleId,
         chosen: crate::CircleControlCoord,
     ) -> Result<(), crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .resolve(circle_id, chosen)
-            .await
-            .map_err(Into::into)
+        self.sync.resolve_circle(circle_id, chosen).await
     }
 
     pub(crate) async fn cancel_close(
         &self,
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleOperationId, crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .cancel_close(circle_id)
-            .await
-            .map_err(Into::into)
+        self.sync.cancel_circle_close(circle_id).await
     }
 
     pub(crate) async fn exclude_close_device(
@@ -129,43 +109,29 @@ impl StoreCircles {
         device_id: crate::StoreDeviceId,
     ) -> Result<(), crate::CircleError> {
         self.sync
-            .active_circles()?
-            .exclude_close_device(circle_id, device_id)
+            .exclude_circle_close_device(circle_id, device_id)
             .await
-            .map_err(Into::into)
     }
 
     pub(crate) async fn delete(
         &self,
         circle_id: crate::CircleId,
     ) -> Result<(), crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .delete(circle_id)
-            .await
-            .map_err(Into::into)
+        self.sync.delete_circle(circle_id).await
     }
 
     pub(crate) async fn retry(
         &self,
         operation_id: crate::CircleOperationId,
     ) -> Result<(), crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .retry(operation_id)
-            .await
-            .map_err(Into::into)
+        self.sync.retry_circle_operation(operation_id).await
     }
 
     pub(crate) async fn discard(
         &self,
         operation_id: crate::CircleOperationId,
     ) -> Result<(), crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .discard(operation_id)
-            .await
-            .map_err(Into::into)
+        self.sync.discard_circle_operation(operation_id).await
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<crate::Circle>, crate::CircleError> {
@@ -200,10 +166,6 @@ impl StoreCircles {
         &self,
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleCloseStatus, crate::CircleError> {
-        self.sync
-            .active_circles()?
-            .close_status(circle_id)
-            .await
-            .map_err(Into::into)
+        self.sync.circle_close_status(circle_id).await
     }
 }

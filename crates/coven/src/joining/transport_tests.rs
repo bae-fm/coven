@@ -294,7 +294,6 @@ impl TransportFixture {
     /// in the state a device that never issued the offer is in.
     async fn forget_owner_journal(&self, bundle: &DeviceJoinOfferBundle) {
         self.owner_database
-            .device_join_journal()
             .forget_for_test(
                 bundle.offer.attempt_id,
                 crate::sync::store::DeviceJoinRole::Owner,

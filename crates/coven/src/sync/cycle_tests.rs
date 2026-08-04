@@ -900,7 +900,6 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .await
             .expect("cancel cross-principal join attempt");
         owner_db
-            .device_join_journal()
             .forget_provider_administrator_journals_for_test()
             .await
             .expect("remove unavailable provider administrator's local journal");

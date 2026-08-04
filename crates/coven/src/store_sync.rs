@@ -20,9 +20,7 @@ use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
 use crate::store_security::StoreSecurity;
 use crate::sync::cycle::{InitSyncError, SyncComponents};
-use crate::sync::store::blob::{
-    LocalStoreBlobAccess, RemoteBlobSource, RemoteStoreBlobAccess, StoreBlobAccess,
-};
+use crate::sync::store::blob::{LocalStoreBlobAccess, RemoteBlobSource, RemoteStoreBlobAccess};
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 use crate::sync::BlobCacheError;
 use crate::sync::Store;
@@ -176,7 +174,10 @@ impl StoreSync {
         }
     }
 
-    pub(crate) async fn blob_access(&self) -> Result<StoreBlobAccess, BlobCacheError> {
+    pub(crate) async fn read_blob(
+        &self,
+        reference: &crate::blob::RowBlobRef,
+    ) -> Result<Vec<u8>, BlobCacheError> {
         let storage = {
             let connection = self.state.read().expect("read Store sync connection");
             match &*connection {
@@ -185,16 +186,109 @@ impl StoreSync {
             }
         };
         match storage {
-            Some(storage) => Ok(StoreBlobAccess::remote(RemoteStoreBlobAccess::new(
-                self.local_blob_access.clone(),
-                RemoteBlobSource::current(self.database.clone(), storage),
-            ))),
-            None => self
-                .read_only_blob_storage
-                .access(self.local_blob_access.clone())
+            Some(storage) => {
+                RemoteStoreBlobAccess::new(
+                    self.local_blob_access.clone(),
+                    RemoteBlobSource::current(self.database.clone(), storage),
+                )
+                .read(reference)
                 .await
-                .map_err(Into::into),
+            }
+            None => self.read_only_blob_storage.read(reference).await,
         }
+    }
+
+    pub(crate) async fn materialize_blob(
+        &self,
+        reference: &crate::blob::RowBlobRef,
+    ) -> Result<(), BlobCacheError> {
+        let storage = {
+            let connection = self.state.read().expect("read Store sync connection");
+            match &*connection {
+                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
+                _ => None,
+            }
+        };
+        match storage {
+            Some(storage) => {
+                RemoteStoreBlobAccess::new(
+                    self.local_blob_access.clone(),
+                    RemoteBlobSource::current(self.database.clone(), storage),
+                )
+                .materialize(reference)
+                .await
+            }
+            None => self.read_only_blob_storage.materialize(reference).await,
+        }
+    }
+
+    pub(crate) async fn open_blob_stream(
+        &self,
+        reference: &crate::blob::RowBlobRef,
+    ) -> Result<crate::sync::BlobStream, BlobCacheError> {
+        let storage = {
+            let connection = self.state.read().expect("read Store sync connection");
+            match &*connection {
+                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
+                _ => None,
+            }
+        };
+        match storage {
+            Some(storage) => {
+                RemoteStoreBlobAccess::new(
+                    self.local_blob_access.clone(),
+                    RemoteBlobSource::current(self.database.clone(), storage),
+                )
+                .open_stream(reference)
+                .await
+            }
+            None => self.read_only_blob_storage.open_stream(reference).await,
+        }
+    }
+
+    pub(crate) async fn pin_blobs(
+        &self,
+        references: &[crate::blob::RowBlobRef],
+    ) -> Result<(), BlobCacheError> {
+        let storage = {
+            let connection = self.state.read().expect("read Store sync connection");
+            match &*connection {
+                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
+                _ => None,
+            }
+        };
+        match storage {
+            Some(storage) => {
+                RemoteStoreBlobAccess::new(
+                    self.local_blob_access.clone(),
+                    RemoteBlobSource::current(self.database.clone(), storage),
+                )
+                .pin(references)
+                .await
+            }
+            None => self.read_only_blob_storage.pin(references).await,
+        }
+    }
+
+    pub(crate) async fn unpin_blobs(
+        &self,
+        references: &[crate::blob::RowBlobRef],
+    ) -> Result<(), BlobCacheError> {
+        self.local_blob_access.unpin(references).await
+    }
+
+    pub(crate) async fn all_blobs_pinned(
+        &self,
+        references: &[crate::blob::RowBlobRef],
+    ) -> Result<bool, BlobCacheError> {
+        self.local_blob_access.all_pinned(references).await
+    }
+
+    pub(crate) async fn evict_blob(
+        &self,
+        reference: &crate::blob::RowBlobRef,
+    ) -> Result<(), BlobCacheError> {
+        self.local_blob_access.evict(reference).await
     }
 
     fn install_cloud(
@@ -282,7 +376,7 @@ impl StoreSync {
         }
     }
 
-    async fn connected_command(&self) -> Option<Result<StoreCommand, SyncError>> {
+    async fn connected_store(&self) -> Option<Result<Store, SyncError>> {
         let storage = {
             let connection = self.state.read().expect("read Store sync connection");
             match &*connection {
@@ -298,7 +392,6 @@ impl StoreSync {
             identity
                 .load_store(self.database.clone(), storage)
                 .await
-                .map(StoreCommand::new)
                 .map_err(SyncError::from),
         )
     }
@@ -394,38 +487,6 @@ struct ActiveSyncOperation {
     loop_handle: Arc<SyncLoopHandle>,
 }
 
-pub(crate) struct StoreCommand {
-    store: Store,
-}
-
-impl StoreCommand {
-    fn new(store: Store) -> Self {
-        Self { store }
-    }
-
-    pub(crate) async fn members(
-        &self,
-    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, crate::sync::store::MembershipOpsError>
-    {
-        self.store.members().await
-    }
-
-    pub(crate) async fn membership_conflict(
-        &self,
-    ) -> Result<Option<crate::MembershipConflictInfo>, crate::sync::store::MembershipOpsError> {
-        self.store.membership_conflict().await
-    }
-
-    pub(crate) async fn restore_membership(
-        &self,
-    ) -> Result<
-        crate::sync::store::owner::StoreRestoreMembership,
-        crate::sync::store::MembershipOpsError,
-    > {
-        self.store.restore_membership().await
-    }
-}
-
 impl ActiveSyncOperation {
     async fn make_remote(
         &self,
@@ -467,21 +528,6 @@ impl ActiveSyncOperation {
         write_id: crate::WriteId,
     ) -> Result<Vec<crate::WriteId>, crate::sync::store::StoreError> {
         self.loop_handle.discard_blocked_write(write_id).await
-    }
-
-    fn membership(self) -> ActiveMembershipSync {
-        ActiveMembershipSync {
-            loop_handle: self.loop_handle,
-        }
-    }
-
-    fn circles(self) -> Result<ActiveCircleSync, crate::CircleError> {
-        if !self.loop_handle.is_running() {
-            return Err(crate::CircleError::LoopNotRunning);
-        }
-        Ok(ActiveCircleSync {
-            loop_handle: self.loop_handle,
-        })
     }
 
     async fn begin_device_join_bundle(
@@ -1089,9 +1135,9 @@ impl StoreSync {
             .unwrap_or_else(|| self.config())
     }
 
-    pub(crate) async fn command(&self) -> Result<StoreCommand, SyncError> {
-        if let Some(command) = self.connected_command().await {
-            return command;
+    async fn load_command_store(&self) -> Result<Store, SyncError> {
+        if let Some(store) = self.connected_store().await {
+            return store;
         }
         let config = self.command_config();
         let storage = self
@@ -1109,8 +1155,37 @@ impl StoreSync {
             .established_identity()?
             .load_store(self.database.clone(), Arc::new(storage))
             .await
-            .map(StoreCommand::new)
             .map_err(SyncError::from)
+    }
+
+    pub(crate) async fn members(
+        &self,
+    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, SyncError> {
+        self.load_command_store()
+            .await?
+            .members()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn membership_conflict(
+        &self,
+    ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
+        self.load_command_store()
+            .await?
+            .membership_conflict()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn restore_membership(
+        &self,
+    ) -> Result<crate::sync::store::owner::StoreRestoreMembership, SyncError> {
+        self.load_command_store()
+            .await?
+            .restore_membership()
+            .await
+            .map_err(Into::into)
     }
 
     #[cfg(test)]
@@ -1178,17 +1253,226 @@ impl StoreSync {
         self.has_cloud()
     }
 
-    pub(crate) fn active_membership(&self) -> Result<ActiveMembershipSync, SyncError> {
-        Ok(self.active().ok_or(SyncError::LoopNotRunning)?.membership())
+    pub(crate) async fn invite_member(
+        &self,
+        public_key_hex: &str,
+        invitee_email: Option<&str>,
+        role: crate::protocol::membership::MemberRole,
+    ) -> Result<crate::joining::InviteCode, SyncError> {
+        let active = self.active().ok_or(SyncError::LoopNotRunning)?;
+        if !active.is_encrypted() {
+            return Err(SyncError::NotEncryptedHome);
+        }
+        active
+            .invite(public_key_hex, invitee_email, role)
+            .await
+            .map_err(Into::into)
     }
 
-    /// Circle *writes* are dispatched to the loop thread and executed there, so
-    /// this is the one capability that needs the thread itself rather than a
-    /// driven connection — and it says which of the two is missing.
-    pub(crate) fn active_circles(&self) -> Result<ActiveCircleSync, crate::CircleError> {
+    pub(crate) async fn remove_store_member(
+        &self,
+        public_key_hex: &str,
+    ) -> Result<String, SyncError> {
+        let active = self.active().ok_or(SyncError::LoopNotRunning)?;
+        if !active.is_encrypted() {
+            return Err(SyncError::NotEncryptedHome);
+        }
+        active.remove(public_key_hex).await.map_err(Into::into)
+    }
+
+    pub(crate) async fn resolve_membership_conflict(
+        &self,
+        choice: &crate::MembershipConflictChoice,
+    ) -> Result<(), SyncError> {
         self.active()
-            .ok_or(crate::CircleError::NotConfigured)?
-            .circles()
+            .ok_or(SyncError::LoopNotRunning)?
+            .resolve(choice)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn propose_device_exclusion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, SyncError> {
+        self.active()
+            .ok_or(SyncError::LoopNotRunning)?
+            .propose_device_exclusion(device_id)
+            .await
+    }
+
+    pub(crate) async fn cancel_device_exclusion(
+        &self,
+        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), SyncError> {
+        self.active()
+            .ok_or(SyncError::LoopNotRunning)?
+            .cancel_device_exclusion(proposal)
+            .await
+    }
+
+    pub(crate) async fn finalize_device_exclusion(
+        &self,
+        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), SyncError> {
+        self.active()
+            .ok_or(SyncError::LoopNotRunning)?
+            .finalize_device_exclusion(proposal)
+            .await
+    }
+
+    pub(crate) async fn begin_owner_promotion(
+        &self,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, SyncError> {
+        self.active()
+            .ok_or(SyncError::LoopNotRunning)?
+            .begin_owner_promotion(device_id)
+            .await
+    }
+
+    pub(crate) async fn accept_owner_promotion(
+        &self,
+        request: crate::protocol::store_commit::OwnerPromotionRequest,
+    ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, SyncError> {
+        self.active()
+            .ok_or(SyncError::LoopNotRunning)?
+            .accept_owner_promotion(request)
+            .await
+    }
+
+    pub(crate) async fn finalize_owner_promotion(
+        &self,
+        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+    ) -> Result<(), SyncError> {
+        self.active()
+            .ok_or(SyncError::LoopNotRunning)?
+            .finalize_owner_promotion(acceptance)
+            .await
+    }
+
+    fn active_circle_operation(&self) -> Result<ActiveSyncOperation, crate::CircleError> {
+        let active = self.active().ok_or(crate::CircleError::NotConfigured)?;
+        if !active.loop_handle.is_running() {
+            return Err(crate::CircleError::LoopNotRunning);
+        }
+        Ok(active)
+    }
+
+    pub(crate) async fn create_circle(
+        &self,
+        name: &str,
+    ) -> Result<crate::CircleId, crate::CircleError> {
+        self.active_circle_operation()?
+            .create_circle(name)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn rename_circle(
+        &self,
+        circle_id: crate::CircleId,
+        name: &str,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .rename_circle(circle_id, name)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn add_circle_member(
+        &self,
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+        role: crate::CircleRole,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .add_circle_member(circle_id, member_pubkey, role)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn remove_circle_member(
+        &self,
+        circle_id: crate::CircleId,
+        member_pubkey: String,
+    ) -> Result<crate::CircleOperationId, crate::CircleError> {
+        self.active_circle_operation()?
+            .remove_circle_member(circle_id, member_pubkey)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn resolve_circle(
+        &self,
+        circle_id: crate::CircleId,
+        chosen: crate::CircleControlCoord,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .resolve_circle(circle_id, chosen)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn cancel_circle_close(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<crate::CircleOperationId, crate::CircleError> {
+        self.active_circle_operation()?
+            .cancel_circle_close(circle_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn exclude_circle_close_device(
+        &self,
+        circle_id: crate::CircleId,
+        device_id: crate::StoreDeviceId,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .exclude_circle_close_device(circle_id, device_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn delete_circle(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .delete_circle(circle_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn retry_circle_operation(
+        &self,
+        operation_id: crate::CircleOperationId,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .retry_circle_operation(operation_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn discard_circle_operation(
+        &self,
+        operation_id: crate::CircleOperationId,
+    ) -> Result<(), crate::CircleError> {
+        self.active_circle_operation()?
+            .discard_circle_operation(operation_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn circle_close_status(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<crate::CircleCloseStatus, crate::CircleError> {
+        self.active_circle_operation()?
+            .circle_close_status(circle_id)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn begin_device_join_bundle(
@@ -1386,11 +1670,7 @@ impl StoreSync {
     }
 }
 
-pub(crate) struct ActiveMembershipSync {
-    loop_handle: Arc<SyncLoopHandle>,
-}
-
-impl ActiveMembershipSync {
+impl ActiveSyncOperation {
     pub(crate) fn is_encrypted(&self) -> bool {
         self.loop_handle.is_encrypted()
     }
@@ -1485,19 +1765,15 @@ impl ActiveMembershipSync {
     }
 }
 
-pub(crate) struct ActiveCircleSync {
-    loop_handle: Arc<SyncLoopHandle>,
-}
-
-impl ActiveCircleSync {
-    pub(crate) async fn create(
+impl ActiveSyncOperation {
+    async fn create_circle(
         &self,
         name: &str,
     ) -> Result<crate::CircleId, crate::sync::store::CircleOperationError> {
         self.loop_handle.create_circle(name).await
     }
 
-    pub(crate) async fn rename(
+    async fn rename_circle(
         &self,
         circle_id: crate::CircleId,
         name: &str,
@@ -1505,7 +1781,7 @@ impl ActiveCircleSync {
         self.loop_handle.rename_circle(circle_id, name).await
     }
 
-    pub(crate) async fn add_member(
+    async fn add_circle_member(
         &self,
         circle_id: crate::CircleId,
         member_pubkey: String,
@@ -1516,7 +1792,7 @@ impl ActiveCircleSync {
             .await
     }
 
-    pub(crate) async fn remove_member(
+    async fn remove_circle_member(
         &self,
         circle_id: crate::CircleId,
         member_pubkey: String,
@@ -1526,7 +1802,7 @@ impl ActiveCircleSync {
             .await
     }
 
-    pub(crate) async fn resolve(
+    async fn resolve_circle(
         &self,
         circle_id: crate::CircleId,
         chosen: crate::CircleControlCoord,
@@ -1536,14 +1812,14 @@ impl ActiveCircleSync {
             .await
     }
 
-    pub(crate) async fn cancel_close(
+    async fn cancel_circle_close(
         &self,
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleOperationId, crate::sync::store::CircleOperationError> {
         self.loop_handle.cancel_circle_epoch_close(circle_id).await
     }
 
-    pub(crate) async fn exclude_close_device(
+    async fn exclude_circle_close_device(
         &self,
         circle_id: crate::CircleId,
         device_id: crate::StoreDeviceId,
@@ -1553,21 +1829,21 @@ impl ActiveCircleSync {
             .await
     }
 
-    pub(crate) async fn delete(
+    async fn delete_circle(
         &self,
         circle_id: crate::CircleId,
     ) -> Result<(), crate::sync::store::CircleOperationError> {
         self.loop_handle.delete_circle(circle_id).await
     }
 
-    pub(crate) async fn retry(
+    async fn retry_circle_operation(
         &self,
         operation_id: crate::CircleOperationId,
     ) -> Result<(), crate::sync::store::CircleOperationError> {
         self.loop_handle.retry_circle_operation(operation_id).await
     }
 
-    pub(crate) async fn discard(
+    async fn discard_circle_operation(
         &self,
         operation_id: crate::CircleOperationId,
     ) -> Result<(), crate::sync::store::CircleOperationError> {
@@ -1576,7 +1852,7 @@ impl ActiveCircleSync {
             .await
     }
 
-    pub(crate) async fn close_status(
+    async fn circle_close_status(
         &self,
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleCloseStatus, crate::sync::store::CircleOperationError> {

@@ -397,6 +397,22 @@ impl LocalStoreBlobAccess {
             }
         }
     }
+
+    pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
+        self.cache.pin(None, blobs).await
+    }
+
+    pub(crate) async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
+        self.cache.unpin(blobs).await
+    }
+
+    pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
+        self.cache.all_pinned(blobs).await
+    }
+
+    pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
+        self.cache.evict(blob).await
+    }
 }
 
 #[derive(Clone)]
@@ -577,6 +593,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RemoteStoreBlobAccess {
     local: LocalStoreBlobAccess,
     remote: RemoteBlobSource<'static>,
@@ -665,6 +682,10 @@ impl RemoteStoreBlobAccess {
             .await
     }
 
+    pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
+        self.local.cache.pin(Some(&self.remote), blobs).await
+    }
+
     pub(crate) async fn stage_verified_local_copy(
         &self,
         reference: &RowBlobRef,
@@ -711,60 +732,6 @@ impl RemoteStoreBlobAccess {
             .enforce_budget(&reference.blob().namespace, Some(&destination))
             .await?;
         Ok(source)
-    }
-}
-
-pub(crate) enum StoreBlobAccess {
-    Local(LocalStoreBlobAccess),
-    Remote(RemoteStoreBlobAccess),
-}
-
-impl StoreBlobAccess {
-    pub(crate) fn local(local: LocalStoreBlobAccess) -> Self {
-        Self::Local(local)
-    }
-
-    pub(crate) fn remote(remote: RemoteStoreBlobAccess) -> Self {
-        Self::Remote(remote)
-    }
-
-    pub(crate) async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        match self {
-            Self::Local(access) => access.read(reference).await,
-            Self::Remote(access) => access.read(reference).await,
-        }
-    }
-
-    pub(crate) async fn open_stream(
-        &self,
-        reference: &RowBlobRef,
-    ) -> Result<BlobStream, BlobCacheError> {
-        match self {
-            Self::Local(access) => access.open_stream(reference).await,
-            Self::Remote(access) => access.open_stream(reference).await,
-        }
-    }
-
-    pub(crate) async fn materialize(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError> {
-        match self {
-            Self::Local(access) => access.materialize(reference).await,
-            Self::Remote(access) => access.materialize(reference).await,
-        }
-    }
-
-    async fn remote_access(
-        &self,
-        reference: &RowBlobRef,
-    ) -> Result<Option<ExactRemoteBlobAccess<'_>>, BlobCacheError> {
-        match self {
-            Self::Local(_) => Ok(None),
-            Self::Remote(access)
-                if matches!(reference.authority(), RowBlobAuthority::Remote(_)) =>
-            {
-                Ok(Some(access.remote.access(reference).await?))
-            }
-            Self::Remote(_) => Ok(None),
-        }
     }
 }
 
@@ -955,20 +922,20 @@ impl StoreBlobCache {
 
     pub(crate) async fn pin(
         &self,
-        access: &StoreBlobAccess,
+        remote: Option<&RemoteBlobSource<'_>>,
         blobs: &[RowBlobRef],
     ) -> Result<(), BlobCacheError> {
         let limit = self.database.transfer_limits().downloads.get();
         futures_util::stream::iter(blobs.iter().map(Ok::<&RowBlobRef, BlobCacheError>))
             .try_for_each_concurrent(limit, |reference| async move {
-                self.pin_one(access, reference).await
+                self.pin_one(remote, reference).await
             })
             .await
     }
 
     async fn pin_one(
         &self,
-        access: &StoreBlobAccess,
+        remote: Option<&RemoteBlobSource<'_>>,
         reference: &RowBlobRef,
     ) -> Result<(), BlobCacheError> {
         self.database.validate_row_blob_ref(reference).await?;
@@ -994,10 +961,10 @@ impl StoreBlobCache {
             }
             None => {}
         }
-        let remote = access
-            .remote_access(reference)
-            .await?
-            .ok_or(BlobCacheError::NoCloudHome)?;
+        let remote = remote
+            .ok_or(BlobCacheError::NoCloudHome)?
+            .access(reference)
+            .await?;
         let staged = remote.stage_verified_plaintext(stored, &pinned).await?;
         verify_exact_file(staged.path(), reference).await?;
         self.database.validate_row_blob_ref(reference).await?;

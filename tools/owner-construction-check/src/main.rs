@@ -32,16 +32,29 @@ const NON_OWNER_TYPES: &[&str] = &[
     "StoreDatabaseConnection",
 ];
 
+// Public API namespaces borrow a retained owner without becoming a separately
+// retained service. They expose the root's intended host-facing capability.
+const BORROWED_FACADE_TYPES: &[&str] = &["Circles"];
+
 const RETAINED_SERVICE_ROOT_TYPES: &[&str] =
     &["CovenHandle", "CovenReadHandle", "Database", "DatabaseCore"];
 
 // These owners are deliberately created for one operation. They may be fields
 // of a retained service, but the type itself does not name that retained role.
 const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
+    "AuthorizedStore",
+    "AuthorizedWriterOperation",
+    "BlobSpoolProtection",
+    "CircleAckPublicationInput",
+    "CirclePackageAccess",
+    "HostWriteBlobStaging",
+    "InitializedStore",
     "RemoteBlobSource",
     "RemoteStoreBlobAccess",
     "Store",
     "StoreBlobCache",
+    "StoreCircleCommands",
+    "StoreDeviceJoinTransport",
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
@@ -451,7 +464,12 @@ fn check(
             Vec::new()
         },
         service_returns: if check_retained_service_returns {
-            find_service_return_violations(&files, &retained_services, RETAINED_SERVICE_ROOT_TYPES)
+            find_service_return_violations(
+                &files,
+                &retained_services,
+                &service_owners,
+                RETAINED_SERVICE_ROOT_TYPES,
+            )
         } else {
             Vec::new()
         },
@@ -870,10 +888,11 @@ fn collect_root_retained_types(
 
 fn find_service_return_violations(
     files: &[RustFile],
-    retained_services: &BTreeSet<String>,
+    retained_owners: &BTreeSet<String>,
+    stateful_services: &BTreeSet<String>,
     root_types: &[&str],
 ) -> Vec<ServiceReturnViolation> {
-    let returned_services = retained_services
+    let returned_services = stateful_services
         .iter()
         .filter(|service| {
             !root_types.contains(&service.as_str())
@@ -891,7 +910,7 @@ fn find_service_return_violations(
         find_service_returns_in_items(
             &file.relative_path,
             &file.syntax.items,
-            retained_services,
+            retained_owners,
             &returned_services,
             &mut violations,
         );
@@ -1010,7 +1029,9 @@ fn infer_owners(structs: &BTreeMap<String, StructInfo>) -> BTreeSet<String> {
     loop {
         let before = owners.len();
         for (name, info) in structs {
-            if NON_OWNER_TYPES.contains(&name.as_str()) {
+            if NON_OWNER_TYPES.contains(&name.as_str())
+                || BORROWED_FACADE_TYPES.contains(&name.as_str())
+            {
                 continue;
             }
             if info
@@ -1694,11 +1715,41 @@ mod tests {
         let retained_services =
             collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
         let violations =
-            find_service_return_violations(&files, &retained_services, &["CovenHandle"]);
+            find_service_return_violations(&files, &retained_services, &owners, &["CovenHandle"]);
 
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].owner, "StoreSync");
         assert_eq!(violations[0].returned, "StoreBlobAccess");
+    }
+
+    #[test]
+    fn owner_cannot_return_a_stateful_service_that_no_root_retains() {
+        let source = syn::parse_file(
+            r#"
+            struct Database;
+            struct DetachedBlobAccess { database: Database }
+            struct StoreSync { database: Database }
+            struct CovenHandle { sync: StoreSync }
+
+            impl StoreSync {
+                pub(crate) fn blob_access(&self) -> DetachedBlobAccess { todo!() }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let declared_types = collect_declared_types(&files);
+        let owners = infer_owners(&declared_types);
+        let retained_services =
+            collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
+        let violations =
+            find_service_return_violations(&files, &retained_services, &owners, &["CovenHandle"]);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].returned, "DetachedBlobAccess");
     }
 
     #[test]
@@ -1735,9 +1786,13 @@ mod tests {
         let retained_services =
             collect_root_retained_types(&declared_types, &owners, &["CovenHandle"]);
 
-        assert!(
-            find_service_return_violations(&files, &retained_services, &["CovenHandle"]).is_empty()
-        );
+        assert!(find_service_return_violations(
+            &files,
+            &retained_services,
+            &owners,
+            &["CovenHandle"],
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1778,7 +1833,10 @@ mod tests {
         let owners = infer_owners(&declared_types);
         let retained_services = collect_root_retained_types(&declared_types, &owners, &["Root"]);
 
-        assert!(find_service_return_violations(&files, &retained_services, &["Root"]).is_empty());
+        assert!(
+            find_service_return_violations(&files, &retained_services, &owners, &["Root"])
+                .is_empty()
+        );
     }
 
     #[test]

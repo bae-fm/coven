@@ -137,6 +137,7 @@ fn store_sync(
         clock.clone(),
         None,
         BlobChunking::DEFAULT,
+        owners.local_access(),
     );
     StoreSync::new(
         config_provider,
@@ -204,6 +205,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         clock.clone(),
         None,
         BlobChunking::DEFAULT,
+        owners.local_access(),
     );
     let sync = StoreSync::new(
         config_provider,

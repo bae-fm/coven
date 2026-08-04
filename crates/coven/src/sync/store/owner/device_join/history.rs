@@ -71,8 +71,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         attempt_id: DeviceJoinAttemptId,
     ) -> Result<Option<DeviceJoinJournalRecord>, DeviceJoinError> {
         self.database
-            .device_join_journal()
-            .load(attempt_id, DeviceJoinRole::Joiner)
+            .load_device_join(attempt_id, DeviceJoinRole::Joiner)
             .await
     }
 

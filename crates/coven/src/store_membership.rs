@@ -25,12 +25,7 @@ impl StoreMembership {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        self.sync
-            .command()
-            .await?
-            .members()
-            .await
-            .map_err(SyncError::from)
+        self.sync.members().await
     }
 
     pub(crate) async fn conflict(
@@ -39,12 +34,7 @@ impl StoreMembership {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        self.sync
-            .command()
-            .await?
-            .membership_conflict()
-            .await
-            .map_err(SyncError::from)
+        self.sync.membership_conflict().await
     }
 
     pub(crate) async fn invite(
@@ -54,21 +44,16 @@ impl StoreMembership {
         role: MemberRole,
     ) -> Result<String, SyncError> {
         let _mutation = self.mutations.lock().await;
-        let active = self.sync.active_membership()?;
-        if !active.is_encrypted() {
-            return Err(SyncError::NotEncryptedHome);
-        }
-        let invite = active.invite(public_key_hex, invitee_email, role).await?;
+        let invite = self
+            .sync
+            .invite_member(public_key_hex, invitee_email, role)
+            .await?;
         Ok(crate::joining::encode(&invite))
     }
 
     pub(crate) async fn remove(&self, public_key_hex: &str) -> Result<String, SyncError> {
         let _mutation = self.mutations.lock().await;
-        let active = self.sync.active_membership()?;
-        if !active.is_encrypted() {
-            return Err(SyncError::NotEncryptedHome);
-        }
-        active.remove(public_key_hex).await.map_err(SyncError::from)
+        self.sync.remove_store_member(public_key_hex).await
     }
 
     pub(crate) async fn resolve_conflict(
@@ -76,11 +61,7 @@ impl StoreMembership {
         choice: &crate::MembershipConflictChoice,
     ) -> Result<(), SyncError> {
         let _mutation = self.mutations.lock().await;
-        self.sync
-            .active_membership()?
-            .resolve(choice)
-            .await
-            .map_err(SyncError::from)
+        self.sync.resolve_membership_conflict(choice).await
     }
 
     pub(crate) async fn propose_device_exclusion(
@@ -88,11 +69,7 @@ impl StoreMembership {
         device_id: crate::StoreDeviceId,
     ) -> Result<String, SyncError> {
         let _mutation = self.mutations.lock().await;
-        let proposal = self
-            .sync
-            .active_membership()?
-            .propose_device_exclusion(device_id)
-            .await?;
+        let proposal = self.sync.propose_device_exclusion(device_id).await?;
         Ok(crate::code_envelope::encode_code(
             DEVICE_EXCLUSION_CODE_PREFIX,
             &proposal,
@@ -102,19 +79,13 @@ impl StoreMembership {
     pub(crate) async fn cancel_device_exclusion(&self, code: &str) -> Result<(), SyncError> {
         let proposal = decode_operation_code(DEVICE_EXCLUSION_CODE_PREFIX, code)?;
         let _mutation = self.mutations.lock().await;
-        self.sync
-            .active_membership()?
-            .cancel_device_exclusion(&proposal)
-            .await
+        self.sync.cancel_device_exclusion(&proposal).await
     }
 
     pub(crate) async fn finalize_device_exclusion(&self, code: &str) -> Result<(), SyncError> {
         let proposal = decode_operation_code(DEVICE_EXCLUSION_CODE_PREFIX, code)?;
         let _mutation = self.mutations.lock().await;
-        self.sync
-            .active_membership()?
-            .finalize_device_exclusion(&proposal)
-            .await
+        self.sync.finalize_device_exclusion(&proposal).await
     }
 
     pub(crate) async fn begin_owner_promotion(
@@ -122,11 +93,7 @@ impl StoreMembership {
         device_id: crate::StoreDeviceId,
     ) -> Result<String, SyncError> {
         let _mutation = self.mutations.lock().await;
-        let request = self
-            .sync
-            .active_membership()?
-            .begin_owner_promotion(device_id)
-            .await?;
+        let request = self.sync.begin_owner_promotion(device_id).await?;
         Ok(crate::code_envelope::encode_code(
             OWNER_PROMOTION_REQUEST_CODE_PREFIX,
             &request,
@@ -136,11 +103,7 @@ impl StoreMembership {
     pub(crate) async fn accept_owner_promotion(&self, code: &str) -> Result<String, SyncError> {
         let request = decode_operation_code(OWNER_PROMOTION_REQUEST_CODE_PREFIX, code)?;
         let _mutation = self.mutations.lock().await;
-        let acceptance = self
-            .sync
-            .active_membership()?
-            .accept_owner_promotion(request)
-            .await?;
+        let acceptance = self.sync.accept_owner_promotion(request).await?;
         Ok(crate::code_envelope::encode_code(
             OWNER_PROMOTION_ACCEPTANCE_CODE_PREFIX,
             &acceptance,
@@ -150,10 +113,7 @@ impl StoreMembership {
     pub(crate) async fn finalize_owner_promotion(&self, code: &str) -> Result<(), SyncError> {
         let acceptance = decode_operation_code(OWNER_PROMOTION_ACCEPTANCE_CODE_PREFIX, code)?;
         let _mutation = self.mutations.lock().await;
-        self.sync
-            .active_membership()?
-            .finalize_owner_promotion(acceptance)
-            .await
+        self.sync.finalize_owner_promotion(acceptance).await
     }
 }
 

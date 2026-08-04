@@ -42,7 +42,7 @@ use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::CloudCipher;
 use crate::storage::StorageError;
-use crate::store_blobs::{ConnectedBlobStorage, StoreBlobReads, StoreBlobs};
+use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
 use crate::store_dir::StoreDir;
 use crate::store_joining::StoreJoining;
@@ -174,6 +174,7 @@ impl CovenHandle {
             clock.clone(),
             cloudkit_ops.clone(),
             blob_chunking,
+            local_blob_access.clone(),
         );
         let sync = StoreSync::new(
             config_provider,
@@ -196,12 +197,7 @@ impl CovenHandle {
             security.clone(),
             sync.clone(),
         );
-        let blob_reads = StoreBlobReads::new(
-            local_blob_access.clone(),
-            blob_cache,
-            ConnectedBlobStorage::new(sync.clone()),
-        );
-        let blobs = StoreBlobs::new(database.clone(), blob_reads, sync.clone());
+        let blobs = StoreBlobs::new(database.clone(), sync.clone());
         let membership = StoreMembership::new(sync.clone());
         let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
         let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());

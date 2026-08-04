@@ -224,30 +224,21 @@ impl DeviceJoinJournalStore {
     }
 }
 
-pub(crate) struct StoreJoinJournal<'database> {
-    database: &'database StoreDatabase,
-}
-
-impl<'database> StoreJoinJournal<'database> {
-    pub(super) fn new(database: &'database StoreDatabase) -> Self {
-        Self { database }
-    }
-
-    pub(crate) fn new_attempt_id(&self) -> DeviceJoinAttemptId {
+impl StoreDatabase {
+    pub(crate) fn new_device_join_attempt_id(&self) -> DeviceJoinAttemptId {
         DeviceJoinAttemptId::from_hash(ObjectHash::digest(
-            self.database.new_store_write_id().as_str().as_bytes(),
+            self.new_store_write_id().as_str().as_bytes(),
         ))
     }
 
-    pub(crate) async fn begin(
+    pub(crate) async fn begin_device_join(
         &self,
         record: DeviceJoinJournalRecord,
     ) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
         record.require_initial()?;
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
-        self.database
-            .connection
+        self.connection
             .call(move |connection| {
                 connection
                     .execute(
@@ -263,14 +254,13 @@ impl<'database> StoreJoinJournal<'database> {
             .map_err(|error| DeviceJoinError::Store(error.into_message()))
     }
 
-    pub(crate) async fn load(
+    pub(crate) async fn load_device_join(
         &self,
         attempt_id: DeviceJoinAttemptId,
         role: DeviceJoinRole,
     ) -> Result<Option<DeviceJoinJournalRecord>, DeviceJoinError> {
         let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
         let value = self
-            .database
             .get_protocol_state(&key)
             .await
             .map_err(|error| DeviceJoinError::Store(error.into_message()))?;
@@ -279,7 +269,7 @@ impl<'database> StoreJoinJournal<'database> {
             .transpose()
     }
 
-    pub(crate) async fn advance(
+    pub(crate) async fn advance_device_join(
         &self,
         previous: &DeviceJoinJournalRecord,
         next: DeviceJoinJournalRecord,
@@ -289,7 +279,6 @@ impl<'database> StoreJoinJournal<'database> {
         let previous = serde_json::to_string(previous)?;
         let next = serde_json::to_string(&next)?;
         let changed = self
-            .database
             .connection
             .call(move |connection| {
                 connection
@@ -308,7 +297,7 @@ impl<'database> StoreJoinJournal<'database> {
         }
     }
 
-    pub(crate) async fn begin_replacement_terminal(
+    pub(crate) async fn begin_device_join_replacement_terminal(
         &self,
         record: DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinError> {
@@ -316,7 +305,6 @@ impl<'database> StoreJoinJournal<'database> {
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
         let durable = self
-            .database
             .connection
             .call(move |connection| {
                 connection
@@ -335,9 +323,8 @@ impl<'database> StoreJoinJournal<'database> {
         Ok(())
     }
 
-    async fn records(&self) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinError> {
+    async fn device_join_records(&self) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinError> {
         let rows = self
-            .database
             .connection
             .call(|connection| {
                 let mut statement = connection
@@ -375,8 +362,7 @@ impl<'database> StoreJoinJournal<'database> {
         role: DeviceJoinRole,
     ) -> Result<(), DeviceJoinError> {
         let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
-        self.database
-            .connection
+        self.connection
             .call(move |connection| {
                 connection
                     .execute("DELETE FROM protocol_state WHERE key = ?1", [&key])
@@ -391,8 +377,7 @@ impl<'database> StoreJoinJournal<'database> {
     pub(crate) async fn forget_provider_administrator_journals_for_test(
         &self,
     ) -> Result<(), DeviceJoinError> {
-        self.database
-            .connection
+        self.connection
             .call(|connection| {
                 connection
                     .execute(
@@ -414,8 +399,7 @@ impl StoreDatabase {
         attempt_id: DeviceJoinAttemptId,
         role: DeviceJoinRole,
     ) -> Result<Option<DeviceJoinStatus>, DeviceJoinError> {
-        self.device_join_journal()
-            .load(attempt_id, role)
+        self.load_device_join(attempt_id, role)
             .await
             .map(|record| record.as_ref().map(DeviceJoinJournalRecord::status))
     }
@@ -424,8 +408,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
         Ok(self
-            .device_join_journal()
-            .records()
+            .device_join_records()
             .await?
             .iter()
             .filter_map(DeviceJoinJournalRecord::action)

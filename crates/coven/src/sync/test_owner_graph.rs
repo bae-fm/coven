@@ -5,41 +5,35 @@ use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
 use crate::sync::store::blob::RemoteBlobSource;
-use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobAccess, StoreBlobCache};
+use crate::sync::store::blob::{LocalStoreBlobAccess, RemoteStoreBlobAccess, StoreBlobCache};
 
 #[derive(Clone)]
 pub(crate) struct TestOwnerGraph {
     database: StoreDatabase,
     store_dir: StoreDir,
-    cache: StoreBlobCache,
     local_access: LocalStoreBlobAccess,
     local_transitions: LocalBlobTransitions,
 }
 
-fn blob_owners(
-    database: StoreDatabase,
-    store_dir: StoreDir,
-) -> (StoreBlobCache, LocalStoreBlobAccess) {
+fn blob_owner(database: StoreDatabase, store_dir: StoreDir) -> LocalStoreBlobAccess {
     let cache = StoreBlobCache::new(database.clone(), store_dir.clone());
-    let local_access = LocalStoreBlobAccess::new(database, store_dir, cache.clone());
-    (cache, local_access)
+    LocalStoreBlobAccess::new(database, store_dir, cache)
 }
 
 pub(crate) fn local_blob_access(
     database: StoreDatabase,
     store_dir: StoreDir,
 ) -> LocalStoreBlobAccess {
-    blob_owners(database, store_dir).1
+    blob_owner(database, store_dir)
 }
 
 impl TestOwnerGraph {
     pub(crate) fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
-        let (cache, local_access) = blob_owners(database.clone(), store_dir.clone());
+        let local_access = blob_owner(database.clone(), store_dir.clone());
         let local_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
         Self {
             database,
             store_dir,
-            cache,
             local_access,
             local_transitions,
         }
@@ -183,16 +177,11 @@ impl TestOwnerGraph {
             .await
     }
 
-    pub(crate) fn blob_access(&self, storage: Option<Arc<dyn SyncStorage>>) -> StoreBlobAccess {
-        match storage {
-            Some(storage) => {
-                StoreBlobAccess::remote(crate::sync::store::blob::RemoteStoreBlobAccess::new(
-                    self.local_access.clone(),
-                    RemoteBlobSource::current(self.database.clone(), storage),
-                ))
-            }
-            None => StoreBlobAccess::local(self.local_access.clone()),
-        }
+    fn remote_blob_access(&self, storage: Arc<dyn SyncStorage>) -> RemoteStoreBlobAccess {
+        RemoteStoreBlobAccess::new(
+            self.local_access.clone(),
+            RemoteBlobSource::current(self.database.clone(), storage),
+        )
     }
 
     pub(crate) async fn read_blob(
@@ -200,7 +189,10 @@ impl TestOwnerGraph {
         storage: Option<Arc<dyn SyncStorage>>,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
-        self.blob_access(storage).read(reference).await
+        match storage {
+            Some(storage) => self.remote_blob_access(storage).read(reference).await,
+            None => self.local_access.read(reference).await,
+        }
     }
 
     pub(crate) async fn open_blob_stream(
@@ -208,7 +200,14 @@ impl TestOwnerGraph {
         storage: Option<Arc<dyn SyncStorage>>,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<crate::sync::BlobStream, crate::sync::BlobCacheError> {
-        self.blob_access(storage).open_stream(reference).await
+        match storage {
+            Some(storage) => {
+                self.remote_blob_access(storage)
+                    .open_stream(reference)
+                    .await
+            }
+            None => self.local_access.open_stream(reference).await,
+        }
     }
 
     pub(crate) async fn read_blob_range(
@@ -229,7 +228,14 @@ impl TestOwnerGraph {
         storage: Option<Arc<dyn SyncStorage>>,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<(), crate::sync::BlobCacheError> {
-        self.blob_access(storage).materialize(reference).await
+        match storage {
+            Some(storage) => {
+                self.remote_blob_access(storage)
+                    .materialize(reference)
+                    .await
+            }
+            None => self.local_access.materialize(reference).await,
+        }
     }
 
     pub(crate) async fn pin_blobs(
@@ -237,8 +243,10 @@ impl TestOwnerGraph {
         storage: Option<Arc<dyn SyncStorage>>,
         references: &[crate::blob::RowBlobRef],
     ) -> Result<(), crate::sync::BlobCacheError> {
-        let access = self.blob_access(storage);
-        self.cache.pin(&access, references).await
+        match storage {
+            Some(storage) => self.remote_blob_access(storage).pin(references).await,
+            None => self.local_access.pin(references).await,
+        }
     }
 
     pub(crate) fn connected_blob_transitions(

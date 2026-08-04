@@ -1042,18 +1042,17 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         error.contains("differs from its exact reference"),
         "{error}"
     );
-    let blob_access = crate::sync::test_owner_graph::TestOwnerGraph::new(
+    let blob_owners = crate::sync::test_owner_graph::TestOwnerGraph::new(
         crate::database::StoreDatabase::new(&db),
         store_dir.clone(),
-    )
-    .blob_access(Some(store.clone()));
-    blob_access
-        .materialize(&historical_blob)
+    );
+    blob_owners
+        .materialize_blob(Some(store.clone()), &historical_blob)
         .await
         .expect("materialize a blob through its retained founder control");
     assert_eq!(
-        blob_access
-            .read(&historical_blob)
+        blob_owners
+            .read_blob(Some(store.clone()), &historical_blob)
             .await
             .expect("read a blob through its retained founder control"),
         blob_bytes,
@@ -1102,8 +1101,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         historical_blob.stored().cloned(),
     )
     .expect("construct same-Circle successor-control substitution");
-    let substitution_error = blob_access
-        .read(&substituted)
+    let substitution_error = blob_owners
+        .read_blob(Some(store.clone()), &substituted)
         .await
         .expect_err("row blob binding must reject a substituted Circle control");
     assert!(

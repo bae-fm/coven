@@ -29,7 +29,7 @@ use crate::database::StoreDatabase;
 use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::read_store_rows::ReadStoreRows;
-use crate::store_blobs::{ReadOnlyBlobStorage, ReadStoreBlobs, StoreBlobReads};
+use crate::store_blobs::{ReadOnlyBlobStorage, ReadStoreBlobs};
 use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
@@ -91,9 +91,9 @@ impl CovenReadHandle {
             clock,
             cloudkit_ops,
             blob_chunking,
+            local_blob_access,
         );
-        let blob_reads = StoreBlobReads::new(local_blob_access, blob_cache, blob_storage);
-        let blobs = ReadStoreBlobs::new(database.clone(), blob_reads);
+        let blobs = ReadStoreBlobs::new(database.clone(), blob_storage);
         Self {
             rows,
             blobs,

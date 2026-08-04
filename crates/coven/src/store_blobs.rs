@@ -8,9 +8,7 @@ use crate::storage::cloud::setup::StorageSetupError;
 use crate::storage::BlobChunking;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync};
-use crate::sync::store::blob::{
-    LocalStoreBlobAccess, RemoteBlobSource, StoreBlobAccess, StoreBlobCache,
-};
+use crate::sync::store::blob::{LocalStoreBlobAccess, RemoteBlobSource, RemoteStoreBlobAccess};
 use crate::sync::{BlobCacheError, BlobStream};
 
 #[derive(Clone)]
@@ -21,6 +19,7 @@ pub(crate) struct ReadOnlyBlobStorage {
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     blob_chunking: BlobChunking,
+    local: LocalStoreBlobAccess,
 }
 
 impl ReadOnlyBlobStorage {
@@ -32,6 +31,7 @@ impl ReadOnlyBlobStorage {
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         blob_chunking: BlobChunking,
+        local: LocalStoreBlobAccess,
     ) -> Self {
         Self {
             database,
@@ -40,6 +40,7 @@ impl ReadOnlyBlobStorage {
             clock,
             cloudkit_ops,
             blob_chunking,
+            local,
         }
     }
 
@@ -47,13 +48,10 @@ impl ReadOnlyBlobStorage {
         (self.config_provider)()
     }
 
-    pub(crate) async fn access(
-        &self,
-        local: LocalStoreBlobAccess,
-    ) -> Result<StoreBlobAccess, StorageSetupError> {
+    async fn resolve(&self) -> Result<ResolvedBlobAccess, StorageSetupError> {
         let config = self.config();
         if config.cloud_home.provider.is_none() {
-            return Ok(StoreBlobAccess::local(local));
+            return Ok(ResolvedBlobAccess::Local(self.local.clone()));
         }
         let storage = self
             .security
@@ -66,155 +64,111 @@ impl ReadOnlyBlobStorage {
             )
             .await?;
         let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
-        Ok(StoreBlobAccess::remote(
-            crate::sync::store::blob::RemoteStoreBlobAccess::new(
-                local,
-                RemoteBlobSource::current(self.database.clone(), storage),
-            ),
-        ))
-    }
-}
-
-pub(crate) trait BlobAccessSource: Clone {
-    async fn access(&self, local: LocalStoreBlobAccess) -> Result<StoreBlobAccess, BlobCacheError>;
-}
-
-#[derive(Clone)]
-pub(crate) struct ConnectedBlobStorage {
-    sync: StoreSync,
-}
-
-impl ConnectedBlobStorage {
-    pub(crate) fn new(sync: StoreSync) -> Self {
-        Self { sync }
-    }
-}
-
-impl BlobAccessSource for ConnectedBlobStorage {
-    async fn access(
-        &self,
-        _local: LocalStoreBlobAccess,
-    ) -> Result<StoreBlobAccess, BlobCacheError> {
-        self.sync.blob_access().await
-    }
-}
-
-impl BlobAccessSource for ReadOnlyBlobStorage {
-    async fn access(&self, local: LocalStoreBlobAccess) -> Result<StoreBlobAccess, BlobCacheError> {
-        ReadOnlyBlobStorage::access(self, local)
-            .await
-            .map_err(Into::into)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct StoreBlobReads<Storage> {
-    access: LocalStoreBlobAccess,
-    cache: StoreBlobCache,
-    storage: Storage,
-}
-
-impl<Storage> StoreBlobReads<Storage> {
-    pub(crate) fn new(
-        access: LocalStoreBlobAccess,
-        cache: StoreBlobCache,
-        storage: Storage,
-    ) -> Self {
-        Self {
-            access,
-            cache,
-            storage,
-        }
-    }
-}
-
-impl<Storage: BlobAccessSource> StoreBlobReads<Storage> {
-    async fn access(&self) -> Result<StoreBlobAccess, BlobCacheError> {
-        self.storage.access(self.access.clone()).await
+        Ok(ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
+            self.local.clone(),
+            RemoteBlobSource::current(self.database.clone(), storage),
+        )))
     }
 
     pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        self.access().await?.read(blob).await
+        self.resolve().await?.read(blob).await
     }
 
     pub(crate) async fn materialize(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.access().await?.materialize(blob).await
+        self.resolve().await?.materialize(blob).await
     }
 
     pub(crate) async fn open_stream(
         &self,
         blob: &RowBlobRef,
     ) -> Result<BlobStream, BlobCacheError> {
-        self.access().await?.open_stream(blob).await
+        self.resolve().await?.open_stream(blob).await
     }
 
     pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        let access = self.access().await?;
-        self.cache.pin(&access, blobs).await
-    }
-
-    pub(crate) async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.cache.unpin(blobs).await
+        self.resolve().await?.pin(blobs).await
     }
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        self.cache.all_pinned(blobs).await
+        self.local.all_pinned(blobs).await
+    }
+}
+
+enum ResolvedBlobAccess {
+    Local(LocalStoreBlobAccess),
+    Remote(RemoteStoreBlobAccess),
+}
+
+impl ResolvedBlobAccess {
+    async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
+        match self {
+            Self::Local(access) => access.read(blob).await,
+            Self::Remote(access) => access.read(blob).await,
+        }
     }
 
-    pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.cache.evict(blob).await
+    async fn materialize(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
+        match self {
+            Self::Local(access) => access.materialize(blob).await,
+            Self::Remote(access) => access.materialize(blob).await,
+        }
+    }
+
+    async fn open_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
+        match self {
+            Self::Local(access) => access.open_stream(blob).await,
+            Self::Remote(access) => access.open_stream(blob).await,
+        }
+    }
+
+    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
+        match self {
+            Self::Local(access) => access.pin(blobs).await,
+            Self::Remote(access) => access.pin(blobs).await,
+        }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct StoreBlobs {
     database: StoreDatabase,
-    reads: StoreBlobReads<ConnectedBlobStorage>,
     sync: StoreSync,
 }
 
 impl StoreBlobs {
-    pub(crate) fn new(
-        database: StoreDatabase,
-        reads: StoreBlobReads<ConnectedBlobStorage>,
-        sync: StoreSync,
-    ) -> Self {
-        Self {
-            database,
-            reads,
-            sync,
-        }
+    pub(crate) fn new(database: StoreDatabase, sync: StoreSync) -> Self {
+        Self { database, sync }
     }
 
     pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        self.reads.read(blob).await
+        self.sync.read_blob(blob).await
     }
 
     pub(crate) async fn materialize(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.reads.materialize(blob).await
+        self.sync.materialize_blob(blob).await
     }
 
     pub(crate) async fn open_stream(
         &self,
         blob: &RowBlobRef,
     ) -> Result<BlobStream, BlobCacheError> {
-        self.reads.open_stream(blob).await
+        self.sync.open_blob_stream(blob).await
     }
 
     pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.reads.pin(blobs).await
+        self.sync.pin_blobs(blobs).await
     }
 
     pub(crate) async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.reads.unpin(blobs).await
+        self.sync.unpin_blobs(blobs).await
     }
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        self.reads.all_pinned(blobs).await
+        self.sync.all_blobs_pinned(blobs).await
     }
 
     pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.reads.evict(blob).await
+        self.sync.evict_blob(blob).await
     }
 
     pub(crate) async fn row_blob_ref(
@@ -326,12 +280,12 @@ impl StoreBlobs {
 #[derive(Clone)]
 pub(crate) struct ReadStoreBlobs {
     database: StoreDatabase,
-    reads: StoreBlobReads<ReadOnlyBlobStorage>,
+    storage: ReadOnlyBlobStorage,
 }
 
 impl ReadStoreBlobs {
-    pub(crate) fn new(database: StoreDatabase, reads: StoreBlobReads<ReadOnlyBlobStorage>) -> Self {
-        Self { database, reads }
+    pub(crate) fn new(database: StoreDatabase, storage: ReadOnlyBlobStorage) -> Self {
+        Self { database, storage }
     }
 
     pub(crate) async fn row_blob_ref(
@@ -343,17 +297,17 @@ impl ReadStoreBlobs {
     }
 
     pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        self.reads.read(blob).await
+        self.storage.read(blob).await
     }
 
     pub(crate) async fn open_stream(
         &self,
         blob: &RowBlobRef,
     ) -> Result<BlobStream, BlobCacheError> {
-        self.reads.open_stream(blob).await
+        self.storage.open_stream(blob).await
     }
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        self.reads.all_pinned(blobs).await
+        self.storage.all_pinned(blobs).await
     }
 }

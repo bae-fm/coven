@@ -262,10 +262,6 @@ impl StoreDatabase {
         Self::from_database(database.clone())
     }
 
-    pub(crate) fn device_join_journal(&self) -> device_join::StoreJoinJournal<'_> {
-        device_join::StoreJoinJournal::new(self)
-    }
-
     pub(crate) async fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
     where
         F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
