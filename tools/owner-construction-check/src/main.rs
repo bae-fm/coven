@@ -6,6 +6,9 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 mod capability_boundaries;
+mod module_dependencies;
+use module_dependencies::{find_module_dependency_violations, ModuleDependencyViolation};
+
 use capability_boundaries::{
     find_capability_boundary_violations, CapabilityBoundaryViolation, GatedCapability,
     AMBIENT_BOUNDARY, CRYPTO_BOUNDARY, FILESYSTEM_BOUNDARY, KEYRING_BOUNDARY, NETWORK_BOUNDARY,
@@ -560,6 +563,7 @@ struct CheckResult {
     retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
     deep_parent_paths: Vec<DeepParentPathViolation>,
     capability_boundaries: Vec<CapabilityBoundaryViolation>,
+    module_dependencies: Vec<ModuleDependencyViolation>,
 }
 
 const CAPABILITY_BOUNDARY_FLAGS: &[(&str, &[GatedCapability])] = &[
@@ -577,9 +581,12 @@ fn main() {
     let mut retained_service_construction = false;
     let mut retained_capability_parameters = false;
     let mut capability_boundaries: Vec<&'static [GatedCapability]> = Vec::new();
+    let mut module_dependencies = false;
     let mut root = None;
     for argument in std::env::args_os().skip(1) {
-        if argument == "--database-boundary" {
+        if argument == "--module-dependencies" {
+            module_dependencies = true;
+        } else if argument == "--database-boundary" {
             database_boundary = true;
         } else if argument == "--retained-service-returns" {
             retained_service_returns = true;
@@ -596,7 +603,7 @@ fn main() {
             root = Some(PathBuf::from(argument));
         } else {
             eprintln!(
-                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [root]"
+                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]"
             );
             std::process::exit(2);
         }
@@ -609,6 +616,7 @@ fn main() {
         retained_service_construction,
         retained_capability_parameters,
         &capability_boundaries,
+        module_dependencies,
     ) {
         Ok(result)
             if result.owner_construction.is_empty()
@@ -617,7 +625,8 @@ fn main() {
                 && result.retained_service_construction.is_empty()
                 && result.retained_capability_parameters.is_empty()
                 && result.deep_parent_paths.is_empty()
-                && result.capability_boundaries.is_empty() => {}
+                && result.capability_boundaries.is_empty()
+                && result.module_dependencies.is_empty() => {}
         Ok(result) => {
             for violation in &result.owner_construction {
                 eprintln!(
@@ -687,6 +696,17 @@ fn main() {
                     violation.homes.join(", ")
                 );
             }
+            for violation in &result.module_dependencies {
+                eprintln!(
+                    "{}:{}: {} ({:?}) references {} ({:?}) against the dependency direction",
+                    violation.path,
+                    violation.line,
+                    violation.from,
+                    violation.from_region,
+                    violation.to,
+                    violation.to_region
+                );
+            }
             if !result.owner_construction.is_empty() {
                 eprintln!(
                     "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
@@ -722,6 +742,11 @@ fn main() {
                     "raw capabilities live with their declared owners; compose the owner that retains the capability instead of naming its crates or construction paths"
                 );
             }
+            if !result.module_dependencies.is_empty() {
+                eprintln!(
+                    "module references point down the architecture: host → domain → replication → protocol/database/storage → keys → foundation"
+                );
+            }
             std::process::exit(1);
         }
         Err(error) => {
@@ -738,6 +763,7 @@ fn check(
     check_retained_service_construction: bool,
     check_retained_capability_parameters: bool,
     capability_boundaries: &[&'static [GatedCapability]],
+    check_module_dependencies: bool,
 ) -> Result<CheckResult, String> {
     let files = rust_files(root)?;
     let structs = collect_structs(&files);
@@ -788,6 +814,11 @@ fn check(
             .iter()
             .flat_map(|boundary| find_capability_boundary_violations(&files, boundary))
             .collect(),
+        module_dependencies: if check_module_dependencies {
+            find_module_dependency_violations(&files)?
+        } else {
+            Vec::new()
+        },
     })
 }
 

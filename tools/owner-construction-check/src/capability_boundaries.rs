@@ -409,7 +409,11 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_> {
     }
 }
 
-fn flatten_use_tree(tree: &syn::UseTree, prefix: &mut Vec<String>, output: &mut Vec<Vec<String>>) {
+pub(crate) fn flatten_use_tree(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    output: &mut Vec<Vec<String>>,
+) {
     match tree {
         syn::UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
