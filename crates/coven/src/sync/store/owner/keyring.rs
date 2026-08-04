@@ -27,7 +27,7 @@ impl<'storage> StoreKeyrings<'storage> {
         identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
     ) -> Result<EncryptionService, InviteError> {
-        let references = Self::references(identity, membership)?;
+        let references = wrapped_key_references(identity, membership)?;
         self.open_references(identity, &references).await
     }
 
@@ -37,7 +37,7 @@ impl<'storage> StoreKeyrings<'storage> {
         membership: &MembershipChain,
         required: &WrappedStoreKeyRef,
     ) -> Result<EncryptionService, InviteError> {
-        let references = Self::references(identity, membership)?;
+        let references = wrapped_key_references(identity, membership)?;
         if !references.contains(required) {
             return Err(InviteError::Crypto(
                 "wrapped-key ref is not activated by the verified membership".to_string(),
@@ -52,7 +52,7 @@ impl<'storage> StoreKeyrings<'storage> {
         membership: &MembershipChain,
         initial: &EncryptionService,
     ) -> Result<EncryptionService, InviteError> {
-        let references = Self::references(identity, membership)?;
+        let references = wrapped_key_references(identity, membership)?;
         if references.is_empty() {
             Ok(initial.clone())
         } else {
@@ -103,15 +103,6 @@ impl<'storage> StoreKeyrings<'storage> {
         Ok(prepared)
     }
 
-    fn references(
-        identity: &dyn IdentityKeyAuthority,
-        membership: &MembershipChain,
-    ) -> Result<Vec<WrappedStoreKeyRef>, InviteError> {
-        membership
-            .wrapped_key_authority_for(&hex::encode(identity.public_key()))
-            .map_err(InviteError::from)
-    }
-
     async fn open_references(
         &self,
         identity: &dyn IdentityKeyAuthority,
@@ -153,4 +144,13 @@ impl<'storage> StoreKeyrings<'storage> {
             )))
         })
     }
+}
+
+fn wrapped_key_references(
+    identity: &dyn IdentityKeyAuthority,
+    membership: &MembershipChain,
+) -> Result<Vec<WrappedStoreKeyRef>, InviteError> {
+    membership
+        .wrapped_key_authority_for(&hex::encode(identity.public_key()))
+        .map_err(InviteError::from)
 }
