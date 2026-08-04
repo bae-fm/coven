@@ -14,6 +14,7 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
     storage: &'storage Arc<dyn SyncStorage>,
     store_dir: &'storage crate::store_dir::StoreDir,
+    blob_cache: crate::sync::store::blob::StoreBlobCache,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
     keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -28,6 +29,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
         store_dir: &'storage crate::store_dir::StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -36,6 +38,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             database,
             storage,
             store_dir,
+            blob_cache,
             history_verifier,
             blob_source,
             keyrings,
@@ -91,6 +94,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             database,
             Arc::clone(self.storage),
             self.store_dir.clone(),
+            self.blob_cache,
             identity.clone(),
             Some(device_id.clone()),
             self.history_verifier.verified_root().clone(),
@@ -299,15 +303,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         crate::database::DbError,
     > {
         let schema = std::sync::Arc::new(self.database.table_schema_for_apply().await?);
-        let blob_cache = crate::sync::store::blob::StoreBlobCache::new(
-            self.database.clone(),
-            self.store_dir.clone(),
-        );
         Ok(
             super::pull_package_materializer::PullPackageMaterializer::new(
                 self.database.clone(),
                 self.blob_source.clone(),
-                blob_cache,
+                self.blob_cache.clone(),
                 self.store_dir.clone(),
                 schema,
             ),
@@ -424,6 +424,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
         store_dir: &'storage crate::store_dir::StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -432,6 +433,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             database,
             storage,
             store_dir,
+            blob_cache,
             history_verifier,
             blob_source,
             keyrings,
@@ -443,6 +445,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
         store_dir: &'storage crate::store_dir::StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
         keyrings: super::keyring::StoreKeyrings<'storage>,
@@ -451,6 +454,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             database,
             storage,
             store_dir,
+            blob_cache,
             history_verifier,
             blob_source,
             keyrings,
@@ -502,13 +506,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn verify_blob_plaintext(
         &self,
-        cache: &crate::sync::store::blob::StoreBlobCache,
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
         self.blob_source
-            .verify_plaintext(cache, authority, stored, retain)
+            .verify_plaintext(&self.blob_cache, authority, stored, retain)
             .await
     }
 

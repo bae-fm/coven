@@ -6,6 +6,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 const CAPABILITY_TYPES: &[&str] = &[
+    "CirclePackageAccess",
     "ClockRef",
     "CloudHome",
     "CloudSyncStorage",
@@ -22,19 +23,31 @@ const CAPABILITY_TYPES: &[&str] = &[
     "SyncStorage",
 ];
 
-// These are configuration/value objects which happen to name a retained
-// capability in their fields. They describe construction; they do not perform
-// operations with that capability.
+// Directory identity is fixed when an owner graph is composed. Runtime owners
+// use the filesystem capability they retain; accepting another directory would
+// let callers combine state from different stores.
+const CONSTRUCTION_ONLY_CAPABILITY_TYPES: &[&str] = &["StoreDir"];
+
+// These are configuration, value, and transfer objects which happen to name a
+// retained capability in their fields. They carry state between operations;
+// they do not own the capability's lifetime.
 const NON_OWNER_TYPES: &[&str] = &[
+    "BlobSpoolProtection",
+    "CircleAckPublicationInput",
     "Config",
     "ConnectionThread",
     "DatabaseState",
+    "InitializedStore",
+    "RemoteBlobSourceInner",
+    "ResolvedBlobAccess",
+    "ResolvedBlobConnection",
     "StoreDatabaseConnection",
 ];
 
 // Public API namespaces borrow a retained owner without becoming a separately
 // retained service. They expose the root's intended host-facing capability.
-const BORROWED_FACADE_TYPES: &[&str] = &["Circles"];
+const BORROWED_FACADE_TYPES: &[&str] =
+    &["Circles", "StoreCircleCommands", "StoreDeviceJoinTransport"];
 
 const RETAINED_SERVICE_ROOT_TYPES: &[&str] =
     &["CovenHandle", "CovenReadHandle", "Database", "DatabaseCore"];
@@ -44,21 +57,15 @@ const RETAINED_SERVICE_ROOT_TYPES: &[&str] =
 const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "AuthorizedStore",
     "AuthorizedWriterOperation",
-    "BlobSpoolProtection",
-    "CircleAckPublicationInput",
-    "CirclePackageAccess",
     "HostWriteBlobStaging",
-    "InitializedStore",
     "RemoteBlobSource",
-    "RemoteStoreBlobAccess",
-    "Store",
-    "StoreBlobCache",
-    "StoreCircleCommands",
-    "StoreDeviceJoinTransport",
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
     ("ConnectedBlobTransitions", "StoreSync"),
+    ("CurrentRemoteBlobSource", "StoreBlobAccess"),
+    ("RemoteStoreBlobAccess", "StoreBlobAccess"),
+    ("Store", "StoreSync"),
     ("SyncComponents", "StoreSync"),
     ("SyncLoopHandle", "StoreSync"),
 ];
@@ -91,6 +98,29 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
     ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
+    (
+        "crates/coven/src/store_blobs.rs",
+        "StoreBlobAccess",
+        "connected_for_test",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/device_join/joiner.rs",
+        "PendingDeviceJoinObservation",
+        "into_joining_store",
+    ),
+    ("crates/coven/src/sync/store/owner.rs", "Store", "create"),
+    ("crates/coven/src/sync/store/owner.rs", "Store", "open"),
+    ("crates/coven/src/sync/store/owner.rs", "Store", "load"),
+    (
+        "crates/coven/src/sync/store/owner/authorized_history.rs",
+        "AuthorizedStoreHistory",
+        "finish_initialization",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/writer/operation/snapshot/image.rs",
+        "PreparedSnapshotBootstrap",
+        "install",
+    ),
     (
         "crates/coven/src/sync/test_owner_graph.rs",
         "TestOwnerGraph",
@@ -325,17 +355,129 @@ struct RetainedServiceConstructionViolation {
     authority: Option<String>,
 }
 
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct RetainedCapabilityParameterViolation {
+    path: String,
+    line: usize,
+    owner: String,
+    method: String,
+    capability: String,
+}
+
+fn find_retained_capability_parameter_violations(
+    files: &[RustFile],
+    owners: &BTreeSet<String>,
+    constructors: &BTreeSet<Constructor>,
+) -> Vec<RetainedCapabilityParameterViolation> {
+    let mut violations = BTreeSet::new();
+    for file in files {
+        if is_test_source(&file.relative_path) {
+            continue;
+        }
+        find_retained_capability_parameters_in_items(
+            &file.relative_path,
+            &file.syntax.items,
+            owners,
+            constructors,
+            &mut violations,
+        );
+    }
+    violations.into_iter().collect()
+}
+
+fn find_retained_capability_parameters_in_items(
+    path: &str,
+    items: &[syn::Item],
+    owners: &BTreeSet<String>,
+    constructors: &BTreeSet<Constructor>,
+    violations: &mut BTreeSet<RetainedCapabilityParameterViolation>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(item) => {
+                if is_test_only(&item.attrs) {
+                    continue;
+                }
+                let Some(owner) = type_name(&item.self_ty) else {
+                    continue;
+                };
+                if !owners.contains(&owner) {
+                    continue;
+                }
+                for impl_item in &item.items {
+                    let syn::ImplItem::Fn(method) = impl_item else {
+                        continue;
+                    };
+                    if is_test_only(&method.attrs) {
+                        continue;
+                    }
+                    let callable = Constructor {
+                        owner: owner.clone(),
+                        method: method.sig.ident.to_string(),
+                    };
+                    if constructors.contains(&callable)
+                        || COMPOSITION_ROOTS
+                            .iter()
+                            .any(|(root_path, root_owner, root_method)| {
+                                path == *root_path
+                                    && owner == *root_owner
+                                    && method.sig.ident == *root_method
+                            })
+                    {
+                        continue;
+                    }
+                    for input in &method.sig.inputs {
+                        let syn::FnArg::Typed(input) = input else {
+                            continue;
+                        };
+                        let mut names = TypeNames::default();
+                        names.visit_type(&input.ty);
+                        for capability in CONSTRUCTION_ONLY_CAPABILITY_TYPES {
+                            if names.names.contains(*capability) {
+                                violations.insert(RetainedCapabilityParameterViolation {
+                                    path: path.to_string(),
+                                    line: input.span().start().line,
+                                    owner: owner.clone(),
+                                    method: method.sig.ident.to_string(),
+                                    capability: (*capability).to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(item) => {
+                if is_test_only(&item.attrs) {
+                    continue;
+                }
+                if let Some((_, items)) = &item.content {
+                    find_retained_capability_parameters_in_items(
+                        path,
+                        items,
+                        owners,
+                        constructors,
+                        violations,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 struct CheckResult {
     owner_construction: Vec<Violation>,
     database_boundary: Vec<DatabaseBoundaryViolation>,
     service_returns: Vec<ServiceReturnViolation>,
     retained_service_construction: Vec<RetainedServiceConstructionViolation>,
+    retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
 }
 
 fn main() {
     let mut database_boundary = false;
     let mut retained_service_returns = false;
     let mut retained_service_construction = false;
+    let mut retained_capability_parameters = false;
     let mut root = None;
     for argument in std::env::args_os().skip(1) {
         if argument == "--database-boundary" {
@@ -344,11 +486,13 @@ fn main() {
             retained_service_returns = true;
         } else if argument == "--retained-service-construction" {
             retained_service_construction = true;
+        } else if argument == "--retained-capability-parameters" {
+            retained_capability_parameters = true;
         } else if root.is_none() {
             root = Some(PathBuf::from(argument));
         } else {
             eprintln!(
-                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [root]"
+                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [root]"
             );
             std::process::exit(2);
         }
@@ -359,12 +503,14 @@ fn main() {
         database_boundary,
         retained_service_returns,
         retained_service_construction,
+        retained_capability_parameters,
     ) {
         Ok(result)
             if result.owner_construction.is_empty()
                 && result.database_boundary.is_empty()
                 && result.service_returns.is_empty()
-                && result.retained_service_construction.is_empty() => {}
+                && result.retained_service_construction.is_empty()
+                && result.retained_capability_parameters.is_empty() => {}
         Ok(result) => {
             for violation in &result.owner_construction {
                 eprintln!(
@@ -409,6 +555,16 @@ fn main() {
                     ),
                 }
             }
+            for violation in &result.retained_capability_parameters {
+                eprintln!(
+                    "{}:{}: {}::{} accepts construction-only capability {} at runtime",
+                    violation.path,
+                    violation.line,
+                    violation.owner,
+                    violation.method,
+                    violation.capability
+                );
+            }
             if !result.owner_construction.is_empty() {
                 eprintln!(
                     "retained owner constructors accept complete dependencies; construct owner graphs only in approved composition roots"
@@ -429,6 +585,11 @@ fn main() {
                     "retained services are constructed at composition roots; declared runtime-replaceable services are constructed only by their root-retained lifetime owner"
                 );
             }
+            if !result.retained_capability_parameters.is_empty() {
+                eprintln!(
+                    "construction-only capabilities are bound when owner graphs are composed and are never accepted by runtime owner methods"
+                );
+            }
             std::process::exit(1);
         }
         Err(error) => {
@@ -443,6 +604,7 @@ fn check(
     check_database_boundary: bool,
     check_retained_service_returns: bool,
     check_retained_service_construction: bool,
+    check_retained_capability_parameters: bool,
 ) -> Result<CheckResult, String> {
     let files = rust_files(root)?;
     let structs = collect_structs(&files);
@@ -480,6 +642,11 @@ fn check(
                 LIFETIME_CONSTRUCTION_AUTHORITIES,
                 COMPOSITION_ROOTS,
             )
+        } else {
+            Vec::new()
+        },
+        retained_capability_parameters: if check_retained_capability_parameters {
+            find_retained_capability_parameter_violations(&files, &owners, &constructors)
         } else {
             Vec::new()
         },
@@ -1503,7 +1670,7 @@ impl<'ast> Visit<'ast> for ServiceConstructionSiteVisitor<'_> {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Path(function) = node.func.as_ref() {
             let segments = function.path.segments.iter().collect::<Vec<_>>();
-            if segments.len() >= 2 {
+            if could_be_local_associated_function_path(&segments) {
                 self.record_associated_factory(
                     &segments[segments.len() - 2].ident.to_string(),
                     &segments[segments.len() - 1].ident.to_string(),
@@ -1550,9 +1717,106 @@ impl<'ast> Visit<'ast> for ServiceConstructionSiteVisitor<'_> {
     }
 }
 
+fn could_be_local_associated_function_path(segments: &[&syn::PathSegment]) -> bool {
+    segments.len() == 2
+        || segments.first().is_some_and(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "crate" | "self" | "super"
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_scope_exemptions_only_name_operation_authorities() {
+        assert_eq!(
+            OPERATION_SCOPED_OWNER_TYPES,
+            &[
+                "AuthorizedStore",
+                "AuthorizedWriterOperation",
+                "HostWriteBlobStaging",
+                "RemoteBlobSource",
+            ]
+        );
+        assert!(CAPABILITY_TYPES.contains(&"CirclePackageAccess"));
+        for value in [
+            "BlobSpoolProtection",
+            "CircleAckPublicationInput",
+            "InitializedStore",
+        ] {
+            assert!(NON_OWNER_TYPES.contains(&value));
+        }
+        for facade in ["StoreCircleCommands", "StoreDeviceJoinTransport"] {
+            assert!(BORROWED_FACADE_TYPES.contains(&facade));
+        }
+        for retained in [
+            "CurrentRemoteBlobSource",
+            "RemoteStoreBlobAccess",
+            "Store",
+            "StoreBlobCache",
+        ] {
+            assert!(!OPERATION_SCOPED_OWNER_TYPES.contains(&retained));
+        }
+    }
+
+    #[test]
+    fn external_associated_factories_do_not_match_local_owner_names() {
+        let external: syn::ExprCall =
+            syn::parse_str("apple_native_keyring_store::protected::Store::new()")
+                .expect("parse external factory");
+        let syn::Expr::Path(external_path) = external.func.as_ref() else {
+            panic!("external factory is a path");
+        };
+        let external_segments = external_path.path.segments.iter().collect::<Vec<_>>();
+        assert!(!could_be_local_associated_function_path(&external_segments));
+
+        for local in ["Store::new()", "crate::sync::store::Store::new()"] {
+            let call: syn::ExprCall = syn::parse_str(local).expect("parse local factory");
+            let syn::Expr::Path(path) = call.func.as_ref() else {
+                panic!("local factory is a path");
+            };
+            let segments = path.path.segments.iter().collect::<Vec<_>>();
+            assert!(could_be_local_associated_function_path(&segments));
+        }
+    }
+
+    #[test]
+    fn retained_owner_runtime_method_cannot_accept_store_dir() {
+        let source = syn::parse_file(
+            r#"
+            struct StoreDir;
+            struct StoreDatabase;
+            struct StoreRows { database: StoreDatabase, store_dir: StoreDir }
+
+            impl StoreRows {
+                fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
+                    Self { database, store_dir }
+                }
+
+                fn execute(&self, store_dir: &StoreDir) {}
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/store_rows.rs".to_string(),
+            syntax: source,
+        }];
+        let structs = collect_structs(&files);
+        let owners = infer_owners(&structs);
+        let constructors = collect_constructors(&files, &owners);
+        let violations =
+            find_retained_capability_parameter_violations(&files, &owners, &constructors);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].owner, "StoreRows");
+        assert_eq!(violations[0].method, "execute");
+        assert_eq!(violations[0].capability, "StoreDir");
+    }
 
     #[test]
     fn retained_services_are_constructed_only_by_roots_or_lifetime_authorities() {

@@ -275,11 +275,25 @@ impl<E> From<std::io::Error> for HostWriteError<E> {
     }
 }
 
-impl StoreDatabase {
-    pub(crate) async fn execute_host_write<R, E>(
+pub(crate) struct HostWriteExecution<'operation> {
+    database: &'operation StoreDatabase,
+    store_dir: &'operation StoreDir,
+}
+
+impl<'operation> HostWriteExecution<'operation> {
+    pub(crate) fn new(
+        database: &'operation StoreDatabase,
+        store_dir: &'operation StoreDir,
+    ) -> Self {
+        Self {
+            database,
+            store_dir,
+        }
+    }
+
+    pub(crate) async fn execute<R, E>(
         &self,
         operation: HostWriteOperation<R, E>,
-        store_dir: StoreDir,
         routing_encryption: Option<EncryptionService>,
         blob_staging: Option<crate::sync::HostWriteBlobStaging>,
     ) -> Result<WriteReceipt<R>, HostWriteError<E>>
@@ -287,17 +301,18 @@ impl StoreDatabase {
         R: Send + 'static,
         E: Send + 'static,
     {
+        let database = self.database;
         let HostWriteOperation { batch, sql } = operation;
-        let staged = StagedBlobBatch::stage(&store_dir, batch.new_blobs).await?;
-        let tables = self.synced_tables.to_vec();
-        let gates = self.gates.clone();
-        let blob_decls = self.blob_decls.clone();
-        let write_id = self.new_store_write_id();
+        let staged = StagedBlobBatch::stage(self.store_dir, batch.new_blobs).await?;
+        let tables = database.synced_tables.to_vec();
+        let gates = database.gates.clone();
+        let blob_decls = database.blob_decls.clone();
+        let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
-        let cleanup_store_dir = store_dir.clone();
-        let stamper = crate::sync::hlc::UpdatedAtStamper::new(self.hlc.clone());
+        let cleanup_store_dir = self.store_dir.clone();
+        let stamper = crate::sync::hlc::UpdatedAtStamper::new(database.hlc.clone());
 
-        let outcome = self
+        let outcome = database
             .connection
             .call(move |connection| {
                 let mut staged = staged;
@@ -422,7 +437,11 @@ impl StoreDatabase {
             Err(error) => return Err(HostWriteError::Database(error)),
         };
 
-        if let Err(error) = self.drain_local_blob_cleanup(&store_dir).await {
+        if let Err(error) =
+            super::local_blob_cleanup::LocalBlobCleanup::new(database, self.store_dir)
+                .drain()
+                .await
+        {
             tracing::warn!(
                 error = %error,
                 "failed to drain local blob cleanup intents after write commit"

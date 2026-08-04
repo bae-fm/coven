@@ -50,6 +50,7 @@ pub(crate) struct Store {
     database: StoreDatabase,
     storage: Arc<dyn SyncStorage>,
     store_dir: StoreDir,
+    blob_cache: crate::sync::store::blob::StoreBlobCache,
     identity: UserKeypair,
     device_id: Option<String>,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
@@ -100,6 +101,7 @@ impl Store {
             self.database.clone(),
             storage,
             self.store_dir.clone(),
+            self.blob_cache.clone(),
             self.identity.clone(),
             self.device_id.clone(),
             self.root.clone(),
@@ -112,6 +114,7 @@ impl Store {
             self.database.clone(),
             self.storage.clone(),
             store_dir,
+            self.blob_cache.clone(),
             self.identity.clone(),
             self.device_id.clone(),
             self.root.clone(),
@@ -158,10 +161,19 @@ impl Store {
         founder_timestamp: &str,
         identity: &UserKeypair,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        FounderStoreCreation::begin(database, storage, &store_dir, founder_timestamp, identity)
-            .await
-            .execute()
-            .await
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
+        FounderStoreCreation::begin(
+            database,
+            storage,
+            &store_dir,
+            blob_cache,
+            founder_timestamp,
+            identity,
+        )
+        .await
+        .execute()
+        .await
     }
 
     pub(crate) async fn open(
@@ -189,10 +201,13 @@ impl Store {
             root.reference().clone(),
         );
         let keyrings = keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         AuthorizedStoreHistory::new(
             database,
             &storage,
             &store_dir,
+            blob_cache,
             history_verifier,
             blob_source,
             keyrings,
@@ -225,8 +240,10 @@ impl Store {
         let device_id = database
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         Ok(Self::new(
-            database, storage, store_dir, identity, device_id, root,
+            database, storage, store_dir, blob_cache, identity, device_id, root,
         ))
     }
 
@@ -234,6 +251,7 @@ impl Store {
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
         store_dir: StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
         identity: UserKeypair,
         device_id: Option<String>,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
@@ -242,6 +260,7 @@ impl Store {
             database,
             storage,
             store_dir,
+            blob_cache,
             identity,
             device_id,
             root,
@@ -406,6 +425,7 @@ impl Store {
             self.database.clone(),
             &self.storage,
             &self.store_dir,
+            self.blob_cache.clone(),
             history_verifier,
             blob_source,
             keyrings,
@@ -1339,8 +1359,6 @@ impl Store {
         coverage: crate::protocol::store_commit::CommitFrontier,
         created_at: String,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, writer::snapshot::SnapshotError> {
-        let temp_dir = tempfile::tempdir().map_err(writer::snapshot::SnapshotError::Io)?;
-        let store_dir = crate::store_dir::StoreDir::new(temp_dir.path());
         let mut writer = self.authorize_writer().await.map_err(|error| {
             writer::snapshot::SnapshotError::PublicationState(error.to_string())
         })?;
@@ -1348,7 +1366,6 @@ impl Store {
             .push_store_snapshot(
                 snapshot,
                 coverage,
-                &store_dir,
                 self.database.schema_version(),
                 created_at,
             )

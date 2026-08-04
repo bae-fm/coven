@@ -115,23 +115,43 @@ fn record_durable_intent(
     Ok(())
 }
 
-impl StoreDatabase {
+pub(crate) struct LocalBlobCleanup<'operation> {
+    database: &'operation StoreDatabase,
+    store_dir: &'operation crate::store_dir::StoreDir,
+}
+
+impl<'operation> LocalBlobCleanup<'operation> {
+    pub(crate) fn new(
+        database: &'operation StoreDatabase,
+        store_dir: &'operation crate::store_dir::StoreDir,
+    ) -> Self {
+        Self {
+            database,
+            store_dir,
+        }
+    }
+
     /// Drain every committed cleanup obligation. A filesystem or database
     /// failure leaves the intent durable and fails the operation. `true` means
     /// every remaining intent is blocked by an active Store-write lease.
-    pub(crate) async fn drain_local_blob_cleanup(
-        &self,
-        store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<bool, DbError> {
+    pub(crate) async fn drain(&self) -> Result<bool, DbError> {
+        let database = self.database;
         #[cfg(test)]
-        self.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupRequested)
+        database
+            .reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupRequested)
             .await;
-        let _cleanup_guard = self.runtime.local_blob_cleanup.clone().lock_owned().await;
+        let _cleanup_guard = database
+            .runtime
+            .local_blob_cleanup
+            .clone()
+            .lock_owned()
+            .await;
         #[cfg(test)]
-        self.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupAcquired)
+        database
+            .reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupAcquired)
             .await;
 
-        let intents = self
+        let intents = database
             .connection
             .call(|connection| {
                 let mut statement = connection
@@ -186,19 +206,21 @@ impl StoreDatabase {
                 continue;
             }
             #[cfg(test)]
-            self.reach_test_point(
-                crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
-                    namespace: intent.namespace().to_string(),
-                    blob_id: intent.blob_id().to_string(),
-                },
-            )
-            .await;
+            database
+                .reach_test_point(
+                    crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
+                        namespace: intent.namespace().to_string(),
+                        blob_id: intent.blob_id().to_string(),
+                    },
+                )
+                .await;
             let persisted_identity = intent.persisted_identity()?;
-            intent.apply(store_dir).await?;
+            intent.apply(self.store_dir).await?;
 
             let namespace = intent.namespace().to_string();
             let blob_id = intent.blob_id().to_string();
-            self.connection
+            database
+                .connection
                 .call(move |connection| {
                     connection
                         .execute(
@@ -212,7 +234,8 @@ impl StoreDatabase {
                 .await?;
         }
         #[cfg(test)]
-        self.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupFinished)
+        database
+            .reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupFinished)
             .await;
         Ok(pending)
     }

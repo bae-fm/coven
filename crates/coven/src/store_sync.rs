@@ -20,7 +20,7 @@ use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
 use crate::store_security::StoreSecurity;
 use crate::sync::cycle::{InitSyncError, SyncComponents};
-use crate::sync::store::blob::{LocalStoreBlobAccess, RemoteBlobSource, RemoteStoreBlobAccess};
+use crate::sync::store::blob::LocalStoreBlobAccess;
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 use crate::sync::BlobCacheError;
 use crate::sync::Store;
@@ -108,9 +108,13 @@ enum SyncConnection {
     /// Connected with no cloud attached — either no provider is configured, or
     /// `stop_sync` released the one that was. `start_sync` rebuilds from config.
     WithoutCloud,
+    /// Cloud-backed Store authority retained for commands while no sync loop is
+    /// installed. Starting sync replaces this with `WithCloud`.
+    CommandOnly { store: Arc<Store> },
     /// Connected over a cloud provider.
     WithCloud {
         sync: Arc<SyncLoopHandle>,
+        #[cfg(test)]
         storage: Arc<dyn SyncStorage>,
         driver: SyncDriver,
     },
@@ -128,7 +132,7 @@ pub(crate) struct StoreSync {
     open_guard: Arc<StoreOpenGuard>,
     blob_chunking: BlobChunking,
     local_blob_access: LocalStoreBlobAccess,
-    read_only_blob_storage: crate::store_blobs::ReadOnlyBlobStorage,
+    blob_access: crate::store_blobs::StoreBlobAccess,
     local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
     state: Arc<RwLock<SyncConnection>>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
@@ -150,7 +154,7 @@ impl StoreSync {
         open_guard: Arc<StoreOpenGuard>,
         blob_chunking: BlobChunking,
         local_blob_access: LocalStoreBlobAccess,
-        read_only_blob_storage: crate::store_blobs::ReadOnlyBlobStorage,
+        blob_access: crate::store_blobs::StoreBlobAccess,
         local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
     ) -> Self {
         Self {
@@ -164,7 +168,7 @@ impl StoreSync {
             open_guard,
             blob_chunking,
             local_blob_access,
-            read_only_blob_storage,
+            blob_access,
             local_blob_transitions,
             state: Arc::new(RwLock::new(SyncConnection::Disconnected)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
@@ -178,96 +182,28 @@ impl StoreSync {
         &self,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = {
-            let connection = self.state.read().expect("read Store sync connection");
-            match &*connection {
-                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
-                _ => None,
-            }
-        };
-        match storage {
-            Some(storage) => {
-                RemoteStoreBlobAccess::new(
-                    self.local_blob_access.clone(),
-                    RemoteBlobSource::current(self.database.clone(), storage),
-                )
-                .read(reference)
-                .await
-            }
-            None => self.read_only_blob_storage.read(reference).await,
-        }
+        self.blob_access.read(reference).await
     }
 
     pub(crate) async fn materialize_blob(
         &self,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<(), BlobCacheError> {
-        let storage = {
-            let connection = self.state.read().expect("read Store sync connection");
-            match &*connection {
-                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
-                _ => None,
-            }
-        };
-        match storage {
-            Some(storage) => {
-                RemoteStoreBlobAccess::new(
-                    self.local_blob_access.clone(),
-                    RemoteBlobSource::current(self.database.clone(), storage),
-                )
-                .materialize(reference)
-                .await
-            }
-            None => self.read_only_blob_storage.materialize(reference).await,
-        }
+        self.blob_access.materialize(reference).await
     }
 
     pub(crate) async fn open_blob_stream(
         &self,
         reference: &crate::blob::RowBlobRef,
     ) -> Result<crate::sync::BlobStream, BlobCacheError> {
-        let storage = {
-            let connection = self.state.read().expect("read Store sync connection");
-            match &*connection {
-                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
-                _ => None,
-            }
-        };
-        match storage {
-            Some(storage) => {
-                RemoteStoreBlobAccess::new(
-                    self.local_blob_access.clone(),
-                    RemoteBlobSource::current(self.database.clone(), storage),
-                )
-                .open_stream(reference)
-                .await
-            }
-            None => self.read_only_blob_storage.open_stream(reference).await,
-        }
+        self.blob_access.open_stream(reference).await
     }
 
     pub(crate) async fn pin_blobs(
         &self,
         references: &[crate::blob::RowBlobRef],
     ) -> Result<(), BlobCacheError> {
-        let storage = {
-            let connection = self.state.read().expect("read Store sync connection");
-            match &*connection {
-                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
-                _ => None,
-            }
-        };
-        match storage {
-            Some(storage) => {
-                RemoteStoreBlobAccess::new(
-                    self.local_blob_access.clone(),
-                    RemoteBlobSource::current(self.database.clone(), storage),
-                )
-                .pin(references)
-                .await
-            }
-            None => self.read_only_blob_storage.pin(references).await,
-        }
+        self.blob_access.pin(references).await
     }
 
     pub(crate) async fn unpin_blobs(
@@ -297,14 +233,17 @@ impl StoreSync {
         storage: Arc<dyn SyncStorage>,
         driver: SyncDriver,
     ) {
+        self.blob_access.install_connected(storage.clone());
         *self.state.write().expect("write Store sync connection") = SyncConnection::WithCloud {
             sync,
+            #[cfg(test)]
             storage,
             driver,
         };
     }
 
     fn install_without_cloud(&self) {
+        self.blob_access.clear_connection();
         *self.state.write().expect("write Store sync connection") = SyncConnection::WithoutCloud;
     }
 
@@ -314,6 +253,7 @@ impl StoreSync {
             SyncConnection::Disconnected,
         );
         let was_connected = !matches!(previous, SyncConnection::Disconnected);
+        self.blob_access.clear_connection();
         if let SyncConnection::WithCloud { sync, .. } = previous {
             sync.stop().map_err(SyncError::Loop)?;
             #[cfg(test)]
@@ -376,26 +316,6 @@ impl StoreSync {
         }
     }
 
-    async fn connected_store(&self) -> Option<Result<Store, SyncError>> {
-        let storage = {
-            let connection = self.state.read().expect("read Store sync connection");
-            match &*connection {
-                SyncConnection::WithCloud { storage, .. } => Some(Arc::clone(storage)),
-                _ => None,
-            }
-        }?;
-        let identity = match self.security.established_identity() {
-            Ok(identity) => identity,
-            Err(error) => return Some(Err(error.into())),
-        };
-        Some(
-            identity
-                .load_store(self.database.clone(), storage, self.store_dir.clone())
-                .await
-                .map_err(SyncError::from),
-        )
-    }
-
     #[cfg(test)]
     fn loop_uses_connected_storage(&self) -> bool {
         let connection = self.state.read().expect("read Store sync connection");
@@ -443,6 +363,28 @@ impl ConnectedSyncOperation {
 
     fn uploader(&self) -> String {
         self.loop_handle.self_uploader()
+    }
+
+    async fn members(
+        &self,
+    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, crate::sync::store::MembershipOpsError>
+    {
+        self.loop_handle.members().await
+    }
+
+    async fn membership_conflict(
+        &self,
+    ) -> Result<Option<crate::MembershipConflictInfo>, crate::sync::store::MembershipOpsError> {
+        self.loop_handle.membership_conflict().await
+    }
+
+    async fn restore_membership(
+        &self,
+    ) -> Result<
+        crate::sync::store::owner::StoreRestoreMembership,
+        crate::sync::store::MembershipOpsError,
+    > {
+        self.loop_handle.restore_membership().await
     }
 
     fn host_write_blob_staging(&self) -> crate::sync::store::HostWriteBlobStaging {
@@ -721,8 +663,11 @@ impl StoreSync {
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
         let storage: Arc<dyn SyncStorage> = storage;
-        let sync = self.build_sync(components, config, storage.clone(), routing_encryption);
-        sync.start().map_err(SyncError::Loop)?;
+        let sync = self.build_sync(components, config, routing_encryption);
+        if let Err(error) = sync.start() {
+            self.blob_access.clear_connection();
+            return Err(SyncError::Loop(error));
+        }
         info!("Sync loop started");
         self.install_cloud(sync, storage, SyncDriver::Loop);
         Ok(())
@@ -760,15 +705,11 @@ impl StoreSync {
         &self,
         components: SyncComponents,
         config: Config,
-        storage: Arc<dyn SyncStorage>,
         routing_encryption: Option<EncryptionService>,
     ) -> Arc<SyncLoopHandle> {
         let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
             self.local_blob_transitions.clone(),
-            RemoteStoreBlobAccess::new(
-                self.local_blob_access.clone(),
-                RemoteBlobSource::current(self.database.clone(), storage),
-            ),
+            self.blob_access.clone(),
             routing_encryption,
             self.observer.clone(),
         );
@@ -853,9 +794,12 @@ impl StoreSync {
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
         let storage: Arc<dyn SyncStorage> = storage;
-        let sync = self.build_sync(components, config, storage.clone(), routing_encryption);
+        let sync = self.build_sync(components, config, routing_encryption);
         if matches!(&driver, SyncDriver::Loop) {
-            sync.start().map_err(SyncError::Loop)?;
+            if let Err(error) = sync.start() {
+                self.blob_access.clear_connection();
+                return Err(SyncError::Loop(error));
+            }
             info!("Sync loop started");
         }
         self.install_cloud(sync, storage, driver);
@@ -1130,9 +1074,12 @@ impl StoreSync {
             .unwrap_or_else(|| self.config())
     }
 
-    async fn load_command_store(&self) -> Result<Store, SyncError> {
-        if let Some(store) = self.connected_store().await {
-            return store;
+    async fn ensure_command_store(&self) -> Result<(), SyncError> {
+        if matches!(
+            &*self.state.read().expect("read Store sync connection"),
+            SyncConnection::WithCloud { .. } | SyncConnection::CommandOnly { .. }
+        ) {
+            return Ok(());
         }
         let config = self.command_config();
         let storage = self
@@ -1146,7 +1093,8 @@ impl StoreSync {
             )
             .await
             .map_err(SyncError::StorageSetup)?;
-        self.security
+        let store = self
+            .security
             .established_identity()?
             .load_store(
                 self.database.clone(),
@@ -1154,37 +1102,56 @@ impl StoreSync {
                 self.store_dir.clone(),
             )
             .await
-            .map_err(SyncError::from)
+            .map_err(SyncError::from)?;
+        *self.state.write().expect("write Store sync connection") = SyncConnection::CommandOnly {
+            store: Arc::new(store),
+        };
+        Ok(())
     }
 
     pub(crate) async fn members(
         &self,
     ) -> Result<Vec<crate::protocol::membership::MemberInfo>, SyncError> {
-        self.load_command_store()
-            .await?
-            .members()
-            .await
-            .map_err(Into::into)
+        let _lifecycle = self.lifecycle.lock().await;
+        self.ensure_command_store().await?;
+        if let Some(connection) = self.connected() {
+            return connection.members().await.map_err(Into::into);
+        }
+        let store = match &*self.state.read().expect("read Store sync connection") {
+            SyncConnection::CommandOnly { store } => Arc::clone(store),
+            _ => return Err(SyncError::NotConfigured),
+        };
+        store.members().await.map_err(Into::into)
     }
 
     pub(crate) async fn membership_conflict(
         &self,
     ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
-        self.load_command_store()
-            .await?
-            .membership_conflict()
-            .await
-            .map_err(Into::into)
+        let _lifecycle = self.lifecycle.lock().await;
+        self.ensure_command_store().await?;
+        if let Some(connection) = self.connected() {
+            return connection.membership_conflict().await.map_err(Into::into);
+        }
+        let store = match &*self.state.read().expect("read Store sync connection") {
+            SyncConnection::CommandOnly { store } => Arc::clone(store),
+            _ => return Err(SyncError::NotConfigured),
+        };
+        store.membership_conflict().await.map_err(Into::into)
     }
 
     pub(crate) async fn restore_membership(
         &self,
     ) -> Result<crate::sync::store::owner::StoreRestoreMembership, SyncError> {
-        self.load_command_store()
-            .await?
-            .restore_membership()
-            .await
-            .map_err(Into::into)
+        let _lifecycle = self.lifecycle.lock().await;
+        self.ensure_command_store().await?;
+        if let Some(connection) = self.connected() {
+            return connection.restore_membership().await.map_err(Into::into);
+        }
+        let store = match &*self.state.read().expect("read Store sync connection") {
+            SyncConnection::CommandOnly { store } => Arc::clone(store),
+            _ => return Err(SyncError::NotConfigured),
+        };
+        store.restore_membership().await.map_err(Into::into)
     }
 
     #[cfg(test)]

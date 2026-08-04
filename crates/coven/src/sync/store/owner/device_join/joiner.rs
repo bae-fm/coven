@@ -291,11 +291,14 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         );
         let keyrings =
             super::super::keyring::StoreKeyrings::new(storage.as_ref(), root.reference().clone());
+        let blob_cache =
+            crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
         let mut history = super::super::AuthorizedStoreHistory::from_pending_device_join(
             PendingDeviceJoinHistoryConstruction,
             database,
             storage,
             store_dir,
+            blob_cache,
             history_verifier,
             blob_source,
             keyrings,

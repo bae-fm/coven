@@ -1,4 +1,4 @@
-use crate::database::{HostWriteError, HostWriteOperation};
+use crate::database::{HostWriteError, HostWriteExecution, HostWriteOperation};
 use crate::{SqlContext, SqlReadContext, WriteBatch, WriteReceipt};
 
 use crate::database::StoreDatabase;
@@ -77,13 +77,8 @@ impl StoreRows {
     {
         let routing_encryption = self.routing_encryption()?;
         let blob_staging = self.host_write_blob_staging();
-        self.database
-            .execute_host_write(
-                operation,
-                self.store_dir.clone(),
-                routing_encryption,
-                blob_staging,
-            )
+        HostWriteExecution::new(&self.database, &self.store_dir)
+            .execute(operation, routing_encryption, blob_staging)
             .await
             .map_err(map_host_write_error)
     }
@@ -229,13 +224,8 @@ impl StoreRows {
             context.execute_batch(&sql)?;
             Ok(())
         });
-        self.database
-            .execute_host_write(
-                operation,
-                self.store_dir.clone(),
-                self.routing_encryption()?,
-                blob_staging,
-            )
+        HostWriteExecution::new(&self.database, &self.store_dir)
+            .execute(operation, self.routing_encryption()?, blob_staging)
             .await
             .map_err(map_host_write_error)
     }

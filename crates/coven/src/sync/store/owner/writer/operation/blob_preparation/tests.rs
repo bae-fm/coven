@@ -199,7 +199,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .expect("read seeded exact spool");
 
     let error = match writer
-        .prepare_partition_blob(&fact, audience, protection, &authority, &store_dir)
+        .prepare_partition_blob(&fact, audience, protection, &authority)
         .await
     {
         Ok(_) => panic!("invalid binding must fail after reusing the exact spool"),
@@ -229,7 +229,6 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
                 .store_blob_protection()
                 .expect("reload Store blob protection"),
             &authority,
-            &store_dir,
         )
         .await
     {

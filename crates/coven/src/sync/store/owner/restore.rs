@@ -1412,7 +1412,6 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(crate) async fn reconcile_snapshot_blobs(
         &self,
-        store_dir: &crate::store_dir::StoreDir,
         cancel: &watch::Receiver<bool>,
     ) -> Result<super::writer::snapshot::SnapshotBlobReconcile, crate::database::DbError> {
         let blobs = self
@@ -1429,15 +1428,13 @@ impl<'storage> RestoringStore<'storage> {
         }
 
         let total = blobs.len();
-        let blob_cache =
-            crate::sync::store::blob::StoreBlobCache::new(self.database.clone(), store_dir.clone());
         let mut all_ok = true;
         for blob in blobs {
             if *cancel.borrow() {
                 info!(total, "snapshot blob reconciliation cancelled");
                 return Ok(super::writer::snapshot::SnapshotBlobReconcile::Cancelled);
             }
-            if self.download_blob(blob, &blob_cache).await.is_err() {
+            if self.download_blob(blob).await.is_err() {
                 all_ok = false;
             }
         }
@@ -1450,16 +1447,12 @@ impl<'storage> RestoringStore<'storage> {
         }
     }
 
-    async fn download_blob(
-        &self,
-        download: BlobDownload,
-        blob_cache: &crate::sync::store::blob::StoreBlobCache,
-    ) -> Result<(), pull::BlobDownloadFailure> {
+    async fn download_blob(&self, download: BlobDownload) -> Result<(), pull::BlobDownloadFailure> {
         let BlobDownload { authority, stored } = download;
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();
         self.history
-            .verify_blob_plaintext(blob_cache, &authority, &stored, true)
+            .verify_blob_plaintext(&authority, &stored, true)
             .await
             .map_err(|cause| {
                 warn!(id, namespace, error = %cause, "failed to verify snapshot blob");

@@ -354,7 +354,7 @@ pub async fn restore_from_cloud(
             .await?;
 
         match store
-            .reconcile_snapshot_blobs(&store_dir, cancel)
+            .reconcile_snapshot_blobs(cancel)
             .await
             .map_err(|error| {
                 BootstrapError::Database(format!("failed to reconcile snapshot blobs: {error}"))

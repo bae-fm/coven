@@ -77,8 +77,10 @@ pub(crate) use candidate_records::CandidateCleanupObject;
 pub(crate) use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
 pub(crate) use host_write_capture::HostWriteBlobTransaction;
+pub(crate) use host_write_operation::HostWriteExecution;
 pub use host_write_operation::WriteBatch;
 pub(crate) use host_write_operation::{HostWriteError, HostWriteOperation};
+pub(crate) use local_blob_cleanup::LocalBlobCleanup;
 pub(crate) use materialization_models::{
     OwnedVerifiedMergeMaterialization, RetainedAudiencePackage, RetainedMergeMaterializationKey,
     RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,

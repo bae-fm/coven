@@ -31,7 +31,6 @@ pub(crate) struct SnapshotCut {
 pub(crate) struct StoreSnapshotCut {
     snapshot: CreatedSnapshot,
     coverage: CommitFrontier,
-    store_dir: crate::store_dir::StoreDir,
 }
 
 impl StoreSnapshotCut {
@@ -48,7 +47,6 @@ impl super::AuthorizedWriterOperation<'_> {
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
-        let store_dir = self.store_dir;
         let keypair = self.writer.identity;
         let resumed = self
             .resume_snapshot_publication()
@@ -134,11 +132,7 @@ impl super::AuthorizedWriterOperation<'_> {
         }
 
         let snapshot = self
-            .capture_snapshot_cut(
-                store_dir.clone(),
-                self.database.synced_tables().to_vec(),
-                routing_encryption,
-            )
+            .capture_snapshot_cut(self.database.synced_tables().to_vec(), routing_encryption)
             .await;
         match snapshot {
             Ok(cut) => {
@@ -185,7 +179,6 @@ impl super::AuthorizedWriterOperation<'_> {
 
     pub(crate) async fn capture_snapshot_cut(
         &self,
-        store_dir: crate::store_dir::StoreDir,
         tables: Vec<crate::sync::session::SyncedTable>,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StoreSnapshotCut, crate::database::DbError> {
@@ -193,16 +186,12 @@ impl super::AuthorizedWriterOperation<'_> {
             .database
             .capture_store_snapshot_cut(
                 self.store_root().clone(),
-                store_dir.as_ref().to_path_buf(),
+                self.store_dir.as_ref().to_path_buf(),
                 tables,
                 routing_encryption.cloned(),
             )
             .await?;
-        Ok(StoreSnapshotCut {
-            snapshot,
-            coverage,
-            store_dir,
-        })
+        Ok(StoreSnapshotCut { snapshot, coverage })
     }
 }
 
@@ -215,7 +204,6 @@ impl super::AuthorizedWriterOperation<'_> {
         self.push_store_snapshot(
             cut.snapshot,
             cut.coverage,
-            &cut.store_dir,
             self.database.schema_version(),
             created_at,
         )
@@ -226,7 +214,6 @@ impl super::AuthorizedWriterOperation<'_> {
         &mut self,
         snapshot: CreatedSnapshot,
         coverage: CommitFrontier,
-        store_dir: &crate::store_dir::StoreDir,
         schema_version: u32,
         created_at: String,
     ) -> Result<SnapshotMeta, SnapshotError> {
@@ -315,7 +302,7 @@ impl super::AuthorizedWriterOperation<'_> {
             generation,
         };
         let (image_bytes, snapshot_blobs) = self
-            .prepare_snapshot_blobs(snapshot, snapshot_owner, store_dir)
+            .prepare_snapshot_blobs(snapshot, snapshot_owner)
             .await?;
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = ProtocolObjectContext::store_encrypted(
@@ -417,7 +404,6 @@ impl super::AuthorizedWriterOperation<'_> {
         &self,
         snapshot: CreatedSnapshot,
         owner: crate::protocol::remote_object::SnapshotObjectOwner,
-        store_dir: &crate::store_dir::StoreDir,
     ) -> Result<(Vec<u8>, Vec<crate::database::PreparedSnapshotBlob>), SnapshotError> {
         let database = &self.database;
         let storage = self.storage.as_ref();
@@ -513,7 +499,6 @@ impl super::AuthorizedWriterOperation<'_> {
                 audience,
                 protection,
                 &authority,
-                store_dir,
             )
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
@@ -566,7 +551,7 @@ impl super::AuthorizedWriterOperation<'_> {
             return Ok((db_image, prepared));
         }
         let image = match crate::database::SnapshotDatabaseImage::replace(
-            store_dir.as_ref().join("snapshot-closure.db"),
+            self.store_dir.as_ref().join("snapshot-closure.db"),
             &db_image,
         )
         .and_then(|image| image.install_blob_graph(&prepared))
@@ -753,8 +738,6 @@ mod tests {
                 .membership_for_test()
                 .await
                 .expect("load exact snapshot selector membership");
-            let snapshot_temp = tempfile::tempdir().expect("snapshot selector source directory");
-            let snapshot_dir = crate::store_dir::StoreDir::new(snapshot_temp.path());
             let published = device
                 .authorize_writer()
                 .await
@@ -762,7 +745,6 @@ mod tests {
                 .push_store_snapshot(
                     snapshot(b"snapshot selector image"),
                     CommitFrontier(BTreeMap::new()),
-                    &snapshot_dir,
                     1,
                     "2026-07-16T00:00:00Z".to_string(),
                 )

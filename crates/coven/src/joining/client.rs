@@ -607,7 +607,7 @@ impl DeviceJoinClient {
             )
             .await?;
         match opened
-            .reconcile_snapshot_blobs(&store_dir, cancel)
+            .reconcile_snapshot_blobs(cancel)
             .await
             .map_err(|error| BootstrapError::Database(error.to_string()))?
         {

@@ -167,7 +167,7 @@ impl CovenHandle {
         let local_blob_access =
             LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), blob_cache.clone());
         let local_blob_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
-        let blob_storage = crate::store_blobs::ReadOnlyBlobStorage::new(
+        let blob_storage = crate::store_blobs::StoreBlobAccess::new(
             database.clone(),
             config_provider.clone(),
             security.clone(),

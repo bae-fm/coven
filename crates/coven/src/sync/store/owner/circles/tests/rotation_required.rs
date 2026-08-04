@@ -1054,10 +1054,8 @@ async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
         .authorize_writer()
         .await
         .expect("authorize the ordinary Store snapshot cut");
-    let (_temp, cut_dir) = temp_store_dir();
     let error = match authorized
         .capture_snapshot_cut(
-            cut_dir,
             fixture.db.synced_tables().to_vec(),
             Some(&EncryptionService::from_key([42; 32])),
         )
@@ -1332,9 +1330,8 @@ impl ActiveMemberCircleSnapshot {
             .authorize_writer()
             .await
             .expect("authorize the Store snapshot");
-        let (_snapshot_temp, snapshot_dir) = temp_store_dir();
         let cut = authorized
-            .capture_snapshot_cut(snapshot_dir, db.synced_tables().to_vec(), Some(&routing))
+            .capture_snapshot_cut(db.synced_tables().to_vec(), Some(&routing))
             .await
             .expect("capture the Store snapshot cut");
         let coverage = cut.coverage().clone();
@@ -1692,9 +1689,8 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .authorize_writer()
         .await
         .expect("authorize the post-close Store snapshot");
-    let (_snapshot_temp, snapshot_dir) = temp_store_dir();
     let cut = authorized
-        .capture_snapshot_cut(snapshot_dir, db.synced_tables().to_vec(), Some(&routing))
+        .capture_snapshot_cut(db.synced_tables().to_vec(), Some(&routing))
         .await
         .expect("capture the post-close Store snapshot cut");
     let coverage = cut.coverage().clone();
@@ -1982,9 +1978,8 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .authorize_writer()
         .await
         .expect("authorize the post-close Store snapshot");
-    let (_snapshot_temp, snapshot_dir) = temp_store_dir();
     let cut = authorized
-        .capture_snapshot_cut(snapshot_dir, db.synced_tables().to_vec(), Some(&routing))
+        .capture_snapshot_cut(db.synced_tables().to_vec(), Some(&routing))
         .await
         .expect("capture the post-close Store snapshot cut");
     let coverage = cut.coverage().clone();

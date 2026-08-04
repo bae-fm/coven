@@ -5678,8 +5678,11 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
 
     let first_db = crate::database::StoreDatabase::new(&target);
     let first_store_dir = store_dir.clone();
-    let first =
-        tokio::spawn(async move { first_db.drain_local_blob_cleanup(&first_store_dir).await });
+    let first = tokio::spawn(async move {
+        crate::database::LocalBlobCleanup::new(&first_db, &first_store_dir)
+            .drain()
+            .await
+    });
     first_reached_filesystem.notified().await;
     assert_eq!(
         points.recv().await,
@@ -5711,8 +5714,11 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
 
     let second_db = crate::database::StoreDatabase::new(&target);
     let second_store_dir = store_dir.clone();
-    let second =
-        tokio::spawn(async move { second_db.drain_local_blob_cleanup(&second_store_dir).await });
+    let second = tokio::spawn(async move {
+        crate::database::LocalBlobCleanup::new(&second_db, &second_store_dir)
+            .drain()
+            .await
+    });
     assert_eq!(
         points.recv().await,
         Some(DatabaseTestPoint::LocalBlobCleanupRequested)
@@ -5746,10 +5752,13 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     store_dir
         .store_local("shared-intent", b"recreated bytes")
         .await;
-    assert!(!crate::database::StoreDatabase::new(&target)
-        .drain_local_blob_cleanup(&store_dir)
-        .await
-        .unwrap());
+    assert!(!crate::database::LocalBlobCleanup::new(
+        &crate::database::StoreDatabase::new(&target),
+        &store_dir,
+    )
+    .drain()
+    .await
+    .unwrap());
     assert!(
         store_dir
             .local_blob_path("photos", "shared-intent")

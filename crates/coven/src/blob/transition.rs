@@ -421,7 +421,7 @@ struct PreparedMakeLocal {
 
 pub(crate) struct ConnectedBlobTransitions {
     local: LocalBlobTransitions,
-    blob_access: crate::sync::store::blob::RemoteStoreBlobAccess,
+    blob_access: crate::store_blobs::StoreBlobAccess,
     routing_encryption: Option<crate::encryption::EncryptionService>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
@@ -429,7 +429,7 @@ pub(crate) struct ConnectedBlobTransitions {
 impl ConnectedBlobTransitions {
     pub(crate) fn new(
         local: LocalBlobTransitions,
-        blob_access: crate::sync::store::blob::RemoteStoreBlobAccess,
+        blob_access: crate::store_blobs::StoreBlobAccess,
         routing_encryption: Option<crate::encryption::EncryptionService>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {

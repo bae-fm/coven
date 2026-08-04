@@ -8,21 +8,34 @@ use crate::storage::cloud::setup::StorageSetupError;
 use crate::storage::BlobChunking;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync};
-use crate::sync::store::blob::{LocalStoreBlobAccess, RemoteBlobSource, RemoteStoreBlobAccess};
+use crate::sync::store::blob::{
+    CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
+};
 use crate::sync::{BlobCacheError, BlobStream};
 
 #[derive(Clone)]
-pub(crate) struct ReadOnlyBlobStorage {
+pub(crate) struct StoreBlobAccess {
     database: StoreDatabase,
-    config_provider: ConfigProvider,
-    security: StoreSecurity,
-    clock: ClockRef,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    blob_chunking: BlobChunking,
     local: LocalStoreBlobAccess,
+    resolver: BlobAccessResolver,
+    resolved: Arc<std::sync::RwLock<ResolvedBlobState>>,
+    resolution: Arc<tokio::sync::Mutex<()>>,
 }
 
-impl ReadOnlyBlobStorage {
+#[derive(Clone)]
+enum BlobAccessResolver {
+    Configured {
+        config_provider: ConfigProvider,
+        security: StoreSecurity,
+        clock: ClockRef,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        blob_chunking: BlobChunking,
+    },
+    #[cfg(test)]
+    Exact,
+}
+
+impl StoreBlobAccess {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         database: StoreDatabase,
@@ -35,39 +48,160 @@ impl ReadOnlyBlobStorage {
     ) -> Self {
         Self {
             database,
-            config_provider,
-            security,
-            clock,
-            cloudkit_ops,
-            blob_chunking,
             local,
+            resolver: BlobAccessResolver::Configured {
+                config_provider,
+                security,
+                clock,
+                cloudkit_ops,
+                blob_chunking,
+            },
+            resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState::new())),
+            resolution: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    fn config(&self) -> Config {
-        (self.config_provider)()
+    #[cfg(test)]
+    pub(crate) fn connected_for_test(
+        database: StoreDatabase,
+        local: LocalStoreBlobAccess,
+        storage: Arc<dyn crate::storage::SyncStorage>,
+    ) -> Self {
+        let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
+            local.clone(),
+            CurrentRemoteBlobSource::current(database.clone(), storage),
+        ));
+        Self {
+            database,
+            local,
+            resolver: BlobAccessResolver::Exact,
+            resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState {
+                generation: 0,
+                connection: Some(ResolvedBlobConnection {
+                    config: None,
+                    access,
+                }),
+            })),
+            resolution: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     async fn resolve(&self) -> Result<ResolvedBlobAccess, StorageSetupError> {
-        let config = self.config();
-        if config.cloud_home.provider.is_none() {
-            return Ok(ResolvedBlobAccess::Local(self.local.clone()));
+        let (config_provider, security, clock, cloudkit_ops, blob_chunking) = match &self.resolver {
+            BlobAccessResolver::Configured {
+                config_provider,
+                security,
+                clock,
+                cloudkit_ops,
+                blob_chunking,
+            } => (
+                config_provider,
+                security,
+                clock,
+                cloudkit_ops,
+                blob_chunking,
+            ),
+            #[cfg(test)]
+            BlobAccessResolver::Exact => {
+                return Ok(self
+                    .resolved
+                    .read()
+                    .expect("read exact Store blob access")
+                    .connection
+                    .as_ref()
+                    .expect("exact Store blob access retains its connection")
+                    .access
+                    .clone());
+            }
+        };
+        loop {
+            let config = config_provider();
+            if let Some(access) = self.cached_access(&config) {
+                return Ok(access);
+            }
+
+            let _resolution = self.resolution.lock().await;
+            let config = config_provider();
+            if let Some(access) = self.cached_access(&config) {
+                return Ok(access);
+            }
+            let generation = self
+                .resolved
+                .read()
+                .expect("read Store blob access")
+                .generation;
+            let access = if config.cloud_home.provider.is_none() {
+                ResolvedBlobAccess::Local(self.local.clone())
+            } else {
+                let storage = security
+                    .create_sync_storage(
+                        &config,
+                        None,
+                        clock.clone(),
+                        cloudkit_ops.clone(),
+                        *blob_chunking,
+                    )
+                    .await?;
+                let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
+                ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
+                    self.local.clone(),
+                    CurrentRemoteBlobSource::current(self.database.clone(), storage),
+                ))
+            };
+            let mut state = self.resolved.write().expect("write Store blob access");
+            if state.generation != generation {
+                if let Some(current) = &state.connection {
+                    return Ok(current.access.clone());
+                }
+                continue;
+            }
+            state.connection = Some(ResolvedBlobConnection {
+                config: Some(config),
+                access: access.clone(),
+            });
+            return Ok(access);
         }
-        let storage = self
-            .security
-            .create_sync_storage(
-                &config,
-                None,
-                self.clock.clone(),
-                self.cloudkit_ops.clone(),
-                self.blob_chunking,
-            )
-            .await?;
-        let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
-        Ok(ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
+    }
+
+    fn cached_access(&self, config: &Config) -> Option<ResolvedBlobAccess> {
+        self.resolved
+            .read()
+            .expect("read Store blob access")
+            .connection
+            .as_ref()
+            .filter(|resolved| resolved.config.as_ref() == Some(config))
+            .map(|resolved| resolved.access.clone())
+    }
+
+    pub(crate) fn install_connected(&self, storage: Arc<dyn crate::storage::SyncStorage>) {
+        let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
             self.local.clone(),
-            RemoteBlobSource::current(self.database.clone(), storage),
-        )))
+            CurrentRemoteBlobSource::current(self.database.clone(), storage),
+        ));
+        let mut state = self.resolved.write().expect("write Store blob access");
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .expect("Store blob connection generation overflow");
+        state.connection = Some(ResolvedBlobConnection {
+            config: match &self.resolver {
+                BlobAccessResolver::Configured {
+                    config_provider, ..
+                } => Some(config_provider()),
+                #[cfg(test)]
+                BlobAccessResolver::Exact => None,
+            },
+            access,
+        });
+    }
+
+    pub(crate) fn clear_connection(&self) {
+        let mut state = self.resolved.write().expect("write Store blob access");
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .expect("Store blob connection generation overflow");
+        state.connection = None;
     }
 
     pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
@@ -92,8 +226,43 @@ impl ReadOnlyBlobStorage {
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         self.local.all_pinned(blobs).await
     }
+
+    pub(crate) async fn stage_verified_local_copy(
+        &self,
+        reference: &RowBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+        match self.resolve().await? {
+            ResolvedBlobAccess::Remote(access) => {
+                access
+                    .stage_verified_local_copy(reference, destination)
+                    .await
+            }
+            ResolvedBlobAccess::Local(_) => Err(BlobCacheError::NoCloudHome),
+        }
+    }
 }
 
+struct ResolvedBlobConnection {
+    config: Option<Config>,
+    access: ResolvedBlobAccess,
+}
+
+struct ResolvedBlobState {
+    generation: u64,
+    connection: Option<ResolvedBlobConnection>,
+}
+
+impl ResolvedBlobState {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            connection: None,
+        }
+    }
+}
+
+#[derive(Clone)]
 enum ResolvedBlobAccess {
     Local(LocalStoreBlobAccess),
     Remote(RemoteStoreBlobAccess),
@@ -280,11 +449,11 @@ impl StoreBlobs {
 #[derive(Clone)]
 pub(crate) struct ReadStoreBlobs {
     database: StoreDatabase,
-    storage: ReadOnlyBlobStorage,
+    storage: StoreBlobAccess,
 }
 
 impl ReadStoreBlobs {
-    pub(crate) fn new(database: StoreDatabase, storage: ReadOnlyBlobStorage) -> Self {
+    pub(crate) fn new(database: StoreDatabase, storage: StoreBlobAccess) -> Self {
         Self { database, storage }
     }
 

@@ -1900,8 +1900,8 @@ mod test_device {
                 )
                 .drain_published_blob_drop_intents(u64::MAX)
                 .await?;
-                self.db
-                    .drain_local_blob_cleanup(store_dir)
+                crate::database::LocalBlobCleanup::new(&self.db, store_dir)
+                    .drain()
                     .await
                     .map_err(|error| error.to_string())?;
             }

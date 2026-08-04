@@ -12,7 +12,6 @@ use crate::protocol::{audience_package, circle, remote_object};
 use crate::storage;
 use crate::storage::StoreObjectError;
 use crate::storage::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
-use crate::store_dir::StoreDir;
 use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
 
 impl AuthorizedWriterOperation<'_> {
@@ -27,7 +26,6 @@ impl AuthorizedWriterOperation<'_> {
         seq: u64,
         partition: AudiencePartition,
         blob_facts: &StoreWriteBlobFacts,
-        store_dir: &StoreDir,
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<PreparedPartitionPackage, StoreError> {
         let database = &self.database;
@@ -94,7 +92,6 @@ impl AuthorizedWriterOperation<'_> {
                     remote_audience.clone(),
                     protection.clone(),
                     &authority,
-                    store_dir,
                 )
                 .await?;
             blob_bindings.push(binding);
@@ -243,7 +240,6 @@ impl AuthorizedWriterOperation<'_> {
         audience: crate::blob::locator::RemoteAudience,
         protection: storage::BlobSpoolProtection,
         authority: &BlobWriteAuthority<'_>,
-        store_dir: &StoreDir,
     ) -> Result<
         (
             audience_package::RowBlobLocatorBinding,
@@ -272,7 +268,9 @@ impl AuthorizedWriterOperation<'_> {
                     fact.table, fact.row_id, fact.column
                 )));
             }
-            let expected_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
+            let expected_path = self
+                .store_dir
+                .outbound_blob_spool_path(locator.locator_hash());
             if spool_path != &expected_path {
                 return Err(StoreError::InvalidOutbound(format!(
                     "audience-move blob {}/{}/{} durable spool has the wrong path",
@@ -313,7 +311,9 @@ impl AuthorizedWriterOperation<'_> {
                 },
             ));
         }
-        let spool_path = store_dir.outbound_blob_spool_path(locator.locator_hash());
+        let spool_path = self
+            .store_dir
+            .outbound_blob_spool_path(locator.locator_hash());
         if let Some(previous) = &fact.previous {
             if previous.stored.locator() == &locator {
                 let binding = audience_package::RowBlobLocatorBinding::new(
@@ -337,7 +337,7 @@ impl AuthorizedWriterOperation<'_> {
         }
         let host_path = match fact.blob.provenance {
             crate::blob::Provenance::HostProvided => Some(
-                store_dir
+                self.store_dir
                     .local_blob_path(&fact.blob.namespace, &fact.blob.id)
                     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             ),
@@ -362,7 +362,7 @@ impl AuthorizedWriterOperation<'_> {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     PartitionBlobSource::temporary(
-                        self.materialize_previous_blob(fact, store_dir, locator.locator_hash())
+                        self.materialize_previous_blob(fact, locator.locator_hash())
                             .await?,
                     )
                 }
@@ -375,7 +375,7 @@ impl AuthorizedWriterOperation<'_> {
             }
         } else {
             PartitionBlobSource::temporary(
-                self.materialize_previous_blob(fact, store_dir, locator.locator_hash())
+                self.materialize_previous_blob(fact, locator.locator_hash())
                     .await?,
             )
         };
@@ -443,7 +443,6 @@ impl AuthorizedWriterOperation<'_> {
     async fn materialize_previous_blob(
         &self,
         fact: &StoreWriteBlobFact,
-        store_dir: &StoreDir,
         destination_locator: ObjectHash,
     ) -> Result<std::path::PathBuf, StoreError> {
         let previous = fact
@@ -454,7 +453,8 @@ impl AuthorizedWriterOperation<'_> {
                 id: fact.blob.id.clone(),
             })?;
         let authority = crate::blob::RowBlobAuthority::Remote(previous.authority.clone());
-        let destination = store_dir
+        let destination = self
+            .store_dir
             .storage_dir()
             .join("outbound-blobs")
             .join(format!(".plaintext-{destination_locator}"));

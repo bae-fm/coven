@@ -438,6 +438,25 @@ impl SyncLoopHandle {
         self.inner.components.discard_blocked_write(write_id).await
     }
 
+    pub(crate) async fn members(
+        &self,
+    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, super::store::MembershipOpsError>
+    {
+        self.inner.components.members().await
+    }
+
+    pub(crate) async fn membership_conflict(
+        &self,
+    ) -> Result<Option<crate::MembershipConflictInfo>, super::store::MembershipOpsError> {
+        self.inner.components.membership_conflict().await
+    }
+
+    pub(crate) async fn restore_membership(
+        &self,
+    ) -> Result<super::store::owner::StoreRestoreMembership, super::store::MembershipOpsError> {
+        self.inner.components.restore_membership().await
+    }
+
     pub(crate) fn host_write_blob_staging(
         &self,
         runtime: tokio::runtime::Handle,

@@ -170,8 +170,8 @@ impl<'storage> PullPackageMaterializer<'storage> {
     }
 
     pub(super) async fn finish_cleanup(&self) -> Result<bool, crate::database::DbError> {
-        self.database
-            .drain_local_blob_cleanup(&self.store_dir)
+        crate::database::LocalBlobCleanup::new(&self.database, &self.store_dir)
+            .drain()
             .await
     }
 }

@@ -23,7 +23,6 @@ struct LocalBlobDropRequest {
 
 impl AuthorizedWriterOperation<'_> {
     pub(super) async fn prepare_store_write(&mut self) -> Result<bool, StoreError> {
-        let store_dir = self.store_dir;
         let database = self.database.clone();
         let Some(pending) = database.prepare_store_write().await? else {
             return Ok(false);
@@ -79,7 +78,8 @@ impl AuthorizedWriterOperation<'_> {
                 {
                     continue;
                 }
-                let present = store_dir
+                let present = self
+                    .store_dir
                     .local_blob_path_if_present(
                         &fact.blob.namespace,
                         &fact.blob.id,
@@ -143,7 +143,6 @@ impl AuthorizedWriterOperation<'_> {
                         seq,
                         partition,
                         &blob_facts,
-                        store_dir,
                         &active_store_members,
                     )
                     .await?,
@@ -160,7 +159,6 @@ impl AuthorizedWriterOperation<'_> {
                         seq,
                         partition,
                         &blob_facts,
-                        store_dir,
                         &active_store_members,
                     )
                     .await?,

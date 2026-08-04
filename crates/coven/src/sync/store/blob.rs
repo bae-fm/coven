@@ -437,23 +437,57 @@ enum RemoteBlobRoot {
 }
 
 #[derive(Clone)]
-pub(crate) struct RemoteBlobSource<'storage> {
+struct RemoteBlobSourceInner<'storage> {
     database: StoreDatabase,
     storage: RemoteBlobStorage<'storage>,
     root: RemoteBlobRoot,
 }
 
-impl RemoteBlobSource<'static> {
+#[derive(Clone)]
+pub(crate) struct CurrentRemoteBlobSource {
+    inner: RemoteBlobSourceInner<'static>,
+}
+
+impl CurrentRemoteBlobSource {
     pub(crate) fn current(
         database: StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
     ) -> Self {
         Self {
-            database,
-            storage: RemoteBlobStorage::Shared(storage),
-            root: RemoteBlobRoot::Current,
+            inner: RemoteBlobSourceInner {
+                database,
+                storage: RemoteBlobStorage::Shared(storage),
+                root: RemoteBlobRoot::Current,
+            },
         }
     }
+
+    async fn validate(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError> {
+        self.inner.validate(reference).await
+    }
+
+    async fn access(
+        &self,
+        reference: &RowBlobRef,
+    ) -> Result<ExactRemoteBlobAccess<'_>, BlobCacheError> {
+        self.inner.access(reference).await
+    }
+
+    async fn stage_verified_plaintext(
+        &self,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+        self.inner
+            .stage_verified_plaintext(authority, stored, destination)
+            .await
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RemoteBlobSource<'storage> {
+    inner: RemoteBlobSourceInner<'storage>,
 }
 
 impl<'storage> RemoteBlobSource<'storage> {
@@ -463,12 +497,64 @@ impl<'storage> RemoteBlobSource<'storage> {
         root: StoreRootRef,
     ) -> Self {
         Self {
-            database,
-            storage: RemoteBlobStorage::Borrowed(storage),
-            root: RemoteBlobRoot::Exact(root),
+            inner: RemoteBlobSourceInner {
+                database,
+                storage: RemoteBlobStorage::Borrowed(storage),
+                root: RemoteBlobRoot::Exact(root),
+            },
         }
     }
 
+    pub(super) fn store_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
+        self.inner.store_protection()
+    }
+
+    pub(super) async fn stage_verified_plaintext(
+        &self,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+        self.inner
+            .stage_verified_plaintext(authority, stored, destination)
+            .await
+    }
+
+    pub(super) async fn verify_plaintext(
+        &self,
+        cache: &StoreBlobCache,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+        retain: bool,
+    ) -> Result<(), BlobDownloadFailureCause> {
+        self.inner
+            .verify_plaintext(cache, authority, stored, retain)
+            .await
+    }
+
+    pub(super) async fn verify_plaintext_with_protection(
+        &self,
+        cache_owner: &StoreBlobCache,
+        stored: &crate::blob::locator::StoredBlobRef,
+        protection: BlobSpoolProtection,
+        retain: bool,
+    ) -> Result<(), BlobDownloadFailureCause> {
+        self.inner
+            .verify_plaintext_with_protection(cache_owner, stored, protection, retain)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn protection_for_test(
+        &self,
+        authority: &RowBlobAuthority,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<BlobSpoolProtection, BlobCacheError> {
+        self.inner.protection(authority, stored).await
+    }
+}
+
+impl RemoteBlobSourceInner<'_> {
     async fn exact_root(&self) -> Result<StoreRootRef, BlobCacheError> {
         match &self.root {
             RemoteBlobRoot::Exact(root) => Ok(root.clone()),
@@ -567,15 +653,6 @@ impl<'storage> RemoteBlobSource<'storage> {
             .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn protection_for_test(
-        &self,
-        authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<BlobSpoolProtection, BlobCacheError> {
-        self.protection(authority, stored).await
-    }
-
     async fn access(
         &self,
         reference: &RowBlobRef,
@@ -596,11 +673,11 @@ impl<'storage> RemoteBlobSource<'storage> {
 #[derive(Clone)]
 pub(crate) struct RemoteStoreBlobAccess {
     local: LocalStoreBlobAccess,
-    remote: RemoteBlobSource<'static>,
+    remote: CurrentRemoteBlobSource,
 }
 
 impl RemoteStoreBlobAccess {
-    pub(crate) fn new(local: LocalStoreBlobAccess, remote: RemoteBlobSource<'static>) -> Self {
+    pub(crate) fn new(local: LocalStoreBlobAccess, remote: CurrentRemoteBlobSource) -> Self {
         Self { remote, local }
     }
 
@@ -922,7 +999,7 @@ impl StoreBlobCache {
 
     pub(crate) async fn pin(
         &self,
-        remote: Option<&RemoteBlobSource<'_>>,
+        remote: Option<&CurrentRemoteBlobSource>,
         blobs: &[RowBlobRef],
     ) -> Result<(), BlobCacheError> {
         let limit = self.database.transfer_limits().downloads.get();
@@ -935,7 +1012,7 @@ impl StoreBlobCache {
 
     async fn pin_one(
         &self,
-        remote: Option<&RemoteBlobSource<'_>>,
+        remote: Option<&CurrentRemoteBlobSource>,
         reference: &RowBlobRef,
     ) -> Result<(), BlobCacheError> {
         self.database.validate_row_blob_ref(reference).await?;

@@ -130,7 +130,7 @@ fn store_sync(
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     let security = store_security(keys, master_keys, identity);
     let clock: ClockRef = Arc::new(SystemClock);
-    let blob_storage = crate::store_blobs::ReadOnlyBlobStorage::new(
+    let blob_storage = crate::store_blobs::StoreBlobAccess::new(
         database.clone(),
         config_provider.clone(),
         security.clone(),
@@ -198,7 +198,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let clock: ClockRef = Arc::new(SystemClock);
-    let blob_storage = crate::store_blobs::ReadOnlyBlobStorage::new(
+    let blob_storage = crate::store_blobs::StoreBlobAccess::new(
         database.clone(),
         config_provider.clone(),
         security.clone(),

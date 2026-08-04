@@ -281,7 +281,6 @@ impl CycleTestStoreOps for TestStore {
             .authorize_writer()
             .await
             .expect("authorize snapshot fixture writer");
-        let (_snapshot_temp, snapshot_dir) = temp_store_dir();
         writer
             .push_store_snapshot(
                 crate::database::CreatedSnapshot {
@@ -289,7 +288,6 @@ impl CycleTestStoreOps for TestStore {
                     blobs: Vec::new(),
                 },
                 crate::protocol::store_commit::CommitFrontier(BTreeMap::new()),
-                &snapshot_dir,
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -1446,7 +1444,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     assert_eq!(
         restored
-            .reconcile_snapshot_blobs(&restore_dir, &cancel_rx)
+            .reconcile_snapshot_blobs(&cancel_rx)
             .await
             .expect("reconcile restored snapshot blob"),
         crate::sync::store::SnapshotBlobReconcile::Complete,
@@ -3921,7 +3919,6 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                     (local_stream, local_at_snapshot),
                     (peer_stream, peer_at_snapshot),
                 ])),
-                &peer_store_dir,
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -4019,7 +4016,6 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .authorize_writer()
             .await
             .expect("authorize timed snapshot writer");
-        let (_temp, store_dir) = temp_store_dir();
         snapshot_writer
             .push_store_snapshot(
                 crate::database::CreatedSnapshot {
@@ -4030,7 +4026,6 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
                     at_snapshot.coord.stream_id,
                     at_snapshot,
                 )])),
-                &store_dir,
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -4044,6 +4039,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
         let now = chrono::DateTime::parse_from_rfc3339("2024-01-02T01:00:00Z")
             .expect("parse timed snapshot clock")
             .with_timezone(&chrono::Utc);
+        let (_temp, store_dir) = temp_store_dir();
         snapshot_device
             .run_cycle_with(&FixedClock(now), None, &store_dir, None)
             .await

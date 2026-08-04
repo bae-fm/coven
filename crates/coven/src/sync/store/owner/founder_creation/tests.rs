@@ -75,6 +75,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             store_database(&db),
             storage.clone(),
             &store_dir,
+            crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
             timestamp,
             &founder,
         )
@@ -151,6 +152,7 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
         store_database(&db),
         storage.clone(),
         &store_dir,
+        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
     )
@@ -201,6 +203,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
         store_database(&db),
         storage.clone(),
         &store_dir,
+        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
     )
@@ -279,6 +282,7 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
         store_database(&db),
         storage,
         &store_dir,
+        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
     )

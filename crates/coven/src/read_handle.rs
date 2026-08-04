@@ -29,7 +29,7 @@ use crate::database::StoreDatabase;
 use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::read_store_rows::ReadStoreRows;
-use crate::store_blobs::{ReadOnlyBlobStorage, ReadStoreBlobs};
+use crate::store_blobs::{ReadStoreBlobs, StoreBlobAccess};
 use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
@@ -84,7 +84,7 @@ impl CovenReadHandle {
         let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
         let local_blob_access =
             LocalStoreBlobAccess::new(database.clone(), store_dir, blob_cache.clone());
-        let blob_storage = ReadOnlyBlobStorage::new(
+        let blob_storage = StoreBlobAccess::new(
             database.clone(),
             config_provider,
             security.clone(),
