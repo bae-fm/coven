@@ -281,6 +281,7 @@ impl CycleTestStoreOps for TestStore {
             .authorize_writer()
             .await
             .expect("authorize snapshot fixture writer");
+        let (_snapshot_temp, snapshot_dir) = temp_store_dir();
         writer
             .push_store_snapshot(
                 crate::database::CreatedSnapshot {
@@ -288,6 +289,7 @@ impl CycleTestStoreOps for TestStore {
                     blobs: Vec::new(),
                 },
                 crate::protocol::store_commit::CommitFrontier(BTreeMap::new()),
+                &snapshot_dir,
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -3909,6 +3911,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                     (local_stream, local_at_snapshot),
                     (peer_stream, peer_at_snapshot),
                 ])),
+                &peer_store_dir,
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -4006,6 +4009,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .authorize_writer()
             .await
             .expect("authorize timed snapshot writer");
+        let (_temp, store_dir) = temp_store_dir();
         snapshot_writer
             .push_store_snapshot(
                 crate::database::CreatedSnapshot {
@@ -4016,6 +4020,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
                     at_snapshot.coord.stream_id,
                     at_snapshot,
                 )])),
+                &store_dir,
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -4026,7 +4031,6 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .await
             .expect("publish one Store commit after snapshot");
 
-        let (_temp, store_dir) = temp_store_dir();
         let now = chrono::DateTime::parse_from_rfc3339("2024-01-02T01:00:00Z")
             .expect("parse timed snapshot clock")
             .with_timezone(&chrono::Utc);

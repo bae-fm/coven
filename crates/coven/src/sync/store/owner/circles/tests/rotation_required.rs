@@ -1071,7 +1071,7 @@ async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
     let (_temp, cut_dir) = temp_store_dir();
     let error = match authorized
         .capture_snapshot_cut(
-            cut_dir.as_ref().to_path_buf(),
+            cut_dir,
             fixture.db.synced_tables().to_vec(),
             Some(&EncryptionService::from_key([42; 32])),
         )
@@ -1351,14 +1351,10 @@ impl ActiveMemberCircleSnapshot {
             .expect("authorize the Store snapshot");
         let (_snapshot_temp, snapshot_dir) = temp_store_dir();
         let cut = authorized
-            .capture_snapshot_cut(
-                snapshot_dir.as_ref().to_path_buf(),
-                db.synced_tables().to_vec(),
-                Some(&routing),
-            )
+            .capture_snapshot_cut(snapshot_dir, db.synced_tables().to_vec(), Some(&routing))
             .await
             .expect("capture the Store snapshot cut");
-        let coverage = cut.coverage.clone();
+        let coverage = cut.coverage().clone();
         authorized
             .push_snapshot_cut(cut, "2026-07-24T01:00:00Z".to_string())
             .await
@@ -1713,14 +1709,10 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .expect("authorize the post-close Store snapshot");
     let (_snapshot_temp, snapshot_dir) = temp_store_dir();
     let cut = authorized
-        .capture_snapshot_cut(
-            snapshot_dir.as_ref().to_path_buf(),
-            db.synced_tables().to_vec(),
-            Some(&routing),
-        )
+        .capture_snapshot_cut(snapshot_dir, db.synced_tables().to_vec(), Some(&routing))
         .await
         .expect("capture the post-close Store snapshot cut");
-    let coverage = cut.coverage.clone();
+    let coverage = cut.coverage().clone();
     authorized
         .push_snapshot_cut(cut, "2026-07-24T01:00:00Z".to_string())
         .await
@@ -2008,14 +2000,10 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .expect("authorize the post-close Store snapshot");
     let (_snapshot_temp, snapshot_dir) = temp_store_dir();
     let cut = authorized
-        .capture_snapshot_cut(
-            snapshot_dir.as_ref().to_path_buf(),
-            db.synced_tables().to_vec(),
-            Some(&routing),
-        )
+        .capture_snapshot_cut(snapshot_dir, db.synced_tables().to_vec(), Some(&routing))
         .await
         .expect("capture the post-close Store snapshot cut");
-    let coverage = cut.coverage.clone();
+    let coverage = cut.coverage().clone();
     authorized
         .push_snapshot_cut(cut, "2026-07-24T02:00:01Z".to_string())
         .await

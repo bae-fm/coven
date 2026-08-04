@@ -17,7 +17,6 @@ pub(crate) struct CreatedSnapshot {
 pub(crate) struct SnapshotBlobFact {
     pub(crate) fact: crate::database::StoreWriteBlobFact,
     pub(crate) audience: SnapshotBlobAudience,
-    pub(crate) store_dir: crate::store_dir::StoreDir,
 }
 
 #[derive(Debug, Clone)]
@@ -104,17 +103,14 @@ impl SnapshotDatabaseImage {
         Self::prepare(path)?.write_new(plaintext)
     }
 
-    fn prepare_snapshot(
-        store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<Self, SnapshotImageError> {
-        Self::prepare(store_dir.as_ref().join("snapshot.db"))
+    fn prepare_snapshot(temp_dir: &Path) -> Result<Self, SnapshotImageError> {
+        Self::prepare(temp_dir.join("snapshot.db"))
     }
 
     fn capture(
         self,
         connection: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
-        store_dir: &crate::store_dir::StoreDir,
         tables: &[SyncedTable],
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         audience: &crate::protocol::circle::Audience,
@@ -159,7 +155,7 @@ impl SnapshotDatabaseImage {
         if let Err(error) = self.project(root, tables, routing_key.as_ref(), audience) {
             return self.finish(Err(error));
         }
-        let blobs = match self.blob_facts(connection, store_dir, tables) {
+        let blobs = match self.blob_facts(connection, tables) {
             Ok(blobs) => blobs,
             Err(error) => return self.finish(Err(error)),
         };
@@ -475,7 +471,6 @@ impl SnapshotDatabaseImage {
     fn blob_facts(
         &self,
         live: &Connection,
-        store_dir: &crate::store_dir::StoreDir,
         tables: &[SyncedTable],
     ) -> Result<Vec<SnapshotBlobFact>, SnapshotImageError> {
         let snapshot = Connection::open(&self.path).map_err(|error| {
@@ -566,7 +561,6 @@ impl SnapshotDatabaseImage {
                     audience_move: None,
                 },
                 audience,
-                store_dir: store_dir.clone(),
             });
         }
         Ok(facts)
@@ -614,13 +608,11 @@ impl StoreDatabase {
         let tables = self.synced_tables().to_vec();
         self.connection
             .call(move |connection| {
-                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
-                SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
                     .and_then(|image| {
                         image.capture(
                             connection,
                             &root,
-                            &store_dir,
                             &tables,
                             routing_encryption.as_ref(),
                             &crate::protocol::circle::Audience::Store,
@@ -643,13 +635,11 @@ impl StoreDatabase {
         let tables = self.synced_tables().to_vec();
         self.connection
             .call(move |connection| {
-                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
-                SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
                     .and_then(|image| {
                         image.capture(
                             connection,
                             &root,
-                            &store_dir,
                             &tables,
                             Some(&routing_encryption),
                             &crate::protocol::circle::Audience::Circle(circle_id),
@@ -677,13 +667,11 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 require_no_unpublished_store_writes(connection)?;
-                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
-                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
                     .and_then(|image| {
                         image.capture(
                             connection,
                             &root,
-                            &store_dir,
                             &tables,
                             routing_encryption.as_ref(),
                             &crate::protocol::circle::Audience::Store,
@@ -716,13 +704,11 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 require_no_unpublished_store_writes(connection)?;
-                let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
-                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
                     .and_then(|image| {
                         image.capture(
                             connection,
                             &root,
-                            &store_dir,
                             &tables,
                             Some(&routing_encryption),
                             &crate::protocol::circle::Audience::Circle(circle_id),
@@ -775,13 +761,11 @@ impl StoreDatabase {
                     "Circle close cutoff is not an exact retained Store frontier".to_string(),
                 ));
             }
-            let store_dir = crate::store_dir::StoreDir::new(&temp_dir);
-            SnapshotDatabaseImage::prepare_snapshot(&store_dir)
+            SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
                 .and_then(|image| {
                     image.capture(
                         &replay,
                         &root,
-                        &store_dir,
                         &tables,
                         Some(&routing_encryption),
                         &crate::protocol::circle::Audience::Circle(circle_id),

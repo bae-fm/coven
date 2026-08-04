@@ -1312,6 +1312,8 @@ impl Store {
         coverage: crate::protocol::store_commit::CommitFrontier,
         created_at: String,
     ) -> Result<crate::protocol::store_commit::SnapshotMeta, writer::snapshot::SnapshotError> {
+        let temp_dir = tempfile::tempdir().map_err(writer::snapshot::SnapshotError::Io)?;
+        let store_dir = crate::store_dir::StoreDir::new(temp_dir.path());
         let mut writer = self.authorize_writer().await.map_err(|error| {
             writer::snapshot::SnapshotError::PublicationState(error.to_string())
         })?;
@@ -1319,6 +1321,7 @@ impl Store {
             .push_store_snapshot(
                 snapshot,
                 coverage,
+                &store_dir,
                 self.database.schema_version(),
                 created_at,
             )
