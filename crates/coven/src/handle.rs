@@ -44,6 +44,7 @@ use crate::storage::CloudCipher;
 use crate::storage::StorageError;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
+use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_dir::StoreDir;
 use crate::store_joining::StoreJoining;
 use crate::store_membership::StoreMembership;
@@ -161,7 +162,13 @@ impl CovenHandle {
             key_service.clone(),
             key_custody.clone(),
             identity_custody.clone(),
+        );
+        let cloud_storage = StoreCloudStorage::new(
+            security.clone(),
             cloud_homes,
+            clock.clone(),
+            cloudkit_ops.clone(),
+            blob_chunking,
         );
         let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
         let local_blob_access =
@@ -170,10 +177,7 @@ impl CovenHandle {
         let blob_storage = crate::store_blobs::StoreBlobAccess::new(
             database.clone(),
             config_provider.clone(),
-            security.clone(),
-            clock.clone(),
-            cloudkit_ops.clone(),
-            blob_chunking,
+            cloud_storage.clone(),
             local_blob_access.clone(),
         );
         let sync = StoreSync::new(
@@ -182,10 +186,9 @@ impl CovenHandle {
             database.clone(),
             store_dir.clone(),
             clock,
-            cloudkit_ops,
             observer,
             open_guard,
-            blob_chunking,
+            cloud_storage,
             local_blob_access.clone(),
             blob_storage,
             local_blob_transitions,

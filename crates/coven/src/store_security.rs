@@ -65,7 +65,6 @@ pub(crate) struct StoreSecurity {
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
-    cloud_homes: crate::storage::cloud::CloudHomeFactory,
 }
 
 impl StoreSecurity {
@@ -73,13 +72,11 @@ impl StoreSecurity {
         keys: StoreKeys,
         master_keys: Arc<dyn MasterKeyCustody>,
         identity: Arc<dyn DeviceIdentityCustody>,
-        cloud_homes: crate::storage::cloud::CloudHomeFactory,
     ) -> Self {
         Self {
             keys,
             master_keys,
             identity,
-            cloud_homes,
         }
     }
 
@@ -195,24 +192,7 @@ impl StoreSecurity {
             .ok_or(crate::store_sync::SyncError::MasterKeyNotEstablished)
     }
 
-    pub(crate) async fn create_sync_storage(
-        &self,
-        config: &Config,
-        cipher: Option<CloudCipher>,
-        clock: crate::clock::ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: BlobChunking,
-    ) -> Result<CloudSyncStorage, crate::storage::cloud::setup::StorageSetupError> {
-        let cipher = match cipher {
-            Some(cipher) => cipher,
-            None => self.cloud_cipher(config)?,
-        };
-        crate::storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
-        let home = self.cloud_homes.create(config, clock, cloudkit_ops).await?;
-        self.create_sync_storage_with_home(config, Arc::from(home), Some(cipher), blob_chunking)
-    }
-
-    pub(crate) fn create_sync_storage_with_home(
+    pub(crate) fn open_cloud_storage(
         &self,
         config: &Config,
         home: Arc<dyn CloudHome>,
@@ -223,10 +203,6 @@ impl StoreSecurity {
             Some(cipher) => cipher,
             None => self.cloud_cipher(config)?,
         };
-        crate::storage::cloud::setup::require_exact_slot_capabilities_home(
-            home.clone(),
-            config.cloud_home.provider.clone(),
-        )?;
         let identity = self.established_identity()?;
         Ok(CloudSyncStorage::new(
             home,

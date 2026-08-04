@@ -28,10 +28,12 @@ const CAPABILITY_TYPES: &[&str] = &[
 // let callers combine state from different stores.
 const CONSTRUCTION_ONLY_CAPABILITY_TYPES: &[&str] = &["StoreDir"];
 
-// These are configuration, value, and transfer objects which happen to name a
-// retained capability in their fields. They carry state between operations;
-// they do not own the capability's lifetime.
+// These are configuration, value, transfer, and proof objects which happen to
+// name a retained capability in their fields. They carry state between
+// operations; they do not own the capability's lifetime.
 const NON_OWNER_TYPES: &[&str] = &[
+    "AdmittedStoreCloudConfig",
+    "AdmittedStoreCloudHome",
     "BlobSpoolProtection",
     "CircleAckPublicationInput",
     "Config",
@@ -1847,6 +1849,8 @@ mod tests {
         );
         assert!(CAPABILITY_TYPES.contains(&"CirclePackageAccess"));
         for value in [
+            "AdmittedStoreCloudConfig",
+            "AdmittedStoreCloudHome",
             "BlobSpoolProtection",
             "CircleAckPublicationInput",
             "InitializedStore",

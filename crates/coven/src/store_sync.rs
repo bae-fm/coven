@@ -17,7 +17,10 @@ use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::storage::cloud::CloudHomeError;
-use crate::storage::{BlobChunking, BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
+#[cfg(test)]
+use crate::storage::BlobChunking;
+use crate::storage::{BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
+use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_security::StoreSecurity;
 use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::store::blob::LocalStoreBlobAccess;
@@ -127,10 +130,9 @@ pub(crate) struct StoreSync {
     database: StoreDatabase,
     store_dir: crate::store_dir::StoreDir,
     clock: ClockRef,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
     open_guard: Arc<StoreOpenGuard>,
-    blob_chunking: BlobChunking,
+    cloud_storage: StoreCloudStorage,
     local_blob_access: LocalStoreBlobAccess,
     blob_access: crate::store_blobs::StoreBlobAccess,
     local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
@@ -142,6 +144,13 @@ pub(crate) struct StoreSync {
 }
 
 impl StoreSync {
+    fn map_storage_setup_error(error: StorageSetupError) -> SyncError {
+        match error {
+            StorageSetupError::Key(error) => SyncError::Key(error),
+            error => SyncError::StorageSetup(error),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config_provider: ConfigProvider,
@@ -149,10 +158,9 @@ impl StoreSync {
         database: StoreDatabase,
         store_dir: crate::store_dir::StoreDir,
         clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
-        blob_chunking: BlobChunking,
+        cloud_storage: StoreCloudStorage,
         local_blob_access: LocalStoreBlobAccess,
         blob_access: crate::store_blobs::StoreBlobAccess,
         local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
@@ -163,10 +171,9 @@ impl StoreSync {
             database,
             store_dir,
             clock,
-            cloudkit_ops,
             observer,
             open_guard,
-            blob_chunking,
+            cloud_storage,
             local_blob_access,
             blob_access,
             local_blob_transitions,
@@ -626,39 +633,17 @@ impl StoreSync {
     async fn build_connection(
         &self,
         config: Config,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        storage: Option<Arc<CloudSyncStorage>>,
     ) -> Result<(), SyncError> {
-        if config.cloud_home.provider.is_none() {
+        let Some(storage) = storage else {
             self.install_without_cloud();
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
-        }
+        };
 
-        crate::storage::cloud::setup::require_exact_slot_capabilities_config(&config)
-            .map_err(SyncError::StorageSetup)?;
         let routing_encryption = self
             .security
             .routing_encryption(self.database.has_scoped_graph())?;
-        let cipher = self
-            .security
-            .resolve_cloud_cipher(config.cloud_home.storage)?;
-        let storage = Arc::new(
-            self.security
-                .create_sync_storage(
-                    &config,
-                    Some(cipher),
-                    self.clock.clone(),
-                    cloudkit_ops,
-                    self.blob_chunking,
-                )
-                .await
-                .map_err(|error| match error {
-                    crate::storage::cloud::setup::StorageSetupError::Key(error) => {
-                        SyncError::Key(error)
-                    }
-                    error => SyncError::StorageSetup(error),
-                })?,
-        );
         let components = self
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
@@ -730,17 +715,31 @@ impl StoreSync {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<(), SyncError> {
         let config = self.config();
-        if config.cloud_home.provider.is_some() {
-            crate::storage::cloud::setup::require_exact_slot_capabilities_config(&config)
-                .map_err(SyncError::StorageSetup)?;
-        }
-        self.stop_current()?;
-        self.build_connection(config, cloudkit_ops).await
+        let storage = if config.cloud_home.provider.is_some() {
+            let admitted = self
+                .cloud_storage
+                .admit(&config, cloudkit_ops)
+                .map_err(Self::map_storage_setup_error)?;
+            let cipher = self
+                .security
+                .resolve_cloud_cipher(config.cloud_home.storage)?;
+            self.stop_current()?;
+            Some(Arc::new(
+                admitted
+                    .open(Some(cipher))
+                    .await
+                    .map_err(Self::map_storage_setup_error)?,
+            ))
+        } else {
+            self.stop_current()?;
+            None
+        };
+        self.build_connection(config, storage).await
     }
 
     pub(crate) async fn connect(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.replace_connection(self.cloudkit_ops.clone()).await?;
+        self.replace_connection(None).await?;
         info!("store sync connected");
         Ok(())
     }
@@ -766,30 +765,19 @@ impl StoreSync {
         driver: SyncDriver,
     ) -> Result<(), SyncError> {
         let config = self.config();
-        crate::storage::cloud::setup::require_exact_slot_capabilities_home(
-            home.clone(),
-            config.cloud_home.provider.clone(),
-        )
-        .map_err(SyncError::StorageSetup)?;
+        let admitted = self
+            .cloud_storage
+            .admit_home(&config, home)
+            .map_err(Self::map_storage_setup_error)?;
         self.stop_current()?;
+        let storage = Arc::new(
+            admitted
+                .open(Some(cipher))
+                .map_err(Self::map_storage_setup_error)?,
+        );
         let routing_encryption = self
             .security
             .routing_encryption(self.database.has_scoped_graph())?;
-        let storage = Arc::new(
-            self.security
-                .create_sync_storage_with_home(
-                    &config,
-                    home.clone(),
-                    Some(cipher),
-                    self.blob_chunking,
-                )
-                .map_err(|error| match error {
-                    crate::storage::cloud::setup::StorageSetupError::Key(error) => {
-                        SyncError::Key(error)
-                    }
-                    error => SyncError::StorageSetup(error),
-                })?,
-        );
         let components = self
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
@@ -855,7 +843,7 @@ impl StoreSync {
             debug!("start_sync: no provider connected; nothing to start");
             return Ok(());
         }
-        self.replace_connection(self.cloudkit_ops.clone()).await
+        self.replace_connection(None).await
     }
 
     pub(crate) fn stop(&self) {
@@ -1083,14 +1071,8 @@ impl StoreSync {
         }
         let config = self.command_config();
         let storage = self
-            .security
-            .create_sync_storage(
-                &config,
-                None,
-                self.clock.clone(),
-                self.cloudkit_ops.clone(),
-                self.blob_chunking,
-            )
+            .cloud_storage
+            .open(&config, None, None)
             .await
             .map_err(SyncError::StorageSetup)?;
         let store = self

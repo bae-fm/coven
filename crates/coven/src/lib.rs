@@ -34,6 +34,7 @@ pub(crate) mod restoration;
 pub(crate) mod storage;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
+pub(crate) mod store_cloud_storage;
 pub(crate) mod store_dir;
 pub(crate) mod store_joining;
 pub(crate) mod store_membership;

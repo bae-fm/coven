@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
 use crate::blob::RowBlobRef;
-use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::StoreDatabase;
 use crate::storage::cloud::setup::StorageSetupError;
-use crate::storage::BlobChunking;
-use crate::store_security::StoreSecurity;
+use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::{ConfigProvider, StoreSync};
 use crate::sync::store::blob::{
     CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
@@ -26,10 +24,7 @@ pub(crate) struct StoreBlobAccess {
 enum BlobAccessResolver {
     Configured {
         config_provider: ConfigProvider,
-        security: StoreSecurity,
-        clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: BlobChunking,
+        cloud_storage: StoreCloudStorage,
     },
     #[cfg(test)]
     Exact,
@@ -40,10 +35,7 @@ impl StoreBlobAccess {
     pub(crate) fn new(
         database: StoreDatabase,
         config_provider: ConfigProvider,
-        security: StoreSecurity,
-        clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: BlobChunking,
+        cloud_storage: StoreCloudStorage,
         local: LocalStoreBlobAccess,
     ) -> Self {
         Self {
@@ -51,10 +43,7 @@ impl StoreBlobAccess {
             local,
             resolver: BlobAccessResolver::Configured {
                 config_provider,
-                security,
-                clock,
-                cloudkit_ops,
-                blob_chunking,
+                cloud_storage,
             },
             resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState::new())),
             resolution: Arc::new(tokio::sync::Mutex::new(())),
@@ -87,20 +76,11 @@ impl StoreBlobAccess {
     }
 
     async fn resolve(&self) -> Result<ResolvedBlobAccess, StorageSetupError> {
-        let (config_provider, security, clock, cloudkit_ops, blob_chunking) = match &self.resolver {
+        let (config_provider, cloud_storage) = match &self.resolver {
             BlobAccessResolver::Configured {
                 config_provider,
-                security,
-                clock,
-                cloudkit_ops,
-                blob_chunking,
-            } => (
-                config_provider,
-                security,
-                clock,
-                cloudkit_ops,
-                blob_chunking,
-            ),
+                cloud_storage,
+            } => (config_provider, cloud_storage),
             #[cfg(test)]
             BlobAccessResolver::Exact => {
                 return Ok(self
@@ -133,15 +113,7 @@ impl StoreBlobAccess {
             let access = if config.cloud_home.provider.is_none() {
                 ResolvedBlobAccess::Local(self.local.clone())
             } else {
-                let storage = security
-                    .create_sync_storage(
-                        &config,
-                        None,
-                        clock.clone(),
-                        cloudkit_ops.clone(),
-                        *blob_chunking,
-                    )
-                    .await?;
+                let storage = cloud_storage.open(&config, None, None).await?;
                 let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
                 ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
                     self.local.clone(),

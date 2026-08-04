@@ -30,6 +30,7 @@ use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::read_store_rows::ReadStoreRows;
 use crate::store_blobs::{ReadStoreBlobs, StoreBlobAccess};
+use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_dir::StoreDir;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
@@ -79,7 +80,14 @@ impl CovenReadHandle {
         let database = StoreDatabase::from_database(db);
         let cloud_homes =
             crate::storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
-        let security = StoreSecurity::new(key_service, key_custody, identity_custody, cloud_homes);
+        let security = StoreSecurity::new(key_service, key_custody, identity_custody);
+        let cloud_storage = StoreCloudStorage::new(
+            security.clone(),
+            cloud_homes,
+            clock,
+            cloudkit_ops,
+            blob_chunking,
+        );
         let rows = ReadStoreRows::new(database.clone());
         let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
         let local_blob_access =
@@ -87,10 +95,7 @@ impl CovenReadHandle {
         let blob_storage = StoreBlobAccess::new(
             database.clone(),
             config_provider,
-            security.clone(),
-            clock,
-            cloudkit_ops,
-            blob_chunking,
+            cloud_storage,
             local_blob_access,
         );
         let blobs = ReadStoreBlobs::new(database.clone(), blob_storage);

@@ -110,11 +110,24 @@ fn store_security(
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
 ) -> StoreSecurity {
-    let cloud_homes = crate::storage::cloud::CloudHomeFactory::new(
-        keys.clone(),
-        crate::oauth::OAuthClients::empty(),
-    );
-    StoreSecurity::new(keys, master_keys, identity, cloud_homes)
+    StoreSecurity::new(keys, master_keys, identity)
+}
+
+fn store_cloud_storage(
+    keys: &StoreKeys,
+    security: &StoreSecurity,
+    clock: ClockRef,
+) -> StoreCloudStorage {
+    StoreCloudStorage::new(
+        security.clone(),
+        crate::storage::cloud::CloudHomeFactory::new(
+            keys.clone(),
+            crate::oauth::OAuthClients::empty(),
+        ),
+        clock,
+        None,
+        BlobChunking::DEFAULT,
+    )
 }
 
 fn store_sync(
@@ -128,15 +141,14 @@ fn store_sync(
     let database = StoreDatabase::from_database(database);
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
+    let cloud_keys = keys.clone();
     let security = store_security(keys, master_keys, identity);
     let clock: ClockRef = Arc::new(SystemClock);
+    let cloud_storage = store_cloud_storage(&cloud_keys, &security, clock.clone());
     let blob_storage = crate::store_blobs::StoreBlobAccess::new(
         database.clone(),
         config_provider.clone(),
-        security.clone(),
-        clock.clone(),
-        None,
-        BlobChunking::DEFAULT,
+        cloud_storage.clone(),
         owners.local_access(),
     );
     StoreSync::new(
@@ -146,9 +158,8 @@ fn store_sync(
         store_dir.clone(),
         clock,
         None,
-        None,
         StoreOpenGuard::acquire_for_test(store_dir),
-        BlobChunking::DEFAULT,
+        cloud_storage,
         owners.local_access(),
         blob_storage,
         owners.local_transitions(),
@@ -192,19 +203,18 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         &join_info,
         &CloudCipher::Plaintext,
     );
+    let cloud_keys = keys.clone();
     let security = store_security(keys, Arc::new(NoKeyCustody), established_identity_custody());
     let database = StoreDatabase::from_database(crate::sync::test_helpers::open_test_db());
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let clock: ClockRef = Arc::new(SystemClock);
+    let cloud_storage = store_cloud_storage(&cloud_keys, &security, clock.clone());
     let blob_storage = crate::store_blobs::StoreBlobAccess::new(
         database.clone(),
         config_provider.clone(),
-        security.clone(),
-        clock.clone(),
-        None,
-        BlobChunking::DEFAULT,
+        cloud_storage.clone(),
         owners.local_access(),
     );
     let sync = StoreSync::new(
@@ -214,9 +224,8 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         store_dir.clone(),
         clock,
         None,
-        None,
         StoreOpenGuard::acquire_for_test(&store_dir),
-        BlobChunking::DEFAULT,
+        cloud_storage,
         owners.local_access(),
         blob_storage,
         owners.local_transitions(),
