@@ -44,17 +44,15 @@ mod exchange;
 pub(super) mod history;
 mod joiner;
 mod journal;
-mod provider_administrator;
 
-pub(super) use authorized_join::AuthorizedJoin;
-pub(super) use provider_administrator::AuthorizedProviderAdministratorJoin;
+pub(super) use authorized_join::{AuthorizedJoin, AuthorizedProviderAdministratorJoin};
 
 #[derive(Clone, Copy)]
 pub(super) struct PendingDeviceJoinHistoryConstruction;
 
+pub use authorized_join::DeviceProviderAccessAdministrator;
 pub use cleanup::*;
 pub use error::*;
 pub use exchange::*;
 pub(crate) use joiner::*;
 pub use journal::*;
-pub use provider_administrator::*;

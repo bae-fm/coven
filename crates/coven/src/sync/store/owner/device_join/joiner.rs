@@ -439,24 +439,6 @@ impl PendingDeviceJoinObservation<'_> {
     }
 }
 
-impl Store {
-    #[doc(hidden)]
-    pub(crate) async fn revoke_joining_device_writes(
-        &self,
-        cancellation: DeviceJoinCancellation,
-        revocation_executor: &dyn DeviceJoinWriteRevocationExecutor,
-    ) -> Result<JoinerJoinTerminal, DeviceJoinError> {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        writer
-            .provider_administrator_join()?
-            .revoke_joiner_writes(cancellation, revocation_executor)
-            .await
-    }
-}
-
 impl PendingDeviceJoinObservation<'_> {
     async fn prepare_provider_access_request(
         &self,

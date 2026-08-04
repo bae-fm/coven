@@ -1,5 +1,11 @@
+use super::cleanup::require_cancelled_outcome;
 use super::journal::{database_error, provider_error};
 use super::*;
+
+mod provider_administrator;
+
+pub(crate) use provider_administrator::AuthorizedProviderAdministratorJoin;
+pub use provider_administrator::DeviceProviderAccessAdministrator;
 
 pub(crate) struct AuthorizedJoin<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
@@ -48,16 +54,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if grants.is_empty() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        Ok(AuthorizedProviderAdministratorJoin::from_parts(
-            self.writer,
-            self.database,
-            self.storage,
-            self.protocol_root,
-            self.verified_root,
-            self.membership,
-            self.local_writer,
-            grants,
-        ))
+        Ok(AuthorizedProviderAdministratorJoin::new(self, grants))
     }
 
     fn history(&mut self) -> history::DeviceJoinHistory<'_, 'storage> {
