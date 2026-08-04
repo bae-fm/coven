@@ -61,6 +61,7 @@ pub(crate) fn require_exact_slot_capabilities_join_info(
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn require_exact_slot_capabilities_home(
     home: std::sync::Arc<dyn super::CloudHome>,
     provider: Option<CloudProvider>,

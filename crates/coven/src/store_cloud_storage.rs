@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::storage::cloud::setup::StorageSetupError;
-use crate::storage::cloud::{CloudHome, CloudHomeFactory};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::storage::cloud::CloudHome;
+use crate::storage::cloud::CloudHomeFactory;
 use crate::storage::{BlobChunking, CloudCipher, CloudSyncStorage};
 use crate::store_security::StoreSecurity;
 
@@ -55,6 +57,7 @@ impl StoreCloudStorage {
         })
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn admit_home<'storage, 'config>(
         &'storage self,
         config: &'config Config,
@@ -89,6 +92,7 @@ impl StoreCloudStorage {
             .open_cloud_storage(config, Arc::from(home), cipher, self.blob_chunking)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     fn open_admitted_home(
         &self,
         config: &Config,
@@ -117,12 +121,14 @@ impl AdmittedStoreCloudConfig<'_, '_> {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) struct AdmittedStoreCloudHome<'storage, 'config> {
     storage: &'storage StoreCloudStorage,
     config: &'config Config,
     home: Arc<dyn CloudHome>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl AdmittedStoreCloudHome<'_, '_> {
     pub(crate) fn open(
         self,
