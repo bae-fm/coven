@@ -2046,7 +2046,7 @@ impl ProviderProbeStorage {
             if observed != peer_payload {
                 return invalid("administrator read differs from the signed peer response");
             }
-            Self::advance_cross_completion(
+            advance_cross_completion(
                 journal,
                 &mut durable,
                 &mut record,
@@ -2056,7 +2056,7 @@ impl ProviderProbeStorage {
             )
             .await?;
         }
-        let administrator_read_peer_hash = Self::cross_completion_read_hash(&record.progress)?;
+        let administrator_read_peer_hash = cross_completion_read_hash(&record.progress)?;
         if matches!(
             record.progress,
             CrossPrincipalCompletionProgress::ReadsVerified { .. }
@@ -2065,7 +2065,7 @@ impl ProviderProbeStorage {
                 .delete_and_verify_absent(&response.peer_object.slot)
                 .await
                 .map_err(StorageError::from)?;
-            Self::advance_cross_completion(
+            advance_cross_completion(
                 journal,
                 &mut durable,
                 &mut record,
@@ -2083,7 +2083,7 @@ impl ProviderProbeStorage {
                 .delete_and_verify_absent(&challenge.administrator_object.slot)
                 .await
                 .map_err(StorageError::from)?;
-            Self::advance_cross_completion(
+            advance_cross_completion(
                 journal,
                 &mut durable,
                 &mut record,
@@ -2102,7 +2102,7 @@ impl ProviderProbeStorage {
         };
         let receipt =
             CrossPrincipalProbeReceipt::signed(transcript, context, store, administrator_signer)?;
-        Self::advance_cross_completion(
+        advance_cross_completion(
             journal,
             &mut durable,
             &mut record,
@@ -2112,39 +2112,6 @@ impl ProviderProbeStorage {
         )
         .await?;
         Ok(receipt)
-    }
-
-    async fn advance_cross_completion(
-        journal: &dyn ProviderProbeJournal,
-        durable: &mut ProviderProbeJournalRecord,
-        record: &mut CrossPrincipalCompletionJournal,
-        progress: CrossPrincipalCompletionProgress,
-    ) -> Result<(), ProviderProbeError> {
-        record.progress = progress;
-        let next = ProviderProbeJournalRecord::CrossPrincipal(record.clone());
-        journal.advance(durable, next.clone()).await?;
-        *durable = next;
-        Ok(())
-    }
-
-    fn cross_completion_read_hash(
-        progress: &CrossPrincipalCompletionProgress,
-    ) -> Result<ObjectHash, ProviderProbeError> {
-        match progress {
-            CrossPrincipalCompletionProgress::ReadsVerified {
-                administrator_read_peer_hash,
-            }
-            | CrossPrincipalCompletionProgress::PeerAbsent {
-                administrator_read_peer_hash,
-            }
-            | CrossPrincipalCompletionProgress::Absent {
-                administrator_read_peer_hash,
-            } => Ok(*administrator_read_peer_hash),
-            CrossPrincipalCompletionProgress::Prepared
-            | CrossPrincipalCompletionProgress::ReceiptReady { .. } => {
-                invalid("cross-principal completion has no durable administrator read")
-            }
-        }
     }
 
     async fn settle_exact_create(
@@ -2436,6 +2403,39 @@ impl ProviderProbeStorage {
         )
         .await?;
         Ok(receipt)
+    }
+}
+
+async fn advance_cross_completion(
+    journal: &dyn ProviderProbeJournal,
+    durable: &mut ProviderProbeJournalRecord,
+    record: &mut CrossPrincipalCompletionJournal,
+    progress: CrossPrincipalCompletionProgress,
+) -> Result<(), ProviderProbeError> {
+    record.progress = progress;
+    let next = ProviderProbeJournalRecord::CrossPrincipal(record.clone());
+    journal.advance(durable, next.clone()).await?;
+    *durable = next;
+    Ok(())
+}
+
+fn cross_completion_read_hash(
+    progress: &CrossPrincipalCompletionProgress,
+) -> Result<ObjectHash, ProviderProbeError> {
+    match progress {
+        CrossPrincipalCompletionProgress::ReadsVerified {
+            administrator_read_peer_hash,
+        }
+        | CrossPrincipalCompletionProgress::PeerAbsent {
+            administrator_read_peer_hash,
+        }
+        | CrossPrincipalCompletionProgress::Absent {
+            administrator_read_peer_hash,
+        } => Ok(*administrator_read_peer_hash),
+        CrossPrincipalCompletionProgress::Prepared
+        | CrossPrincipalCompletionProgress::ReceiptReady { .. } => {
+            invalid("cross-principal completion has no durable administrator read")
+        }
     }
 }
 
