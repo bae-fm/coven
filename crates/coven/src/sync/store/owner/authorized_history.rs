@@ -559,6 +559,104 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         ReclaimHistory::new(self)
     }
 
+    async fn reclaim_circle_epoch_access(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        control: &crate::protocol::circle::CircleControlCoord,
+    ) -> Result<Option<crate::sync::CircleEpochAccess>, crate::database::DbError> {
+        self.database
+            .circle_epoch_access(self.root().clone(), circle_id, control.clone())
+            .await
+    }
+
+    async fn reclaim_covered_commits(
+        &mut self,
+        coverage: &CommitFrontier,
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        )>,
+        crate::sync::store::owner::pull::StorePullError,
+    > {
+        self.history_verifier.load_covered_commits(coverage).await
+    }
+
+    async fn reclaim_commit_position_covers(
+        &mut self,
+        covering: &StoreBatchCommitRef,
+        covered: &StoreBatchCommitRef,
+    ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
+        self.history_verifier
+            .commit_position_covers(covering, covered)
+            .await
+    }
+
+    async fn reclaim_authorization(
+        &mut self,
+        reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
+    ) -> Result<
+        crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
+        crate::storage::StoreObjectError,
+    > {
+        self.history_verifier
+            .load_reclaim_authorization(reference)
+            .await
+    }
+
+    async fn reclaim_device_head(
+        &mut self,
+        reference: &crate::protocol::store_commit::StoreDeviceHeadRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        commit: &StoreBatchCommitRef,
+    ) -> Result<
+        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceHead>,
+        crate::storage::StoreObjectError,
+    > {
+        self.history_verifier
+            .load_head(reference, registration, commit)
+            .await
+    }
+
+    async fn reclaim_next_announcement_slot(
+        &mut self,
+        registration_ref: &StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        previous: Option<&crate::protocol::store_commit::VerifiedStoreBatchCommit>,
+    ) -> Result<
+        (
+            crate::storage::cloud::ObjectSlot,
+            Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
+        ),
+        crate::sync::store::StoreError,
+    > {
+        self.history_verifier
+            .exact_next_announcement_slot(registration_ref, registration, previous)
+            .await
+    }
+
+    async fn reclaim_snapshot_stability(
+        &mut self,
+        snapshot: &crate::database::PublishedStoreSnapshot,
+    ) -> Result<
+        crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
+        crate::sync::store::owner::pull::StorePullError,
+    > {
+        self.history_verifier
+            .verify_snapshot_stability(snapshot)
+            .await
+    }
+
+    async fn select_reclaim_store_snapshot(
+        &mut self,
+        candidates: Vec<crate::database::PublishedStoreSnapshot>,
+    ) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::owner::pull::StorePullError>
+    {
+        self.history_verifier
+            .select_maximal_stable_store_snapshot(candidates)
+            .await
+    }
+
     pub(super) fn restore_history(&self) -> RestoreHistory<'_, 'storage> {
         RestoreHistory::new(&self.history_verifier)
     }
@@ -885,7 +983,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    #[cfg(test)]
     pub(super) async fn load_store_snapshot(
         &self,
         registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
@@ -900,6 +997,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     > {
         self.history_verifier
             .load_store_snapshot(registration_ref, registration, reference)
+            .await
+    }
+
+    async fn load_store_snapshot_stream(
+        &self,
+        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
+        self.history_verifier
+            .load_store_snapshot_stream(registration_ref, registration)
             .await
     }
 
