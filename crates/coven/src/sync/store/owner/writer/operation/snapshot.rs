@@ -15,13 +15,13 @@ use tracing::{info, warn};
 use super::SnapshotHistoryConstruction;
 #[cfg(test)]
 use crate::keys::UserKeypair;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 #[cfg(test)]
 use crate::protocol::store_commit::StoreSnapshotRef;
 use crate::protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
     SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
 pub(crate) struct SnapshotCut {
     pub(crate) snapshot: CreatedSnapshot,
@@ -891,7 +891,7 @@ mod tests {
 
         let mut wrong_successor = published.meta;
         wrong_successor.successor.next_slot =
-            crate::storage::cloud::ObjectSlot::logical("wrong-successor.json".to_string())
+            crate::protocol::objects::ObjectSlot::logical("wrong-successor.json".to_string())
                 .expect("valid wrong successor slot");
         assert!(writer
             .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_successor.to_bytes())

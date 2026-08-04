@@ -3,6 +3,7 @@ use crate::database::*;
 use crate::database::{RetainedReplayAuthority, RetainedReplayBaseline};
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::membership::{AuthorHead, MembershipEntry};
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{
     remote_object_id, RemoteObjectRecord, RetainedReplayOwner, SharedLiveSetObjectDomain,
 };
@@ -11,7 +12,6 @@ use crate::protocol::store_commit::{
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
     StoreRootRef,
 };
-use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::{
     activated_merge_membership_remote_objects, ApplyOutcome, HeldStorePositionReason,
     LocalStoreMembership, MembershipAuthorityBytes, PreparedMergeMaterialization,
@@ -2666,7 +2666,7 @@ mod circle_epoch_cutoff_tests {
     use crate::protocol::causal_grants::AuthorStreamId;
     use crate::protocol::circle::{CircleControlCoord, CircleEpochId, CircleId};
     use crate::protocol::membership::MembershipGrantId;
-    use crate::storage::cloud::ObjectSlot;
+    use crate::protocol::objects::ObjectSlot;
 
     fn commit_reference(
         stream_id: AuthorStreamId,
@@ -2680,7 +2680,7 @@ mod circle_epoch_cutoff_tests {
                 sequence,
             },
             commit_hash: ObjectHash::digest(format!("{label}-semantic").as_bytes()),
-            object: crate::storage::ExactObjectRef::new(
+            object: crate::protocol::objects::ExactObjectRef::new(
                 ObjectSlot::logical(format!("store-v1/commits/{label}.json"))
                     .expect("valid commit slot"),
                 bytes.len() as u64,

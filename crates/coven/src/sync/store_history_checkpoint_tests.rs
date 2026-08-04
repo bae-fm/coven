@@ -1,8 +1,8 @@
 use crate::keys::UserKeypair;
 use crate::protocol::membership::MembershipChain;
+use crate::protocol::objects::ExactObjectRef;
+use crate::protocol::objects::ObjectSlot;
 use crate::protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
-use crate::storage::cloud::ObjectSlot;
-use crate::storage::ExactObjectRef;
 use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
 
 fn store_database(db: &crate::database::Database) -> crate::database::StoreDatabase {

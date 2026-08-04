@@ -1,5 +1,5 @@
+use crate::protocol::objects::StorageError;
 use crate::protocol::store_commit::{OwnerPromotionId, OwnerPromotionStaleReason};
-use crate::storage::StorageError;
 use crate::sync::store::StoreError;
 
 #[derive(Debug, thiserror::Error)]

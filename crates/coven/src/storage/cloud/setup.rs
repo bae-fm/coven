@@ -132,8 +132,8 @@ mod tests {
             head_hash: crate::protocol::store_commit::ObjectHash::digest(
                 b"restore setup membership head semantic bytes",
             ),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(
                     "store-v1/membership/heads/restore-setup/1.json".to_string(),
                 )
                 .expect("valid test membership-head slot"),
@@ -150,8 +150,8 @@ mod tests {
                 b"restore setup Store root identity",
             ),
             store_root_hash: crate::protocol::store_commit::ObjectHash::digest(stored),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(
                     "store-v1/protocol/root/restore-setup.json".to_string(),
                 )
                 .expect("valid test Store-root slot"),
@@ -168,7 +168,7 @@ mod tests {
         let root = store_root();
         let owner_pubkey = hex::encode([7u8; 32]);
         let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(
+            first_slot: crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/recovery/restore-setup/first.json".to_string(),
             )
             .expect("valid recovery slot"),

@@ -84,7 +84,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_circle_roster_head(
         &self,
         entry: &crate::protocol::circle::CircleRosterEntry,
-        tip: crate::storage::ExactObjectRef,
+        tip: crate::protocol::objects::ExactObjectRef,
         successor: crate::protocol::store_commit::SuccessorLink,
     ) -> crate::protocol::circle::CircleRosterHead {
         crate::protocol::circle::CircleRosterHead::signed(
@@ -98,7 +98,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_circle_metadata_head(
         &self,
         metadata: &crate::protocol::circle::CircleMetadata,
-        tip: crate::storage::ExactObjectRef,
+        tip: crate::protocol::objects::ExactObjectRef,
         successor: crate::protocol::store_commit::SuccessorLink,
     ) -> crate::protocol::circle::CircleMetadataHead {
         crate::protocol::circle::CircleMetadataHead::signed(
@@ -112,7 +112,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_circle_control_head(
         &self,
         control: &crate::protocol::circle::CircleControl,
-        entry: crate::storage::ExactObjectRef,
+        entry: crate::protocol::objects::ExactObjectRef,
         successor: crate::protocol::store_commit::SuccessorLink,
     ) -> crate::protocol::circle::CircleControlHead {
         crate::protocol::circle::CircleControlHead::signed(
@@ -370,9 +370,9 @@ impl LocalStoreWriter {
         attempt_id: crate::protocol::store_commit::DeviceJoinAttemptId,
         member_pubkey: String,
         root: crate::protocol::store_commit::StoreRootRef,
-        provider: crate::storage::StoreProviderBinding,
-        attempt_slot: crate::storage::ObjectSlot,
-        outcome_slot: crate::storage::ObjectSlot,
+        provider: crate::protocol::objects::StoreProviderBinding,
+        attempt_slot: crate::protocol::objects::ObjectSlot,
+        outcome_slot: crate::protocol::objects::ObjectSlot,
         owner_grant: crate::protocol::membership::MembershipGrantId,
         provider_admin: crate::protocol::provider::ProviderAdminGrantRecord,
     ) -> Result<
@@ -426,7 +426,9 @@ impl LocalStoreWriter {
     pub(crate) fn verify_device_admission_approval_as_owner(
         &self,
         approval: &crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
-        root: &crate::storage::VerifiedObject<crate::protocol::store_commit::StoreProtocolRoot>,
+        root: &crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreProtocolRoot,
+        >,
         administrator: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
         approval.verify(root, self.registration.value(), administrator)
@@ -437,10 +439,10 @@ impl LocalStoreWriter {
         &self,
         store_root: crate::protocol::store_commit::StoreRootRef,
         attempt_id: crate::protocol::store_commit::DeviceJoinAttemptId,
-        attempt_slot: crate::storage::ObjectSlot,
+        attempt_slot: crate::protocol::objects::ObjectSlot,
         expected_registration: crate::protocol::store_commit::StoreDeviceRegistration,
-        registration_slot: crate::storage::ObjectSlot,
-        outcome_slot: crate::storage::ObjectSlot,
+        registration_slot: crate::protocol::objects::ObjectSlot,
+        outcome_slot: crate::protocol::objects::ObjectSlot,
         bootstrap_cut: crate::protocol::store_commit::StoreHistoryCut,
         membership: crate::protocol::circle_control::StoreMembershipStateRef,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
@@ -475,7 +477,7 @@ impl LocalStoreWriter {
         history: &mut crate::sync::store::owner::device_join::history::DeviceJoinHistory<'_, '_>,
         reference: &crate::protocol::store_commit::DeviceJoinAttemptRef,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::DeviceJoinAttempt>,
+        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::DeviceJoinAttempt>,
         crate::sync::store::owner::pull::StorePullError,
     > {
         history
@@ -507,8 +509,8 @@ impl LocalStoreWriter {
         history: &crate::sync::store::owner::device_join::history::DeviceJoinHistory<'_, '_>,
         reference: &crate::protocol::store_commit::DeviceJoinOutcomeRef,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::DeviceJoinOutcome>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::DeviceJoinOutcome>,
+        crate::protocol::objects::StoreObjectError,
     > {
         history
             .load_outcome(reference, self.registration.value())
@@ -530,7 +532,7 @@ impl LocalStoreWriter {
         cancellation: crate::protocol::store_commit::DeviceJoinOutcomeRef,
         administrator_terminal: crate::sync::store::owner::device_join::ProviderAdminJoinTerminal,
         joiner_terminal: crate::sync::store::owner::device_join::JoinerJoinTerminal,
-        deleted_slots: Vec<crate::storage::ObjectSlot>,
+        deleted_slots: Vec<crate::protocol::objects::ObjectSlot>,
         membership: crate::protocol::circle_control::StoreMembershipStateRef,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
     ) -> Result<
@@ -579,7 +581,9 @@ impl LocalStoreWriter {
     pub(crate) fn verify_device_admission_approval_as_administrator(
         &self,
         approval: &crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
-        root: &crate::storage::VerifiedObject<crate::protocol::store_commit::StoreProtocolRoot>,
+        root: &crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreProtocolRoot,
+        >,
         owner: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
         approval.verify(root, owner, self.registration.value())
@@ -590,7 +594,9 @@ impl LocalStoreWriter {
         request: crate::sync::store::owner::device_join::DeviceProviderAccessRequest,
         access_grant: crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant,
         admission: crate::sync::store::owner::device_join::DeviceProviderAdmissionChallenge,
-        root: &crate::storage::VerifiedObject<crate::protocol::store_commit::StoreProtocolRoot>,
+        root: &crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreProtocolRoot,
+        >,
     ) -> Result<
         crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
         crate::sync::store::owner::device_join::DeviceJoinError,
@@ -609,7 +615,7 @@ impl LocalStoreWriter {
         &self,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
     ) -> Result<(), crate::protocol::provider::ProviderProbeError> {
         challenge.verify(
             context,
@@ -623,11 +629,11 @@ impl LocalStoreWriter {
         &self,
         grant_id: crate::protocol::provider::ProviderAccessGrantId,
         member_pubkey: String,
-        peer_provider: crate::storage::ProviderDeviceBinding,
+        peer_provider: crate::protocol::objects::ProviderDeviceBinding,
         locator: crate::protocol::provider::ProviderAccessLocator,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
         provider_admin_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        store_provider: &crate::storage::StoreProviderBinding,
+        store_provider: &crate::protocol::objects::StoreProviderBinding,
     ) -> Result<
         crate::protocol::provider::StoreMemberProviderAccessGrant,
         crate::protocol::provider::ProviderProbeError,
@@ -671,7 +677,7 @@ impl LocalStoreWriter {
         cancellation: crate::protocol::store_commit::DeviceJoinOutcomeRef,
         producer: crate::sync::store::owner::device_join::DeviceJoinProducer,
         authority: crate::sync::store::owner::device_join::ProviderWriteAuthorityRef,
-        protected_slots: Vec<crate::storage::ObjectSlot>,
+        protected_slots: Vec<crate::protocol::objects::ObjectSlot>,
         withdrawal: crate::protocol::provider::ProviderAccessWithdrawal,
         executor_grant: crate::protocol::provider::ProviderAdminGrantId,
         executor_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
@@ -722,11 +728,11 @@ impl LocalStoreWriter {
     pub(crate) fn circle_ack_first_slot(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<crate::storage::ObjectSlot, crate::storage::StorageError> {
-        Ok(crate::storage::ObjectSlot::logical(format!(
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
+        crate::protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             self.circle_ack_semantic_prefix(circle_id, 1)
-        ))?)
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -741,8 +747,8 @@ impl LocalStoreWriter {
         key_fingerprint: crate::encryption::KeyFingerprint,
         seeded_from: Option<crate::protocol::circle::CircleBootstrapCoverageRef>,
         sync_time: String,
-        predecessor: Option<crate::storage::ExactObjectRef>,
-        next_slot: crate::storage::ObjectSlot,
+        predecessor: Option<crate::protocol::objects::ExactObjectRef>,
+        next_slot: crate::protocol::objects::ObjectSlot,
     ) -> Result<
         crate::protocol::store_commit::CircleAck,
         crate::protocol::store_commit::StoreProtocolError,
@@ -850,7 +856,7 @@ impl LocalStoreWriter {
         bootstrap: crate::protocol::circle::CircleBootstrapRef,
         created_at: String,
         predecessor: Option<crate::protocol::store_commit::CircleSnapshotRef>,
-        next_slot: crate::storage::ObjectSlot,
+        next_slot: crate::protocol::objects::ObjectSlot,
     ) -> Result<
         crate::protocol::store_commit::CircleSnapshotMeta,
         crate::protocol::store_commit::StoreProtocolError,
@@ -1063,11 +1069,11 @@ impl LocalStoreWriter {
             .map(|activation| activation.activation_id())
     }
 
-    pub(super) fn first_snapshot_slot(&self) -> crate::storage::cloud::ObjectSlot {
+    pub(super) fn first_snapshot_slot(&self) -> crate::protocol::objects::ObjectSlot {
         self.registration.value().snapshots.first_slot().clone()
     }
 
-    pub(super) fn first_acknowledgement_slot(&self) -> crate::storage::cloud::ObjectSlot {
+    pub(super) fn first_acknowledgement_slot(&self) -> crate::protocol::objects::ObjectSlot {
         self.registration
             .value()
             .acknowledgements
@@ -1091,7 +1097,10 @@ impl LocalStoreWriter {
         &self,
         history: &mut super::AuthorizedStoreHistory<'_>,
         reference: &crate::protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<crate::protocol::store_commit::SnapshotMeta, crate::storage::StoreObjectError> {
+    ) -> Result<
+        crate::protocol::store_commit::SnapshotMeta,
+        crate::protocol::objects::StoreObjectError,
+    > {
         history
             .load_store_snapshot(
                 self.registration.reference(),
@@ -1281,7 +1290,7 @@ impl LocalStoreWriter {
         bytes: &[u8],
         store_root_hash: crate::protocol::store_commit::ObjectHash,
         coord: crate::protocol::store_commit::StoreCommitCoord,
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
     ) -> Result<
         crate::protocol::store_commit::VerifiedStoreBatchCommit,
         crate::sync::store::circle_controls::CircleOperationError,
@@ -1345,7 +1354,7 @@ impl LocalStoreWriter {
         bytes: &[u8],
         store_root_hash: crate::protocol::store_commit::ObjectHash,
         coord: crate::protocol::store_commit::StoreCommitCoord,
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
     ) -> Result<
         crate::protocol::store_commit::VerifiedStoreBatchCommit,
         crate::protocol::store_commit::StoreProtocolError,
@@ -1392,8 +1401,8 @@ impl LocalStoreWriter {
         )
     }
 
-    pub(super) fn blob_write_authority(&self) -> crate::storage::BlobWriteAuthority<'_> {
-        crate::storage::BlobWriteAuthority::new(&self.registration)
+    pub(super) fn blob_write_authority(&self) -> crate::protocol::objects::BlobWriteAuthority<'_> {
+        crate::protocol::objects::BlobWriteAuthority::new(&self.registration)
     }
 
     pub(super) async fn seal_keyring_for_member(
@@ -1522,8 +1531,8 @@ impl LocalStoreWriter {
         verifier: crate::sync::store::owner::verification::StoreMembershipObjectVerifier<'_, '_>,
         reference: &crate::protocol::membership::MembershipHeadRef,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::membership::AuthorHead>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<crate::protocol::membership::AuthorHead>,
+        crate::protocol::objects::StoreObjectError,
     > {
         verifier
             .load_head_for_registration(reference, self.registration.value())
@@ -1538,8 +1547,8 @@ impl LocalStoreWriter {
         entry_ref: crate::protocol::membership::MembershipEntryRef,
         predecessor: Option<crate::protocol::membership::MembershipHeadRef>,
         anchor: crate::protocol::store_commit::GrantStreamAnchor,
-        next_slot: crate::storage::ObjectSlot,
-        head_slot: crate::storage::ObjectSlot,
+        next_slot: crate::protocol::objects::ObjectSlot,
+        head_slot: crate::protocol::objects::ObjectSlot,
     ) -> Result<
         crate::protocol::membership::MergeMembershipHeadTransition,
         crate::sync::store::membership::InviteError,
@@ -1615,13 +1624,13 @@ impl LocalStoreWriter {
         publication: &super::PreparedMembershipPublication,
         resolution: Option<&crate::protocol::membership::StoreMembershipConflictResolution>,
         prepare_head: impl FnOnce(
-            &crate::storage::ProtocolObjectContext,
-            crate::storage::ObjectSlot,
+            &crate::protocol::objects::ProtocolObjectContext,
+            crate::protocol::objects::ObjectSlot,
             &str,
             Vec<u8>,
         ) -> Result<
-            crate::storage::PreparedExactObject,
-            crate::storage::StoreObjectError,
+            crate::protocol::objects::PreparedExactObject,
+            crate::protocol::objects::StoreObjectError,
         >,
     ) -> Result<(), crate::sync::store::StoreError> {
         candidate.attach_merge_membership_proof_with(
@@ -1990,7 +1999,7 @@ impl LocalStoreWriter {
         target: crate::protocol::store_commit::StoreDeviceRegistrationRef,
         target_registration: &crate::protocol::store_commit::StoreDeviceRegistration,
         device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-        outcome_slot: crate::storage::cloud::ObjectSlot,
+        outcome_slot: crate::protocol::objects::ObjectSlot,
         owner_grant: crate::protocol::membership::MembershipGrantId,
     ) -> Result<
         crate::protocol::store_commit::StoreDeviceExclusionProposal,
@@ -2191,7 +2200,7 @@ impl<'storage> LocalWriterKeyrings<'storage> {
         value: crate::protocol::wrapped_store_key::WrappedStoreKey,
     ) -> Result<
         crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::storage::StorageError,
+        crate::protocol::objects::StorageError,
     > {
         self.keyrings.prepare(recipient, value).await
     }

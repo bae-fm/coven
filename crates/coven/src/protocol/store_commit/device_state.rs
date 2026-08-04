@@ -119,14 +119,14 @@ pub enum StoreDeviceExclusionOutcomeRef {
 #[derive(Debug)]
 pub(crate) struct VerifiedDeviceExclusionProposal {
     pub(crate) reference: StoreDeviceExclusionProposalRef,
-    pub(crate) object: crate::storage::VerifiedObject<StoreDeviceExclusionProposal>,
+    pub(crate) object: crate::protocol::objects::VerifiedObject<StoreDeviceExclusionProposal>,
     pub(crate) target: StoreDeviceRegistration,
     pub(crate) owner: StoreDeviceRegistration,
 }
 
 #[derive(Debug)]
 pub(crate) struct VerifiedDeviceExclusionOutcome {
-    pub(crate) object: crate::storage::VerifiedObject<StoreDeviceExclusionOutcome>,
+    pub(crate) object: crate::protocol::objects::VerifiedObject<StoreDeviceExclusionOutcome>,
     pub(crate) owner: StoreDeviceRegistration,
 }
 
@@ -482,7 +482,7 @@ impl RetainedStoreDeviceExclusionProposal {
         )?;
         Ok(VerifiedDeviceExclusionProposal {
             reference: self.reference.clone(),
-            object: crate::storage::VerifiedObject {
+            object: crate::protocol::objects::VerifiedObject {
                 value: proposal,
                 bytes: self.canonical_proposal.clone(),
                 semantic_hash: self.reference.proposal_hash,
@@ -839,7 +839,7 @@ impl StoreDeviceExclusionProposal {
         target: &StoreDeviceRegistration,
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let proposal: Self = crate::storage::decode_protocol_object(bytes)?;
+        let proposal: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(proposal.version)?;
         expected.verify_proposal(&proposal)?;
         proposal.target.verify_registration(target)?;
@@ -1055,7 +1055,7 @@ impl StoreDeviceExclusionOutcome {
         target: &StoreDeviceRegistration,
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let outcome: Self = crate::storage::decode_protocol_object(bytes)?;
+        let outcome: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         if outcome.proposal().proposal_id != proposal.proposal_id
             || outcome.proposal().proposal_hash != proposal.proposal_hash()
             || outcome.proposal().target != proposal.target

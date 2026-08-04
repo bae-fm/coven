@@ -7,9 +7,10 @@ use crate::protocol::membership::{
     validate_membership_floor, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
     MembershipCoord, MembershipGrantId, MembershipHeadRef,
 };
-use crate::storage::cloud::ObjectSlot;
+use crate::protocol::objects::ObjectSlot;
+use crate::protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
+use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess};
-use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use std::sync::{Arc, RwLock};
 

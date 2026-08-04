@@ -749,7 +749,7 @@ impl ConnectedBlobTransitions {
                             .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
                         match staged.commit_new().await {
                             Ok(()) => materialization.record_created_file(destination),
-                            Err(crate::storage::PublishBlobFileError::DestinationExists(_)) => {
+                            Err(crate::local_file::CommitNewFileError::DestinationExists(_)) => {
                                 destination.verify().await.map_err(|detail| {
                                     MakeLocalError::Write {
                                         blob_id: blob.id.clone(),

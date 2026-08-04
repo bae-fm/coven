@@ -249,7 +249,7 @@ impl<'storage> AuthorizedStore<'storage> {
         value: crate::protocol::wrapped_store_key::WrappedStoreKey,
     ) -> Result<
         crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::storage::StorageError,
+        crate::protocol::objects::StorageError,
     > {
         self.history.prepare_wrapped_key(recipient, value).await
     }
@@ -338,7 +338,7 @@ impl<'storage> AuthorizedStore<'storage> {
         let live_provider = history
             .provider_binding()
             .await
-            .map_err(crate::storage::StoreObjectError::from)
+            .map_err(crate::protocol::objects::StoreObjectError::from)
             .map_err(crate::sync::store::StoreError::from)?;
         if live_provider.device != local_device.registration.value().provider {
             return Err(super::StoreRegistrationError::Invalid(

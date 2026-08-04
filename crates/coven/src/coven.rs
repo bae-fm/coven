@@ -419,10 +419,11 @@ mod tests {
     use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
     use crate::config::Config;
     use crate::keys::test_keyring;
+    use crate::protocol::objects::ObjectSlot;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
         BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-        ExactSlotStorage, ObjectSlot, UploadProgress,
+        ExactSlotStorage, UploadProgress,
     };
     use crate::storage::CloudCipher;
     use crate::store_dir::StoreDir;
@@ -1357,7 +1358,7 @@ mod tests {
         let final_path = dir
             .local_blob_path("media-files", "tempaaaa")
             .expect("local path");
-        let mut staged = crate::storage::StagedBlobFile::create(&final_path)
+        let mut staged = crate::local_file::AtomicStagedFile::create(&final_path)
             .await
             .expect("allocate local blob stage");
         staged
@@ -1426,7 +1427,7 @@ mod tests {
         let path = dir
             .local_blob_path("media-files", "orphaaaa")
             .expect("local path");
-        crate::storage::StagedBlobFile::write_for_test(&path, b"orphaned bytes")
+        crate::local_file::AtomicStagedFile::write_for_test(&path, b"orphaned bytes")
             .await
             .expect("write orphaned file");
 
@@ -2546,10 +2547,10 @@ mod tests {
         crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
             .await
             .expect("restore published blob locally");
-        crate::storage::StagedBlobFile::write_for_test(&pinned, b"old")
+        crate::local_file::AtomicStagedFile::write_for_test(&pinned, b"old")
             .await
             .expect("write pinned blob");
-        crate::storage::StagedBlobFile::write_for_test(&cached, b"old")
+        crate::local_file::AtomicStagedFile::write_for_test(&cached, b"old")
             .await
             .expect("write cached blob");
         let old_ref = BlobRef {
@@ -2719,7 +2720,7 @@ mod tests {
         let local = dir
             .local_blob_path("media-files", blob_id)
             .expect("local path");
-        crate::storage::StagedBlobFile::write_for_test(&local, b"live")
+        crate::local_file::AtomicStagedFile::write_for_test(&local, b"live")
             .await
             .expect("write local blob");
 
@@ -2770,10 +2771,10 @@ mod tests {
         let cached = dir
             .cache_blob_path("media-files", locator_hash)
             .expect("cache path");
-        crate::storage::StagedBlobFile::write_for_test(&pinned, b"live")
+        crate::local_file::AtomicStagedFile::write_for_test(&pinned, b"live")
             .await
             .expect("write pinned blob");
-        crate::storage::StagedBlobFile::write_for_test(&cached, b"live")
+        crate::local_file::AtomicStagedFile::write_for_test(&cached, b"live")
             .await
             .expect("write cached blob");
         let delete = source
@@ -3126,7 +3127,7 @@ mod tests {
     impl ExactSlotStorage for GateCloudHome {
         async fn provider_binding(
             &self,
-        ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
+        ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
             self.gate().await;
             ExactSlotStorage::provider_binding(&self.inner).await
         }
@@ -3546,8 +3547,8 @@ mod tests {
         let a = vec![b'A'; 64 * 1024];
         let b = vec![b'B'; 64 * 1024];
         let (ra, rb) = tokio::join!(
-            crate::storage::StagedBlobFile::write_for_test(&dest, &a),
-            crate::storage::StagedBlobFile::write_for_test(&dest, &b),
+            crate::local_file::AtomicStagedFile::write_for_test(&dest, &a),
+            crate::local_file::AtomicStagedFile::write_for_test(&dest, &b),
         );
         ra.expect("first concurrent cache write");
         rb.expect("second concurrent cache write");

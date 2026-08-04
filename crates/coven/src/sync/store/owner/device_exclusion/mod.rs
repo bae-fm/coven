@@ -12,6 +12,7 @@ use super::verified_history::MergeHistoryVerifier;
 use super::{AuthorizedWriterOperation, Store, StoreError};
 use crate::database::DbError;
 use crate::database::StoreDatabase;
+use crate::protocol::objects::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::remote_object::{
     CandidateNonactivation, CandidateNonactivationProof, RemoteObjectRecord,
     RemoteObjectRecordError,
@@ -23,9 +24,7 @@ use crate::protocol::store_commit::{
     StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError,
 };
-use crate::storage::{
-    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-};
+use crate::storage::SyncStorage;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -80,7 +79,7 @@ impl DurableStoreDeviceExclusionObject {
         }
     }
 
-    pub(crate) fn object(&self) -> &crate::storage::ExactObjectRef {
+    pub(crate) fn object(&self) -> &crate::protocol::objects::ExactObjectRef {
         match self {
             Self::Proposal { reference, .. } => &reference.object,
             Self::Outcome { reference, .. } => reference.object(),
@@ -535,13 +534,13 @@ pub(crate) enum StoreDeviceExclusionError {
     #[error("Store-device exclusion database state: {0}")]
     Database(#[from] DbError),
     #[error("Store-device exclusion object: {0}")]
-    Object(#[from] crate::storage::StoreObjectError),
+    Object(#[from] crate::protocol::objects::StoreObjectError),
     #[error("Store-device exclusion protocol: {0}")]
     Protocol(#[from] StoreProtocolError),
     #[error("Store-device exclusion publication: {0}")]
     Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
-    Storage(#[from] crate::storage::StorageError),
+    Storage(#[from] crate::protocol::objects::StorageError),
     #[error("Store-device exclusion journal: {0}")]
     Journal(String),
     #[error("Store-device exclusion state is invalid: {0}")]
@@ -1144,7 +1143,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
         match Box::pin(self.create_exact_object(operation)).await {
             Ok(()) => {}
             Err(StoreDeviceExclusionJournalError::Storage(
-                crate::storage::StorageError::SlotCollision(_),
+                crate::protocol::objects::StorageError::SlotCollision(_),
             )) => {
                 if let Some(completed) = self.resolve_object_collision(operation.clone()).await? {
                     return completion_result(&completed).map(Some);
@@ -1174,7 +1173,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
                     self.storage
                         .delete_protocol_object(&target.object)
                         .await
-                        .map_err(crate::storage::StoreObjectError::from)?;
+                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
                     database
                         .mark_candidate_cleanup_absent(target.object)
                         .await?;
@@ -1197,7 +1196,7 @@ impl AuthorizedDeviceExclusion<'_, '_> {
                     self.storage
                         .delete_protocol_object(&target.object)
                         .await
-                        .map_err(crate::storage::StoreObjectError::from)?;
+                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
                     database
                         .mark_candidate_cleanup_absent(target.object)
                         .await?;
@@ -1500,7 +1499,7 @@ pub(crate) enum StoreDeviceExclusionJournalError {
     #[error("Store-device exclusion activation: {0}")]
     Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
-    Storage(#[from] crate::storage::StorageError),
+    Storage(#[from] crate::protocol::objects::StorageError),
 }
 
 impl From<StoreDeviceExclusionJournalError> for StoreDeviceExclusionError {

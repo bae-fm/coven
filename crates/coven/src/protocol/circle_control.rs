@@ -21,8 +21,8 @@ use super::store_commit::{
 };
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
-use crate::storage::cloud::ObjectSlot;
-use crate::storage::ExactObjectRef;
+use crate::protocol::objects::ExactObjectRef;
+use crate::protocol::objects::ObjectSlot;
 
 const RECIPIENT_SLOT_DOMAIN: &[u8] = b"coven.circle-recipient-slot.v1\0";
 const METADATA_DOMAIN: &str = "coven.circle-metadata.v1";

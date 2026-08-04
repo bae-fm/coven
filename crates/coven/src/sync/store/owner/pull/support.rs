@@ -52,8 +52,8 @@ impl std::error::Error for BlobDownloadFailures {
 
 #[derive(Debug)]
 pub enum PullError {
-    Storage(crate::storage::StorageError),
-    MembershipObject(crate::storage::StoreObjectError),
+    Storage(crate::protocol::objects::StorageError),
+    MembershipObject(crate::protocol::objects::StoreObjectError),
     MembershipLoad(crate::sync::store::membership::AnchoredChainError),
     Apply(String),
     /// The sync storage requires a schema version newer than ours.

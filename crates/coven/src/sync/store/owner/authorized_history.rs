@@ -108,11 +108,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         signer: &UserKeypair,
     ) -> Result<(), super::registration::StoreRegistrationError> {
+        use crate::protocol::objects::ProtocolObjectDomain;
         use crate::protocol::store_commit::{
             ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckRef,
             StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
         };
-        use crate::storage::ProtocolObjectDomain;
 
         let storage = self.storage;
         let root = self.history_verifier.verified_root().reference();
@@ -126,7 +126,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             != storage
                 .provider_binding()
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?
+                .map_err(crate::protocol::objects::StoreObjectError::from)?
                 .device
         {
             return Err(super::registration::StoreRegistrationError::Invalid(
@@ -137,10 +137,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             super::registration::StoreRegistrationError::Invalid(error.to_string())
         })?;
 
-        let registration_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreDeviceRegistration,
-        );
+        let registration_context =
+            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                root.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            );
         let registration_prefix =
             crate::protocol::store_commit::founder_registration_semantic_prefix(
                 match founder.value.origin {
@@ -159,7 +160,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 &registration_prefix,
             )
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         if registration_bytes != founder.bytes
             || registration_prepared.reference() != &founder.object
         {
@@ -176,7 +177,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 "Store founder registration has no acknowledgement anchor".to_string(),
             ));
         };
-        let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -184,7 +185,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let (ack_bytes, ack_prepared) = storage
             .read_prepared_protocol_slot(&ack_context, first_slot, &ack_prefix)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes).map_err(|error| {
             super::registration::StoreRegistrationError::Invalid(error.to_string())
         })?;
@@ -308,14 +309,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) fn pull_store_blob_protection(
         &self,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    {
         self.blob_source.store_protection()
     }
 
     pub(super) async fn prepare_pull_package(
         &self,
         package: crate::protocol::audience_package::AudiencePackage,
-        blob_protection: crate::storage::BlobSpoolProtection,
+        blob_protection: crate::protocol::objects::BlobSpoolProtection,
         schema: std::sync::Arc<crate::database::TableSchema>,
     ) -> Result<
         Result<pull::PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
@@ -597,7 +599,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<
         crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .load_reclaim_authorization(reference)
@@ -610,8 +612,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         registration: &crate::protocol::store_commit::StoreDeviceRegistration,
         commit: &StoreBatchCommitRef,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceHead>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::StoreDeviceHead>,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .load_head(reference, registration, commit)
@@ -625,7 +627,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         previous: Option<&crate::protocol::store_commit::VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::storage::cloud::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
         ),
         crate::sync::store::StoreError,
@@ -681,7 +683,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, crate::storage::StorageError> {
+    ) -> Result<
+        crate::protocol::objects::ResolvedProviderBinding,
+        crate::protocol::objects::StorageError,
+    > {
         self.storage.provider_binding().await
     }
 
@@ -764,7 +769,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, crate::sync::BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.blob_source
             .stage_verified_plaintext(authority, stored, destination)
             .await
@@ -786,7 +791,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::sync::BlobCacheError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::sync::BlobCacheError> {
         self.blob_source
             .protection_for_test(authority, stored)
             .await
@@ -798,7 +803,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) fn verified_root_object(
         &self,
-    ) -> &crate::storage::VerifiedObject<StoreProtocolRoot> {
+    ) -> &crate::protocol::objects::VerifiedObject<StoreProtocolRoot> {
         self.history_verifier.verified_root().object()
     }
 
@@ -819,7 +824,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         value: crate::protocol::wrapped_store_key::WrappedStoreKey,
     ) -> Result<
         crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::storage::StorageError,
+        crate::protocol::objects::StorageError,
     > {
         self.keyrings.prepare(recipient, value).await
     }
@@ -830,7 +835,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         bytes: &[u8],
     ) -> Result<
         crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .authenticate_bytes(reference, bytes)
@@ -860,8 +865,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        >,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history_verifier.load_registration(reference).await
     }
@@ -993,7 +1000,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             crate::protocol::store_commit::StoreSnapshotRef,
             crate::protocol::store_commit::SnapshotMeta,
         ),
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .load_store_snapshot(registration_ref, registration, reference)
@@ -1429,8 +1436,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) async fn load_pull_store_package(
         &mut self,
         reference: &StoreBatchCommitRef,
-    ) -> Result<Option<crate::storage::VerifiedObject<Vec<u8>>>, crate::storage::StoreObjectError>
-    {
+    ) -> Result<
+        Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>,
+        crate::protocol::objects::StoreObjectError,
+    > {
         self.history_verifier.load_store_package(reference).await
     }
 
@@ -1706,7 +1715,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) async fn verified_pull_terminal_retractions(
         &mut self,
         activation_head: &crate::protocol::store_commit::StoreDeviceHead,
-        activation_head_object: &crate::storage::ExactObjectRef,
+        activation_head_object: &crate::protocol::objects::ExactObjectRef,
         activation_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         activation_predecessor_state: &ResolvedStoreDeviceState,
         activation_predecessor_membership: &MembershipChain,
@@ -1953,7 +1962,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             self.storage
                 .delete_protocol_object(&target.object)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             self.database
                 .mark_candidate_cleanup_absent(target.object)
                 .await?;
@@ -1985,7 +1994,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             self.storage
                 .delete_protocol_object(&target.object)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             self.database
                 .mark_candidate_cleanup_absent(target.object)
                 .await?;
@@ -2015,7 +2024,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 self.storage
                     .delete_protocol_object(&target.object)
                     .await
-                    .map_err(crate::storage::StoreObjectError::from)?;
+                    .map_err(crate::protocol::objects::StoreObjectError::from)?;
                 self.database
                     .mark_candidate_cleanup_absent(target.object)
                     .await?;
@@ -2584,7 +2593,7 @@ impl AuthorizedStoreHistory<'_> {
         &mut self,
         expected: &crate::protocol::store_commit::StoreDeviceHead,
         expected_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        slot: &crate::storage::cloud::ObjectSlot,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<abandonment::VerifiedMergeWinner, StoreError> {
         let store_root_hash = self
@@ -2592,15 +2601,15 @@ impl AuthorizedStoreHistory<'_> {
             .verified_root()
             .reference()
             .store_root_hash;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let (winner_bytes, winner_prepared) = self
             .storage
             .read_prepared_protocol_slot(&context, slot, semantic_prefix)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let unverified: crate::protocol::store_commit::StoreDeviceHead =
             serde_json::from_slice(&winner_bytes).map_err(|error| {
                 StoreError::InvalidOutbound(format!("parse competing Merge head: {error}"))
@@ -2684,16 +2693,16 @@ impl AuthorizedStoreHistory<'_> {
         &mut self,
         candidate: &crate::protocol::store_commit::StoreDeviceHead,
         candidate_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_object: &crate::storage::ExactObjectRef,
+        candidate_object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<abandonment::ExcludedCandidateHeadObservation, StoreError> {
         let store_root_hash = self
             .history_verifier
             .verified_root()
             .reference()
             .store_root_hash;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let prefix = crate::protocol::store_commit::head_slot_prefix(
             &candidate.author_registration.device_id.to_string(),
@@ -2704,7 +2713,7 @@ impl AuthorizedStoreHistory<'_> {
             .read_protocol_slot(&context, candidate_object.slot(), &prefix)
             .await
         {
-            Err(crate::storage::StorageError::NotFound(_)) => {
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
                 Ok(abandonment::ExcludedCandidateHeadObservation::AuthorExclusion)
             }
             Ok((bytes, object)) if bytes == candidate.to_bytes() && object == *candidate_object => {
@@ -2719,7 +2728,7 @@ impl AuthorizedStoreHistory<'_> {
                 )
                 .await
                 .map(abandonment::ExcludedCandidateHeadObservation::MergeWinner),
-            Err(error) => Err(crate::storage::StoreObjectError::Storage(error).into()),
+            Err(error) => Err(crate::protocol::objects::StoreObjectError::Storage(error).into()),
         }
     }
 
@@ -2779,7 +2788,7 @@ impl AuthorizedStoreHistory<'_> {
         revoked_grant: &crate::protocol::membership::MembershipGrantId,
         candidate: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         candidate_head: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_head_object: &crate::storage::ExactObjectRef,
+        candidate_head_object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let root = self.history_verifier.verified_root().reference().clone();
@@ -2856,7 +2865,7 @@ impl AuthorizedStoreHistory<'_> {
         &mut self,
         candidate: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         candidate_head: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_head_object: &crate::storage::ExactObjectRef,
+        candidate_head_object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let candidate_ref = candidate.reference().clone();
@@ -2902,7 +2911,7 @@ impl AuthorizedStoreHistory<'_> {
         locator: &crate::database::AuthorExclusionActivationLocator,
         candidate: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
         candidate_head: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_head_object: &crate::storage::ExactObjectRef,
+        candidate_head_object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<
         crate::protocol::remote_object::VerifiedCandidateNonactivation,
         crate::sync::store::owner::pull::StorePullError,
@@ -2963,7 +2972,7 @@ impl AuthorizedStoreHistory<'_> {
         previous: Option<&crate::protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<
         (
-            crate::storage::cloud::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
         ),
         StoreError,
@@ -3072,7 +3081,9 @@ impl AuthorizedStoreHistory<'_> {
     pub(super) async fn load_founder_registration_for_test(
         &mut self,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+        crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        >,
         StoreError,
     > {
         Ok(self.history_verifier.load_founder_registration().await?)
@@ -3115,7 +3126,7 @@ impl AuthorizedStoreHistory<'_> {
     pub(super) async fn load_store_package_for_test(
         &mut self,
         reference: &crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<Option<crate::storage::VerifiedObject<Vec<u8>>>, StoreError> {
+    ) -> Result<Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>, StoreError> {
         Ok(self.history_verifier.load_store_package(reference).await?)
     }
 

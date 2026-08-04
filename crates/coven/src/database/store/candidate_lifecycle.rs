@@ -4,11 +4,11 @@ use super::{
     StoreDatabase,
 };
 use crate::database::*;
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use crate::protocol::store_commit::{
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
 };
-use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::write::{WriteId, WriteResolution, WriteStatus};
 use rusqlite::OptionalExtension;
 

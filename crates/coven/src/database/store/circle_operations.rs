@@ -694,7 +694,7 @@ impl StoreDatabase {
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<crate::storage::BlobSpoolProtection, DbError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
         self.connection
             .call(move |conn| {
                 circle_blob_opening_protection_on(
@@ -715,7 +715,7 @@ pub(super) fn circle_blob_opening_protection_on(
     circle_id: crate::protocol::circle::CircleId,
     expected_control: &crate::protocol::circle::CircleControlCoord,
     expected_key_fingerprint: crate::KeyFingerprint,
-) -> Result<crate::storage::BlobSpoolProtection, DbError> {
+) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
     let Some(authority) =
         StoreDatabase::verified_circle_activation_on(conn, root, circle_id, expected_control)?
     else {
@@ -787,7 +787,7 @@ pub(super) fn circle_blob_opening_protection_on(
         }
     }
     retained_key
-        .map(crate::storage::BlobSpoolProtection::Opaque)
+        .map(crate::protocol::objects::BlobSpoolProtection::Opaque)
         .ok_or_else(|| {
             DbError::Message(format!(
                 "Circle {circle_id} retains no local key for fingerprint \

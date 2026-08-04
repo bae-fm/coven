@@ -11,6 +11,8 @@ use crate::changeset::RowChange;
 use crate::database::{DbError, ValidatedChangeset};
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{BlobSpoolProtection, ExactObjectRef, StorageError};
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
     ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, StoreBatchCommit,
@@ -19,8 +21,6 @@ use crate::protocol::store_commit::{
     StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use crate::protocol::{circle, remote_object, store_commit};
-use crate::storage::StoreObjectError;
-use crate::storage::{BlobSpoolProtection, ExactObjectRef, StorageError};
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };

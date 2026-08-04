@@ -26,6 +26,7 @@ pub(crate) mod identity_custody;
 pub(crate) mod joining;
 pub(crate) mod keyring_backend;
 pub(crate) mod keys;
+pub(crate) mod local_file;
 pub(crate) mod oauth;
 pub(crate) mod protocol;
 mod read_handle;
@@ -108,6 +109,7 @@ pub use oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{AuthorizeRequest, OAuthClientCreds, OAuthClientCredsError};
 pub use oauth::{OAuthClients, OAuthTokens};
+pub use protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
 pub use protocol::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
     CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
@@ -119,6 +121,10 @@ pub use protocol::{
     ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderAdminMembershipChange,
     ProviderAdminState, ProviderCapabilityProof, ProviderProbeId, StoreBatchCommitRef,
     StoreCommitCoord, StoreCommitOrder, StoreDeviceId,
+};
+pub use protocol::{
+    AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
+    ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
 pub use read_handle::CovenReadHandle;
 pub use restoration::{
@@ -133,14 +139,12 @@ pub use storage::CloudCipher;
 #[cfg(any(test, feature = "test-utils"))]
 pub use storage::InMemoryCloudHome;
 pub use storage::{
-    write_cloud_object_stream, AwsPrincipal, BlobBody, BoxPartSink, CloudAccessOutcome,
-    CloudAccessState, CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps,
-    CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
-    CloudKitShare, CloudKitShareAcceptance, CloudKitSharePermission, CloudObjectStream,
-    CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, GoogleDriveCorpus, ObjectSlot,
-    PartSink, PhysicalObjectLocator, ProviderDeviceBinding, ProviderPrincipalId,
-    ResolvedProviderBinding, S3CloudHome, S3EndpointBinding, StoreProviderBinding, UploadProgress,
+    write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudKitAcceptedShareRecord,
+    CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
+    CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
+    CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
+    ExactSlotStorage, PartSink, S3CloudHome, UploadProgress,
 };
 pub use store_dir::{StoreDir, StoreLayout};
 pub use sync::{

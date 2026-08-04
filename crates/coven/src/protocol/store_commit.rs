@@ -20,8 +20,8 @@ use crate::protocol::circle::{
     CircleRosterConflictResolutionRef, CircleRosterCoord, CircleRosterHeadRef,
 };
 use crate::protocol::circle_control::StoreMembershipStateRef;
-use crate::storage::cloud::ObjectSlot;
-use crate::storage::{ExactObjectRef, ProviderDeviceBinding};
+use crate::protocol::objects::ObjectSlot;
+use crate::protocol::objects::{ExactObjectRef, ProviderDeviceBinding};
 use crate::KeyFingerprint;
 use crate::WriteId;
 

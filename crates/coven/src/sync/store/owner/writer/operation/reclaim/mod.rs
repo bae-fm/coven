@@ -8,13 +8,14 @@ use crate::database::{
 use crate::protocol::circle::{
     CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId,
 };
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::protocol::reclaim::*;
 use crate::protocol::store_commit::{
     snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
     StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::storage::{StoreObjectError, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::store::owner::history::{
     CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
 };
@@ -1589,7 +1590,7 @@ impl AuthorizedReclaim<'_, '_> {
             self.storage
                 .delete_protocol_object(&target.object)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             database
                 .mark_candidate_cleanup_absent(target.object)
                 .await?;
@@ -1767,7 +1768,8 @@ impl AuthorizedReclaim<'_, '_> {
                     ),
                     crate::protocol::store_commit::semantic_prefix_from_exact_object(
                         &target.coverage.bootstrap.image.object,
-                        crate::storage::ProtectedObjectDomain::CircleBootstrapImage.extension(),
+                        crate::protocol::objects::ProtectedObjectDomain::CircleBootstrapImage
+                            .extension(),
                     )
                     .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
                 )
@@ -1793,7 +1795,8 @@ impl AuthorizedReclaim<'_, '_> {
                     ),
                     crate::protocol::store_commit::semantic_prefix_from_exact_object(
                         &target.image.object,
-                        crate::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
+                        crate::protocol::objects::ProtectedObjectDomain::CircleSnapshotImage
+                            .extension(),
                     )
                     .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
                 )

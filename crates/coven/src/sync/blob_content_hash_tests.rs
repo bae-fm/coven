@@ -5,8 +5,9 @@
 
 use crate::blob::locator::{BlobLocatorError, StoredBlobRef};
 use crate::encryption::EncryptionService;
+use crate::protocol::objects::{BlobSpoolProtection, StorageError};
 use crate::storage::cloud::ExactSlotStorage;
-use crate::storage::{BlobSpoolProtection, StorageError, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::test_helpers::TestStore;
 
 const BLOB_ID: &str = "blobxxxx";

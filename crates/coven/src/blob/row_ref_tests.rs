@@ -2,9 +2,9 @@ use super::*;
 use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::protocol::circle::CircleId;
 use crate::protocol::circle_control::CircleControlCoord;
+use crate::protocol::objects::ExactObjectRef;
+use crate::protocol::objects::ObjectSlot;
 use crate::protocol::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
-use crate::storage::cloud::ObjectSlot;
-use crate::storage::ExactObjectRef;
 use crate::KeyFingerprint;
 
 fn uploader() -> StoreDeviceRegistrationRef {

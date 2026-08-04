@@ -44,8 +44,9 @@ use tracing::{debug, warn};
 use crate::blob::locator::StoredBlobRef;
 use crate::database::{OutboxEntry, OutboxOperation};
 use crate::keys::{self, UserKeypair};
+use crate::protocol::objects::StorageError;
+use crate::storage::SyncStorage;
 use crate::storage::{CloudCipherAccess, CloudRotationAccess};
-use crate::storage::{StorageError, SyncStorage};
 
 /// The default convergence window a host gets if it configures none: how long a
 /// deleted blob is kept after its tombstone is written, before a GC pass reclaims

@@ -70,7 +70,7 @@ pub(crate) fn verify_next_local_store_ack_on(
 
 pub(super) fn store_ack_first_slot(
     registration: &StoreDeviceRegistration,
-) -> Result<&crate::storage::cloud::ObjectSlot, DbError> {
+) -> Result<&crate::protocol::objects::ObjectSlot, DbError> {
     match &registration.acknowledgements {
         crate::protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements { first_slot } => {
             Ok(first_slot)
@@ -83,7 +83,7 @@ pub(super) fn store_ack_first_slot(
 
 pub(crate) fn store_snapshot_first_slot(
     registration: &StoreDeviceRegistration,
-) -> Result<&crate::storage::cloud::ObjectSlot, DbError> {
+) -> Result<&crate::protocol::objects::ObjectSlot, DbError> {
     match &registration.snapshots {
         crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots { first_slot } => {
             Ok(first_slot)
@@ -128,7 +128,7 @@ pub(crate) fn load_published_store_ack_on(
 pub(crate) fn finish_outbound_store_ack_on(
     conn: &Connection,
     reference: &StoreAckRef,
-    successor_slot: &crate::storage::cloud::ObjectSlot,
+    successor_slot: &crate::protocol::objects::ObjectSlot,
 ) -> Result<(), DbError> {
     let removed = conn
         .execute(

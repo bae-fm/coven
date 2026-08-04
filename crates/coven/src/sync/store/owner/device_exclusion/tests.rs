@@ -896,8 +896,8 @@ fn indexed_shared_blob(
         ObjectHash::digest(format!("plaintext excluded-author blob {label}").as_bytes()),
     )
     .expect("construct indexed shared blob locator");
-    let object = crate::storage::ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(locator.semantic_key())
+    let object = crate::protocol::objects::ExactObjectRef::new(
+        crate::protocol::objects::ObjectSlot::logical(locator.semantic_key())
             .expect("construct indexed shared blob slot"),
         u64::try_from(stored_bytes.len()).expect("indexed shared blob size fits u64"),
         ObjectHash::digest(&stored_bytes),
@@ -1691,7 +1691,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                         &candidate_head_prefix,
                     )
                     .await,
-                Err(crate::storage::StorageError::NotFound(_))
+                Err(crate::protocol::objects::StorageError::NotFound(_))
             ));
             assert!(crate::database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
@@ -1775,7 +1775,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                         &candidate_head_prefix,
                     )
                     .await,
-                Err(crate::storage::StorageError::NotFound(_))
+                Err(crate::protocol::objects::StorageError::NotFound(_))
             ));
         }
         ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
@@ -1794,7 +1794,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                 &candidate_commit_prefix,
             )
             .await,
-        Err(crate::storage::StorageError::NotFound(_))
+        Err(crate::protocol::objects::StorageError::NotFound(_))
     ));
     let store_package = candidate
         .commit
@@ -1811,7 +1811,9 @@ async fn run_excluded_author_candidate_cleanup_case(
             .load_store_package_for_test(candidate.commit.value.reference())
             .await,
         Err(StoreError::Object(
-            crate::storage::StoreObjectError::Storage(crate::storage::StorageError::NotFound(_))
+            crate::protocol::objects::StoreObjectError::Storage(
+                crate::protocol::objects::StorageError::NotFound(_)
+            )
         ))
     ));
     assert!(matches!(
@@ -1929,7 +1931,7 @@ impl ExcludedPeer<'_> {
                         &prefix,
                     )
                     .await,
-                Err(crate::storage::StorageError::NotFound(_))
+                Err(crate::protocol::objects::StorageError::NotFound(_))
             ));
         }
         let peer_store = self
@@ -1947,8 +1949,8 @@ impl ExcludedPeer<'_> {
                         .load_store_package_for_test(commit.reference())
                         .await,
                     Err(StoreError::Object(
-                        crate::storage::StoreObjectError::Storage(
-                            crate::storage::StorageError::NotFound(_)
+                        crate::protocol::objects::StoreObjectError::Storage(
+                            crate::protocol::objects::StorageError::NotFound(_)
                         )
                     ))
                 ));

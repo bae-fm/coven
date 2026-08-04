@@ -96,7 +96,8 @@
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
 use crate::database::DbError;
-use crate::storage::{StorageError, SyncStorage};
+use crate::protocol::objects::StorageError;
+use crate::storage::SyncStorage;
 use crate::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };
@@ -105,13 +106,13 @@ use crate::store_dir::{
 /// authority; the cache only reads bytes with the supplied protection.
 pub(crate) struct RemoteBlobAccess<'a> {
     storage: &'a dyn SyncStorage,
-    protection: crate::storage::BlobSpoolProtection,
+    protection: crate::protocol::objects::BlobSpoolProtection,
 }
 
 impl<'a> RemoteBlobAccess<'a> {
     pub(crate) fn new(
         storage: &'a dyn SyncStorage,
-        protection: crate::storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Self {
         Self {
             storage,
@@ -123,7 +124,7 @@ impl<'a> RemoteBlobAccess<'a> {
         &self,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.storage
             .stage_verified_blob_plaintext(stored, self.protection.clone(), destination)
             .await
@@ -373,7 +374,7 @@ pub struct BlobStream {
 pub(super) enum BlobStreamSource {
     /// A file on this device: the user's own external file, the local store, or
     /// a cache copy of a Remote blob.
-    Local(crate::storage::LocalBlobFile),
+    Local(crate::local_file::OpenFile),
     /// A Remote blob with no cache copy: ranges are served from the cloud object
     /// a chunk at a time.
     Remote(crate::storage::BlobRangeReader),

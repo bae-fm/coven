@@ -277,8 +277,8 @@ pub fn exercise_exact_outbound_blob_graph(
     use crate::protocol::causal_grants::AuthorStreamId;
     use crate::protocol::circle::CircleId;
     use crate::protocol::circle_control::CircleControlCoord;
+    use crate::protocol::objects::ObjectSlot;
     use crate::protocol::store_commit::{CandidateFamilyId, StoreCommitCoord};
-    use crate::storage::cloud::ObjectSlot;
 
     let store_root_hash = ObjectHash::digest(b"outbound-graph-store");
     let write_id = WriteId::from_generated("outbound-graph-write".to_string());

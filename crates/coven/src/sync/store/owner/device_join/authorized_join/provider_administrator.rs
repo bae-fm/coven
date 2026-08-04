@@ -145,7 +145,7 @@ impl<'operation, 'storage>
                 },
             ) if durable_request == &request => (
                 grant.clone(),
-                crate::storage::PreparedExactObject::new(
+                crate::protocol::objects::PreparedExactObject::new(
                     prepared.object.clone(),
                     prepared.stored_bytes.clone(),
                 )?,
@@ -184,7 +184,7 @@ impl<'operation, 'storage>
                         &request.offer.provider,
                     )
                     .map_err(provider_error)?;
-                let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+                let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                     request.offer.store_root.store_root_hash,
                     ProtocolObjectDomain::ProviderAccessGrant,
                 );
@@ -218,7 +218,7 @@ impl<'operation, 'storage>
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::ProviderAccessGrant,
         );

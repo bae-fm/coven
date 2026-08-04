@@ -343,15 +343,15 @@ pub(crate) fn user_keypair_from_seed(seed: [u8; 32]) -> UserKeypair {
 }
 
 pub(crate) fn test_cloud_home() -> Arc<crate::storage::cloud::test_utils::InMemoryCloudHome> {
-    test_cloud_home_with_binding(crate::storage::ResolvedProviderBinding {
-        store: crate::storage::StoreProviderBinding::GoogleDrive {
-            corpus: crate::storage::GoogleDriveCorpus::SharedDrive {
+    test_cloud_home_with_binding(crate::protocol::objects::ResolvedProviderBinding {
+        store: crate::protocol::objects::StoreProviderBinding::GoogleDrive {
+            corpus: crate::protocol::objects::GoogleDriveCorpus::SharedDrive {
                 drive_id: "test-drive".to_string(),
                 folder_id: "test-folder".to_string(),
             },
         },
-        device: crate::storage::ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::GoogleDrive {
+        device: crate::protocol::objects::ProviderDeviceBinding {
+            principal: crate::protocol::objects::ProviderPrincipalId::GoogleDrive {
                 permission_id: "test-permission".to_string(),
             },
         },
@@ -359,7 +359,7 @@ pub(crate) fn test_cloud_home() -> Arc<crate::storage::cloud::test_utils::InMemo
 }
 
 pub(crate) fn test_cloud_home_with_binding(
-    binding: crate::storage::ResolvedProviderBinding,
+    binding: crate::protocol::objects::ResolvedProviderBinding,
 ) -> Arc<crate::storage::cloud::test_utils::InMemoryCloudHome> {
     Arc::new(
         crate::storage::cloud::test_utils::InMemoryCloudHome::new().with_provider_binding(binding),
@@ -379,10 +379,11 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
         &self,
         _member_pubkey: &str,
         _provider_account_email: Option<&str>,
-        peer: &crate::storage::ProviderDeviceBinding,
+        peer: &crate::protocol::objects::ProviderDeviceBinding,
     ) -> Result<crate::protocol::provider::ProviderAccessLocator, crate::sync::store::DeviceJoinError>
     {
-        let crate::storage::ProviderPrincipalId::Dropbox { account_id } = &peer.principal else {
+        let crate::protocol::objects::ProviderPrincipalId::Dropbox { account_id } = &peer.principal
+        else {
             return Err(crate::sync::store::DeviceJoinError::Provider(
                 "test Dropbox access administrator received a non-Dropbox peer".to_string(),
             ));
@@ -415,21 +416,22 @@ impl crate::storage::SyncStorage for TestStore {
         self.storage.self_uploader()
     }
 
-    async fn probe_provider(&self) -> Result<(), crate::storage::StorageError> {
+    async fn probe_provider(&self) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.probe_provider().await
     }
 
     async fn set_member_access(
         &self,
         state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::storage::StorageError> {
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::protocol::objects::StorageError>
+    {
         self.storage.set_member_access(state).await
     }
 
     async fn read_blob_tombstone(
         &self,
         key: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.storage.read_blob_tombstone(key).await
     }
 
@@ -437,43 +439,49 @@ impl crate::storage::SyncStorage for TestStore {
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.write_blob_tombstone(key, stored_bytes).await
     }
 
     async fn list_blob_tombstones(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::StorageError> {
+    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
         self.storage.list_blob_tombstones(prefix).await
     }
 
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, crate::storage::StorageError> {
+    async fn blob_tombstone_exists(
+        &self,
+        key: &str,
+    ) -> Result<bool, crate::protocol::objects::StorageError> {
         self.storage.blob_tombstone_exists(key).await
     }
 
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), crate::storage::StorageError> {
+    async fn delete_blob_tombstone(
+        &self,
+        key: &str,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.delete_blob_tombstone(key).await
     }
 
     async fn list_provider_objects_for_test(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::StorageError> {
+    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
         self.storage.list_provider_objects_for_test(prefix).await
     }
 
     async fn read_provider_object_for_test(
         &self,
         key: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.storage.read_provider_object_for_test(key).await
     }
 
     async fn provider_object_exists_for_test(
         &self,
         key: &str,
-    ) -> Result<bool, crate::storage::StorageError> {
+    ) -> Result<bool, crate::protocol::objects::StorageError> {
         self.storage.provider_object_exists_for_test(key).await
     }
 
@@ -481,7 +489,7 @@ impl crate::storage::SyncStorage for TestStore {
         &self,
         journal: &dyn crate::protocol::provider::ProviderProbeJournal,
         probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &crate::storage::ResolvedProviderBinding,
+        binding: &crate::protocol::objects::ResolvedProviderBinding,
     ) -> Result<
         crate::protocol::provider::ExactSlotProbeReceipt,
         crate::protocol::provider::ProviderProbeError,
@@ -494,7 +502,7 @@ impl crate::storage::SyncStorage for TestStore {
     async fn reserve_cross_principal_response_slot(
         &self,
         probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::protocol::provider::ProviderProbeError>
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::provider::ProviderProbeError>
     {
         self.storage
             .reserve_cross_principal_response_slot(probe_id)
@@ -503,15 +511,18 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn observe_exact_slot(
         &self,
-        slot: &crate::storage::cloud::ObjectSlot,
-    ) -> Result<Option<crate::storage::ExactObjectRef>, crate::storage::StorageError> {
+        slot: &crate::protocol::objects::ObjectSlot,
+    ) -> Result<
+        Option<crate::protocol::objects::ExactObjectRef>,
+        crate::protocol::objects::StorageError,
+    > {
         self.storage.observe_exact_slot(slot).await
     }
 
     async fn delete_exact_slot_and_verify_absent(
         &self,
-        slot: &crate::storage::cloud::ObjectSlot,
-    ) -> Result<(), crate::storage::StorageError> {
+        slot: &crate::protocol::objects::ObjectSlot,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.delete_exact_slot_and_verify_absent(slot).await
     }
 
@@ -519,7 +530,7 @@ impl crate::storage::SyncStorage for TestStore {
         &self,
         publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
         probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
         administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<
@@ -543,7 +554,7 @@ impl crate::storage::SyncStorage for TestStore {
         authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
@@ -563,7 +574,7 @@ impl crate::storage::SyncStorage for TestStore {
         &self,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         administrator_signing_pubkey: &str,
         peer_signer: &crate::keys::UserKeypair,
     ) -> Result<
@@ -587,7 +598,7 @@ impl crate::storage::SyncStorage for TestStore {
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         response: &crate::protocol::provider::CrossPrincipalProbeResponse,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<
@@ -609,22 +620,26 @@ impl crate::storage::SyncStorage for TestStore {
 
     fn store_blob_protection(
         &self,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    {
         self.storage.store_blob_protection()
     }
 
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, crate::storage::StorageError> {
+    ) -> Result<
+        crate::protocol::objects::ResolvedProviderBinding,
+        crate::protocol::objects::StorageError,
+    > {
         self.storage.provider_binding().await
     }
 
     async fn allocate_protocol_slot(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
+        context: &crate::protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
         self.storage
             .allocate_protocol_slot(context, semantic_prefix, extension)
             .await
@@ -632,28 +647,29 @@ impl crate::storage::SyncStorage for TestStore {
 
     fn prepare_protocol_object(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         data: Vec<u8>,
-    ) -> Result<crate::storage::PreparedExactObject, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::PreparedExactObject, crate::protocol::objects::StorageError>
+    {
         self.storage
             .prepare_protocol_object(context, slot, semantic_prefix, data)
     }
 
     async fn create_protocol_object(
         &self,
-        prepared: &crate::storage::PreparedExactObject,
-    ) -> Result<(), crate::storage::StorageError> {
+        prepared: &crate::protocol::objects::PreparedExactObject,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.create_protocol_object(prepared).await
     }
 
     async fn read_protocol_object(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        object: &crate::storage::ExactObjectRef,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        object: &crate::protocol::objects::ExactObjectRef,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.storage
             .read_protocol_object(context, object, semantic_prefix)
             .await
@@ -661,10 +677,13 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn read_protocol_slot(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::storage::ExactObjectRef), crate::storage::StorageError> {
+    ) -> Result<
+        (Vec<u8>, crate::protocol::objects::ExactObjectRef),
+        crate::protocol::objects::StorageError,
+    > {
         self.storage
             .read_protocol_slot(context, slot, semantic_prefix)
             .await
@@ -672,10 +691,13 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn read_prepared_protocol_slot(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::storage::PreparedExactObject), crate::storage::StorageError> {
+    ) -> Result<
+        (Vec<u8>, crate::protocol::objects::PreparedExactObject),
+        crate::protocol::objects::StorageError,
+    > {
         self.storage
             .read_prepared_protocol_slot(context, slot, semantic_prefix)
             .await
@@ -683,27 +705,28 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn delete_protocol_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
-    ) -> Result<(), crate::storage::StorageError> {
+        object: &crate::protocol::objects::ExactObjectRef,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.delete_protocol_object(object).await
     }
 
     async fn allocate_blob_slot(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::storage::StorageError> {
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
         self.storage.allocate_blob_slot(locator, authority).await
     }
 
     async fn seal_blob_to_spool(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-        protection: crate::storage::BlobSpoolProtection,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
         spool_file: &std::path::Path,
-    ) -> Result<crate::storage::BlobSpoolWrite, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolWrite, crate::protocol::objects::StorageError>
+    {
         self.storage
             .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
             .await
@@ -712,10 +735,10 @@ impl crate::storage::SyncStorage for TestStore {
     async fn prepare_blob_object(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-        slot: crate::storage::cloud::ObjectSlot,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        slot: crate::protocol::objects::ObjectSlot,
         stored_file: &std::path::Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, crate::storage::StorageError> {
+    ) -> Result<crate::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError> {
         self.storage
             .prepare_blob_object(locator, authority, slot, stored_file)
             .await
@@ -724,10 +747,10 @@ impl crate::storage::SyncStorage for TestStore {
     async fn create_blob_object_from_file(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage
             .create_blob_object_from_file(blob, authority, stored_file, progress)
             .await
@@ -736,7 +759,7 @@ impl crate::storage::SyncStorage for TestStore {
     async fn verify_blob_object(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(blob).await
     }
 
@@ -744,16 +767,16 @@ impl crate::storage::SyncStorage for TestStore {
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, crate::storage::StorageError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
         self.storage.stage_exact_blob_download(blob, dest).await
     }
 
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, crate::storage::StorageError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
         self.storage
             .stage_verified_blob_plaintext(blob, protection, dest)
             .await
@@ -762,15 +785,15 @@ impl crate::storage::SyncStorage for TestStore {
     async fn open_blob_range_reader(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
-    ) -> Result<crate::storage::BlobRangeReader, crate::storage::StorageError> {
+        protection: crate::protocol::objects::BlobSpoolProtection,
+    ) -> Result<crate::storage::BlobRangeReader, crate::protocol::objects::StorageError> {
         self.storage.open_blob_range_reader(blob, protection).await
     }
 
     async fn delete_blob_object(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.delete_blob_object(blob).await
     }
 }
@@ -807,10 +830,10 @@ mod test_device {
             &self,
             store_root: crate::protocol::store_commit::StoreRootRef,
             attempt_id: crate::protocol::store_commit::DeviceJoinAttemptId,
-            attempt_slot: crate::storage::cloud::ObjectSlot,
+            attempt_slot: crate::protocol::objects::ObjectSlot,
             expected_registration: crate::protocol::store_commit::StoreDeviceRegistration,
-            registration_slot: crate::storage::cloud::ObjectSlot,
-            outcome_slot: crate::storage::cloud::ObjectSlot,
+            registration_slot: crate::protocol::objects::ObjectSlot,
+            outcome_slot: crate::protocol::objects::ObjectSlot,
             bootstrap_cut: crate::protocol::store_commit::StoreHistoryCut,
             membership: crate::protocol::circle_control::StoreMembershipStateRef,
             provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
@@ -1183,7 +1206,7 @@ mod test_device {
             &self,
             authority: &crate::blob::RowBlobAuthority,
             stored: &crate::blob::locator::StoredBlobRef,
-        ) -> Result<crate::storage::BlobSpoolProtection, String> {
+        ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
             self.store.blob_protection_for_test(authority, stored).await
         }
 
@@ -1219,7 +1242,7 @@ mod test_device {
             &self,
             candidate: &crate::protocol::store_commit::StoreDeviceHead,
             candidate_commit: &crate::protocol::store_commit::StoreBatchCommit,
-            candidate_object: &crate::storage::ExactObjectRef,
+            candidate_object: &crate::protocol::objects::ExactObjectRef,
         ) -> Result<
             crate::sync::store::ExcludedCandidateHeadObservation,
             crate::sync::store::StoreError,
@@ -1370,7 +1393,7 @@ mod test_device {
             previous: Option<&crate::protocol::store_commit::StoreBatchCommitRef>,
         ) -> Result<
             (
-                crate::storage::cloud::ObjectSlot,
+                crate::protocol::objects::ObjectSlot,
                 Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
             ),
             crate::sync::store::StoreError,
@@ -1574,8 +1597,10 @@ mod test_device {
         pub(crate) async fn load_store_package_for_test(
             &self,
             reference: &crate::protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<Option<crate::storage::VerifiedObject<Vec<u8>>>, crate::sync::store::StoreError>
-        {
+        ) -> Result<
+            Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>,
+            crate::sync::store::StoreError,
+        > {
             self.store.load_store_package_for_test(reference).await
         }
 
@@ -1941,7 +1966,7 @@ mod test_device {
             let source = store_dir
                 .local_blob_path(&local.blob().namespace, &local.blob().id)
                 .expect("resolve host blob source");
-            crate::storage::StagedBlobFile::write_for_test(&source, bytes)
+            crate::local_file::AtomicStagedFile::write_for_test(&source, bytes)
                 .await
                 .expect("write host blob source");
             crate::sync::test_owner_graph::TestOwnerGraph::new(self.db.clone(), store_dir.clone())
@@ -2122,7 +2147,7 @@ mod test_device {
                 .local_blob_write_authority()
                 .await
                 .expect("load exact blob write authority");
-            let authority = crate::storage::BlobWriteAuthority::new(&registration);
+            let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
             let protection = crate::encryption::EncryptionService::from_key([42; 32]);
             let locator = crate::blob::locator::BlobLocator::opaque(
                 namespace,
@@ -2138,7 +2163,7 @@ mod test_device {
             let temp = tempfile::tempdir().expect("create exact blob spool directory");
             let plaintext = temp.path().join("plaintext");
             let spool = temp.path().join("stored");
-            crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
+            crate::local_file::AtomicStagedFile::write_for_test(&plaintext, bytes)
                 .await
                 .expect("write exact blob plaintext");
             let slot = self
@@ -2150,7 +2175,7 @@ mod test_device {
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
-                    crate::storage::BlobSpoolProtection::Opaque(protection),
+                    crate::protocol::objects::BlobSpoolProtection::Opaque(protection),
                     &plaintext,
                     &spool,
                 )
@@ -2185,7 +2210,7 @@ mod test_device {
                 .local_blob_write_authority()
                 .await
                 .expect("load browsable blob write authority");
-            let authority = crate::storage::BlobWriteAuthority::new(&registration);
+            let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
             let locator = crate::blob::locator::BlobLocator::browsable(
                 namespace,
                 id,
@@ -2198,7 +2223,7 @@ mod test_device {
             let temp = tempfile::tempdir().expect("create browsable blob spool directory");
             let plaintext = temp.path().join("plaintext");
             let spool = temp.path().join("stored");
-            crate::storage::StagedBlobFile::write_for_test(&plaintext, bytes)
+            crate::local_file::AtomicStagedFile::write_for_test(&plaintext, bytes)
                 .await
                 .expect("write browsable blob plaintext");
             let slot = self
@@ -2210,7 +2235,7 @@ mod test_device {
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
-                    crate::storage::BlobSpoolProtection::Browsable,
+                    crate::protocol::objects::BlobSpoolProtection::Browsable,
                     &plaintext,
                     &spool,
                 )
@@ -2630,12 +2655,14 @@ mod test_device {
 
         pub(crate) async fn prepare_circle_object(
             &self,
-            context: &crate::storage::ProtocolObjectContext,
+            context: &crate::protocol::objects::ProtocolObjectContext,
             semantic_prefix: &str,
             extension: &str,
             bytes: Vec<u8>,
-        ) -> Result<crate::storage::PreparedExactObject, crate::sync::store::CircleOperationError>
-        {
+        ) -> Result<
+            crate::protocol::objects::PreparedExactObject,
+            crate::sync::store::CircleOperationError,
+        > {
             self.store
                 .authorize_writer()
                 .await
@@ -2649,12 +2676,14 @@ mod test_device {
 
         pub(crate) async fn prepare_circle_object_at(
             &self,
-            context: &crate::storage::ProtocolObjectContext,
-            slot: crate::storage::cloud::ObjectSlot,
+            context: &crate::protocol::objects::ProtocolObjectContext,
+            slot: crate::protocol::objects::ObjectSlot,
             semantic_prefix: &str,
             bytes: Vec<u8>,
-        ) -> Result<crate::storage::PreparedExactObject, crate::sync::store::CircleOperationError>
-        {
+        ) -> Result<
+            crate::protocol::objects::PreparedExactObject,
+            crate::sync::store::CircleOperationError,
+        > {
             self.store
                 .authorize_writer()
                 .await
@@ -2674,8 +2703,8 @@ mod test_device {
             (
                 crate::protocol::circle::PreparedCircleTransition,
                 crate::protocol::store_commit::CircleActivationObjects,
-                std::collections::BTreeMap<String, crate::storage::PreparedExactObject>,
-                Option<crate::storage::ExactObjectRef>,
+                std::collections::BTreeMap<String, crate::protocol::objects::PreparedExactObject>,
+                Option<crate::protocol::objects::ExactObjectRef>,
                 Vec<crate::protocol::store_commit::StreamActivation>,
             ),
             crate::sync::store::CircleOperationError,
@@ -3149,7 +3178,7 @@ impl TestStore {
         &self,
         key: &str,
         bytes: Vec<u8>,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.write_blob_tombstone(key, bytes).await
     }
 
@@ -3170,7 +3199,7 @@ impl TestStore {
 
     pub(crate) fn fail_nth_exact_delete_of(
         &self,
-        slots: &[&crate::storage::cloud::ObjectSlot],
+        slots: &[&crate::protocol::objects::ObjectSlot],
         call: usize,
     ) {
         self.home.fail_nth_exact_delete_of(slots, call);
@@ -3268,16 +3297,16 @@ impl TestStore {
             let provider_binding = crate::storage::SyncStorage::provider_binding(&*self.storage)
                 .await
                 .map_err(|error| error.to_string())?;
-            let crate::storage::StoreProviderBinding::Dropbox { namespace_id } =
+            let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
                 &provider_binding.store
             else {
                 return Err("cross-principal test Store is not Dropbox".to_string());
             };
             let namespace_id = namespace_id.clone();
-            let peer_binding = crate::storage::ResolvedProviderBinding {
+            let peer_binding = crate::protocol::objects::ResolvedProviderBinding {
                 store: provider_binding.store.clone(),
-                device: crate::storage::ProviderDeviceBinding {
-                    principal: crate::storage::ProviderPrincipalId::Dropbox {
+                device: crate::protocol::objects::ProviderDeviceBinding {
+                    principal: crate::protocol::objects::ProviderPrincipalId::Dropbox {
                         account_id: peer_account_id.to_string(),
                     },
                 },
@@ -3670,11 +3699,11 @@ impl TestStore {
 
     pub(crate) async fn create_exact_protocol_object(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
+        context: &crate::protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         bytes: &[u8],
-    ) -> Result<crate::storage::ExactObjectRef, String> {
+    ) -> Result<crate::protocol::objects::ExactObjectRef, String> {
         let slot = self
             .storage
             .allocate_protocol_slot(context, semantic_prefix, extension)
@@ -3693,17 +3722,17 @@ impl TestStore {
 
     pub(crate) async fn publish_prepared_protocol_object(
         &self,
-        prepared: &crate::storage::PreparedExactObject,
-    ) -> Result<(), crate::storage::StorageError> {
+        prepared: &crate::protocol::objects::PreparedExactObject,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.create_protocol_object(prepared).await
     }
 
     pub(crate) async fn read_exact_protocol_object(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        object: &crate::storage::ExactObjectRef,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        object: &crate::protocol::objects::ExactObjectRef,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.storage
             .read_protocol_object(context, object, semantic_prefix)
             .await
@@ -3722,10 +3751,10 @@ impl TestStore {
     pub(crate) async fn contains_stored_blob_object(
         &self,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<bool, crate::storage::StorageError> {
+    ) -> Result<bool, crate::protocol::objects::StorageError> {
         match self.storage.verify_blob_object(stored).await {
             Ok(()) => Ok(true),
-            Err(crate::storage::StorageError::NotFound(_)) => Ok(false),
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -3752,11 +3781,11 @@ impl TestStore {
             .ok_or_else(|| "the Circle snapshot control has no retained access".to_string())?;
         let context = access.protocol_context(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CircleSnapshotImage,
+            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
         );
         let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
             &meta.bootstrap.image.object,
-            crate::storage::ProtectedObjectDomain::CircleSnapshotImage.extension(),
+            crate::protocol::objects::ProtectedObjectDomain::CircleSnapshotImage.extension(),
         )
         .map_err(|error| error.to_string())?;
         match self
@@ -3765,7 +3794,7 @@ impl TestStore {
             .await
         {
             Ok(_) => Ok(true),
-            Err(crate::storage::StorageError::NotFound(_)) => Ok(false),
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(error.to_string()),
         }
     }
@@ -3798,7 +3827,7 @@ impl TestStore {
             .expect("the package's control stays retained after its epoch closed");
         let context = access.protocol_context(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CirclePackage,
+            crate::protocol::objects::ProtocolObjectDomain::CirclePackage,
         );
         let prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
             package.circle_id,
@@ -3813,7 +3842,7 @@ impl TestStore {
             .await
         {
             Ok(_) => true,
-            Err(crate::storage::StorageError::NotFound(_)) => false,
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => false,
             Err(error) => panic!("read the exact Circle package object: {error}"),
         }
     }
@@ -3822,8 +3851,8 @@ impl TestStore {
         &self,
         journal: &crate::sync::store::CircleOperationJournal,
     ) -> (
-        crate::storage::ExactObjectRef,
-        crate::storage::ExactObjectRef,
+        crate::protocol::objects::ExactObjectRef,
+        crate::protocol::objects::ExactObjectRef,
     ) {
         let candidate = journal.commit().expect("parse candidate Store commit");
         let coord = journal.operation().commit_ref.coord.clone();
@@ -3855,9 +3884,9 @@ impl TestStore {
             candidate.seq(),
             crate::protocol::store_commit::ObjectHash::digest(&package_bytes),
         );
-        let package_context = crate::storage::ProtocolObjectContext::store_encrypted(
+        let package_context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StorePackage,
+            crate::protocol::objects::ProtocolObjectDomain::StorePackage,
         );
         let package_slot = self
             .storage
@@ -3910,9 +3939,9 @@ impl TestStore {
             winner.seq(),
             winner.commit_hash(),
         );
-        let commit_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let commit_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreCommit,
+            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
         let commit_slot = self
             .storage
@@ -3948,9 +3977,9 @@ impl TestStore {
             &device_signer,
         )
         .expect("sign competing head");
-        let head_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let head_slot = journal
             .operation()
@@ -4013,9 +4042,9 @@ impl TestStore {
             sequence,
         } = coord.clone();
         let package_bytes = package.to_bytes();
-        let package_context = crate::storage::ProtocolObjectContext::store_encrypted(
+        let package_context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StorePackage,
+            crate::protocol::objects::ProtocolObjectDomain::StorePackage,
         );
         let package_prefix = crate::protocol::store_commit::package_semantic_prefix(
             candidate_family,
@@ -4060,9 +4089,9 @@ impl TestStore {
             &device_signer,
         )
         .expect("sign third ordinary winner");
-        let commit_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let commit_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreCommit,
+            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
         let commit_prefix = crate::protocol::store_commit::commit_semantic_prefix(
             third.candidate_family(),
@@ -4103,9 +4132,9 @@ impl TestStore {
             &device_signer,
         )
         .expect("sign third winner head");
-        let head_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let head_prefix = crate::protocol::store_commit::head_slot_prefix(
             &candidate
@@ -4140,9 +4169,9 @@ impl TestStore {
             .delete_protocol_object(&reference.object)
             .await
             .expect("delete exact head before replacement");
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreMembershipHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
         );
         let prefix = crate::protocol::store_commit::membership_head_slot_prefix(
             &reference.coord.author_pubkey,
@@ -4168,7 +4197,7 @@ impl TestStore {
     pub(crate) async fn delete_membership_head_for_test(
         &self,
         reference: &crate::protocol::membership::MembershipHeadRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.delete_protocol_object(&reference.object).await
     }
 
@@ -4334,10 +4363,10 @@ impl TestStore {
         &self,
         selected: &crate::protocol::store_commit::CircleSnapshotMeta,
         access: &crate::sync::CircleEpochAccess,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         let context = access.protocol_context(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CircleSnapshotImage,
+            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
         );
         self.storage
             .read_protocol_object(
@@ -4358,9 +4387,9 @@ impl TestStore {
         circle_id: crate::protocol::circle::CircleId,
         encryption: crate::encryption::EncryptionService,
     ) -> bool {
-        let context = crate::storage::ProtocolObjectContext::circle(
+        let context = crate::protocol::objects::ProtocolObjectContext::circle(
             self.root.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CircleSnapshotMeta,
+            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotMeta,
             encryption,
         );
         let prefix = crate::protocol::store_commit::circle_snapshot_slot_prefix(
@@ -4368,7 +4397,7 @@ impl TestStore {
             &self.founder.device_id,
             0,
         );
-        let slot = crate::storage::cloud::ObjectSlot::logical(format!("{prefix}.json"))
+        let slot = crate::protocol::objects::ObjectSlot::logical(format!("{prefix}.json"))
             .expect("valid generation-zero Circle snapshot slot");
         self.storage
             .read_protocol_slot(&context, &slot, &prefix)
@@ -4818,8 +4847,8 @@ pub(crate) enum TombstoneExistsInterception {
 pub(crate) trait StorageInterceptor: Send + Sync {
     async fn before_protocol_create(
         &self,
-        _prepared: &crate::storage::PreparedExactObject,
-    ) -> Result<(), crate::storage::StorageError> {
+        _prepared: &crate::protocol::objects::PreparedExactObject,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
@@ -4827,54 +4856,54 @@ pub(crate) trait StorageInterceptor: Send + Sync {
         &self,
         _read: ProtocolRead,
         _semantic_prefix: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_allocate(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_allocate(&self) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_prepare(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_prepare(&self) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_blob_create(
         &self,
         _blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_stage(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_stage(&self) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_blob_tombstone_read(
         &self,
         _key: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_blob_tombstone_write(
         &self,
         _key: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_blob_tombstone_exists(
         &self,
         _key: &str,
-    ) -> Result<TombstoneExistsInterception, crate::storage::StorageError> {
+    ) -> Result<TombstoneExistsInterception, crate::protocol::objects::StorageError> {
         Ok(TombstoneExistsInterception::Proceed)
     }
 
     async fn before_blob_tombstone_delete(
         &self,
         _key: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 }
@@ -4887,8 +4916,8 @@ where
 {
     async fn before_protocol_create(
         &self,
-        prepared: &crate::storage::PreparedExactObject,
-    ) -> Result<(), crate::storage::StorageError> {
+        prepared: &crate::protocol::objects::PreparedExactObject,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_protocol_create(prepared).await
     }
 
@@ -4896,54 +4925,54 @@ where
         &self,
         read: ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_protocol_read(read, semantic_prefix).await
     }
 
-    async fn before_blob_allocate(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_allocate(&self) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_allocate().await
     }
 
-    async fn before_blob_prepare(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_prepare(&self) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_prepare().await
     }
 
     async fn before_blob_create(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_create(blob).await
     }
 
-    async fn before_blob_stage(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_stage(&self) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_stage().await
     }
 
     async fn before_blob_tombstone_read(
         &self,
         key: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_tombstone_read(key).await
     }
 
     async fn before_blob_tombstone_write(
         &self,
         key: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_tombstone_write(key).await
     }
 
     async fn before_blob_tombstone_exists(
         &self,
         key: &str,
-    ) -> Result<TombstoneExistsInterception, crate::storage::StorageError> {
+    ) -> Result<TombstoneExistsInterception, crate::protocol::objects::StorageError> {
         (**self).before_blob_tombstone_exists(key).await
     }
 
     async fn before_blob_tombstone_delete(
         &self,
         key: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_tombstone_delete(key).await
     }
 }
@@ -5020,18 +5049,18 @@ where
             .replace_candidate_mutation(generation, previous, replacement)
     }
 
-    fn gate(&self) -> Option<crate::storage::RotationGate> {
+    fn gate(&self) -> Option<crate::protocol::objects::RotationGate> {
         self.inner.gate()
     }
 
-    fn install_durable_gate(&self, gate: Option<crate::storage::RotationGate>) {
+    fn install_durable_gate(&self, gate: Option<crate::protocol::objects::RotationGate>) {
         self.inner.install_durable_gate(gate);
     }
 
     fn check(
         &self,
         cipher: &crate::storage::CloudCipher,
-    ) -> Result<(), crate::storage::RotationPending> {
+    ) -> Result<(), crate::protocol::objects::RotationPending> {
         self.inner.check(cipher)
     }
 }
@@ -5075,21 +5104,22 @@ where
         self.inner.self_uploader()
     }
 
-    async fn probe_provider(&self) -> Result<(), crate::storage::StorageError> {
+    async fn probe_provider(&self) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.probe_provider().await
     }
 
     async fn set_member_access(
         &self,
         state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::storage::StorageError> {
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::protocol::objects::StorageError>
+    {
         self.inner.set_member_access(state).await
     }
 
     async fn read_blob_tombstone(
         &self,
         key: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_tombstone_read(key).await?;
         self.inner.read_blob_tombstone(key).await
     }
@@ -5098,7 +5128,7 @@ where
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_tombstone_write(key).await?;
         self.inner.write_blob_tombstone(key, stored_bytes).await
     }
@@ -5106,11 +5136,14 @@ where
     async fn list_blob_tombstones(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::StorageError> {
+    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
         self.inner.list_blob_tombstones(prefix).await
     }
 
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, crate::storage::StorageError> {
+    async fn blob_tombstone_exists(
+        &self,
+        key: &str,
+    ) -> Result<bool, crate::protocol::objects::StorageError> {
         match self.interceptor.before_blob_tombstone_exists(key).await? {
             TombstoneExistsInterception::Proceed => self.inner.blob_tombstone_exists(key).await,
             TombstoneExistsInterception::DeleteAndReportAbsent => {
@@ -5120,7 +5153,10 @@ where
         }
     }
 
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), crate::storage::StorageError> {
+    async fn delete_blob_tombstone(
+        &self,
+        key: &str,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_tombstone_delete(key).await?;
         self.inner.delete_blob_tombstone(key).await
     }
@@ -5128,21 +5164,21 @@ where
     async fn list_provider_objects_for_test(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::StorageError> {
+    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
         self.inner.list_provider_objects_for_test(prefix).await
     }
 
     async fn read_provider_object_for_test(
         &self,
         key: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.inner.read_provider_object_for_test(key).await
     }
 
     async fn provider_object_exists_for_test(
         &self,
         key: &str,
-    ) -> Result<bool, crate::storage::StorageError> {
+    ) -> Result<bool, crate::protocol::objects::StorageError> {
         self.inner.provider_object_exists_for_test(key).await
     }
 
@@ -5150,7 +5186,7 @@ where
         &self,
         journal: &dyn crate::protocol::provider::ProviderProbeJournal,
         probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &crate::storage::ResolvedProviderBinding,
+        binding: &crate::protocol::objects::ResolvedProviderBinding,
     ) -> Result<
         crate::protocol::provider::ExactSlotProbeReceipt,
         crate::protocol::provider::ProviderProbeError,
@@ -5163,7 +5199,7 @@ where
     async fn reserve_cross_principal_response_slot(
         &self,
         probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::protocol::provider::ProviderProbeError>
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::provider::ProviderProbeError>
     {
         self.inner
             .reserve_cross_principal_response_slot(probe_id)
@@ -5172,15 +5208,18 @@ where
 
     async fn observe_exact_slot(
         &self,
-        slot: &crate::storage::cloud::ObjectSlot,
-    ) -> Result<Option<crate::storage::ExactObjectRef>, crate::storage::StorageError> {
+        slot: &crate::protocol::objects::ObjectSlot,
+    ) -> Result<
+        Option<crate::protocol::objects::ExactObjectRef>,
+        crate::protocol::objects::StorageError,
+    > {
         self.inner.observe_exact_slot(slot).await
     }
 
     async fn delete_exact_slot_and_verify_absent(
         &self,
-        slot: &crate::storage::cloud::ObjectSlot,
-    ) -> Result<(), crate::storage::StorageError> {
+        slot: &crate::protocol::objects::ObjectSlot,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.delete_exact_slot_and_verify_absent(slot).await
     }
 
@@ -5188,7 +5227,7 @@ where
         &self,
         publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
         probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
         administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<
@@ -5212,7 +5251,7 @@ where
         authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
@@ -5232,7 +5271,7 @@ where
         &self,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         administrator_signing_pubkey: &str,
         peer_signer: &crate::keys::UserKeypair,
     ) -> Result<
@@ -5256,7 +5295,7 @@ where
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         response: &crate::protocol::provider::CrossPrincipalProbeResponse,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<
@@ -5278,22 +5317,26 @@ where
 
     fn store_blob_protection(
         &self,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    {
         self.inner.store_blob_protection()
     }
 
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, crate::storage::StorageError> {
+    ) -> Result<
+        crate::protocol::objects::ResolvedProviderBinding,
+        crate::protocol::objects::StorageError,
+    > {
         self.inner.provider_binding().await
     }
 
     async fn allocate_protocol_slot(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
+        context: &crate::protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
         self.inner
             .allocate_protocol_slot(context, semantic_prefix, extension)
             .await
@@ -5301,29 +5344,30 @@ where
 
     fn prepare_protocol_object(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         data: Vec<u8>,
-    ) -> Result<crate::storage::PreparedExactObject, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::PreparedExactObject, crate::protocol::objects::StorageError>
+    {
         self.inner
             .prepare_protocol_object(context, slot, semantic_prefix, data)
     }
 
     async fn create_protocol_object(
         &self,
-        prepared: &crate::storage::PreparedExactObject,
-    ) -> Result<(), crate::storage::StorageError> {
+        prepared: &crate::protocol::objects::PreparedExactObject,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.interceptor.before_protocol_create(prepared).await?;
         self.inner.create_protocol_object(prepared).await
     }
 
     async fn read_protocol_object(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        object: &crate::storage::ExactObjectRef,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        object: &crate::protocol::objects::ExactObjectRef,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::storage::StorageError> {
+    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         self.interceptor
             .before_protocol_read(ProtocolRead::Object, semantic_prefix)
             .await?;
@@ -5334,10 +5378,13 @@ where
 
     async fn read_protocol_slot(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::storage::ExactObjectRef), crate::storage::StorageError> {
+    ) -> Result<
+        (Vec<u8>, crate::protocol::objects::ExactObjectRef),
+        crate::protocol::objects::StorageError,
+    > {
         self.interceptor
             .before_protocol_read(ProtocolRead::Slot, semantic_prefix)
             .await?;
@@ -5348,10 +5395,13 @@ where
 
     async fn read_prepared_protocol_slot(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, crate::storage::PreparedExactObject), crate::storage::StorageError> {
+    ) -> Result<
+        (Vec<u8>, crate::protocol::objects::PreparedExactObject),
+        crate::protocol::objects::StorageError,
+    > {
         self.interceptor
             .before_protocol_read(ProtocolRead::PreparedSlot, semantic_prefix)
             .await?;
@@ -5362,16 +5412,16 @@ where
 
     async fn delete_protocol_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
-    ) -> Result<(), crate::storage::StorageError> {
+        object: &crate::protocol::objects::ExactObjectRef,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.delete_protocol_object(object).await
     }
 
     async fn allocate_blob_slot(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-    ) -> Result<crate::storage::cloud::ObjectSlot, crate::storage::StorageError> {
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_allocate().await?;
         self.inner.allocate_blob_slot(locator, authority).await
     }
@@ -5379,11 +5429,12 @@ where
     async fn seal_blob_to_spool(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-        protection: crate::storage::BlobSpoolProtection,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
         spool_file: &std::path::Path,
-    ) -> Result<crate::storage::BlobSpoolWrite, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolWrite, crate::protocol::objects::StorageError>
+    {
         self.inner
             .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
             .await
@@ -5392,10 +5443,10 @@ where
     async fn prepare_blob_object(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-        slot: crate::storage::cloud::ObjectSlot,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        slot: crate::protocol::objects::ObjectSlot,
         stored_file: &std::path::Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, crate::storage::StorageError> {
+    ) -> Result<crate::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_prepare().await?;
         self.inner
             .prepare_blob_object(locator, authority, slot, stored_file)
@@ -5405,10 +5456,10 @@ where
     async fn create_blob_object_from_file(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_create(blob).await?;
         self.inner
             .create_blob_object_from_file(blob, authority, stored_file, progress)
@@ -5418,7 +5469,7 @@ where
     async fn verify_blob_object(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.verify_blob_object(blob).await
     }
 
@@ -5426,7 +5477,7 @@ where
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, crate::storage::StorageError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_stage().await?;
         self.inner.stage_exact_blob_download(blob, dest).await
     }
@@ -5434,9 +5485,9 @@ where
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, crate::storage::StorageError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_stage().await?;
         self.inner
             .stage_verified_blob_plaintext(blob, protection, dest)
@@ -5446,15 +5497,15 @@ where
     async fn open_blob_range_reader(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
-    ) -> Result<crate::storage::BlobRangeReader, crate::storage::StorageError> {
+        protection: crate::protocol::objects::BlobSpoolProtection,
+    ) -> Result<crate::storage::BlobRangeReader, crate::protocol::objects::StorageError> {
         self.inner.open_blob_range_reader(blob, protection).await
     }
 
     async fn delete_blob_object(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.delete_blob_object(blob).await
     }
 }

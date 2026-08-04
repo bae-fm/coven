@@ -1,10 +1,11 @@
 use tracing::debug;
 
 use crate::database::{DbError, StoreDatabase};
+use crate::protocol::objects::VerifiedObject;
 use crate::protocol::store_commit::{
     CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,
 };
-use crate::storage::{run_blocking_object_verification, VerifiedObject};
+use crate::storage::run_blocking_object_verification;
 use crate::sync::store::owner::pull::{LoadedCirclePackage, LocalStoreMembership};
 use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
 
@@ -15,7 +16,7 @@ pub(crate) enum CirclePackageReadError {
 
 pub(crate) struct OpenedCirclePackage {
     pub(crate) object: VerifiedObject<Vec<u8>>,
-    pub(crate) blob_protection: crate::storage::BlobSpoolProtection,
+    pub(crate) blob_protection: crate::protocol::objects::BlobSpoolProtection,
 }
 
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
@@ -70,7 +71,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
         );
         let context = access.protocol_context(
             commit.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CirclePackage,
+            crate::protocol::objects::ProtocolObjectDomain::CirclePackage,
         );
         let bytes = self
             .storage

@@ -39,7 +39,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
 
     let binding = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes");
     let second_object = ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::opaque(
+        crate::protocol::objects::ObjectSlot::opaque(
             binding.blob().locator().semantic_key(),
             "database-test-second-physical-object".to_string(),
         )
@@ -70,7 +70,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     let semantic = package.to_bytes();
     let stored_package = b"stored package representation".to_vec();
     let StoreCommitCoord { stream_id, .. } = test_commit_coord();
-    let package_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+    let package_slot = crate::protocol::objects::ObjectSlot::logical(format!(
         "{}.pkg",
         crate::protocol::store_commit::package_semantic_prefix(
             test_candidate_family(),
@@ -87,7 +87,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     );
     let owner_commit_hash = ObjectHash::digest(b"owner commit semantic bytes");
     let owner_object = ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(format!(
+        crate::protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             commit_semantic_prefix(
                 test_candidate_family(),
@@ -146,7 +146,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     let mut sibling = owner.clone();
     sibling.commit_hash = ObjectHash::digest(b"sibling owner commit");
     sibling.object = ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(format!(
+        crate::protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             commit_semantic_prefix(
                 test_candidate_family(),
@@ -199,7 +199,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
 
     let directory = tempfile::tempdir().expect("temp dir");
     let spool = directory.path().join("blob.spool");
-    crate::storage::StagedBlobFile::write_for_test(&spool, b"stored representation")
+    crate::local_file::AtomicStagedFile::write_for_test(&spool, b"stored representation")
         .await
         .expect("write spool");
     let blob_remote = crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(

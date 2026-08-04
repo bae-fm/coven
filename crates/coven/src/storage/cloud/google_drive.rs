@@ -19,11 +19,11 @@ use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
     sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PhysicalObjectLocator,
-    RevokeOutcome, UploadProgress,
+    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::id_provider::{IdRef, UuidProvider};
 use crate::oauth::OAuthConfig;
+use crate::protocol::objects::{ObjectSlot, PhysicalObjectLocator};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
@@ -1366,8 +1366,8 @@ impl CloudHome for GoogleDriveCloudHome {
 impl ExactSlotStorage for GoogleDriveCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
-        use crate::storage::{
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use crate::protocol::objects::{
             GoogleDriveCorpus, ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };
@@ -1456,6 +1456,7 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
             logical_key.to_string(),
             self.generate_file_id(logical_key).await?,
         )
+        .map_err(CloudHomeError::from)
     }
 
     async fn create_at(
@@ -1772,7 +1773,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::local_file::PlaintextChunkReader for FailingMultipartBodyReader {
+    impl crate::local_file::PlaintextChunkReader for FailingMultipartBodyReader {
+        type Error = crate::storage::local_file::PlaintextChunkError;
+
         async fn next_chunk(
             &mut self,
             _max: usize,
@@ -1792,7 +1795,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::local_file::PlaintextChunkReader for EarlyEofMultipartBodyReader {
+    impl crate::local_file::PlaintextChunkReader for EarlyEofMultipartBodyReader {
+        type Error = crate::storage::local_file::PlaintextChunkError;
+
         async fn next_chunk(
             &mut self,
             _max: usize,
@@ -1811,7 +1816,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::local_file::PlaintextChunkReader for PausedMultipartBodyReader {
+    impl crate::local_file::PlaintextChunkReader for PausedMultipartBodyReader {
+        type Error = crate::storage::local_file::PlaintextChunkError;
+
         async fn next_chunk(
             &mut self,
             _max: usize,

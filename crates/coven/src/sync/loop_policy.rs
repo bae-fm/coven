@@ -8,7 +8,7 @@ use crate::changeset::RowChange;
 use super::cycle::SyncCycleResult;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
-use crate::storage::RotationPending;
+use crate::protocol::objects::RotationPending;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoopWait {
@@ -141,8 +141,8 @@ mod tests {
     use super::*;
 
     use crate::protocol::causal_grants::AuthorStreamId;
+    use crate::protocol::objects::ExactObjectRef;
     use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
-    use crate::storage::ExactObjectRef;
     use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 
     fn held(n: usize) -> Vec<HeldStorePosition> {
@@ -159,8 +159,10 @@ mod tests {
                         },
                         commit_hash: ObjectHash::digest(format!("commit-{i}").as_bytes()),
                         object: ExactObjectRef::new(
-                            crate::storage::cloud::ObjectSlot::logical(format!("test-commit-{i}"))
-                                .expect("test commit slot"),
+                            crate::protocol::objects::ObjectSlot::logical(format!(
+                                "test-commit-{i}"
+                            ))
+                            .expect("test commit slot"),
                             0,
                             ObjectHash::digest(&[]),
                         ),
@@ -280,7 +282,9 @@ mod tests {
     fn rotation_pending_alert_takes_priority_over_every_other_alert() {
         let alerts = SyncLoopAlerts {
             rotation_pending: Some(RotationPending {
-                state: crate::storage::RotationPendingState::LocalCommitted { generation: 2 },
+                state: crate::protocol::objects::RotationPendingState::LocalCommitted {
+                    generation: 2,
+                },
                 live_generation: 1,
             }),
             held_positions: held(4),

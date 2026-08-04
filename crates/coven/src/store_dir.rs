@@ -481,13 +481,14 @@ impl StoreDir {
         expected_hash: crate::protocol::store_commit::ObjectHash,
         source: &Path,
     ) -> Result<(), StoreBlobFileError> {
-        let staged = crate::storage::StagedBlobFile::create(&destination)
+        let staged = crate::local_file::AtomicStagedFile::create(&destination)
             .await
             .map_err(StoreBlobFileError::Io)?;
-        let (staged, actual_size, actual_hash) = staged
+        let (staged, actual_size, actual_digest) = staged
             .copy_from(source)
             .await
             .map_err(StoreBlobFileError::Io)?;
+        let actual_hash = crate::protocol::store_commit::ObjectHash::from_digest(actual_digest);
         if actual_size != expected_size || actual_hash != expected_hash {
             return Err(StoreBlobFileError::Integrity {
                 path: source.to_path_buf(),
@@ -499,7 +500,7 @@ impl StoreDir {
         }
         match staged.commit_new().await {
             Ok(()) => Ok(()),
-            Err(crate::storage::PublishBlobFileError::DestinationExists(path)) => {
+            Err(crate::local_file::CommitNewFileError::DestinationExists(path)) => {
                 let (actual_size, actual_hash) = exact_file_facts(&path)
                     .await
                     .map_err(StoreBlobFileError::Io)?;
@@ -723,7 +724,7 @@ impl StoreDir {
         bytes: &[u8],
     ) -> Result<(), LocalBlobStoreError> {
         let destination = self.local_blob_path(namespace, id)?;
-        let mut staged = crate::storage::StagedBlobFile::create(&destination)
+        let mut staged = crate::local_file::AtomicStagedFile::create(&destination)
             .await
             .map_err(LocalBlobStoreError::Io)?;
         staged
@@ -845,7 +846,8 @@ impl StoreDir {
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
                 self.remove_orphaned_temps_in_dir(&path, process_start)?;
-            } else if file_type.is_file() && crate::storage::StagedBlobFile::is_staging_path(&path)
+            } else if file_type.is_file()
+                && crate::local_file::AtomicStagedFile::is_staging_path(&path)
             {
                 let modified = entry.metadata()?.modified()?;
                 if modified >= process_start {
@@ -968,7 +970,7 @@ async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
             };
             if metadata.is_dir() {
                 pending.push(entry_path);
-            } else if !crate::storage::StagedBlobFile::is_staging_path(&entry_path) {
+            } else if !crate::local_file::AtomicStagedFile::is_staging_path(&entry_path) {
                 let recency = metadata
                     .modified()
                     .map_err(|error| format!("read store blob modification time: {error}"))?
@@ -1259,7 +1261,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().expect("test runtime");
         let staged_temp = |destination: PathBuf| {
             runtime.block_on(async {
-                crate::storage::StagedBlobFile::create(&destination)
+                crate::local_file::AtomicStagedFile::create(&destination)
                     .await
                     .expect("create test staging file")
                     .leave_unpublished_for_test()
@@ -1275,9 +1277,10 @@ mod tests {
         let fresh_local_temp = staged_temp(local_namespace.join("fresh-local"));
         let committed_local = local_namespace.join("blob0bbb");
         let stale_local_stage = runtime.block_on(async {
-            let mut stage = crate::storage::StagedBlobFile::create(&local_namespace.join("blob"))
-                .await
-                .expect("local staging path");
+            let mut stage =
+                crate::local_file::AtomicStagedFile::create(&local_namespace.join("blob"))
+                    .await
+                    .expect("local staging path");
             stage.write_bytes(b"x").await.expect("write local stage");
             stage.leave_unpublished_for_test()
         });

@@ -43,7 +43,8 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<crate::storage::VerifiedObject<StoreAck>, super::StoreDeviceExclusionError> {
+    ) -> Result<crate::protocol::objects::VerifiedObject<StoreAck>, super::StoreDeviceExclusionError>
+    {
         self.history
             .load_store_ack(reference, registration)
             .await

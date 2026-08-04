@@ -19,9 +19,9 @@ use crate::store_dir::StoreDir;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
 use super::store::{AuthorizedWriterOperation, Store};
+use crate::protocol::objects::RotationPending;
 use crate::storage::{
-    BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, RotationPending,
-    SyncStorage,
+    BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, SyncStorage,
 };
 
 /// Result of a single sync cycle.
@@ -110,8 +110,8 @@ fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> 
     let mut current = Some(error);
     while let Some(source) = current {
         if source
-            .downcast_ref::<crate::storage::StorageError>()
-            .is_some_and(crate::storage::StorageError::is_transport)
+            .downcast_ref::<crate::protocol::objects::StorageError>()
+            .is_some_and(crate::protocol::objects::StorageError::is_transport)
             || source
                 .downcast_ref::<crate::storage::cloud::CloudHomeError>()
                 .is_some_and(|error| {
@@ -136,18 +136,18 @@ mod sync_cycle_failure_tests {
     #[test]
     fn registration_transport_source_is_offline() {
         let error = crate::sync::store::StoreRegistrationError::Object(
-            crate::storage::StoreObjectError::Storage(crate::storage::StorageError::Storage(
-                "provider unavailable".to_string(),
-            )),
+            crate::protocol::objects::StoreObjectError::Storage(
+                crate::protocol::objects::StorageError::Storage("provider unavailable".to_string()),
+            ),
         );
 
         let object = std::error::Error::source(&error).expect("object source");
         assert!(object
-            .downcast_ref::<crate::storage::StoreObjectError>()
+            .downcast_ref::<crate::protocol::objects::StoreObjectError>()
             .is_some());
         let storage = object.source().expect("storage source");
         assert!(storage
-            .downcast_ref::<crate::storage::StorageError>()
+            .downcast_ref::<crate::protocol::objects::StorageError>()
             .is_some());
 
         assert!(SyncCycleFailure::operation("register", error).is_offline());
@@ -156,9 +156,9 @@ mod sync_cycle_failure_tests {
     #[test]
     fn registration_configuration_source_is_failed() {
         let error = crate::sync::store::StoreRegistrationError::Object(
-            crate::storage::StoreObjectError::Storage(crate::storage::StorageError::Configuration(
-                "missing bucket".to_string(),
-            )),
+            crate::protocol::objects::StoreObjectError::Storage(
+                crate::protocol::objects::StorageError::Configuration("missing bucket".to_string()),
+            ),
         );
 
         assert!(!SyncCycleFailure::operation("register", error).is_offline());
@@ -700,7 +700,7 @@ impl SyncComponents {
         }
     }
 
-    pub(crate) async fn probe_storage(&self) -> Result<(), crate::storage::StorageError> {
+    pub(crate) async fn probe_storage(&self) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.probe_provider().await
     }
 
@@ -963,7 +963,7 @@ impl SyncComponents {
     pub(crate) async fn list_storage_objects_for_test(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::storage::StorageError> {
+    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
         self.storage.list_provider_objects_for_test(prefix).await
     }
 

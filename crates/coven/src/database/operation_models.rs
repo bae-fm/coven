@@ -73,7 +73,7 @@ pub(crate) struct PreparedSnapshotBlob {
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedStoreSnapshot {
     pub reference: StoreSnapshotRef,
-    pub successor_slot: crate::storage::cloud::ObjectSlot,
+    pub successor_slot: crate::protocol::objects::ObjectSlot,
     pub meta: SnapshotMeta,
 }
 
@@ -88,6 +88,6 @@ pub(crate) struct DurableCircleSnapshotPublication {
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedCircleSnapshot {
     pub reference: crate::protocol::store_commit::CircleSnapshotRef,
-    pub successor_slot: crate::storage::cloud::ObjectSlot,
+    pub successor_slot: crate::protocol::objects::ObjectSlot,
     pub cut: crate::protocol::store_commit::CommitFrontier,
 }

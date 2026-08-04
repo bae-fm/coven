@@ -3,8 +3,9 @@
 use futures_util::stream::TryStreamExt;
 
 use crate::blob::{RowBlobAuthority, RowBlobRef};
+use crate::protocol::objects::{BlobSpoolProtection, StorageError};
 use crate::protocol::store_commit::StoreRootRef;
-use crate::storage::{BlobSpoolProtection, StorageError, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
 
 use crate::database::StoreDatabase;
@@ -142,7 +143,7 @@ fn verify_external_file_facts(
 }
 
 async fn open_local_file(path: &std::path::Path) -> Result<BlobStreamSource, BlobCacheError> {
-    crate::storage::LocalBlobFile::open(path)
+    crate::local_file::OpenFile::open(path)
         .await
         .map(BlobStreamSource::Local)
         .map_err(BlobCacheError::Io)
@@ -152,7 +153,7 @@ async fn open_external_file(
     reference: &RowBlobRef,
     external: crate::database::ExternalBlob,
 ) -> Result<BlobStreamSource, BlobCacheError> {
-    let file = crate::storage::LocalBlobFile::open(&external.path)
+    let file = crate::local_file::OpenFile::open(&external.path)
         .await
         .map_err(|source| BlobCacheError::ExternalMissing {
             id: reference.blob().id.clone(),
@@ -478,7 +479,7 @@ impl CurrentRemoteBlobSource {
         authority: &RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
             .stage_verified_plaintext(authority, stored, destination)
             .await
@@ -514,7 +515,7 @@ impl<'storage> RemoteBlobSource<'storage> {
         authority: &RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
             .stage_verified_plaintext(authority, stored, destination)
             .await
@@ -613,7 +614,7 @@ impl RemoteBlobSourceInner<'_> {
         authority: &RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         let protection = self.protection(authority, stored).await?;
         self.storage
             .as_ref()
@@ -764,7 +765,7 @@ impl RemoteStoreBlobAccess {
         &self,
         reference: &RowBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.remote.validate(reference).await?;
         if let Some(hit) = self.local.cache.cached_path(reference, false).await? {
             let staged = self
@@ -878,12 +879,12 @@ impl StoreBlobCache {
 
     async fn publish_materialization(
         &self,
-        staged: crate::storage::StagedBlobFile,
+        staged: crate::local_file::AtomicStagedFile,
         reference: &RowBlobRef,
     ) -> Result<(), BlobCacheError> {
         match staged.commit_new().await {
             Ok(()) => Ok(()),
-            Err(crate::storage::PublishBlobFileError::DestinationExists(path)) => {
+            Err(crate::local_file::CommitNewFileError::DestinationExists(path)) => {
                 verify_exact_file(&path, reference).await
             }
             Err(error) => Err(BlobCacheError::Io(error.to_string())),
@@ -930,7 +931,7 @@ impl StoreBlobCache {
         }
         match staged.commit_new().await {
             Ok(()) => {}
-            Err(crate::storage::PublishBlobFileError::DestinationExists(_)) => {
+            Err(crate::local_file::CommitNewFileError::DestinationExists(_)) => {
                 if !self
                     .store_dir
                     .remote_blob_is_exact(
@@ -959,12 +960,17 @@ impl StoreBlobCache {
         source: &std::path::Path,
         destination: &std::path::Path,
         reference: &RowBlobRef,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
-        let staged = crate::storage::StagedBlobFile::create(destination)
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
+        let staged = crate::local_file::AtomicStagedFile::create(destination)
             .await
             .map_err(BlobCacheError::Io)?;
-        let (staged, size, hash) = staged.copy_from(source).await.map_err(BlobCacheError::Io)?;
-        verify_file_identity(source, reference, size, hash)?;
+        let (staged, size, digest) = staged.copy_from(source).await.map_err(BlobCacheError::Io)?;
+        verify_file_identity(
+            source,
+            reference,
+            size,
+            crate::protocol::store_commit::ObjectHash::from_digest(digest),
+        )?;
         Ok(staged)
     }
 
@@ -1184,7 +1190,7 @@ impl StoreBlobCache {
         bytes: &[u8],
     ) -> Result<(), BlobCacheError> {
         let destination = self.store_dir.cache_blob_path(namespace, locator_hash)?;
-        let mut staged = crate::storage::StagedBlobFile::create(&destination)
+        let mut staged = crate::local_file::AtomicStagedFile::create(&destination)
             .await
             .map_err(BlobCacheError::Io)?;
         staged

@@ -13,7 +13,8 @@ use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::joining::encode;
 use crate::keys::UserKeypair;
-use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage, ObjectSlot};
+use crate::protocol::objects::ObjectSlot;
+use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::store::{
     DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,

@@ -1,5 +1,5 @@
 use crate::protocol::circle::{CircleId, CircleTransitionError};
-use crate::storage::StoreObjectError;
+use crate::protocol::objects::StoreObjectError;
 use crate::sync::store::{StoreError, StoreRegistrationError};
 
 #[derive(Debug, thiserror::Error)]

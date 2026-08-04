@@ -1,8 +1,8 @@
+use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::store_commit::{
     ObjectHash, StoreBatchCommitDeletionTarget, StoreDeviceHead, StoreDeviceRegistration,
     VerifiedStoreBatchCommit,
 };
-use crate::storage::PreparedExactObject;
 use crate::sync::store::StoreError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub(crate) enum MergeCandidateAbandonment {
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedMergeWinner {
     store_root_hash: ObjectHash,
-    expected_slot: crate::storage::cloud::ObjectSlot,
+    expected_slot: crate::protocol::objects::ObjectSlot,
     expected: StoreDeviceHead,
     expected_commit: Box<VerifiedStoreBatchCommit>,
     winner: StoreDeviceHead,
@@ -38,7 +38,7 @@ pub(crate) struct VerifiedMergeWinner {
 impl VerifiedMergeWinner {
     pub(crate) fn from_verified_parts(
         store_root_hash: ObjectHash,
-        expected_slot: crate::storage::cloud::ObjectSlot,
+        expected_slot: crate::protocol::objects::ObjectSlot,
         expected: StoreDeviceHead,
         expected_commit: VerifiedStoreBatchCommit,
         winner: StoreDeviceHead,
@@ -151,7 +151,7 @@ impl VerifiedMergeWinner {
     #[cfg(test)]
     pub(crate) fn set_expected_slot_for_test(
         &mut self,
-        expected_slot: crate::storage::cloud::ObjectSlot,
+        expected_slot: crate::protocol::objects::ObjectSlot,
     ) {
         self.expected_slot = expected_slot;
     }

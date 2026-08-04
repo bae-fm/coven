@@ -4,11 +4,17 @@ pub(crate) mod circle;
 pub(crate) mod circle_control;
 pub(crate) mod circle_roster;
 pub(crate) mod membership;
+pub(crate) mod objects;
 pub(crate) mod provider;
 pub(crate) mod reclaim;
 pub(crate) mod remote_object;
 pub(crate) mod store_commit;
 pub(crate) mod wrapped_store_key;
+
+pub use objects::{
+    AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
+    ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
+};
 
 pub use circle::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,

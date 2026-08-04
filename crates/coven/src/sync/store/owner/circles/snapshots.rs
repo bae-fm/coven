@@ -1,11 +1,12 @@
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
     CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::storage::SyncStorage;
 use tracing::warn;
 
 use super::bootstrap_blobs::CircleBootstrapBlobVerification;
@@ -32,7 +33,7 @@ impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
     async fn verify_stored_blob(
         &self,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }
 }
@@ -325,7 +326,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         // Generation zero occupies a deterministic slot a reader can compute (there
         // is no registration snapshot anchor for a per-Circle stream); later
         // generations occupy the predecessor's create-once successor slot.
-        let stream_first_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+        let stream_first_slot = crate::protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             self.local_writer
                 .circle_snapshot_semantic_prefix(circle_id, 0)
@@ -598,7 +599,7 @@ impl CircleSnapshotReader<'_, '_> {
             ));
         }
         let device_id = registration.device_id.to_string();
-        let mut slot = crate::storage::cloud::ObjectSlot::logical(format!(
+        let mut slot = crate::protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             circle_snapshot_slot_prefix(circle_id, &device_id, 0)
         ))
@@ -610,7 +611,7 @@ impl CircleSnapshotReader<'_, '_> {
             let prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
             let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
                 Ok(value) => value,
-                Err(crate::storage::StorageError::NotFound(_)) => break,
+                Err(crate::protocol::objects::StorageError::NotFound(_)) => break,
                 Err(error) => return Err(SnapshotError::Bucket(error)),
             };
             let semantic_hash = CircleSnapshotMeta::semantic_hash_from_bytes(&bytes)

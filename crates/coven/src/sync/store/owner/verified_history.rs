@@ -2,6 +2,10 @@ use super::verification::{StoreMembershipObjectVerifier, VerifiedMergeMembership
 use super::*;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{MembershipChain, MembershipStatus};
+use crate::protocol::objects::{
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+};
+use crate::protocol::objects::{StoreObjectError, VerifiedObject};
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttempt,
     DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash,
@@ -23,8 +27,6 @@ use crate::protocol::store_commit::{
 use crate::protocol::{
     causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
 };
-use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::storage::{StoreObjectError, VerifiedObject};
 use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store::owner::pull::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1958,7 +1960,7 @@ pub(crate) struct MergeOutboundAuthorization {
 
 pub(crate) struct PreparedMergeHistorySuccessor {
     pub(crate) summary: RetainedVerifiedMergeHistorySummary,
-    pub(crate) head_slot: crate::storage::cloud::ObjectSlot,
+    pub(crate) head_slot: crate::protocol::objects::ObjectSlot,
     pub(crate) predecessor_head: Option<store_commit::StoreDeviceHeadRef>,
 }
 
@@ -3123,7 +3125,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         previous: Option<&VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::storage::cloud::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             Option<StoreDeviceHeadRef>,
         ),
         StoreError,
@@ -3261,7 +3263,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             Ok((_, Some(_))) => {}
             Ok((_, None)) => return Ok(false),
             Err(StoreError::MergeAnnouncementOccupied { .. })
-            | Err(StoreError::Object(crate::storage::StoreObjectError::Storage(
+            | Err(StoreError::Object(crate::protocol::objects::StoreObjectError::Storage(
                 StorageError::NotFound(_),
             ))) => return Ok(false),
             Err(error) => return Err(error.to_string()),

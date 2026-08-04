@@ -1,6 +1,6 @@
 //! Durable append-only Store device registration and recovery.
 
-use crate::storage::StoreObjectError;
+use crate::protocol::objects::StoreObjectError;
 
 #[cfg(test)]
 use super::RegistrationOutbox;
@@ -9,12 +9,12 @@ use crate::database::Database;
 #[cfg(test)]
 use crate::keys::UserKeypair;
 #[cfg(test)]
+use crate::protocol::objects::ProtocolObjectDomain;
+#[cfg(test)]
 use crate::protocol::store_commit::{
     owner_recovery_semantic_prefix, StoreCommitCoord, StoreDeviceRegistration,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
 };
-#[cfg(test)]
-use crate::storage::ProtocolObjectDomain;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreRegistrationError {
@@ -275,7 +275,7 @@ mod tests {
                 else {
                     panic!("interrupted registration is not a Recovery registration");
                 };
-                let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+                let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
@@ -342,7 +342,7 @@ mod tests {
                 else {
                     panic!("completed registration is not a Recovery registration");
                 };
-                let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+                let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );

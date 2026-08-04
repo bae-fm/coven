@@ -315,5 +315,5 @@ pub(crate) enum OutboundStoreAckActivation {
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedStoreAck {
     pub reference: StoreAckRef,
-    pub successor_slot: crate::storage::cloud::ObjectSlot,
+    pub successor_slot: crate::protocol::objects::ObjectSlot,
 }

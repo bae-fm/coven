@@ -17,8 +17,10 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
     pub(crate) async fn load_owner_recovery_node(
         &self,
         reference: &OwnerRecoveryNodeRef,
-    ) -> Result<crate::storage::VerifiedObject<OwnerRecoveryNode>, crate::storage::StoreObjectError>
-    {
+    ) -> Result<
+        crate::protocol::objects::VerifiedObject<OwnerRecoveryNode>,
+        crate::protocol::objects::StoreObjectError,
+    > {
         self.history.load_owner_recovery_node(reference).await
     }
 
@@ -26,7 +28,10 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         &self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<crate::storage::VerifiedObject<StoreAck>, crate::storage::StoreObjectError> {
+    ) -> Result<
+        crate::protocol::objects::VerifiedObject<StoreAck>,
+        crate::protocol::objects::StoreObjectError,
+    > {
         self.history.load_store_ack(reference, registration).await
     }
 
@@ -46,7 +51,7 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
         reference: &StoreSnapshotRef,
-    ) -> Result<(StoreSnapshotRef, SnapshotMeta), crate::storage::StoreObjectError> {
+    ) -> Result<(StoreSnapshotRef, SnapshotMeta), crate::protocol::objects::StoreObjectError> {
         self.history
             .load_store_snapshot(registration_ref, registration, reference)
             .await

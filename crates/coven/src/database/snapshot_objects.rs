@@ -35,13 +35,24 @@ pub(crate) async fn verify_snapshot_blob_spools(
 ) -> Result<(), DbError> {
     for blob in blobs {
         if let Some(spool_path) = &blob.spool_path {
-            blob.remote
-                .object()
-                .verify_file(spool_path)
-                .await
-                .map_err(|error| {
-                    DbError::Message(format!("{label} snapshot blob spool: {error}"))
-                })?;
+            {
+                let (size, digest) =
+                    crate::local_file::file_facts(spool_path)
+                        .await
+                        .map_err(|error| {
+                            DbError::Message(format!("{label} snapshot blob spool: {error}"))
+                        })?;
+                blob.remote
+                    .object()
+                    .verify_stored_facts(
+                        spool_path,
+                        size,
+                        crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("{label} snapshot blob spool: {error}"))
+                    })?;
+            }
         }
     }
     Ok(())

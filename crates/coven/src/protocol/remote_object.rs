@@ -8,7 +8,7 @@ use super::circle::CircleId;
 use super::store_commit::{
     CandidateFamilyId, CircleAckRef, ObjectHash, StoreBatchCommitRef, StreamActivationId,
 };
-use crate::storage::ExactObjectRef;
+use crate::protocol::objects::ExactObjectRef;
 
 const REMOTE_OBJECT_ID_DOMAIN: &[u8] = b"coven.remote-object-id.v1\0";
 
@@ -4229,8 +4229,8 @@ pub(crate) enum RemoteObjectRecordError {
 mod tests {
     use super::*;
     use crate::blob::locator::{BlobLocator, RemoteAudience};
+    use crate::protocol::objects::ObjectSlot;
     use crate::protocol::{audience_package, membership, store_commit};
-    use crate::storage::cloud::ObjectSlot;
     use crate::{BlobScope, KeyFingerprint, WriteId};
 
     fn test_commit_ref(label: &str, sequence: u64) -> StoreBatchCommitRef {
@@ -4370,8 +4370,8 @@ mod tests {
                 store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
                 owner_grant: replacement_grant,
                 owner_registration: registration,
-                provider: crate::storage::ProviderDeviceBinding {
-                    principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+                provider: crate::protocol::objects::ProviderDeviceBinding {
+                    principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                         access_key_id_hash: ObjectHash::digest(b"resolution provider credential"),
                     },
                 },

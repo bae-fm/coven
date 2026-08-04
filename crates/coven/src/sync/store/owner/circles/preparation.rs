@@ -15,6 +15,9 @@ use crate::protocol::circle::{
     CirclePublicationBlocked, CircleRosterHeadRef, CircleSemanticSlot, CircleTransitionDraft,
     CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
 };
+use crate::protocol::objects::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
+};
 use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
@@ -22,9 +25,7 @@ use crate::protocol::store_commit::{
     CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreCommitCoord, StoreCommitOrder,
     StoreOperationMembershipAuthority, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
-use crate::storage::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-};
+use crate::storage::SyncStorage;
 
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     announcement_stream_id: crate::protocol::membership::AuthorStreamId,
@@ -40,7 +41,7 @@ impl CircleBootstrapBlobVerification for CircleCandidatePreparer<'_, '_> {
     async fn verify_stored_blob(
         &self,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }
 }
@@ -57,20 +58,20 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             .storage
             .allocate_protocol_slot(context, semantic_prefix, extension)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         self.prepare_circle_object_at(context, slot, semantic_prefix, bytes)
     }
 
     pub(super) fn prepare_circle_object_at(
         &self,
         context: &ProtocolObjectContext,
-        slot: crate::storage::cloud::ObjectSlot,
+        slot: crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         bytes: Vec<u8>,
     ) -> Result<PreparedExactObject, CircleOperationError> {
         self.storage
             .prepare_protocol_object(context, slot, semantic_prefix, bytes)
-            .map_err(crate::storage::StoreObjectError::from)
+            .map_err(crate::protocol::objects::StoreObjectError::from)
             .map_err(CircleOperationError::from)
     }
 
@@ -289,7 +290,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let current_slot = storage
                             .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
                             .await
-                            .map_err(crate::storage::StoreObjectError::from)?;
+                            .map_err(crate::protocol::objects::StoreObjectError::from)?;
                         let activation = local_writer.circle_grant_authorized_activation(
                             store_root_hash,
                             owner_grant.clone(),
@@ -333,7 +334,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         ".json",
                     )
                     .await
-                    .map_err(crate::storage::StoreObjectError::from)?;
+                    .map_err(crate::protocol::objects::StoreObjectError::from)?;
                 let head = local_writer.sign_circle_roster_head(
                     &entry,
                     entry_prepared.reference().clone(),
@@ -447,7 +448,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let slot = storage
                             .allocate_protocol_slot(&metadata_context, &prefix, ".json")
                             .await
-                            .map_err(crate::storage::StoreObjectError::from)?;
+                            .map_err(crate::protocol::objects::StoreObjectError::from)?;
                         let activation = local_writer.circle_grant_authorized_activation(
                             store_root_hash,
                             owner_grant.clone(),
@@ -528,7 +529,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         ".json",
                     )
                     .await
-                    .map_err(crate::storage::StoreObjectError::from)?;
+                    .map_err(crate::protocol::objects::StoreObjectError::from)?;
                 let metadata_head = local_writer.sign_circle_metadata_head(
                     &draft.metadata,
                     metadata_prepared.reference().clone(),
@@ -720,7 +721,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let slot = storage
                         .allocate_protocol_slot(&control_context, &prefix, ".json")
                         .await
-                        .map_err(crate::storage::StoreObjectError::from)?;
+                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
                     let activation = local_writer.circle_grant_authorized_activation(
                         store_root_hash,
                         owner_grant.clone(),
@@ -925,7 +926,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     ".json",
                 )
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let control_head = local_writer.sign_circle_control_head(
                 &draft.control.value,
                 control_prepared.reference().clone(),
@@ -1502,7 +1503,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let outcome_slot = storage
                         .allocate_protocol_slot(&close_outcome_context, &outcome_prefix, ".json")
                         .await
-                        .map_err(crate::storage::StoreObjectError::from)?;
+                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
                     let mut participants = Vec::new();
                     for record in resolved_devices.devices.values() {
                         if !matches!(
@@ -1530,7 +1531,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let response_slot = storage
                             .allocate_protocol_slot(&response_context, &response_prefix, ".json")
                             .await
-                            .map_err(crate::storage::StoreObjectError::from)?;
+                            .map_err(crate::protocol::objects::StoreObjectError::from)?;
                         participants.push(crate::protocol::circle::CircleEpochCloseParticipant {
                             registration: record.registration.clone(),
                             response_slot,
@@ -1866,7 +1867,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     ".json",
                 )
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let head = local_writer.sign_circle_store_head(
                 store_root_hash,
                 commit_ref.clone(),
@@ -1888,7 +1889,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     &head_prefix,
                     head.to_bytes(),
                 )
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             prepared_objects.insert("store-head".to_string(), head_prepared);
             (
                 creation,

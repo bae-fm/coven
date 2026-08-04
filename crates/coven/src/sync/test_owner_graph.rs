@@ -123,7 +123,7 @@ impl TestOwnerGraph {
         created_at: &str,
     ) {
         let source = source_dir.join(blob_id);
-        crate::storage::StagedBlobFile::write_for_test(&source, bytes)
+        crate::local_file::AtomicStagedFile::write_for_test(&source, bytes)
             .await
             .expect("write upload source");
         let reference = self

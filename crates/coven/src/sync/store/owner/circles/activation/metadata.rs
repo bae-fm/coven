@@ -8,11 +8,11 @@ use crate::protocol::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleMetadata,
     CircleMetadataHeadRef, CircleSemanticSlot,
 };
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StreamActivationId,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::circle_controls::CircleOperationError;
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
@@ -88,7 +88,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&context, &object.object, &prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let head: crate::protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -192,7 +192,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&exact_context, &object.object, &prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             if ObjectHash::digest(&bytes) != coord.metadata_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle metadata bytes differ from the signed coordinate".to_string(),

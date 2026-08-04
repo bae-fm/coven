@@ -18,9 +18,10 @@ use super::s3_common::{
 };
 use super::{
     combine_cleanup_failure, range_header, BlobBody, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, ObjectSlot,
-    RevokeOutcome, UploadProgress,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, RevokeOutcome,
+    UploadProgress,
 };
+use crate::protocol::objects::ObjectSlot;
 use runtime::S3Runtime;
 
 /// S3-backed cloud home.
@@ -467,8 +468,8 @@ fn aws_caller_identity(
     account_id: &str,
     arn: &str,
     user_id: &str,
-) -> Result<(String, crate::storage::AwsPrincipal), CloudHomeError> {
-    use crate::storage::AwsPrincipal;
+) -> Result<(String, crate::protocol::objects::AwsPrincipal), CloudHomeError> {
+    use crate::protocol::objects::AwsPrincipal;
 
     if account_id.len() != 12 || !account_id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(CloudHomeError::Configuration(
@@ -652,7 +653,8 @@ impl S3CloudHome {
         body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
-        slot.require_logical_key_for("S3")?;
+        slot.require_logical_key_for("S3")
+            .map_err(CloudHomeError::from)?;
         self.append_create_only(slot.logical_key(), body, progress)
             .await
     }
@@ -662,7 +664,8 @@ impl S3CloudHome {
         slot: &ObjectSlot,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        slot.require_logical_key_for("S3")?;
+        slot.require_logical_key_for("S3")
+            .map_err(|error| super::CloudFileReadError::Source(CloudHomeError::from(error)))?;
         let full = self.full_key(slot.logical_key());
         let key = slot.logical_key().to_string();
         let client = self.client.clone();
@@ -980,8 +983,8 @@ impl CloudHome for S3CloudHome {
 impl ExactSlotStorage for S3CloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
-        use crate::storage::{
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use crate::protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding,
             StoreProviderBinding,
         };
@@ -1106,7 +1109,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::local_file::PlaintextChunkReader for FailingBodyReader {
+    impl crate::local_file::PlaintextChunkReader for FailingBodyReader {
+        type Error = crate::storage::local_file::PlaintextChunkError;
+
         async fn next_chunk(
             &mut self,
             _max: usize,
@@ -1330,7 +1335,7 @@ mod tests {
             if entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(crate::storage::local_file::TEMP_BLOB_PREFIX)
+                .starts_with(crate::local_file::TEMP_BLOB_PREFIX)
             {
                 temps.push(entry.path());
             }
@@ -1948,7 +1953,9 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_canonicalizes_the_custom_origin_and_hashes_the_access_key_id() {
-        use crate::storage::{ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding};
+        use crate::protocol::objects::{
+            ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
+        };
 
         let home = test_home(
             "bucket-a".to_string(),
@@ -2009,7 +2016,7 @@ mod tests {
 
     #[test]
     fn sts_identity_accepts_stable_aws_principals_and_rejects_federated_users() {
-        use crate::storage::AwsPrincipal;
+        use crate::protocol::objects::AwsPrincipal;
 
         assert_eq!(
             aws_caller_identity(

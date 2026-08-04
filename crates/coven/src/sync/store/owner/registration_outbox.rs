@@ -1,10 +1,11 @@
 use super::registration::StoreRegistrationError;
 use crate::database::StoreDatabase;
+use crate::protocol::objects::ProtocolObjectDomain;
+use crate::protocol::objects::StoreObjectError;
 use crate::protocol::store_commit::{
     ack_slot_prefix, registration_semantic_prefix, StoreDeviceRegistration,
 };
-use crate::storage::StoreObjectError;
-use crate::storage::{ProtocolObjectDomain, SyncStorage};
+use crate::storage::SyncStorage;
 
 pub(super) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,
@@ -41,7 +42,7 @@ impl<'storage> RegistrationOutbox<'storage> {
                     "durable registration columns differ from its exact signed bytes".to_string(),
                 ));
             }
-            let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 store_root.store_root_hash,
                 ProtocolObjectDomain::StoreDeviceRegistration,
             );
@@ -60,7 +61,7 @@ impl<'storage> RegistrationOutbox<'storage> {
                     "Store registration exact readback differs from its durable bytes".to_string(),
                 ));
             }
-            let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 store_root.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
             );

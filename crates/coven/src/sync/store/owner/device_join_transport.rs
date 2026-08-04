@@ -23,9 +23,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
+use crate::protocol::objects::ObjectSlot;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::protocol::store_commit::{DeviceJoinAttemptId, ObjectHash, STORE_PROTOCOL_VERSION};
-use crate::storage::cloud::ObjectSlot;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinOffer,

@@ -4,11 +4,13 @@
 //! supplies domain separation and the physical locator selects the one provider
 //! object whose stored size and hash the signed reference authenticates. Prefix
 //! enumeration and provider names never select protocol authority.
-use async_trait::async_trait;
+use std::num::NonZeroU64;
 use std::path::Path;
 
-use crate::protocol::store_commit::ObjectHash;
-use crate::storage::cloud::ObjectSlot;
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::protocol::membership::AuthorHead;
+use crate::protocol::store_commit::{ObjectHash, StoreDeviceRegistration, StoreProtocolError};
 
 /// Signed object kind bound into protection AAD and checked against the
 /// semantic path before storage I/O.
@@ -1119,10 +1121,15 @@ impl ExactObjectRef {
         Ok(())
     }
 
-    pub(crate) async fn verify_file(&self, path: &std::path::Path) -> Result<(), StorageError> {
-        let (size, hash) = super::local_file::exact_file_facts(path)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
+    /// Check independently computed file facts against the stored identity.
+    /// Reading the file and computing its facts is the filesystem owner's
+    /// operation; this value only compares.
+    pub(crate) fn verify_stored_facts(
+        &self,
+        path: &Path,
+        size: u64,
+        hash: ObjectHash,
+    ) -> Result<(), StorageError> {
         if size != self.stored_size || hash != self.stored_hash {
             return Err(StorageError::InvalidContent(format!(
                 "exact file {} does not match stored identity for {}",
@@ -1211,40 +1218,9 @@ pub enum StorageError {
     #[error("local blob filesystem failed: {0}")]
     LocalFilesystem(String),
     /// This device has not adopted a store-key rotation the cloud already
-    /// committed; see [`crate::storage::RotationPending`].
+    /// committed; see [`RotationPending`].
     #[error("{0}")]
-    RotationPending(#[from] crate::storage::RotationPending),
-}
-
-impl From<crate::storage::cloud::CloudHomeError> for StorageError {
-    fn from(e: crate::storage::cloud::CloudHomeError) -> Self {
-        match e {
-            crate::storage::cloud::CloudHomeError::NotFound(key) => StorageError::NotFound(key),
-            crate::storage::cloud::CloudHomeError::AlreadyExists(key) => {
-                StorageError::AlreadyExists(key)
-            }
-            crate::storage::cloud::CloudHomeError::Configuration(msg) => {
-                StorageError::Configuration(msg)
-            }
-            crate::storage::cloud::CloudHomeError::Transport(msg) => StorageError::Storage(msg),
-            crate::storage::cloud::CloudHomeError::CleanupFailed { operation, cleanup } => {
-                StorageError::CleanupFailed {
-                    operation: Box::new(StorageError::from(*operation)),
-                    cleanup: Box::new(StorageError::from(*cleanup)),
-                }
-            }
-            crate::storage::cloud::CloudHomeError::UnresolvedOutcome {
-                operation,
-                readback,
-            } => StorageError::UnresolvedOutcome {
-                operation: Box::new(StorageError::from(*operation)),
-                readback: Box::new(StorageError::from(*readback)),
-            },
-            crate::storage::cloud::CloudHomeError::Io(io_err) => {
-                StorageError::Storage(format!("I/O error: {io_err}"))
-            }
-        }
-    }
+    RotationPending(#[from] RotationPending),
 }
 
 impl StorageError {
@@ -1275,622 +1251,509 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
     }
 }
 
-#[async_trait]
-pub(crate) trait SyncStorage: Send + Sync {
-    /// Return the cloud home's fixed blob path representation.
-    fn blob_path_scheme(&self) -> crate::storage::BlobPathScheme;
-
-    /// Return this installation's uploader identity.
-    fn self_uploader(&self) -> String;
-
-    /// Verify that the retained provider session is reachable and usable.
-    async fn probe_provider(&self) -> Result<(), StorageError>;
-
-    /// Apply and read back one provider membership-access state.
-    async fn set_member_access(
-        &self,
-        state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, StorageError>;
-
-    async fn read_blob_tombstone(&self, key: &str) -> Result<Vec<u8>, StorageError>;
-
-    async fn write_blob_tombstone(
-        &self,
-        key: &str,
-        stored_bytes: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    async fn list_blob_tombstones(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
-
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, StorageError>;
-
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), StorageError>;
-
-    #[cfg(test)]
-    async fn list_provider_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError>;
-
-    #[cfg(test)]
-    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError>;
-
-    #[cfg(test)]
-    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError>;
-
-    /// Verify the provider's exact-slot behavior through two independent
-    /// clients retained by this storage session.
-    async fn probe_exact_slots(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &ResolvedProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::ExactSlotProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    /// Reserve the joining peer's deterministic cross-principal response slot.
-    async fn reserve_cross_principal_response_slot(
-        &self,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError>;
-
-    /// Observe the exact object identity currently occupying `slot` without
-    /// opening its protocol bytes.
-    async fn observe_exact_slot(
-        &self,
-        slot: &ObjectSlot,
-    ) -> Result<Option<ExactObjectRef>, StorageError>;
-
-    /// Delete whatever occupies `slot` and prove the exact slot is absent.
-    async fn delete_exact_slot_and_verify_absent(
-        &self,
-        slot: &ObjectSlot,
-    ) -> Result<(), StorageError>;
-
-    async fn prepare_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &StoreProviderBinding,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    async fn settle_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &StoreProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    async fn create_cross_principal_response(
-        &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signing_pubkey: &str,
-        peer_signer: &crate::keys::UserKeypair,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeResponse,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    async fn complete_cross_principal_probe(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-        peer_signing_pubkey: &str,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    /// Return the cloud home's fixed Store blob opening protection. Circle blobs
-    /// use their exact activated Circle key instead.
-    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError>;
-
-    /// Resolve the provider corpus and authenticated principal used by this
-    /// adapter. Registrations bind the principal before allocating descendants.
-    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError>;
-
-    /// Reserve the exact provider slot for a protocol object.
-    async fn allocate_protocol_slot(
-        &self,
-        context: &ProtocolObjectContext,
-        semantic_prefix: &str,
-        extension: &str,
-    ) -> Result<ObjectSlot, StorageError>;
-
-    /// Seal canonical protocol bytes once and bind their exact stored size/hash.
-    fn prepare_protocol_object(
-        &self,
-        context: &ProtocolObjectContext,
-        slot: ObjectSlot,
-        semantic_prefix: &str,
-        data: Vec<u8>,
-    ) -> Result<PreparedExactObject, StorageError>;
-
-    /// Create the prepared bytes at their reserved slot, settling lost responses
-    /// by exact readback and refusing different bytes at an occupied slot.
-    async fn create_protocol_object(
-        &self,
-        prepared: &PreparedExactObject,
-    ) -> Result<(), StorageError>;
-
-    /// Read and open one exact Store protocol object using the signed
-    /// semantic prefix as encryption AAD.
-    async fn read_protocol_object(
-        &self,
-        context: &ProtocolObjectContext,
-        object: &ExactObjectRef,
-        semantic_prefix: &str,
-    ) -> Result<Vec<u8>, StorageError>;
-
-    /// Read one predecessor-reserved successor slot and return both its opened
-    /// bytes and the completed exact reference derived from the stored bytes.
-    async fn read_protocol_slot(
-        &self,
-        context: &ProtocolObjectContext,
-        slot: &ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, ExactObjectRef), StorageError>;
-
-    /// Read one predecessor-reserved successor slot while retaining its exact
-    /// stored representation for a durable retry journal.
-    async fn read_prepared_protocol_slot(
-        &self,
-        context: &ProtocolObjectContext,
-        slot: &ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, PreparedExactObject), StorageError>;
-
-    /// Delete one exact Store protocol object and verify absence.
-    async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError>;
-
-    /// Reserve the exact provider slot for a stored blob body.
-    async fn allocate_blob_slot(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &BlobWriteAuthority<'_>,
-    ) -> Result<ObjectSlot, StorageError>;
-
-    /// Verify one plaintext source against its locator and write the exact stored
-    /// representation to an atomically committed, directory-synced spool file.
-    async fn seal_blob_to_spool(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &BlobWriteAuthority<'_>,
-        protection: BlobSpoolProtection,
-        plaintext_file: &Path,
-        spool_file: &Path,
-    ) -> Result<BlobSpoolWrite, StorageError>;
-
-    /// Derive an exact reference from an immutable stored blob file.
-    async fn prepare_blob_object(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &BlobWriteAuthority<'_>,
-        slot: ObjectSlot,
-        stored_file: &Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError>;
-
-    /// Create the exact stored blob body from its immutable local file.
-    async fn create_blob_object_from_file(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        authority: &BlobWriteAuthority<'_>,
-        stored_file: &Path,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), StorageError>;
-
-    /// Read one exact stored blob body and verify its signed size/hash reference.
-    async fn verify_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError>;
-
-    /// Read and verify one exact stored blob body into an unpublished sibling.
-    /// The caller commits it with overwrite semantics for coven-owned paths or
-    /// no-replace semantics for user-owned destinations.
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        dest: &Path,
-    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError>;
-
-    /// Download and exact-verify the stored object, open it under the
-    /// audience-owned protection, and return an unpublished plaintext file only
-    /// after its locator size and hash have also been verified.
-    async fn stage_verified_blob_plaintext(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: BlobSpoolProtection,
-        dest: &Path,
-    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError>;
-
-    /// Open a reader that serves plaintext ranges of a stored blob by fetching
-    /// only the sealed chunks covering each range. The ranged counterpart of
-    /// [`Self::stage_verified_blob_plaintext`], which materializes the whole
-    /// blob; a host seeking around a large blob opens this instead so a range
-    /// costs its own bytes rather than the object's.
-    async fn open_blob_range_reader(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: BlobSpoolProtection,
-    ) -> Result<crate::storage::BlobRangeReader, StorageError>;
-
-    /// Delete one exact stored blob body.
-    async fn delete_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError>;
+/// Provider-specific physical address for a caller-reserved immutable slot.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PhysicalObjectLocator {
+    LogicalKey,
+    Opaque(String),
 }
 
-#[async_trait]
-impl<T> SyncStorage for std::sync::Arc<T>
-where
-    T: SyncStorage + ?Sized,
-{
-    fn blob_path_scheme(&self) -> crate::storage::BlobPathScheme {
-        (**self).blob_path_scheme()
+/// Exact logical and physical location persisted before an immutable write.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectSlot {
+    logical_key: String,
+    physical: PhysicalObjectLocator,
+}
+
+impl<'de> Deserialize<'de> for ObjectSlot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            logical_key: String,
+            physical: PhysicalObjectLocator,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.logical_key, fields.physical).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ObjectSlot {
+    pub fn logical(logical_key: String) -> Result<Self, StorageError> {
+        Self::new(logical_key, PhysicalObjectLocator::LogicalKey)
     }
 
-    fn self_uploader(&self) -> String {
-        (**self).self_uploader()
+    pub fn opaque(logical_key: String, provider_id: String) -> Result<Self, StorageError> {
+        Self::new(logical_key, PhysicalObjectLocator::Opaque(provider_id))
     }
 
-    async fn probe_provider(&self) -> Result<(), StorageError> {
-        (**self).probe_provider().await
+    fn new(logical_key: String, physical: PhysicalObjectLocator) -> Result<Self, StorageError> {
+        let slot = Self {
+            logical_key,
+            physical,
+        };
+        slot.validate()?;
+        Ok(slot)
     }
 
-    async fn set_member_access(
-        &self,
-        state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, StorageError> {
-        (**self).set_member_access(state).await
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if self.logical_key.is_empty() {
+            return Err(StorageError::Configuration(
+                "object slot logical key is empty".to_string(),
+            ));
+        }
+        if matches!(&self.physical, PhysicalObjectLocator::Opaque(value) if value.is_empty()) {
+            return Err(StorageError::Configuration(
+                "object slot provider locator is empty".to_string(),
+            ));
+        }
+        Ok(())
     }
 
-    async fn read_blob_tombstone(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        (**self).read_blob_tombstone(key).await
+    pub fn logical_key(&self) -> &str {
+        &self.logical_key
     }
 
-    async fn write_blob_tombstone(
-        &self,
-        key: &str,
-        stored_bytes: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        (**self).write_blob_tombstone(key, stored_bytes).await
+    pub fn physical(&self) -> &PhysicalObjectLocator {
+        &self.physical
     }
 
-    async fn list_blob_tombstones(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        (**self).list_blob_tombstones(prefix).await
+    /// Reject this slot when the provider requires the logical key to be the
+    /// physical object locator.
+    pub(crate) fn require_logical_key_for(&self, provider: &str) -> Result<(), StorageError> {
+        self.validate()?;
+        if self.physical != PhysicalObjectLocator::LogicalKey {
+            return Err(StorageError::Configuration(format!(
+                "{provider} slot for {} must use its logical key",
+                self.logical_key
+            )));
+        }
+        Ok(())
     }
+}
 
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, StorageError> {
-        (**self).blob_tombstone_exists(key).await
-    }
+/// Store-key work is in flight or committed but not fully adopted. Every cloud
+/// seal refuses while this holds, including while a local removal candidate may
+/// still publish and after a committed rotation whose key is not locally
+/// adopted or whose exact operation journal remains open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "store-key rotation is pending ({state:?}) while this device is sealing under generation \
+     {live_generation}; refusing to seal for the cloud until the pending state is completed"
+)]
+pub struct RotationPending {
+    pub state: RotationPendingState,
+    pub live_generation: u64,
+}
 
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), StorageError> {
-        (**self).delete_blob_tombstone(key).await
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationPendingState {
+    Candidate {
+        generation: u64,
+    },
+    LocalCommitted {
+        generation: u64,
+    },
+    PeerCommitted {
+        generation: u64,
+    },
+    CandidateAndPeer {
+        candidate_generation: u64,
+        peer_generation: u64,
+    },
+    LocalCommittedAndPeer {
+        local_generation: u64,
+        peer_generation: u64,
+    },
+}
 
+/// The exact store-key work that blocks sealing: a local candidate, an activated
+/// local removal awaiting adoption, a peer's committed generation awaiting
+/// adoption, or a local fact together with a peer fact. Durable database
+/// transitions and this in-memory copy move together at operation boundaries.
+///
+/// Shared (behind one `Arc`, via [`CloudSyncStorage::shared_pending_rotation`])
+/// across every path that seals data for the cloud — changesets, heads, blobs,
+/// tombstones, snapshots — so a rotation this device can't adopt blocks all of
+/// them the same way, not just the removal call that discovered it. This is the
+/// structural half of the invariant: this device must never seal under a
+/// generation the store has already superseded.
+/// The protocol-state key that persists the serialized [`RotationGate`].
+/// Restored before the first sync cycle so a restart cannot forget an
+/// unfinished candidate or an unadopted committed rotation and resume sealing
+/// under an unauthorized key.
+pub(crate) const ROTATION_GATE_STATE_KEY: &str = "rotation_gate";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RotationGate {
+    /// This device's own rotation, with no unadopted peer generation.
+    Local(LocalRotation),
+    /// A generation the store committed that this device has not adopted, with
+    /// no local rotation of its own.
+    Peer { generation: NonZeroU64 },
+    /// Both facts at once: this device's rotation, and a peer generation it has
+    /// not adopted.
+    LocalAndPeer {
+        local: LocalRotation,
+        peer_generation: NonZeroU64,
+    },
+}
+
+/// This device's own rotation: a candidate it may still publish or lose, or its
+/// committed rotation awaiting local adoption. The commit consumes the candidate,
+/// so the two are the same fact at different points of its life — a device holds
+/// one or the other, never both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum LocalRotation {
+    Candidate {
+        generation: NonZeroU64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    },
+    Committed {
+        generation: NonZeroU64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    },
+}
+
+impl LocalRotation {
+    /// Reported through [`PendingRotation::pending_generation`], which exists for
+    /// status reporting in tests and for hosts built with `test-utils`.
     #[cfg(test)]
-    async fn list_provider_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
-        (**self).list_provider_objects_for_test(prefix).await
+    fn generation(&self) -> NonZeroU64 {
+        match self {
+            Self::Candidate { generation, .. } | Self::Committed { generation, .. } => *generation,
+        }
+    }
+}
+
+impl RotationGate {
+    /// This device's own rotation, if the gate holds one.
+    fn local(&self) -> Option<LocalRotation> {
+        match self {
+            Self::Local(local) | Self::LocalAndPeer { local, .. } => Some(*local),
+            Self::Peer { .. } => None,
+        }
     }
 
+    /// The unadopted peer generation, if the gate holds one.
+    fn peer(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Peer { generation }
+            | Self::LocalAndPeer {
+                peer_generation: generation,
+                ..
+            } => Some(*generation),
+            Self::Local(_) => None,
+        }
+    }
+
+    /// The gate holding both facts — `None` when neither is left, which is the
+    /// absence of a gate rather than an empty one.
+    fn from_parts(local: Option<LocalRotation>, peer: Option<NonZeroU64>) -> Option<Self> {
+        match (local, peer) {
+            (Some(local), Some(peer_generation)) => Some(Self::LocalAndPeer {
+                local,
+                peer_generation,
+            }),
+            (Some(local), None) => Some(Self::Local(local)),
+            (None, Some(generation)) => Some(Self::Peer { generation }),
+            (None, None) => None,
+        }
+    }
+
+    /// The gate `local` owns, keeping whatever peer fact came with it.
+    fn with_local(local: LocalRotation, peer: Option<NonZeroU64>) -> Self {
+        match peer {
+            Some(peer_generation) => Self::LocalAndPeer {
+                local,
+                peer_generation,
+            },
+            None => Self::Local(local),
+        }
+    }
+
+    /// The newest generation the gate names. Reported through
+    /// [`PendingRotation::pending_generation`].
     #[cfg(test)]
-    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        (**self).read_provider_object_for_test(key).await
+    pub(crate) fn generation(&self) -> NonZeroU64 {
+        match self {
+            Self::Local(local) => local.generation(),
+            Self::Peer { generation } => *generation,
+            Self::LocalAndPeer {
+                local,
+                peer_generation,
+            } => local.generation().max(*peer_generation),
+        }
     }
 
-    #[cfg(test)]
-    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
-        (**self).provider_object_exists_for_test(key).await
+    pub(crate) fn pending_state(&self) -> RotationPendingState {
+        match self {
+            Self::Local(LocalRotation::Candidate { generation, .. }) => {
+                RotationPendingState::Candidate {
+                    generation: generation.get(),
+                }
+            }
+            Self::Local(LocalRotation::Committed { generation, .. }) => {
+                RotationPendingState::LocalCommitted {
+                    generation: generation.get(),
+                }
+            }
+            Self::Peer { generation } => RotationPendingState::PeerCommitted {
+                generation: generation.get(),
+            },
+            Self::LocalAndPeer {
+                local: LocalRotation::Candidate { generation, .. },
+                peer_generation,
+            } => RotationPendingState::CandidateAndPeer {
+                candidate_generation: generation.get(),
+                peer_generation: peer_generation.get(),
+            },
+            Self::LocalAndPeer {
+                local: LocalRotation::Committed { generation, .. },
+                peer_generation,
+            } => RotationPendingState::LocalCommittedAndPeer {
+                local_generation: generation.get(),
+                peer_generation: peer_generation.get(),
+            },
+        }
     }
 
-    async fn probe_exact_slots(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &ResolvedProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::ExactSlotProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self).probe_exact_slots(journal, probe_id, binding).await
+    /// Stage `mutation` as this device's rotation candidate, on whatever gate is
+    /// already open (`None` when none is).
+    pub(crate) fn with_candidate(
+        gate: Option<Self>,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<Self, String> {
+        let Some(generation) = NonZeroU64::new(generation) else {
+            return Err("rotation candidate names generation zero".to_string());
+        };
+        let candidate = LocalRotation::Candidate {
+            generation,
+            mutation,
+        };
+        match gate.as_ref().and_then(Self::local) {
+            Some(LocalRotation::Committed { .. }) => {
+                Err("a committed local rotation already owns the gate".to_string())
+            }
+            Some(existing) if existing != candidate => {
+                Err("another rotation candidate already owns the gate".to_string())
+            }
+            _ => Ok(Self::with_local(
+                candidate,
+                gate.as_ref().and_then(Self::peer),
+            )),
+        }
     }
 
-    async fn reserve_cross_principal_response_slot(
-        &self,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError> {
-        (**self)
-            .reserve_cross_principal_response_slot(probe_id)
-            .await
+    /// Promote this device's staged candidate to its committed rotation.
+    pub(crate) fn commit_candidate(
+        gate: Option<Self>,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<Self, String> {
+        let refusal = "rotation commit does not own the pending candidate gate";
+        let Some(generation) = NonZeroU64::new(generation) else {
+            return Err(refusal.to_string());
+        };
+        let committed = LocalRotation::Committed {
+            generation,
+            mutation,
+        };
+        let local = gate.as_ref().and_then(Self::local);
+        // The gate must hold this exact candidate — or already hold the commit,
+        // which is the same fact arriving twice rather than a second rotation.
+        if local
+            != Some(LocalRotation::Candidate {
+                generation,
+                mutation,
+            })
+            && local != Some(committed)
+        {
+            return Err(refusal.to_string());
+        }
+        Ok(Self::with_local(
+            committed,
+            gate.as_ref().and_then(Self::peer),
+        ))
     }
 
-    async fn observe_exact_slot(
-        &self,
-        slot: &ObjectSlot,
-    ) -> Result<Option<ExactObjectRef>, StorageError> {
-        (**self).observe_exact_slot(slot).await
+    /// Record that the store committed `generation`. Forward-only: an older
+    /// generation never displaces a newer one already recorded.
+    pub(crate) fn merge_peer_commit(gate: Option<Self>, generation: u64) -> Result<Self, String> {
+        let Some(generation) = NonZeroU64::new(generation) else {
+            return Err("committed rotation names generation zero".to_string());
+        };
+        let peer_generation = gate
+            .as_ref()
+            .and_then(Self::peer)
+            .map_or(generation, |recorded| recorded.max(generation));
+        Ok(match gate.as_ref().and_then(Self::local) {
+            Some(local) => Self::LocalAndPeer {
+                local,
+                peer_generation,
+            },
+            None => Self::Peer {
+                generation: peer_generation,
+            },
+        })
     }
 
-    async fn delete_exact_slot_and_verify_absent(
-        &self,
-        slot: &ObjectSlot,
-    ) -> Result<(), StorageError> {
-        (**self).delete_exact_slot_and_verify_absent(slot).await
+    pub(crate) fn remove_candidate(
+        self,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<Option<Self>, String> {
+        let lost = NonZeroU64::new(generation).map(|generation| LocalRotation::Candidate {
+            generation,
+            mutation,
+        });
+        if lost.is_none() || self.local() != lost {
+            return Err("rotation loss does not own the pending candidate gate".to_string());
+        }
+        Ok(Self::from_parts(None, self.peer()))
     }
 
-    async fn prepare_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &StoreProviderBinding,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .prepare_cross_principal_challenge(
-                publication_journal,
-                probe_id,
-                store,
-                context,
-                administrator_signer,
-            )
-            .await
+    pub(crate) fn replace_candidate_mutation(
+        self,
+        generation: u64,
+        previous: crate::protocol::store_commit::ObjectHash,
+        replacement: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<Self, String> {
+        let refusal = "rotation candidate replacement lost its exact owner";
+        let Some(generation) = NonZeroU64::new(generation) else {
+            return Err(refusal.to_string());
+        };
+        if self.local()
+            != Some(LocalRotation::Candidate {
+                generation,
+                mutation: previous,
+            })
+        {
+            return Err(refusal.to_string());
+        }
+        Ok(Self::with_local(
+            LocalRotation::Candidate {
+                generation,
+                mutation: replacement,
+            },
+            self.peer(),
+        ))
     }
 
-    async fn settle_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &StoreProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .settle_cross_principal_challenge(
-                publication_journal,
-                authorization,
-                challenge,
-                context,
-                store,
-            )
-            .await
+    pub(crate) fn complete_local_adoption(
+        self,
+        generation: u64,
+        mutation: crate::protocol::store_commit::ObjectHash,
+    ) -> Result<Option<Self>, String> {
+        match self.local() {
+            Some(LocalRotation::Candidate { .. }) => {
+                return Err(
+                    "rotation adoption cannot close while a candidate is pending".to_string(),
+                )
+            }
+            Some(LocalRotation::Committed {
+                generation: committed,
+                mutation: committed_mutation,
+            }) if committed.get() == generation && committed_mutation == mutation => {}
+            _ => return Err("rotation adoption does not own the committed gate".to_string()),
+        }
+        // Adopting the local rotation adopts every peer generation it covers; a
+        // newer peer generation is a separate fact and stays.
+        Ok(Self::from_parts(
+            None,
+            self.peer().filter(|peer| peer.get() > generation),
+        ))
     }
 
-    async fn create_cross_principal_response(
-        &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signing_pubkey: &str,
-        peer_signer: &crate::keys::UserKeypair,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeResponse,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .create_cross_principal_response(
-                challenge,
-                context,
-                store,
-                administrator_signing_pubkey,
-                peer_signer,
-            )
-            .await
+    pub(crate) fn complete_peer_adoption(
+        self,
+        adopted_generation: u64,
+    ) -> Result<Option<Self>, String> {
+        if adopted_generation == 0 {
+            return Err("adopted rotation names generation zero".to_string());
+        }
+        Ok(Self::from_parts(
+            self.local(),
+            self.peer().filter(|peer| peer.get() > adopted_generation),
+        ))
     }
+}
 
-    async fn complete_cross_principal_probe(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-        peer_signing_pubkey: &str,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .complete_cross_principal_probe(
-                journal,
-                challenge,
-                response,
-                context,
-                store,
-                administrator_signer,
-                peer_signing_pubkey,
-            )
-            .await
-    }
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedObject<T> {
+    pub value: T,
+    pub bytes: Vec<u8>,
+    pub semantic_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
 
-    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
-        (**self).store_blob_protection()
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum StoreObjectError {
+    #[error("{0}")]
+    Storage(
+        #[from]
+        #[source]
+        StorageError,
+    ),
+    #[error("Store object {key:?} is invalid for semantic object {semantic_prefix:?}: {source}")]
+    InvalidObject {
+        semantic_prefix: String,
+        key: String,
+        #[source]
+        source: Box<StoreProtocolError>,
+    },
+}
 
-    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError> {
-        (**self).provider_binding().await
-    }
+/// Decode the JSON body of one protocol object. Bytes that do not parse as `T`
+/// are malformed for the slot they were read from.
+pub(crate) fn decode_protocol_object<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, StoreProtocolError> {
+    serde_json::from_slice(bytes).map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+}
 
-    async fn allocate_protocol_slot(
-        &self,
-        context: &ProtocolObjectContext,
-        semantic_prefix: &str,
-        extension: &str,
-    ) -> Result<ObjectSlot, StorageError> {
-        (**self)
-            .allocate_protocol_slot(context, semantic_prefix, extension)
-            .await
+/// Reject an object that names a different Store root than the one it was read
+/// under.
+pub(crate) fn verify_store_root(
+    expected: ObjectHash,
+    actual: ObjectHash,
+) -> Result<(), StoreProtocolError> {
+    if actual != expected {
+        return Err(StoreProtocolError::StoreRootMismatch { expected, actual });
     }
+    Ok(())
+}
 
-    fn prepare_protocol_object(
-        &self,
-        context: &ProtocolObjectContext,
-        slot: ObjectSlot,
-        semantic_prefix: &str,
-        data: Vec<u8>,
-    ) -> Result<PreparedExactObject, StorageError> {
-        (**self).prepare_protocol_object(context, slot, semantic_prefix, data)
+pub(crate) fn verify_membership_head_reference(
+    head: &AuthorHead,
+    expected_coord: &crate::protocol::membership::MembershipCoord,
+    expected_head_hash: ObjectHash,
+    registration: &StoreDeviceRegistration,
+) -> Result<(), StoreProtocolError> {
+    if head.entry_coord() != *expected_coord
+        || head.head_hash() != expected_head_hash
+        || registration.author_pubkey != expected_coord.author_pubkey
+        || !head.verify(registration)
+    {
+        return Err(StoreProtocolError::Malformed(
+            "exact membership head differs from its reference or certified author".to_string(),
+        ));
     }
-
-    async fn create_protocol_object(
-        &self,
-        prepared: &PreparedExactObject,
-    ) -> Result<(), StorageError> {
-        (**self).create_protocol_object(prepared).await
-    }
-
-    async fn read_protocol_object(
-        &self,
-        context: &ProtocolObjectContext,
-        object: &ExactObjectRef,
-        semantic_prefix: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        (**self)
-            .read_protocol_object(context, object, semantic_prefix)
-            .await
-    }
-
-    async fn read_protocol_slot(
-        &self,
-        context: &ProtocolObjectContext,
-        slot: &ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, ExactObjectRef), StorageError> {
-        (**self)
-            .read_protocol_slot(context, slot, semantic_prefix)
-            .await
-    }
-
-    async fn read_prepared_protocol_slot(
-        &self,
-        context: &ProtocolObjectContext,
-        slot: &ObjectSlot,
-        semantic_prefix: &str,
-    ) -> Result<(Vec<u8>, PreparedExactObject), StorageError> {
-        (**self)
-            .read_prepared_protocol_slot(context, slot, semantic_prefix)
-            .await
-    }
-
-    async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError> {
-        (**self).delete_protocol_object(object).await
-    }
-
-    async fn allocate_blob_slot(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &BlobWriteAuthority<'_>,
-    ) -> Result<ObjectSlot, StorageError> {
-        (**self).allocate_blob_slot(locator, authority).await
-    }
-
-    async fn seal_blob_to_spool(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &BlobWriteAuthority<'_>,
-        protection: BlobSpoolProtection,
-        plaintext_file: &Path,
-        spool_file: &Path,
-    ) -> Result<BlobSpoolWrite, StorageError> {
-        (**self)
-            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
-            .await
-    }
-
-    async fn prepare_blob_object(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        authority: &BlobWriteAuthority<'_>,
-        slot: ObjectSlot,
-        stored_file: &Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
-        (**self)
-            .prepare_blob_object(locator, authority, slot, stored_file)
-            .await
-    }
-
-    async fn create_blob_object_from_file(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        authority: &BlobWriteAuthority<'_>,
-        stored_file: &Path,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), StorageError> {
-        (**self)
-            .create_blob_object_from_file(blob, authority, stored_file, progress)
-            .await
-    }
-
-    async fn verify_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError> {
-        (**self).verify_blob_object(blob).await
-    }
-
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        dest: &Path,
-    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
-        (**self).stage_exact_blob_download(blob, dest).await
-    }
-
-    async fn stage_verified_blob_plaintext(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: BlobSpoolProtection,
-        dest: &Path,
-    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
-        (**self)
-            .stage_verified_blob_plaintext(blob, protection, dest)
-            .await
-    }
-
-    async fn open_blob_range_reader(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-        protection: BlobSpoolProtection,
-    ) -> Result<crate::storage::BlobRangeReader, StorageError> {
-        (**self).open_blob_range_reader(blob, protection).await
-    }
-
-    async fn delete_blob_object(
-        &self,
-        blob: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), StorageError> {
-        (**self).delete_blob_object(blob).await
-    }
+    Ok(())
 }
 
 #[cfg(test)]

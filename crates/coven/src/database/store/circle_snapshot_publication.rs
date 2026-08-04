@@ -97,7 +97,7 @@ impl StoreDatabase {
                     ),
                     None => (
                         0,
-                        crate::storage::cloud::ObjectSlot::logical(format!(
+                        crate::protocol::objects::ObjectSlot::logical(format!(
                             "{}.json",
                             circle_snapshot_slot_prefix(meta.circle_id, &device_id, 0)
                         ))

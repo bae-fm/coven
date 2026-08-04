@@ -391,14 +391,20 @@ impl RotationFixture {
             .expect("walk the owner's Circle snapshot stream")
     }
 
-    async fn bootstrap_image_present(&self, image: &crate::storage::ExactObjectRef) -> bool {
+    async fn bootstrap_image_present(
+        &self,
+        image: &crate::protocol::objects::ExactObjectRef,
+    ) -> bool {
         self.db
             .remote_object_exists_for_test(image.clone())
             .await
             .expect("read bootstrap image ownership presence")
     }
 
-    async fn member_seed_image(&self, circle_id: CircleId) -> crate::storage::ExactObjectRef {
+    async fn member_seed_image(
+        &self,
+        circle_id: CircleId,
+    ) -> crate::protocol::objects::ExactObjectRef {
         StoreDatabase::new(&self.member_db)
             .circle_bootstrap_coverage_ref(circle_id)
             .await
@@ -409,7 +415,10 @@ impl RotationFixture {
             .object
     }
 
-    async fn bootstrap_image_owner_count(&self, image: &crate::storage::ExactObjectRef) -> usize {
+    async fn bootstrap_image_owner_count(
+        &self,
+        image: &crate::protocol::objects::ExactObjectRef,
+    ) -> usize {
         let record = self
             .db
             .remote_object_for_test(image.clone())
@@ -436,7 +445,9 @@ impl RotationFixture {
             .count()
     }
 
-    async fn live_bootstrap_images(&self) -> Vec<(crate::storage::ExactObjectRef, usize)> {
+    async fn live_bootstrap_images(
+        &self,
+    ) -> Vec<(crate::protocol::objects::ExactObjectRef, usize)> {
         self.db
             .remote_objects_for_test()
             .await

@@ -4,7 +4,7 @@ pub(super) trait CircleBootstrapBlobVerification {
     async fn verify_stored_blob(
         &self,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError>;
+    ) -> Result<(), crate::protocol::objects::StorageError>;
 
     async fn verify_snapshot_blobs(
         &self,

@@ -4,6 +4,8 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use super::*;
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{PreparedExactObject, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
     registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
@@ -15,8 +17,6 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
     StoreOperationMembershipAuthority, SuccessorLink,
 };
-use crate::storage::StoreObjectError;
-use crate::storage::{PreparedExactObject, ProtocolObjectDomain};
 
 /// A snapshot-installed Store that retains the exact remote authority used to
 /// verify the image. Restore-only operations consume this authority directly
@@ -90,14 +90,14 @@ impl<'storage> RestoringStore<'storage> {
     async fn prepare_or_load_recovery_registration(
         &self,
         expected: StoreDeviceRegistration,
-        slot: crate::storage::cloud::ObjectSlot,
+        slot: crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<
         RecoveryProtocolObject<StoreDeviceRegistration, StoreDeviceRegistrationRef>,
         StoreRegistrationError,
     > {
         let root = &self.root;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
@@ -131,7 +131,7 @@ impl<'storage> RestoringStore<'storage> {
                     reference,
                 })
             }
-            Err(crate::storage::StorageError::NotFound(_)) => {
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
                 let bytes = expected.to_bytes();
                 let prepared = self
                     .storage
@@ -158,7 +158,7 @@ impl<'storage> RestoringStore<'storage> {
 
     async fn prepared_protocol_object_exists(
         &self,
-        context: &crate::storage::ProtocolObjectContext,
+        context: &crate::protocol::objects::ProtocolObjectContext,
         prepared: &PreparedExactObject,
         semantic_prefix: &str,
         expected_bytes: &[u8],
@@ -176,7 +176,7 @@ impl<'storage> RestoringStore<'storage> {
             Ok(_) => Err(StoreRegistrationError::Invalid(format!(
                 "exact object {semantic_prefix:?} differs from its staged Owner recovery bytes"
             ))),
-            Err(crate::storage::StorageError::NotFound(_)) => Ok(false),
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(StoreObjectError::from(error).into()),
         }
     }
@@ -185,7 +185,7 @@ impl<'storage> RestoringStore<'storage> {
         &self,
         registration: &StoreDeviceRegistration,
         registration_ref: &StoreDeviceRegistrationRef,
-        first_slot: crate::storage::cloud::ObjectSlot,
+        first_slot: crate::protocol::objects::ObjectSlot,
         store_cut: StoreHistoryCut,
         device_state: StoreDeviceStateRef,
         published_at: &str,
@@ -193,7 +193,7 @@ impl<'storage> RestoringStore<'storage> {
     ) -> Result<RecoveryProtocolObject<StoreAck, StoreAckRef>, StoreRegistrationError> {
         let root = &self.root;
         let storage = self.storage;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -243,7 +243,7 @@ impl<'storage> RestoringStore<'storage> {
                     reference,
                 })
             }
-            Err(crate::storage::StorageError::NotFound(_)) => {
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
                 let next_slot = storage
                     .allocate_protocol_slot(
                         &context,
@@ -302,7 +302,7 @@ impl<'storage> RestoringStore<'storage> {
     #[allow(clippy::too_many_arguments)]
     async fn prepare_or_load_owner_recovery_node(
         &self,
-        recovery_slot: crate::storage::cloud::ObjectSlot,
+        recovery_slot: crate::protocol::objects::ObjectSlot,
         owner_pubkey: &str,
         owner_grant: &crate::protocol::membership::MembershipGrantId,
         sequence: u64,
@@ -317,7 +317,7 @@ impl<'storage> RestoringStore<'storage> {
     > {
         let root = &self.root;
         let storage = self.storage;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::OwnerRecoveryNode,
         );
@@ -363,7 +363,7 @@ impl<'storage> RestoringStore<'storage> {
                     reference,
                 })
             }
-            Err(crate::storage::StorageError::NotFound(_)) => {
+            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
                 let next_sequence = sequence.checked_add(1).ok_or_else(|| {
                     StoreRegistrationError::Invalid("Owner recovery sequence overflow".into())
                 })?;
@@ -423,7 +423,7 @@ impl<'storage> RestoringStore<'storage> {
         origin: &StoreDeviceRegistrationOrigin,
         device_id: crate::protocol::store_commit::StoreDeviceId,
         recovery_id: DeviceRecoveryId,
-        recovery_slot: &crate::storage::cloud::ObjectSlot,
+        recovery_slot: &crate::protocol::objects::ObjectSlot,
         owner_pubkey: &str,
         owner_grant: &crate::protocol::membership::MembershipGrantId,
         sequence: u64,
@@ -492,10 +492,11 @@ impl<'storage> RestoringStore<'storage> {
             ));
         }
 
-        let registration_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            root.store_root_hash,
-            ProtocolObjectDomain::StoreDeviceRegistration,
-        );
+        let registration_context =
+            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                root.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            );
         let (registration_bytes, registration_prepared) = storage
             .read_prepared_protocol_slot(
                 &registration_context,
@@ -512,7 +513,7 @@ impl<'storage> RestoringStore<'storage> {
                     .into(),
             ));
         }
-        let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -657,7 +658,10 @@ impl<'storage> RestoringStore<'storage> {
             return Ok(registration);
         }
         let context = |domain| {
-            crate::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
+            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                root.store_root_hash,
+                domain,
+            )
         };
         let commit_context = context(ProtocolObjectDomain::StoreCommit);
         let staged = database
@@ -700,7 +704,9 @@ impl<'storage> RestoringStore<'storage> {
             }
             let registration_exists = self
                 .prepared_protocol_object_exists(
-                    &context(crate::storage::ProtocolObjectDomain::StoreDeviceRegistration),
+                    &context(
+                        crate::protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration,
+                    ),
                     &durable.prepared,
                     &registration_semantic_prefix(&device_id.to_string()),
                     &durable.registration_bytes,
@@ -708,7 +714,7 @@ impl<'storage> RestoringStore<'storage> {
                 .await?;
             let initial_ack_exists = self
                 .prepared_protocol_object_exists(
-                    &context(crate::storage::ProtocolObjectDomain::StoreAck),
+                    &context(crate::protocol::objects::ProtocolObjectDomain::StoreAck),
                     &durable.initial_ack.prepared,
                     &ack_slot_prefix(&device_id.to_string(), 1),
                     &durable.initial_ack.bytes,
@@ -733,11 +739,12 @@ impl<'storage> RestoringStore<'storage> {
                 ),
             }
         } else {
-            let head_context = context(crate::storage::ProtocolObjectDomain::StoreHead);
-            let ack_context = context(crate::storage::ProtocolObjectDomain::StoreAck);
-            let snapshot_context = context(crate::storage::ProtocolObjectDomain::StoreSnapshotMeta);
+            let head_context = context(crate::protocol::objects::ProtocolObjectDomain::StoreHead);
+            let ack_context = context(crate::protocol::objects::ProtocolObjectDomain::StoreAck);
+            let snapshot_context =
+                context(crate::protocol::objects::ProtocolObjectDomain::StoreSnapshotMeta);
             let registration_context =
-                context(crate::storage::ProtocolObjectDomain::StoreDeviceRegistration);
+                context(crate::protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration);
             let first_head = storage
                 .allocate_protocol_slot(
                     &head_context,
@@ -1038,7 +1045,7 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let head_context = context(crate::storage::ProtocolObjectDomain::StoreHead);
+        let head_context = context(crate::protocol::objects::ProtocolObjectDomain::StoreHead);
         let DeviceStreamAnchor::StoreAnnouncements { first_slot: _ } = &registration.store_commits
         else {
             return Err(StoreRegistrationError::Invalid(

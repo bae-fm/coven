@@ -1645,7 +1645,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     tokio::fs::create_dir_all(pinned.parent().unwrap())
         .await
         .unwrap();
-    crate::storage::StagedBlobFile::write_for_test(&pinned, &bytes)
+    crate::local_file::AtomicStagedFile::write_for_test(&pinned, &bytes)
         .await
         .unwrap();
     let sequence = storage.publish_fixture_position(&lib, "pin-position").await;
@@ -1697,7 +1697,7 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     tokio::fs::create_dir_all(cached.parent().unwrap())
         .await
         .unwrap();
-    crate::storage::StagedBlobFile::write_for_test(&cached, &bytes)
+    crate::local_file::AtomicStagedFile::write_for_test(&cached, &bytes)
         .await
         .unwrap();
     let sequence = storage
@@ -2293,7 +2293,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .local_blob_write_authority()
         .await
         .expect("load local blob write authority");
-    let authority = crate::storage::BlobWriteAuthority::new(&registration);
+    let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
     let entries = db
         .get_pending_cloud_uploads()
         .await
@@ -2314,7 +2314,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .store_blob_protection()
             .expect("load blob protection");
         let locator = match &protection {
-            crate::storage::BlobSpoolProtection::Opaque(encryption) => {
+            crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
                 crate::blob::locator::BlobLocator::opaque(
                     row.blob().namespace.clone(),
                     row.blob().id.clone(),
@@ -2326,7 +2326,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
                     row.plaintext_hash(),
                 )
             }
-            crate::storage::BlobSpoolProtection::Browsable => {
+            crate::protocol::objects::BlobSpoolProtection::Browsable => {
                 crate::blob::locator::BlobLocator::browsable(
                     row.blob().namespace.clone(),
                     row.blob().id.clone(),

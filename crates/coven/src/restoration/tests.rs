@@ -319,8 +319,8 @@ fn membership_floor(author_pubkey: String) -> MembershipFloor {
         head_hash: crate::protocol::store_commit::ObjectHash::digest(
             b"restore test membership head semantic bytes",
         ),
-        object: crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+        object: crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/membership/heads/restore-test/1.json".to_string(),
             )
             .expect("valid test membership-head slot"),
@@ -337,8 +337,8 @@ fn store_root_ref(label: &str) -> crate::protocol::store_commit::StoreRootRef {
             format!("{label} identity").as_bytes(),
         ),
         store_root_hash: crate::protocol::store_commit::ObjectHash::digest(label.as_bytes()),
-        object: crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(format!(
+        object: crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/protocol/root/{}.json",
                 crate::protocol::store_commit::ObjectHash::digest(label.as_bytes())
             ))
@@ -364,7 +364,7 @@ fn owner_recovery_authority(
         crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
     );
     let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
-        first_slot: crate::storage::cloud::ObjectSlot::logical(
+        first_slot: crate::protocol::objects::ObjectSlot::logical(
             "store-v1/recovery/restore-tests/first.json".to_string(),
         )
         .expect("valid recovery slot"),

@@ -4,14 +4,13 @@ use crate::database::{
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, StoreWriteBlobFact,
     StoreWriteBlobFacts,
 };
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     circle_package_semantic_prefix, package_semantic_prefix, CandidateFamilyId, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
 };
 use crate::protocol::{audience_package, circle, remote_object};
-use crate::storage;
-use crate::storage::StoreObjectError;
-use crate::storage::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
 
 impl AuthorizedWriterOperation<'_> {
@@ -232,7 +231,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         fact: &StoreWriteBlobFact,
         audience: crate::blob::locator::RemoteAudience,
-        protection: storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         authority: &BlobWriteAuthority<'_>,
     ) -> Result<
         (
@@ -418,7 +417,8 @@ impl AuthorizedWriterOperation<'_> {
         let (binding, stored) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
-                let created_spool = (spool_write == crate::storage::BlobSpoolWrite::Created)
+                let created_spool = (spool_write
+                    == crate::protocol::objects::BlobSpoolWrite::Created)
                     .then(|| PreparedBlobSpool::new(&spool_path));
                 return Err(source.cleanup_failure(created_spool, error).await);
             }
@@ -557,11 +557,11 @@ async fn remove_durable_file(path: &std::path::Path, require_present: bool) -> R
 pub(crate) fn prepare_partition_blob_locator(
     fact: &StoreWriteBlobFact,
     audience: crate::blob::locator::RemoteAudience,
-    protection: &storage::BlobSpoolProtection,
+    protection: &crate::protocol::objects::BlobSpoolProtection,
     authority: &BlobWriteAuthority<'_>,
 ) -> Result<crate::blob::locator::BlobLocator, StoreError> {
     match protection {
-        storage::BlobSpoolProtection::Opaque(encryption) => {
+        crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
             crate::blob::locator::BlobLocator::opaque(
                 fact.blob.namespace.clone(),
                 fact.blob.id.clone(),
@@ -573,7 +573,7 @@ pub(crate) fn prepare_partition_blob_locator(
                 fact.plaintext_hash,
             )
         }
-        storage::BlobSpoolProtection::Browsable => {
+        crate::protocol::objects::BlobSpoolProtection::Browsable => {
             if audience != crate::blob::locator::RemoteAudience::Store {
                 return Err(StoreError::InvalidOutbound(
                     "Circle blob cannot use Browsable storage".to_string(),

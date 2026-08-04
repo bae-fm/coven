@@ -3,11 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::keys::{self, UserKeypair};
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject, StorageError};
 use crate::protocol::store_commit::ObjectHash;
-use crate::storage::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
-    SyncStorage,
-};
 
 /// A Store encryption keyring sealed to one member and signed by an Owner.
 ///
@@ -283,27 +280,11 @@ impl PreparedWrappedStoreKey {
     }
 }
 
-pub(crate) async fn load_wrapped_store_key(
-    storage: &dyn SyncStorage,
-    store_root_hash: ObjectHash,
-    reference: &WrappedStoreKeyRef,
-) -> Result<WrappedStoreKey, StorageError> {
-    let context = ProtocolObjectContext::recipient_sealed(
-        store_root_hash,
-        ProtocolObjectDomain::StoreWrappedKey,
-    );
-    let bytes = storage
-        .read_protocol_object(&context, &reference.object, &reference.semantic_prefix())
-        .await?;
-    let value: WrappedStoreKey = serde_json::from_slice(&bytes)
-        .map_err(|error| StorageError::Parse(format!("parse wrapped Store key: {error}")))?;
-    reference.validate_value(&value, &bytes)?;
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::SyncStorage as _;
+    use crate::sync::store::owner::load_wrapped_store_key;
 
     #[test]
     fn wrapped_key_round_trips_and_returns_sealed_bytes() {

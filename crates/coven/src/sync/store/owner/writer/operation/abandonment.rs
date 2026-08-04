@@ -1,10 +1,10 @@
 use super::*;
 use crate::database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use crate::protocol::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest,
     StoreBatchCommitDeletionTarget,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
 use crate::sync::store::owner::verified_history::prepare_merge_abandonment_history_summary;
 use std::sync::Arc;

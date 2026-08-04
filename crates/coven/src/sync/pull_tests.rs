@@ -27,7 +27,8 @@ use crate::Migration;
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
-use crate::storage::{ProtocolObjectDomain, SyncStorage};
+use crate::protocol::objects::ProtocolObjectDomain;
+use crate::storage::SyncStorage;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::test_helpers::*;
 
@@ -61,7 +62,7 @@ trait PullTestDatabaseOps {
     async fn exact_row_blob_ref(&self, table: &str, row_id: &str) -> crate::blob::RowBlobRef;
     async fn stored_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> crate::protocol::remote_object::RemoteObjectRecord;
     async fn stored_remote_objects(
         &self,
@@ -69,7 +70,7 @@ trait PullTestDatabaseOps {
     async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>);
     async fn replace_stored_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
         remote: &crate::protocol::remote_object::RemoteObjectRecord,
     );
     async fn local_announcement_stream(&self) -> crate::protocol::membership::AuthorStreamId;
@@ -96,7 +97,7 @@ impl PullTestDatabaseOps for crate::database::Database {
 
     async fn stored_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> crate::protocol::remote_object::RemoteObjectRecord {
         self.remote_object_for_test(object.clone())
             .await
@@ -121,7 +122,7 @@ impl PullTestDatabaseOps for crate::database::Database {
 
     async fn replace_stored_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
         remote: &crate::protocol::remote_object::RemoteObjectRecord,
     ) {
         self.replace_remote_object_for_test(object.clone(), remote.clone())
@@ -451,12 +452,12 @@ impl PullTestStoreOps for TestStore {
                 blob,
                 match blob.locator() {
                     crate::blob::locator::BlobLocator::Opaque { .. } => {
-                        crate::storage::BlobSpoolProtection::Opaque(EncryptionService::from_key(
-                            [42; 32],
-                        ))
+                        crate::protocol::objects::BlobSpoolProtection::Opaque(
+                            EncryptionService::from_key([42; 32]),
+                        )
                     }
                     crate::blob::locator::BlobLocator::Browsable { .. } => {
-                        crate::storage::BlobSpoolProtection::Browsable
+                        crate::protocol::objects::BlobSpoolProtection::Browsable
                     }
                 },
                 &temp.path().join("plaintext"),
@@ -768,10 +769,10 @@ impl<'storage> ExactMembershipChain<'storage> {
         signer: &UserKeypair,
     ) {
         use crate::protocol::membership::{AuthorHead, MembershipHeadRef};
+        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
         use crate::protocol::store_commit::{
             membership_head_slot_prefix, StreamActivation, SuccessorLink,
         };
-        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let storage = self.storage;
         let chain = &mut self.chain;
@@ -1033,7 +1034,7 @@ struct ExactPublishedCommit<'storage> {
     registration: crate::protocol::store_commit::StoreDeviceRegistration,
     device_signer: UserKeypair,
     head: StoreDeviceHead,
-    head_object: crate::storage::ExactObjectRef,
+    head_object: crate::protocol::objects::ExactObjectRef,
 }
 
 impl<'storage> ExactPublishedCommit<'storage> {
@@ -1042,7 +1043,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         schema_version: u32,
         membership_authority: crate::protocol::store_commit::StoreOperationMembershipAuthority,
         package_bytes: &[u8],
-        package_object: crate::storage::ExactObjectRef,
+        package_object: crate::protocol::objects::ExactObjectRef,
     ) -> crate::protocol::store_commit::StoreBatchCommit {
         crate::protocol::store_commit::StoreBatchCommit::signed_operations(
             self.commit.store_root_hash,
@@ -1093,10 +1094,10 @@ impl<'storage> ExactPublishedCommit<'storage> {
         reference: crate::protocol::store_commit::StoreBatchCommitRef,
         identity: &UserKeypair,
     ) -> Self {
+        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
         use crate::protocol::store_commit::{
             head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration,
         };
-        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let commit = storage
             .founder_device()
@@ -1204,7 +1205,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         commit_bytes: Vec<u8>,
         commit_hash: crate::protocol::store_commit::ObjectHash,
     ) -> crate::protocol::store_commit::StoreBatchCommitRef {
-        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let stream_id = commit_stream_id(&self.reference);
         let commit_context = ProtocolObjectContext::signed_plaintext(
@@ -1245,7 +1246,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
         head_signer: &UserKeypair,
     ) {
-        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let head_context = ProtocolObjectContext::signed_plaintext(
             self.storage.root.store_root_hash,
@@ -1309,7 +1310,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         author_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
         signer: &UserKeypair,
     ) {
-        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let context = ProtocolObjectContext::signed_plaintext(
             self.storage.root.store_root_hash,
@@ -1389,7 +1390,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
     }
 
     async fn replace_package_bytes(&self, bytes: Vec<u8>) {
-        use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let package = self
             .commit
@@ -1428,9 +1429,9 @@ impl<'storage> ExactPublishedCommit<'storage> {
         let package_object = self
             .storage
             .create_exact_protocol_object(
-                &crate::storage::ProtocolObjectContext::store_encrypted(
+                &crate::protocol::objects::ProtocolObjectContext::store_encrypted(
                     self.storage.root.store_root_hash,
-                    crate::storage::ProtocolObjectDomain::StorePackage,
+                    crate::protocol::objects::ProtocolObjectDomain::StorePackage,
                 ),
                 &crate::protocol::store_commit::package_semantic_prefix(
                     self.commit.candidate_family(),
@@ -1509,21 +1510,21 @@ impl crate::sync::test_helpers::StorageInterceptor for FaultingStorage {
         &self,
         _read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         if self.fail_membership_read(semantic_prefix) {
-            return Err(crate::storage::StorageError::Storage(
+            return Err(crate::protocol::objects::StorageError::Storage(
                 "forced exact membership read failure".to_string(),
             ));
         }
         Ok(())
     }
 
-    async fn before_blob_stage(&self) -> Result<(), crate::storage::StorageError> {
+    async fn before_blob_stage(&self) -> Result<(), crate::protocol::objects::StorageError> {
         if self
             .fail_blob_read
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(crate::storage::StorageError::Storage(
+            return Err(crate::protocol::objects::StorageError::Storage(
                 "forced exact blob read failure".to_string(),
             ));
         }
@@ -1541,9 +1542,9 @@ impl StorageInterceptor for MissingProtocolSlot {
         &self,
         read: ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         if read == ProtocolRead::Slot && semantic_prefix == self.semantic_prefix {
-            return Err(crate::storage::StorageError::NotFound(format!(
+            return Err(crate::protocol::objects::StorageError::NotFound(format!(
                 "lagging provider omits {semantic_prefix}"
             )));
         }
@@ -3154,7 +3155,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let expected_stream_id = stream_id.to_string();
     let relocated_object = storage
         .create_exact_protocol_object(
-            &crate::storage::ProtocolObjectContext::signed_plaintext(
+            &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 storage.root.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             ),
@@ -3230,7 +3231,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     let relocated_stream = crate::protocol::membership::AuthorStreamId::from_bytes([99; 32]);
     let relocated_object = storage
         .create_exact_protocol_object(
-            &crate::storage::ProtocolObjectContext::signed_plaintext(
+            &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 storage.root.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             ),
@@ -7272,9 +7273,9 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         2,
         owner_grant.entry_hash,
     );
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::storage::ProtocolObjectDomain::StoreMembershipEntry,
+        crate::protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
     );
     let slot = storage
         .allocate_protocol_slot(&context, &relocated_prefix, ".json")
@@ -7528,9 +7529,9 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         .expect("load exact founder head");
     let mut bad = founder.clone();
     bad.signature = "00".to_string();
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::storage::ProtocolObjectDomain::StoreMembershipEntry,
+        crate::protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
     );
     let prefix = crate::protocol::store_commit::membership_entry_semantic_prefix(
         &coord.author_pubkey,

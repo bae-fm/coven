@@ -5,6 +5,12 @@ use super::verified_history::registration::{
     registration_attempt_error, RegistrationLoadError,
 };
 use crate::protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
+use crate::protocol::objects::{
+    decode_protocol_object, verify_store_root, StoreObjectError, VerifiedObject,
+};
+use crate::protocol::objects::{
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+};
 use crate::protocol::reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
@@ -22,13 +28,8 @@ use crate::protocol::store_commit::{
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreDeviceHeadRef,
     StoreSnapshotRef,
 };
-use crate::storage::{
-    decode_protocol_object, run_blocking_object_verification, verify_store_root, StoreObjectError,
-    VerifiedObject,
-};
-use crate::storage::{
-    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
-};
+use crate::storage::run_blocking_object_verification;
+use crate::storage::SyncStorage;
 use crate::sync::store::StoreError;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,7 +110,7 @@ impl VerifiedMergeMembershipClosure {
 }
 
 struct ExactAnnouncementPath {
-    next_slot: crate::storage::cloud::ObjectSlot,
+    next_slot: crate::protocol::objects::ObjectSlot,
     accepted_head: Option<StoreDeviceHeadRef>,
     commits: Vec<StoreBatchCommitRef>,
 }
@@ -240,7 +241,7 @@ impl<'a> StoreCommitVerifier<'a> {
         previous: Option<&VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::storage::cloud::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             Option<StoreDeviceHeadRef>,
         ),
         StoreError,
@@ -2066,7 +2067,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn read_protocol_slot(
         &self,
         context: &ProtocolObjectContext,
-        slot: &crate::storage::cloud::ObjectSlot,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<(Vec<u8>, ExactObjectRef), StorageError> {
         self.storage

@@ -136,9 +136,9 @@ impl CircleAck {
         expected: &CircleAckRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let ack: Self = crate::storage::decode_protocol_object(bytes)?;
+        let ack: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(ack.version)?;
-        crate::storage::verify_store_root(
+        crate::protocol::objects::verify_store_root(
             expected_store_root.store_root_hash,
             ack.store_root_hash,
         )?;
@@ -237,7 +237,7 @@ mod tests {
             control_hash: ObjectHash::digest(b"circle-ack-control"),
         };
         let object = ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+            crate::protocol::objects::ObjectSlot::logical(
                 "circles/ack-test/acknowledgements/device/1.json".to_string(),
             )
             .expect("valid acknowledgement slot"),

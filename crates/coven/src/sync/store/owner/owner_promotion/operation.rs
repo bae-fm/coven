@@ -2,6 +2,7 @@ use crate::encryption::EncryptionService;
 use crate::keys;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::StoreMembershipRoleGrant;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
     OwnerPromotionAcceptance, OwnerPromotionAnchors,
@@ -10,7 +11,6 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
 };
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };

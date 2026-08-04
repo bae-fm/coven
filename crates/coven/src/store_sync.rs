@@ -12,13 +12,14 @@ use crate::config::Config;
 use crate::database::{DbError, StoreDatabase};
 use crate::encryption::EncryptionService;
 use crate::keys::KeyError;
+use crate::protocol::objects::StorageError;
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::storage::cloud::CloudHomeError;
 #[cfg(test)]
 use crate::storage::BlobChunking;
-use crate::storage::{BlobPathScheme, CloudSyncStorage, StorageError, SyncStorage};
+use crate::storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_dir::StoreOpenGuard;
 use crate::store_security::StoreSecurity;

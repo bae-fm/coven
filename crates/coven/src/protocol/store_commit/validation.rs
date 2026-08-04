@@ -139,7 +139,7 @@ fn parse_store_batch_commit(
     expected_coord: &StoreCommitCoord,
     author: &StoreDeviceRegistration,
 ) -> Result<StoreBatchCommit, StoreProtocolError> {
-    let commit: StoreBatchCommit = crate::storage::decode_protocol_object(bytes)?;
+    let commit: StoreBatchCommit = crate::protocol::objects::decode_protocol_object(bytes)?;
     commit.verify_at(expected_store_root_hash, expected_coord, author)?;
     Ok(commit)
 }

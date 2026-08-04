@@ -75,6 +75,7 @@ use crate::protocol::circle::Audience;
 use crate::protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
 };
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
     SharedLiveSetObjectDomain,
@@ -85,7 +86,6 @@ use crate::protocol::store_commit::{
     StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
     StoreSnapshotRef,
 };
-use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
 use crate::write::{WriteId, WriteStatus};
@@ -647,8 +647,8 @@ pub(crate) enum StagedCircleDecision {
 
 pub(crate) struct VerifiedSnapshotBootstrapInstall {
     snapshot: PublishedStoreSnapshot,
-    store_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
-    founder: crate::storage::VerifiedObject<StoreDeviceRegistration>,
+    store_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
+    founder: crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
     stability: RetainedReplaySnapshotAuthority,
     membership: InitialStoreMembershipAuthority,
     routing_key: Option<crate::protocol::circle::RowRoutingKey>,
@@ -663,8 +663,8 @@ pub(crate) struct VerifiedSnapshotBootstrapInstall {
 impl VerifiedSnapshotBootstrapInstall {
     pub(crate) fn new(
         snapshot: PublishedStoreSnapshot,
-        store_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
-        founder: crate::storage::VerifiedObject<StoreDeviceRegistration>,
+        store_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        founder: crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
         stability: crate::sync::store::VerifiedStoreSnapshotStability,
         membership: InitialStoreMembershipAuthority,
         routing_encryption: Option<&EncryptionService>,

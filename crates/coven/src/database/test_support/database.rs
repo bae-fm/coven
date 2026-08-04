@@ -395,7 +395,7 @@ impl Database {
 
     pub(crate) async fn remote_object_for_test(
         &self,
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
     ) -> Result<crate::protocol::remote_object::RemoteObjectRecord, DbError> {
         self.test_sql(move |database| database.remote_object(&object))
             .await
@@ -446,7 +446,7 @@ impl Database {
 
     pub(crate) async fn remote_object_exists_for_test(
         &self,
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
     ) -> Result<bool, DbError> {
         self.test_sql(move |database| database.remote_object_exists(&object))
             .await
@@ -462,7 +462,7 @@ impl Database {
 
     pub(crate) async fn replace_remote_object_for_test(
         &self,
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
         remote: crate::protocol::remote_object::RemoteObjectRecord,
     ) -> Result<(), DbError> {
         self.test_sql(move |database| database.replace_remote_object(&object, &remote))
@@ -471,7 +471,7 @@ impl Database {
 
     pub(crate) async fn delete_remote_object_for_test(
         &self,
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         self.test_sql(move |database| database.delete_remote_object(&object))
             .await

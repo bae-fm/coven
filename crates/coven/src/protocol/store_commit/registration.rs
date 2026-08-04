@@ -63,7 +63,7 @@ impl OwnerRecoveryNode {
         store_root: &StoreRootRef,
         reference: &OwnerRecoveryNodeRef,
     ) -> Result<Self, StoreProtocolError> {
-        let node: Self = crate::storage::decode_protocol_object(bytes)?;
+        let node: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(node.version)?;
         node.validate_shape()?;
         if node.store_root_hash != store_root.store_root_hash
@@ -634,7 +634,7 @@ impl StoreDeviceRegistration {
         expected_store_root: &StoreRootRef,
         expected_device: StoreDeviceId,
     ) -> Result<Self, StoreProtocolError> {
-        let registration: Self = crate::storage::decode_protocol_object(bytes)?;
+        let registration: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(registration.version)?;
         if &registration.store_root != expected_store_root {
             return Err(StoreProtocolError::StoreRootMismatch {

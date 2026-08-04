@@ -11,7 +11,7 @@ use crate::sync::test_helpers::user_keypair_from_seed;
 fn exact_ref(label: &str) -> ExactObjectRef {
     let bytes = label.as_bytes();
     ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(format!(
+        crate::protocol::objects::ObjectSlot::logical(format!(
             "store-v1/test-circle-objects/{label}.json"
         ))
         .unwrap(),
@@ -33,7 +33,7 @@ fn roster_head(
                 ObjectHash::digest(format!("{label}-activation").as_bytes()),
             ),
             predecessor: (entry.seq > 1).then(|| exact_ref(&format!("{label}-predecessor"))),
-            next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+            next_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test-circle-successors/{label}.json"
             ))
             .unwrap(),

@@ -554,7 +554,7 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .await
         .expect("first read populates cache");
     let path = cache_path(&ld, &reference);
-    crate::storage::StagedBlobFile::write_for_test(&path, &bytes[..8])
+    crate::local_file::AtomicStagedFile::write_for_test(&path, &bytes[..8])
         .await
         .expect("simulate a torn cache file");
 
@@ -1680,7 +1680,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     .await
     .expect("open a stream over the local store");
 
-    crate::storage::StagedBlobFile::write_for_test(&host_path, &decoy)
+    crate::local_file::AtomicStagedFile::write_for_test(&host_path, &decoy)
         .await
         .expect("atomically replace the local-store file after open");
     assert_eq!(
@@ -3401,7 +3401,7 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
             crate::sync::test_helpers::test_cache_locator_hash("new0bbbb"),
         )
         .unwrap();
-    let mut stage = crate::storage::StagedBlobFile::create(&dest)
+    let mut stage = crate::local_file::AtomicStagedFile::create(&dest)
         .await
         .expect("create concurrent populate stage");
     stage

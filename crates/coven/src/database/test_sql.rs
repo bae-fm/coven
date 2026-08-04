@@ -87,7 +87,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<crate::protocol::remote_object::RemoteObjectRecord, DbError> {
         let object_id = crate::protocol::remote_object::remote_object_id(object);
         let state: String = self
@@ -119,7 +119,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn replace_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
         remote: &crate::protocol::remote_object::RemoteObjectRecord,
     ) -> Result<(), DbError> {
         let object_id = crate::protocol::remote_object::remote_object_id(object);
@@ -142,7 +142,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn remote_object_exists(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<bool, DbError> {
         let object_id = crate::protocol::remote_object::remote_object_id(object);
         self.connection
@@ -169,7 +169,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn delete_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         let object_id = crate::protocol::remote_object::remote_object_id(object);
         let deleted = self
@@ -715,7 +715,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn insert_retained_replay_object(
         &self,
         owner: &crate::protocol::remote_object::RetainedReplayOwner,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         let crate::protocol::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
             owner;
@@ -875,7 +875,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn staged_circle_acknowledgement_object(
         &self,
-    ) -> Result<crate::storage::PreparedExactObject, DbError> {
+    ) -> Result<crate::protocol::objects::PreparedExactObject, DbError> {
         let encoded: String = self
             .connection
             .query_row(
@@ -1531,12 +1531,12 @@ impl DatabaseTestSql<'_> {
         &self,
         label: &str,
     ) -> Result<crate::protocol::store_commit::ObjectHash, DbError> {
+        use crate::protocol::objects::ObjectSlot;
+        use crate::protocol::objects::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
         use crate::protocol::store_commit::{
             GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId,
             StoreProtocolRoot, STORE_PROTOCOL_VERSION,
         };
-        use crate::storage::cloud::ObjectSlot;
-        use crate::storage::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
 
         let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
             "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
@@ -1603,7 +1603,7 @@ impl DatabaseTestSql<'_> {
         &self,
         hash: crate::protocol::store_commit::ObjectHash,
         bytes: &[u8],
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         self.connection
             .execute(

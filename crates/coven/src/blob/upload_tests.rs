@@ -12,10 +12,11 @@ use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::protocol::objects::ObjectSlot;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage,
     RevokeOutcome, UploadProgress,
 };
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -171,7 +172,7 @@ impl CloudHome for InstrumentedHome {
 impl ExactSlotStorage for InstrumentedHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
         ExactSlotStorage::provider_binding(&self.inner).await
     }
 
@@ -372,7 +373,7 @@ impl UploadFixture {
                 .parent()
                 .expect("Store directory has a parent")
                 .join(format!("{id}.source"));
-            crate::storage::StagedBlobFile::write_for_test(&path, bytes)
+            crate::local_file::AtomicStagedFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
             crate::database::StoreDatabase::new(&self.db)

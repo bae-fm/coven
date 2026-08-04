@@ -10,12 +10,15 @@ use crate::keys::UserKeypair;
 use crate::protocol::membership::{
     MembershipCoord, MembershipEntry, MembershipGrantId, OwnerStreamBarrier,
 };
+use crate::protocol::objects::ObjectSlot;
+use crate::protocol::objects::{
+    ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding,
+};
 use crate::protocol::store_commit::{
     DeviceJoinAttemptId, DeviceJoinAttemptRef, ObjectHash, StoreBatchCommitRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
 };
-use crate::storage::cloud::{BlobBody, CloudHomeError, ExactSlotStorage, ObjectSlot};
-use crate::storage::{ExactObjectRef, ProviderDeviceBinding, StorageError, StoreProviderBinding};
+use crate::storage::cloud::{BlobBody, CloudHomeError, ExactSlotStorage};
 
 const EXACT_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-exact-slot-probe.v1\0";
 const CROSS_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-cross-principal-probe.v1\0";
@@ -188,12 +191,12 @@ impl FounderProviderAdminGrant {
             ObjectHash::digest(&lost_payload),
         );
         let device = ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+            principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                 access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
             },
         };
         let store = StoreProviderBinding::S3 {
-            endpoint: crate::storage::S3EndpointBinding::Custom {
+            endpoint: crate::protocol::objects::S3EndpointBinding::Custom {
                 origin: "https://test.invalid".to_string(),
             },
             region: "test-region".to_string(),
@@ -525,28 +528,6 @@ pub(crate) trait DeviceJoinChallengePublicationJournal: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
-#[async_trait]
-impl DeviceJoinChallengePublicationJournal for crate::database::StoreDatabase {
-    async fn prepare(
-        &self,
-        challenge: &CrossPrincipalProbeChallenge,
-    ) -> Result<DeviceJoinChallengePublicationRecord, StorageError> {
-        self.prepare_device_join_challenge_publication(challenge.clone())
-            .await
-            .map_err(|error| StorageError::Storage(error.to_string()))
-    }
-
-    async fn claim_published(
-        &self,
-        authorization: &DeviceJoinChallengePublicationAuthorization,
-        challenge: &CrossPrincipalProbeChallenge,
-    ) -> Result<(), StorageError> {
-        self.publish_device_join_challenge(authorization.clone(), challenge.clone())
-            .await
-            .map_err(|error| StorageError::Storage(error.to_string()))
-    }
-}
-
 impl CrossPrincipalProbeReceipt {
     fn signed(
         transcript: CrossPrincipalProbeTranscript,
@@ -722,29 +703,32 @@ pub enum ProviderAccessLocator {
 
 impl ProviderAccessLocator {
     pub fn for_current_administrator(
-        binding: &crate::storage::ResolvedProviderBinding,
+        binding: &crate::protocol::objects::ResolvedProviderBinding,
     ) -> Result<Self, StorageError> {
         binding.validate()?;
         match (&binding.store, &binding.device.principal) {
             (
                 StoreProviderBinding::S3 { .. },
-                crate::storage::ProviderPrincipalId::CustomS3Credential { access_key_id_hash },
+                crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
+                    access_key_id_hash,
+                },
             ) => Ok(Self::S3SharedCredentialGeneration {
                 generation: 1,
                 access_key_id_hash: *access_key_id_hash,
             }),
             (
                 StoreProviderBinding::GoogleDrive {
-                    corpus: crate::storage::GoogleDriveCorpus::SharedDrive { drive_id, .. },
+                    corpus:
+                        crate::protocol::objects::GoogleDriveCorpus::SharedDrive { drive_id, .. },
                 },
-                crate::storage::ProviderPrincipalId::GoogleDrive { permission_id },
+                crate::protocol::objects::ProviderPrincipalId::GoogleDrive { permission_id },
             ) => Ok(Self::GoogleDrivePermission {
                 drive_id: drive_id.clone(),
                 permission_id: permission_id.clone(),
             }),
             (
                 StoreProviderBinding::Dropbox { namespace_id },
-                crate::storage::ProviderPrincipalId::Dropbox { account_id },
+                crate::protocol::objects::ProviderPrincipalId::Dropbox { account_id },
             ) => Ok(Self::DropboxSharedFolderMember {
                 namespace_id: namespace_id.clone(),
                 account_id: account_id.clone(),
@@ -755,7 +739,9 @@ impl ProviderAccessLocator {
                     zone_name,
                     ..
                 },
-                crate::storage::ProviderPrincipalId::CloudKitPrivateZoneOwner { record_name },
+                crate::protocol::objects::ProviderPrincipalId::CloudKitPrivateZoneOwner {
+                    record_name,
+                },
             ) => Ok(Self::CloudKitPrivateZoneOwner {
                 owner_name: owner_name.clone(),
                 zone_name: zone_name.clone(),
@@ -777,7 +763,7 @@ impl ProviderAccessLocator {
         let valid = match (store, &provider.principal, self) {
             (
                 StoreProviderBinding::S3 { .. },
-                crate::storage::ProviderPrincipalId::CustomS3Credential {
+                crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: provider_hash,
                 },
                 Self::S3SharedCredentialGeneration {
@@ -787,14 +773,15 @@ impl ProviderAccessLocator {
             ) => *generation > 0 && provider_hash == access_key_id_hash,
             (
                 StoreProviderBinding::S3 { .. },
-                crate::storage::ProviderPrincipalId::Aws { .. },
+                crate::protocol::objects::ProviderPrincipalId::Aws { .. },
                 Self::S3SharedCredentialGeneration { generation, .. },
             ) => *generation > 0,
             (
                 StoreProviderBinding::GoogleDrive {
-                    corpus: crate::storage::GoogleDriveCorpus::SharedDrive { drive_id, .. },
+                    corpus:
+                        crate::protocol::objects::GoogleDriveCorpus::SharedDrive { drive_id, .. },
                 },
-                crate::storage::ProviderPrincipalId::GoogleDrive { permission_id },
+                crate::protocol::objects::ProviderPrincipalId::GoogleDrive { permission_id },
                 Self::GoogleDrivePermission {
                     drive_id: locator_drive,
                     permission_id: locator_permission,
@@ -802,7 +789,7 @@ impl ProviderAccessLocator {
             ) => drive_id == locator_drive && permission_id == locator_permission,
             (
                 StoreProviderBinding::Dropbox { namespace_id },
-                crate::storage::ProviderPrincipalId::Dropbox { account_id },
+                crate::protocol::objects::ProviderPrincipalId::Dropbox { account_id },
                 Self::DropboxSharedFolderMember {
                     namespace_id: locator_namespace,
                     account_id: locator_account,
@@ -813,7 +800,7 @@ impl ProviderAccessLocator {
                     drive_id,
                     folder_id,
                 },
-                crate::storage::ProviderPrincipalId::OneDrive { .. },
+                crate::protocol::objects::ProviderPrincipalId::OneDrive { .. },
                 Self::OneDrivePermission {
                     drive_id: locator_drive,
                     item_id,
@@ -826,7 +813,9 @@ impl ProviderAccessLocator {
                     zone_name,
                     ..
                 },
-                crate::storage::ProviderPrincipalId::CloudKitPrivateZoneOwner { record_name },
+                crate::protocol::objects::ProviderPrincipalId::CloudKitPrivateZoneOwner {
+                    record_name,
+                },
                 Self::CloudKitPrivateZoneOwner {
                     owner_name: locator_owner,
                     zone_name: locator_zone,
@@ -843,7 +832,9 @@ impl ProviderAccessLocator {
                     zone_name,
                     ..
                 },
-                crate::storage::ProviderPrincipalId::CloudKitSharedZoneParticipant { record_name },
+                crate::protocol::objects::ProviderPrincipalId::CloudKitSharedZoneParticipant {
+                    record_name,
+                },
                 Self::CloudKitParticipant {
                     share_record_name,
                     owner_name: locator_owner,
@@ -1601,7 +1592,7 @@ pub(crate) enum ProviderProbeJournalError {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExactProbeJournal {
     pub probe_id: ProviderProbeId,
-    pub binding: crate::storage::ResolvedProviderBinding,
+    pub binding: crate::protocol::objects::ResolvedProviderBinding,
     pub slot: ObjectSlot,
     pub lost_response_slot: ObjectSlot,
     pub progress: ExactProbeProgress,
@@ -2136,7 +2127,7 @@ impl ProviderProbeStorage {
         &self,
         journal: &dyn ProviderProbeJournal,
         probe_id: ProviderProbeId,
-        binding: &crate::storage::ResolvedProviderBinding,
+        binding: &crate::protocol::objects::ResolvedProviderBinding,
     ) -> Result<ExactSlotProbeReceipt, ProviderProbeError> {
         let first = self.primary.as_ref();
         let second = self.peer.as_ref();
@@ -2702,7 +2693,7 @@ fn validate_cross_provider_evidence(
         (store, evidence),
         (
             StoreProviderBinding::GoogleDrive {
-                corpus: crate::storage::GoogleDriveCorpus::SharedDrive { .. }
+                corpus: crate::protocol::objects::GoogleDriveCorpus::SharedDrive { .. }
             },
             CrossPrincipalProviderEvidence::GoogleSharedDrive
         ) | (
@@ -2728,8 +2719,9 @@ fn validate_cross_provider_evidence(
         CrossPrincipalProviderEvidence::CloudKit(accepted),
     ) = (store, evidence)
     {
-        let crate::storage::ProviderPrincipalId::CloudKitSharedZoneParticipant { record_name } =
-            &peer.principal
+        let crate::protocol::objects::ProviderPrincipalId::CloudKitSharedZoneParticipant {
+            record_name,
+        } = &peer.principal
         else {
             return invalid("CloudKit peer is not a shared-zone participant");
         };
@@ -2861,7 +2853,7 @@ mod tests {
     fn shared_cloudkit_participant_is_not_treated_as_the_zone_owner() {
         let mut binding = private_cloudkit_binding();
         binding.device.principal =
-            crate::storage::ProviderPrincipalId::CloudKitSharedZoneParticipant {
+            crate::protocol::objects::ProviderPrincipalId::CloudKitSharedZoneParticipant {
                 record_name: "current-user".to_string(),
             };
 
@@ -2897,9 +2889,9 @@ mod tests {
             .unwrap();
         let mut conflicting = second.clone();
         conflicting.provider = ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::Aws {
+            principal: crate::protocol::objects::ProviderPrincipalId::Aws {
                 account_id: "999999999999".to_string(),
-                principal: crate::storage::AwsPrincipal::Root,
+                principal: crate::protocol::objects::AwsPrincipal::Root,
             },
         };
         assert_eq!(
@@ -2971,7 +2963,7 @@ mod tests {
         let db = crate::sync::test_helpers::open_test_db();
         let journal = crate::database::StoreDatabase::new(&db);
         let probe_id = ProviderProbeId::from_bytes([44; 32]);
-        let binding = crate::storage::ResolvedProviderBinding {
+        let binding = crate::protocol::objects::ResolvedProviderBinding {
             store: test_store_binding(),
             device: test_device_binding(),
         };
@@ -2998,8 +2990,8 @@ mod tests {
     }
 
     fn admin_record(id: u8, label: &str) -> ProviderAdminGrantRecord {
-        let root_object = crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(format!("roots/{label}")).unwrap(),
+        let root_object = crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(format!("roots/{label}")).unwrap(),
             1,
             ObjectHash::digest(&[id]),
         );
@@ -3047,9 +3039,9 @@ mod tests {
         }
     }
 
-    fn test_store_binding() -> crate::storage::StoreProviderBinding {
-        crate::storage::StoreProviderBinding::S3 {
-            endpoint: crate::storage::S3EndpointBinding::Aws {
+    fn test_store_binding() -> crate::protocol::objects::StoreProviderBinding {
+        crate::protocol::objects::StoreProviderBinding::S3 {
+            endpoint: crate::protocol::objects::S3EndpointBinding::Aws {
                 partition: "aws".to_string(),
             },
             region: "us-east-1".to_string(),
@@ -3058,46 +3050,49 @@ mod tests {
         }
     }
 
-    fn private_cloudkit_binding() -> crate::storage::ResolvedProviderBinding {
-        crate::storage::ResolvedProviderBinding {
-            store: crate::storage::StoreProviderBinding::CloudKit {
+    fn private_cloudkit_binding() -> crate::protocol::objects::ResolvedProviderBinding {
+        crate::protocol::objects::ResolvedProviderBinding {
+            store: crate::protocol::objects::StoreProviderBinding::CloudKit {
                 container_id: "iCloud.example.coven".to_string(),
-                environment: crate::storage::CloudKitEnvironment::Development,
+                environment: crate::protocol::objects::CloudKitEnvironment::Development,
                 owner_name: "private-owner".to_string(),
                 zone_name: "private-zone".to_string(),
             },
-            device: crate::storage::ProviderDeviceBinding {
-                principal: crate::storage::ProviderPrincipalId::CloudKitPrivateZoneOwner {
-                    record_name: "current-user".to_string(),
-                },
+            device: crate::protocol::objects::ProviderDeviceBinding {
+                principal:
+                    crate::protocol::objects::ProviderPrincipalId::CloudKitPrivateZoneOwner {
+                        record_name: "current-user".to_string(),
+                    },
             },
         }
     }
 
-    fn test_device_binding() -> crate::storage::ProviderDeviceBinding {
-        crate::storage::ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::Aws {
+    fn test_device_binding() -> crate::protocol::objects::ProviderDeviceBinding {
+        crate::protocol::objects::ProviderDeviceBinding {
+            principal: crate::protocol::objects::ProviderPrincipalId::Aws {
                 account_id: "123456789012".to_string(),
-                principal: crate::storage::AwsPrincipal::Root,
+                principal: crate::protocol::objects::AwsPrincipal::Root,
             },
         }
     }
 
     fn test_exact_receipt() -> ExactSlotProbeReceipt {
         let probe_id = ProviderProbeId::from_bytes([7; 32]);
-        let slot = crate::storage::cloud::ObjectSlot::logical("store-v1/probes/exact".to_string())
-            .unwrap();
+        let slot =
+            crate::protocol::objects::ObjectSlot::logical("store-v1/probes/exact".to_string())
+                .unwrap();
         let first = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateFirst);
         let second = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateSecond);
-        let accepted = crate::storage::ExactObjectRef::new(
+        let accepted = crate::protocol::objects::ExactObjectRef::new(
             slot.clone(),
             first.len() as u64,
             ObjectHash::digest(&first),
         );
         let lost_slot =
-            crate::storage::cloud::ObjectSlot::logical("store-v1/probes/lost".to_string()).unwrap();
+            crate::protocol::objects::ObjectSlot::logical("store-v1/probes/lost".to_string())
+                .unwrap();
         let lost_payload = probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
-        let lost_ref = crate::storage::ExactObjectRef::new(
+        let lost_ref = crate::protocol::objects::ExactObjectRef::new(
             lost_slot.clone(),
             lost_payload.len() as u64,
             ObjectHash::digest(&lost_payload),

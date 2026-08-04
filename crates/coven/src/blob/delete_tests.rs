@@ -18,7 +18,8 @@ use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::MemberRole;
-use crate::storage::{CloudCipher, PendingRotation, StorageError, SyncStorage};
+use crate::protocol::objects::StorageError;
+use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
 use crate::store_dir::StoreDir;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
@@ -468,7 +469,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         .expect("load exact upload row");
     let source_dir = tempfile::tempdir().expect("create upload source directory");
     let source_path = source_dir.path().join("upload-row");
-    crate::storage::StagedBlobFile::write_for_test(&source_path, b"upload body")
+    crate::local_file::AtomicStagedFile::write_for_test(&source_path, b"upload body")
         .await
         .expect("write upload source");
     let enqueue_row = row.clone();

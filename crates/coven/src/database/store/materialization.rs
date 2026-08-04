@@ -5,11 +5,11 @@ use crate::database::{
     install_store_founder_state_on, required_store_root_authority_on, DbError,
     VerifiedMergeMaterialization,
 };
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
-use crate::storage::ExactObjectRef;
 use crate::sync::VerifiedCircleActivations;
 
 impl StoreDatabase {

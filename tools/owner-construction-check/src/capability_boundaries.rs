@@ -239,6 +239,7 @@ pub(crate) const FILESYSTEM_BOUNDARY: &[GatedCapability] = &[GatedCapability {
 ///   `snapshot/image.rs`: blob and snapshot staging with rollback state.
 const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven/src/atomic_file.rs",
+    "crates/coven/src/local_file.rs",
     "crates/coven/src/store_dir.rs",
     "crates/coven/src/config.rs",
     "crates/coven/src/custody.rs",

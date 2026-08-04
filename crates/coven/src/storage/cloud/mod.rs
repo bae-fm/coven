@@ -38,6 +38,7 @@ mod sharing;
 #[cfg(test)]
 mod test_server;
 
+use crate::protocol::objects::ObjectSlot;
 pub(crate) use factory::CloudHomeFactory;
 #[cfg(feature = "oauth-providers")]
 pub(crate) use google_drive::{folder_search_query, supports_all_drives};
@@ -46,7 +47,7 @@ pub(crate) use setup::SetupError;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -87,98 +88,6 @@ pub enum CloudHomeError {
     },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-/// Provider-specific physical address for a caller-reserved immutable slot.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum PhysicalObjectLocator {
-    LogicalKey,
-    Opaque(String),
-}
-
-/// Exact logical and physical location persisted before an immutable write.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObjectSlot {
-    logical_key: String,
-    physical: PhysicalObjectLocator,
-}
-
-impl<'de> Deserialize<'de> for ObjectSlot {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Fields {
-            logical_key: String,
-            physical: PhysicalObjectLocator,
-        }
-
-        let fields = Fields::deserialize(deserializer)?;
-        Self::new(fields.logical_key, fields.physical).map_err(serde::de::Error::custom)
-    }
-}
-
-impl ObjectSlot {
-    pub fn logical(logical_key: String) -> Result<Self, CloudHomeError> {
-        Self::new(logical_key, PhysicalObjectLocator::LogicalKey)
-    }
-
-    pub fn opaque(logical_key: String, provider_id: String) -> Result<Self, CloudHomeError> {
-        Self::new(logical_key, PhysicalObjectLocator::Opaque(provider_id))
-    }
-
-    fn new(logical_key: String, physical: PhysicalObjectLocator) -> Result<Self, CloudHomeError> {
-        let slot = Self {
-            logical_key,
-            physical,
-        };
-        slot.validate()?;
-        Ok(slot)
-    }
-
-    pub fn validate(&self) -> Result<(), CloudHomeError> {
-        if self.logical_key.is_empty() {
-            return Err(CloudHomeError::Configuration(
-                "object slot logical key is empty".to_string(),
-            ));
-        }
-        if matches!(&self.physical, PhysicalObjectLocator::Opaque(value) if value.is_empty()) {
-            return Err(CloudHomeError::Configuration(
-                "object slot provider locator is empty".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn logical_key(&self) -> &str {
-        &self.logical_key
-    }
-
-    pub fn physical(&self) -> &PhysicalObjectLocator {
-        &self.physical
-    }
-
-    /// Reject this slot when the provider requires the logical key to be the
-    /// physical object locator.
-    pub(crate) fn require_logical_key_for(&self, provider: &str) -> Result<(), CloudHomeError> {
-        self.validate()?;
-        if self.physical != PhysicalObjectLocator::LogicalKey {
-            return Err(CloudHomeError::Configuration(format!(
-                "{provider} slot for {} must use its logical key",
-                self.logical_key
-            )));
-        }
-        Ok(())
-    }
 }
 
 /// Opaque provider revision for an exact cloud object.
@@ -227,7 +136,7 @@ pub async fn write_cloud_object_stream(
     destination: &Path,
     stream: CloudObjectStream,
 ) -> Result<u64, CloudFileReadError> {
-    let staged = crate::storage::local_file::AtomicStagedFile::create(destination)
+    let staged = crate::local_file::AtomicStagedFile::create(destination)
         .await
         .map_err(CloudFileReadError::Local)?;
     let (staged, written) =
@@ -235,14 +144,13 @@ pub async fn write_cloud_object_stream(
             .write_byte_stream(stream)
             .await
             .map_err(|error| match error {
-                crate::storage::local_file::ByteStreamWriteError::Source(error) => {
+                crate::local_file::ByteStreamWriteError::Source(error) => {
                     CloudFileReadError::Source(error)
                 }
-                crate::storage::local_file::ByteStreamWriteError::SourceCleanup {
-                    source,
-                    cleanup,
-                } => CloudFileReadError::SourceCleanup { source, cleanup },
-                crate::storage::local_file::ByteStreamWriteError::Local(error) => {
+                crate::local_file::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
+                    CloudFileReadError::SourceCleanup { source, cleanup }
+                }
+                crate::local_file::ByteStreamWriteError::Local(error) => {
                     CloudFileReadError::Local(error)
                 }
             })?;
@@ -597,7 +505,7 @@ impl BlobBody {
     }
 
     pub async fn from_file(path: &Path) -> Result<Self, String> {
-        let len = crate::storage::local_file::file_len(path).await?;
+        let len = crate::local_file::file_len(path).await?;
         let reader = crate::storage::local_file::open_reader(path).await?;
         Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))
     }
@@ -792,13 +700,13 @@ impl<'sink, 'progress> MultipartUpload<'sink, 'progress> {
 pub trait ExactSlotStorage: Send + Sync {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError>;
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError>;
 
     async fn cross_principal_evidence(
         &self,
     ) -> Result<crate::protocol::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
+        use crate::protocol::objects::{GoogleDriveCorpus, StoreProviderBinding};
         use crate::protocol::provider::CrossPrincipalProviderEvidence;
-        use crate::storage::{GoogleDriveCorpus, StoreProviderBinding};
 
         match self.provider_binding().await?.store {
             StoreProviderBinding::GoogleDrive {
@@ -826,7 +734,7 @@ pub trait ExactSlotStorage: Send + Sync {
     /// by the key itself allocates nothing; one that mints its own object id
     /// overrides this and returns an opaque locator.
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
-        ObjectSlot::logical(logical_key.to_string())
+        ObjectSlot::logical(logical_key.to_string()).map_err(CloudHomeError::from)
     }
 
     async fn create_at(
@@ -841,9 +749,9 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn observe_at(
         &self,
         slot: &ObjectSlot,
-    ) -> Result<Option<crate::storage::ExactObjectRef>, CloudHomeError> {
+    ) -> Result<Option<crate::protocol::objects::ExactObjectRef>, CloudHomeError> {
         match self.read_at(slot).await {
-            Ok(bytes) => Ok(Some(crate::storage::ExactObjectRef::new(
+            Ok(bytes) => Ok(Some(crate::protocol::objects::ExactObjectRef::new(
                 slot.clone(),
                 bytes.len() as u64,
                 crate::protocol::store_commit::ObjectHash::digest(&bytes),
@@ -1541,5 +1449,50 @@ mod streaming_tests {
         assert_eq!(home.multipart_calls.load(Ordering::SeqCst), 0);
         assert_eq!(home.read("small").await.unwrap(), data);
         assert_eq!(*total.lock().unwrap(), data.len() as u64);
+    }
+}
+
+impl From<CloudHomeError> for crate::protocol::objects::StorageError {
+    fn from(e: CloudHomeError) -> Self {
+        match e {
+            CloudHomeError::NotFound(key) => crate::protocol::objects::StorageError::NotFound(key),
+            CloudHomeError::AlreadyExists(key) => {
+                crate::protocol::objects::StorageError::AlreadyExists(key)
+            }
+            CloudHomeError::Configuration(msg) => {
+                crate::protocol::objects::StorageError::Configuration(msg)
+            }
+            CloudHomeError::Transport(msg) => crate::protocol::objects::StorageError::Storage(msg),
+            CloudHomeError::CleanupFailed { operation, cleanup } => {
+                crate::protocol::objects::StorageError::CleanupFailed {
+                    operation: Box::new(Self::from(*operation)),
+                    cleanup: Box::new(Self::from(*cleanup)),
+                }
+            }
+            CloudHomeError::UnresolvedOutcome {
+                operation,
+                readback,
+            } => crate::protocol::objects::StorageError::UnresolvedOutcome {
+                operation: Box::new(Self::from(*operation)),
+                readback: Box::new(Self::from(*readback)),
+            },
+            CloudHomeError::Io(io_err) => {
+                crate::protocol::objects::StorageError::Storage(format!("I/O error: {io_err}"))
+            }
+        }
+    }
+}
+
+/// Slot and reference validation lives on the protocol values and reports
+/// [`crate::protocol::objects::StorageError`]; provider code folds it into its
+/// own configuration vocabulary.
+impl From<crate::protocol::objects::StorageError> for CloudHomeError {
+    fn from(error: crate::protocol::objects::StorageError) -> Self {
+        match error {
+            crate::protocol::objects::StorageError::Configuration(message) => {
+                CloudHomeError::Configuration(message)
+            }
+            other => CloudHomeError::Configuration(other.to_string()),
+        }
     }
 }

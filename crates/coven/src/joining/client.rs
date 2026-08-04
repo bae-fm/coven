@@ -51,7 +51,7 @@ pub enum BootstrapError {
     #[error("Store device join transport: {0}")]
     DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
     #[error("storage: {0}")]
-    Storage(#[from] crate::storage::StorageError),
+    Storage(#[from] crate::protocol::objects::StorageError),
     #[error("config: {0}")]
     Config(#[from] ConfigError),
     #[error("keyring: {0}")]

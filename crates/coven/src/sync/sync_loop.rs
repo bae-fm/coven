@@ -1066,7 +1066,7 @@ fn reply_circle_command<T>(
     }
 }
 
-fn storage_check_failure_status(error: &crate::storage::StorageError) -> SyncLoopStatus {
+fn storage_check_failure_status(error: &crate::protocol::objects::StorageError) -> SyncLoopStatus {
     if error.is_transport() {
         SyncLoopStatus::Offline
     } else {
@@ -1118,9 +1118,9 @@ mod tests {
 
     #[test]
     fn storage_configuration_failure_is_terminal() {
-        let status = storage_check_failure_status(&crate::storage::StorageError::Configuration(
-            "missing bucket".to_string(),
-        ));
+        let status = storage_check_failure_status(
+            &crate::protocol::objects::StorageError::Configuration("missing bucket".to_string()),
+        );
 
         assert!(matches!(status, SyncLoopStatus::Failed { .. }));
     }

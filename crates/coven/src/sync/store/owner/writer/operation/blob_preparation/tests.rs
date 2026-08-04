@@ -12,8 +12,8 @@ fn exact_partition_blob(
             .parse()
             .expect("valid exact-ref test device id"),
         registration_hash: ObjectHash::digest(uploader_bytes),
-        object: crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+        object: crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/test/exact-ref-uploader.json".to_string(),
             )
             .expect("valid exact-ref uploader slot"),
@@ -31,9 +31,12 @@ fn exact_partition_blob(
     )
     .expect("valid exact-ref test locator");
     let stored_bytes = b"stored exact-ref bytes";
-    let object = crate::storage::ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::opaque(locator.semantic_key(), physical_id.to_string())
-            .expect("valid exact-ref physical slot"),
+    let object = crate::protocol::objects::ExactObjectRef::new(
+        crate::protocol::objects::ObjectSlot::opaque(
+            locator.semantic_key(),
+            physical_id.to_string(),
+        )
+        .expect("valid exact-ref physical slot"),
         stored_bytes.len() as u64,
         ObjectHash::digest(stored_bytes),
     );
@@ -56,8 +59,8 @@ fn exact_blob_owner() -> StoreBatchCommitRef {
             sequence: 1,
         },
         commit_hash: ObjectHash::digest(b"exact-ref owner"),
-        object: crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+        object: crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/test/exact-ref-owner.json".to_string(),
             )
             .expect("valid exact-ref owner slot"),
@@ -155,7 +158,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let source = temp.path().join("source");
     let plaintext = b"spool owned by another pending write";
-    crate::storage::StagedBlobFile::write_for_test(&source, plaintext)
+    crate::local_file::AtomicStagedFile::write_for_test(&source, plaintext)
         .await
         .expect("write blob plaintext");
     let fact = StoreWriteBlobFact {
@@ -192,7 +195,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
             )
             .await
             .expect("seed exact spool"),
-        crate::storage::BlobSpoolWrite::Created
+        crate::protocol::objects::BlobSpoolWrite::Created
     );
     let expected_spool = tokio::fs::read(&spool)
         .await

@@ -9,11 +9,11 @@ use crate::protocol::circle::{
     CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedCircleControl, ResolvedCircleRoster,
 };
 use crate::protocol::circle_roster::CircleMaterializedRoster;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StreamActivationId,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::sync::store::circle_controls::CircleOperationError;
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
@@ -190,7 +190,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(context, object, &prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             if ObjectHash::digest(&bytes) != coord.entry_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle roster entry bytes differ from the signed coordinate".to_string(),
@@ -261,7 +261,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&context, object, &prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             if ObjectHash::digest(&bytes) != reference.resolution_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle roster resolution bytes differ from the signed reference".to_string(),
@@ -309,7 +309,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(context, &object.object, &prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let head: crate::protocol::circle::CircleRosterHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!("parse Circle roster head: {error}"))

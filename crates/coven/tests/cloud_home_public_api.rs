@@ -168,13 +168,16 @@ fn external_cloudkit_bridge_can_name_every_signature_type() {
 #[test]
 fn object_slot_rejects_empty_components() {
     let empty_key = ObjectSlot::logical(String::new()).expect_err("empty logical key must fail");
-    assert!(matches!(empty_key, CloudHomeError::Configuration(_)));
-    assert!(!empty_key.is_retryable());
+    assert!(matches!(empty_key, coven::StorageError::Configuration(_)));
+    assert!(!empty_key.is_transport());
 
     let empty_provider = ObjectSlot::opaque("objects/copy".to_string(), String::new())
         .expect_err("empty provider id must fail");
-    assert!(matches!(empty_provider, CloudHomeError::Configuration(_)));
-    assert!(!empty_provider.is_retryable());
+    assert!(matches!(
+        empty_provider,
+        coven::StorageError::Configuration(_)
+    ));
+    assert!(!empty_provider.is_transport());
 }
 
 #[async_trait]
@@ -253,6 +256,7 @@ impl ExactSlotStorage for ExternalProvider {
 
     async fn allocate_slot(&self, key: &str) -> Result<ObjectSlot, CloudHomeError> {
         ObjectSlot::opaque(key.to_string(), "provider:created-copy".to_string())
+            .map_err(CloudHomeError::from)
     }
 
     async fn create_at(

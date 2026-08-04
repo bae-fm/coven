@@ -44,6 +44,7 @@ use crate::database::{
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef,
@@ -51,7 +52,6 @@ use crate::protocol::store_commit::{
     StoreDeviceProposalState, StoreDeviceRegistrationRef, StoreHistoryCut,
     VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
-use crate::storage::ExactObjectRef;
 use crate::sync::{
     ApplyOutcome, HeldStorePositionReason, LocalStoreMembership, PreparedMergeMaterialization,
     PreparedMergeMaterializationPackage, SyncedTable, VerifiedCircleActivations,
@@ -1844,12 +1844,12 @@ impl MergeMaterializationTransaction<'_, '_> {
             sequence,
         } = &retained.commit_ref().coord;
         let input = super::materialization_models::MergeRetractionCleanupInput {
-            commit: crate::storage::PreparedExactObject::new(
+            commit: crate::protocol::objects::PreparedExactObject::new(
                 retained.commit_ref().object.clone(),
                 retained.commit().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
-            activation_head: crate::storage::PreparedExactObject::new(
+            activation_head: crate::protocol::objects::PreparedExactObject::new(
                 retained.activation_head_object().clone(),
                 retained.activation_head().to_bytes(),
             )
@@ -2204,9 +2204,9 @@ impl MergeMaterializationTransaction<'_, '_> {
 mod retraction_tests {
     use super::*;
 
-    fn test_object(path: &str) -> crate::storage::ExactObjectRef {
-        crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(path.to_string())
+    fn test_object(path: &str) -> crate::protocol::objects::ExactObjectRef {
+        crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(path.to_string())
                 .expect("valid test object slot"),
             0,
             ObjectHash::digest(path.as_bytes()),

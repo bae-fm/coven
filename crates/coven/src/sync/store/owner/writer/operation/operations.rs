@@ -3,6 +3,10 @@ use super::{PreparedMembershipPublication, PreparedMembershipTransition};
 #[cfg(test)]
 use crate::database::StoreDatabase;
 use crate::protocol::membership::MembershipChain;
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
+};
 use crate::protocol::store_commit::{
     head_slot_prefix, ActivatedStoreDeviceRegistration, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder,
@@ -11,10 +15,6 @@ use crate::protocol::store_commit::{
 };
 use crate::protocol::{
     circle_control, membership, provider, remote_object, store_commit, wrapped_store_key,
-};
-use crate::storage::StoreObjectError;
-use crate::storage::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
 };
 use crate::sync::store::owner::{device_join, owner_promotion};
 use crate::sync::store::StoreError;

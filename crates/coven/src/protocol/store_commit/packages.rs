@@ -278,7 +278,7 @@ impl OwnerPromotionRequest {
     ) -> Result<(), StoreProtocolError> {
         require_version(self.version)?;
         self.promoter_registration.verify_registration(promoter)?;
-        crate::storage::verify_store_root(root.store_root_hash, self.store_root_hash)?;
+        crate::protocol::objects::verify_store_root(root.store_root_hash, self.store_root_hash)?;
         if promoter.store_root != *root
             || promoter.author_pubkey == self.member_pubkey
             || self.member_pubkey.is_empty()
@@ -466,8 +466,8 @@ impl OwnerPromotionAcceptance {
                 || matches!(
                     (membership.first_slot().physical(), recovery.first_slot().physical()),
                     (
-                        crate::storage::cloud::PhysicalObjectLocator::Opaque(left),
-                        crate::storage::cloud::PhysicalObjectLocator::Opaque(right),
+                        crate::protocol::objects::PhysicalObjectLocator::Opaque(left),
+                        crate::protocol::objects::PhysicalObjectLocator::Opaque(right),
                     ) if left == right
                 )
             {

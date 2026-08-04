@@ -4,12 +4,13 @@ use crate::protocol::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,
     CircleSemanticSlot, CircleTransitionPolicyObjects, PreparedCircleTransition,
 };
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
 };
-use crate::storage::StoreObjectError;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::{
     read_exact_circle_object, verify_control_context_for_verified_commit, CircleOperationError,
     CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive,
@@ -590,7 +591,7 @@ fn verify_prepared_objects_are_signed(
 ) -> Result<(), CircleOperationError> {
     let operation = journal.operation();
     let objects = reference.objects();
-    let mut signed = BTreeSet::<crate::storage::ExactObjectRef>::from([
+    let mut signed = BTreeSet::<crate::protocol::objects::ExactObjectRef>::from([
         operation.commit_ref.object.clone(),
         objects.control.clone(),
     ]);
@@ -814,7 +815,7 @@ impl CircleCandidatePublisher<'_, '_> {
             self.storage
                 .create_protocol_object(&prepared)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
         }
         read_exact_circle_object(
             self.storage.as_ref(),

@@ -62,8 +62,8 @@ impl Fixture {
                 attempt_slot: slot(format!("store-v1/tests/{label}/join-attempt.json")),
                 outcome_slot: slot(format!("store-v1/tests/{label}/join-outcome.json")),
             },
-            crate::storage::ProviderDeviceBinding {
-                principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+            crate::protocol::objects::ProviderDeviceBinding {
+                principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: ObjectHash::digest(label.as_bytes()),
                 },
             },
@@ -664,8 +664,8 @@ fn fixture() -> Fixture {
         StoreCreationDescriptor {
             version: STORE_PROTOCOL_VERSION,
             creation_id: StoreCreationId::from_nonce("store-a"),
-            provider: crate::storage::StoreProviderBinding::S3 {
-                endpoint: crate::storage::S3EndpointBinding::Custom {
+            provider: crate::protocol::objects::StoreProviderBinding::S3 {
+                endpoint: crate::protocol::objects::S3EndpointBinding::Custom {
                     origin: "https://test.invalid".to_string(),
                 },
                 region: "test-region".to_string(),
@@ -712,8 +712,8 @@ fn fixture() -> Fixture {
         StoreDeviceRegistrationOrigin::Founder {
             creation_id: StoreCreationId::from_nonce("store-a"),
         },
-        crate::storage::ProviderDeviceBinding {
-            principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+        crate::protocol::objects::ProviderDeviceBinding {
+            principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                 access_key_id_hash: ObjectHash::digest(b"test access key"),
             },
         },
@@ -1076,7 +1076,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
             &access_grant.to_bytes(),
         ),
     );
-    let verified_root = crate::storage::VerifiedObject {
+    let verified_root = crate::protocol::objects::VerifiedObject {
         value: fixture.root.clone(),
         bytes: fixture.root.to_bytes(),
         semantic_hash: fixture.root_ref.store_root_hash,

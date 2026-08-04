@@ -1,17 +1,13 @@
 mod objects;
-mod protocol;
 mod remote;
+mod sync_storage;
 
 pub(crate) mod cloud;
 
 pub(crate) use objects::*;
-pub(crate) use protocol::*;
 pub(crate) use remote::*;
+pub(crate) use sync_storage::*;
 
-pub use protocol::{
-    AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
-    ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
-};
 #[cfg(feature = "test-utils")]
 pub use remote::CloudCipher;
 
@@ -46,11 +42,6 @@ pub async fn fetch_account_email(
 pub use cloud::{
     write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
     CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectStream,
-    CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, ObjectSlot, PartSink,
-    PhysicalObjectLocator, UploadProgress,
+    CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, PartSink, UploadProgress,
 };
 mod local_file;
-pub(crate) use local_file::{
-    AtomicStagedFile as StagedBlobFile, CommitNewFileError as PublishBlobFileError,
-    OpenFile as LocalBlobFile, PublishedAtomicFile as PublishedBlobFile,
-};

@@ -74,7 +74,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<crate::storage::BlobSpoolProtection, DbError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
         super::circle_blob_opening_protection_on(
             self.transaction,
             root,

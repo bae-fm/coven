@@ -1,10 +1,10 @@
 use crate::database::*;
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use crate::protocol::store_commit::{
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
     StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
-use crate::storage::ExactObjectRef;
 use crate::write::WriteId;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,9 +16,9 @@ pub(crate) struct PreparedMergeCandidate {
     pub(crate) commit: VerifiedStoreBatchCommit,
     pub(crate) reference: StoreBatchCommitRef,
     pub(crate) canonical_signed_bytes: Vec<u8>,
-    pub(crate) commit_prepared: crate::storage::PreparedExactObject,
+    pub(crate) commit_prepared: crate::protocol::objects::PreparedExactObject,
     pub(crate) head: StoreDeviceHead,
-    pub(crate) head_prepared: crate::storage::PreparedExactObject,
+    pub(crate) head_prepared: crate::protocol::objects::PreparedExactObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

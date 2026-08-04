@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::membership::{AuthorHead, MembershipHeadRef};
+use crate::protocol::objects::{ProtocolObjectDomain, StoreObjectError};
 use crate::protocol::store_commit::{
     ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
@@ -7,7 +8,6 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
     SuccessorLink,
 };
-use crate::storage::{ProtocolObjectDomain, StoreObjectError};
 use crate::sync::store::protocol_root::*;
 use crate::sync::store::registration_object::prepare_registration_object;
 use std::sync::Arc;
@@ -156,7 +156,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 "durable Store creation authority differs from this creation request".to_string(),
             ));
         }
-        let allocation_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let allocation_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             ObjectHash::digest(authority.creation_id.to_string().as_bytes()),
             ProtocolObjectDomain::StoreProtocolRoot,
         );
@@ -182,7 +182,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             let prefix = crate::protocol::store_commit::founder_registration_semantic_prefix(
                 root.authority.creation_id,
             );
-            let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 allocation_context.store_root_hash(),
                 ProtocolObjectDomain::StoreDeviceRegistration,
             );
@@ -204,9 +204,9 @@ impl<'operation> FounderStoreCreation<'operation> {
             let prefix = crate::protocol::store_commit::founder_membership_head_semantic_prefix(
                 founder.root.authority.creation_id,
             );
-            let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 allocation_context.store_root_hash(),
-                crate::storage::ProtocolObjectDomain::StoreMembershipHead,
+                crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
             );
             let first_slot = storage
                 .allocate_protocol_slot(&context, &prefix, ".json")
@@ -229,7 +229,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 authority.founder_grant.clone(),
                 1,
             );
-            let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 allocation_context.store_root_hash(),
                 ProtocolObjectDomain::OwnerRecoveryNode,
             );
@@ -297,7 +297,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         };
         let device =
             crate::protocol::store_commit::StoreDeviceId::derive(root, &origin).to_string();
-        let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -311,7 +311,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             let store_commits = DeviceStreamAnchor::StoreAnnouncements {
                 first_slot: storage
                     .allocate_protocol_slot(
-                        &crate::storage::ProtocolObjectContext::signed_plaintext(
+                        &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                             root.store_root_hash,
                             ProtocolObjectDomain::StoreHead,
                         ),
@@ -359,7 +359,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                     snapshots: DeviceStreamAnchor::StoreSnapshots {
                         first_slot: storage
                             .allocate_protocol_slot(
-                                &crate::storage::ProtocolObjectContext::signed_plaintext(
+                                &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                                     root.store_root_hash,
                                     ProtocolObjectDomain::StoreSnapshotMeta,
                                 ),
@@ -402,9 +402,9 @@ impl<'operation> FounderStoreCreation<'operation> {
             let membership = FounderMembershipPublicationReservation {
                 next_head_slot: storage
                     .allocate_protocol_slot(
-                        &crate::storage::ProtocolObjectContext::signed_plaintext(
+                        &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                             root.store_root_hash,
-                            crate::storage::ProtocolObjectDomain::StoreMembershipHead,
+                            crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
                         ),
                         &prefix,
                         ".json",
@@ -488,7 +488,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let root_id = root_value.descriptor.store_root_id();
         let root_hash = root_value.object_hash();
         let root_prefix = crate::protocol::store_commit::store_protocol_root_logical_key();
-        let root_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let root_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root_hash,
             ProtocolObjectDomain::StoreProtocolRoot,
         );
@@ -543,7 +543,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 "founder registration has no acknowledgement anchor".to_string(),
             ));
         };
-        let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -615,9 +615,9 @@ impl<'operation> FounderStoreCreation<'operation> {
             );
             let (entry_prepared, entry_ref) =
                 crate::storage::prepare_membership_entry(storage, root_hash, &founder).await?;
-            let head_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 root_hash,
-                crate::storage::ProtocolObjectDomain::StoreMembershipHead,
+                crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
             );
             let next_head_slot = &graph_reservation.membership.next_head_slot;
             let head_value = AuthorHead::signed(
@@ -722,7 +722,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let mut failures = Vec::new();
         for object in objects {
             match self.storage.delete_protocol_object(&object).await {
-                Ok(()) | Err(crate::storage::StorageError::SlotCollision(_)) => {}
+                Ok(()) | Err(crate::protocol::objects::StorageError::SlotCollision(_)) => {}
                 Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
             }
         }

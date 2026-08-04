@@ -25,7 +25,7 @@ const PROGRESS_TICK: Duration = Duration::from_millis(300);
 
 struct BlobUploadAttempt<'operation, 'storage, 'authority> {
     writer: &'operation AuthorizedWriterOperation<'storage>,
-    authority: &'operation crate::storage::BlobWriteAuthority<'authority>,
+    authority: &'operation crate::protocol::objects::BlobWriteAuthority<'authority>,
     routing_encryption: Option<&'operation EncryptionService>,
     observer: Option<&'operation dyn BlobTransitionObserver>,
     now: chrono::DateTime<chrono::Utc>,
@@ -54,7 +54,7 @@ impl AuthorizedWriterOperation<'_> {
         self.database
             .validate_store_write_routing(routing_encryption)?;
         let registration = self.database.local_blob_write_authority().await?;
-        let authority = crate::storage::BlobWriteAuthority::new(&registration);
+        let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
         let uploads = self.database.pending_blob_uploads().await?;
         if uploads.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
@@ -169,17 +169,18 @@ impl AuthorizedWriterOperation<'_> {
 
     fn blob_upload_protection(
         &self,
-    ) -> Result<crate::storage::BlobSpoolProtection, crate::storage::StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    {
         self.storage.store_blob_protection()
     }
 
     async fn prepare_blob_upload(
         &self,
         locator: &BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-        protection: crate::storage::BlobSpoolProtection,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         source_path: &std::path::Path,
-    ) -> Result<(StoredBlobRef, std::path::PathBuf), crate::storage::StorageError> {
+    ) -> Result<(StoredBlobRef, std::path::PathBuf), crate::protocol::objects::StorageError> {
         let spool_path = self
             .store_dir
             .outbound_blob_spool_path(locator.locator_hash());
@@ -213,10 +214,10 @@ impl AuthorizedWriterOperation<'_> {
     async fn create_blob_upload_object(
         &self,
         blob: &StoredBlobRef,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         spool_path: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage
             .create_blob_object_from_file(blob, authority, spool_path, progress)
             .await
@@ -225,7 +226,7 @@ impl AuthorizedWriterOperation<'_> {
     async fn verify_blob_upload_object(
         &self,
         stored: &StoredBlobRef,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }
 
@@ -363,17 +364,19 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     Err(error) => return self.storage_failure(&file_id, error).await,
                 };
                 let locator = match &protection {
-                    crate::storage::BlobSpoolProtection::Opaque(encryption) => BlobLocator::opaque(
-                        row.blob().namespace.clone(),
-                        row.blob().id.clone(),
-                        self.authority.reference.clone(),
-                        RemoteAudience::Store,
-                        row.blob().scope.clone(),
-                        encryption.seal_key_fingerprint(),
-                        row.plaintext_size(),
-                        row.plaintext_hash(),
-                    ),
-                    crate::storage::BlobSpoolProtection::Browsable => {
+                    crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
+                        BlobLocator::opaque(
+                            row.blob().namespace.clone(),
+                            row.blob().id.clone(),
+                            self.authority.reference.clone(),
+                            RemoteAudience::Store,
+                            row.blob().scope.clone(),
+                            encryption.seal_key_fingerprint(),
+                            row.plaintext_size(),
+                            row.plaintext_hash(),
+                        )
+                    }
+                    crate::protocol::objects::BlobSpoolProtection::Browsable => {
                         let Some(cloud_path) = row.blob().cloud_path.clone() else {
                             let message = format!(
                                 "Browsable blob {}/{} has no readable path",
@@ -535,7 +538,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         blob: &StoredBlobRef,
         spool_path: &std::path::Path,
         file_id: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         let total = blob.object().stored_size();
         let sent = Arc::new(AtomicU64::new(0));
         let progress = {
@@ -609,7 +612,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
     async fn storage_failure(
         &self,
         file_id: &str,
-        error: crate::storage::StorageError,
+        error: crate::protocol::objects::StorageError,
     ) -> EntryOutcome {
         let message = error.to_string();
         warn!("Upload failed for {}: {message}", self.label());

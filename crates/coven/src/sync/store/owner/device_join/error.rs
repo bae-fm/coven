@@ -43,7 +43,7 @@ pub enum DeviceJoinError {
     #[error("device join activation is not materialized in the installed Store database")]
     ActivationNotMaterialized,
     #[error(transparent)]
-    Object(#[from] crate::storage::StoreObjectError),
+    Object(#[from] crate::protocol::objects::StoreObjectError),
     #[error(transparent)]
     Registration(#[from] crate::sync::store::StoreRegistrationError),
     #[error(transparent)]
@@ -53,7 +53,7 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
     #[error(transparent)]
-    Storage(#[from] crate::storage::StorageError),
+    Storage(#[from] crate::protocol::objects::StorageError),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
 }

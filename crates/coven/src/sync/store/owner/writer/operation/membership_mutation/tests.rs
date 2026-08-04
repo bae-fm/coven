@@ -47,7 +47,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     prepared.validate().expect("validate prepared transition");
 
     let mut redirected_head = prepared.clone();
-    redirected_head.transition.head_slot = crate::storage::cloud::ObjectSlot::logical(
+    redirected_head.transition.head_slot = crate::protocol::objects::ObjectSlot::logical(
         "store-v1/tests/redirected-membership-head.json".to_string(),
     )
     .expect("valid redirected head slot");
@@ -55,7 +55,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
 
     let mut redirected_successor = prepared.clone();
     redirected_successor.transition.body.successor.next_slot =
-        crate::storage::cloud::ObjectSlot::logical(
+        crate::protocol::objects::ObjectSlot::logical(
             "store-v1/tests/redirected-membership-successor.json".to_string(),
         )
         .expect("valid redirected successor slot");
@@ -63,14 +63,16 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
 
     let mut substituted_entry = prepared.clone();
     let substituted_bytes = b"substituted exact membership entry".to_vec();
-    let substituted_ref = crate::storage::ExactObjectRef::new(
+    let substituted_ref = crate::protocol::objects::ExactObjectRef::new(
         substituted_entry.entry_object.reference().slot().clone(),
         substituted_bytes.len() as u64,
         ObjectHash::digest(&substituted_bytes),
     );
-    substituted_entry.entry_object =
-        crate::storage::PreparedExactObject::new(substituted_ref.clone(), substituted_bytes)
-            .expect("prepare substituted membership entry object");
+    substituted_entry.entry_object = crate::protocol::objects::PreparedExactObject::new(
+        substituted_ref.clone(),
+        substituted_bytes,
+    )
+    .expect("prepare substituted membership entry object");
     substituted_entry.entry_ref.object = substituted_ref.clone();
     substituted_entry.transition.body.entry.object = substituted_ref;
     assert!(substituted_entry.validate().is_err());
@@ -83,14 +85,16 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
         .await
         .expect("finish membership transition");
     let substituted_bytes = b"substituted exact membership head".to_vec();
-    let substituted_ref = crate::storage::ExactObjectRef::new(
+    let substituted_ref = crate::protocol::objects::ExactObjectRef::new(
         substituted_head.head_object.reference().slot().clone(),
         substituted_bytes.len() as u64,
         ObjectHash::digest(&substituted_bytes),
     );
-    substituted_head.head_object =
-        crate::storage::PreparedExactObject::new(substituted_ref.clone(), substituted_bytes)
-            .expect("prepare substituted membership head object");
+    substituted_head.head_object = crate::protocol::objects::PreparedExactObject::new(
+        substituted_ref.clone(),
+        substituted_bytes,
+    )
+    .expect("prepare substituted membership head object");
     substituted_head.head_ref.object = substituted_ref;
     assert!(substituted_head.validate().is_err());
 }

@@ -8,12 +8,12 @@ use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{CircleBootstrapCoverageRef, CircleControlCoord, CircleId};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::MembershipGrantId;
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::store_commit::{
     CircleAckRef, CirclePackageRef, CircleSnapshotRef, ObjectHash, SnapshotImageRef, StoreAckRef,
     StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef,
     StoreProtocolError, StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
 };
-use crate::storage::ExactObjectRef;
 
 const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
 const RECLAIM_AUTHORIZATION_DOMAIN: &[u8] = b"coven.store-reclaim-authorization.v1\0";
@@ -904,7 +904,7 @@ impl ReclaimReceipt {
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         executor.verify_registration(executor_registration)?;
-        crate::storage::verify_store_root(
+        crate::protocol::objects::verify_store_root(
             store_root_hash,
             executor_registration.store_root.store_root_hash,
         )?;
@@ -950,7 +950,7 @@ impl ReclaimReceipt {
     pub fn verify(&self, executor: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
         crate::protocol::store_commit::require_version(self.version)?;
         self.executor.verify_registration(executor)?;
-        crate::storage::verify_store_root(
+        crate::protocol::objects::verify_store_root(
             self.store_root_hash,
             executor.store_root.store_root_hash,
         )?;

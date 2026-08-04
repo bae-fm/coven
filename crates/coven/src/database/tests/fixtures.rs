@@ -5,7 +5,7 @@ use crate::protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
 pub(super) fn reclaim_test_object(path: &str) -> ExactObjectRef {
     let bytes = path.as_bytes();
     ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(path.to_string())
+        crate::protocol::objects::ObjectSlot::logical(path.to_string())
             .expect("valid reclaim test slot"),
         u64::try_from(bytes.len()).expect("reclaim test object length fits u64"),
         ObjectHash::digest(bytes),
@@ -39,7 +39,7 @@ pub(super) fn snapshot_activation(label: &str) -> StreamActivationId {
         ObjectHash::digest(format!("{label} Store root").as_bytes()),
         registration,
         crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+            first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/snapshots/1.json"
             ))
             .expect("valid snapshot activation slot"),
@@ -100,7 +100,7 @@ pub(super) fn exact_blob_binding(row_id: &str, stamp: &str, bytes: &[u8]) -> Row
         device_id: "aa".repeat(32).parse().expect("valid test device id"),
         registration_hash: ObjectHash::digest(uploader_bytes),
         object: ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+            crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/devices/database-test-uploader.json".to_string(),
             )
             .expect("valid uploader registration slot"),
@@ -118,7 +118,7 @@ pub(super) fn exact_blob_binding(row_id: &str, stamp: &str, bytes: &[u8]) -> Row
     )
     .expect("valid locator");
     let stored = b"stored representation".to_vec();
-    let slot = crate::storage::cloud::ObjectSlot::logical(locator.semantic_key())
+    let slot = crate::protocol::objects::ObjectSlot::logical(locator.semantic_key())
         .expect("valid exact slot");
     let object = ExactObjectRef::new(slot, stored.len() as u64, ObjectHash::digest(&stored));
     RowBlobLocatorBinding::new(
@@ -185,7 +185,7 @@ pub(super) fn test_commit_ref() -> StoreBatchCommitRef {
     let coord = test_commit_coord();
     let commit_hash = ObjectHash::digest(b"database test commit");
     let StoreCommitCoord { stream_id, .. } = &coord;
-    let slot = crate::storage::cloud::ObjectSlot::logical(format!(
+    let slot = crate::protocol::objects::ObjectSlot::logical(format!(
         "{}.json",
         commit_semantic_prefix(
             test_candidate_family(),

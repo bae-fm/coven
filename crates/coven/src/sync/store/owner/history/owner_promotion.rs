@@ -50,8 +50,8 @@ impl<'operation, 'storage> OwnerPromotionHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::storage::VerifiedObject<StoreDeviceRegistration>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history.load_registration(reference).await
     }

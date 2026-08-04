@@ -18,6 +18,10 @@ use super::{
 use crate::keys::{self, UserKeypair};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::MembershipGrantId;
+use crate::protocol::objects::ObjectSlot;
+use crate::protocol::objects::{
+    ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding,
+};
 use crate::protocol::provider::{
     ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
     CrossPrincipalProbeReceipt, CrossPrincipalProbeResponse,
@@ -31,10 +35,7 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
     STORE_PROTOCOL_VERSION,
 };
-use crate::storage::cloud::ObjectSlot;
-use crate::storage::{
-    ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding, SyncStorage,
-};
+use crate::storage::SyncStorage;
 use crate::sync::store::{Store, StoreDatabase};
 
 mod authorized_join;

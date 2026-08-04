@@ -295,7 +295,7 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
     .expect("open scoped replay database")
 }
 
-fn exact_circle_package_slot(commit: &StoreBatchCommit) -> crate::storage::cloud::ObjectSlot {
+fn exact_circle_package_slot(commit: &StoreBatchCommit) -> crate::protocol::objects::ObjectSlot {
     let [reference] = commit.circle_packages() else {
         panic!("test commit must contain one Circle package");
     };

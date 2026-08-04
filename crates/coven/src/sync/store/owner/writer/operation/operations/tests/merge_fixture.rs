@@ -14,8 +14,8 @@ pub(super) struct PreparedWriteFixture {
     pub(super) device_id: String,
     pub(super) write_id: crate::WriteId,
     pub(super) commit_ref: StoreBatchCommitRef,
-    pub(super) package_object: crate::storage::ExactObjectRef,
-    pub(super) head_object: crate::storage::ExactObjectRef,
+    pub(super) package_object: crate::protocol::objects::ExactObjectRef,
+    pub(super) head_object: crate::protocol::objects::ExactObjectRef,
 }
 
 impl PreparedWriteFixture {
@@ -35,7 +35,10 @@ impl PreparedWriteFixture {
         self.home.corrupt_exact_readback_on_call(call);
     }
 
-    pub(super) fn contains_exact_object(&self, object: &crate::storage::ExactObjectRef) -> bool {
+    pub(super) fn contains_exact_object(
+        &self,
+        object: &crate::protocol::objects::ExactObjectRef,
+    ) -> bool {
         self.home.contains_exact_object(object)
     }
 
@@ -120,7 +123,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn publish_prepared_object(
         &self,
-        prepared: &crate::storage::PreparedExactObject,
+        prepared: &crate::protocol::objects::PreparedExactObject,
     ) {
         self.storage
             .create_protocol_object(prepared)
@@ -467,7 +470,7 @@ impl PreparedWriteFixture {
             ProtocolObjectDomain::StoreHead,
         );
         let next_prefix = head_slot_prefix(&self.device_id, batch.commit.value.seq() + 1);
-        let alternate_next = crate::storage::cloud::ObjectSlot::opaque(
+        let alternate_next = crate::protocol::objects::ObjectSlot::opaque(
             format!("{next_prefix}.json"),
             "alternate-successor".to_string(),
         )
@@ -507,7 +510,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn stored_remote_object(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> crate::protocol::remote_object::RemoteObjectRecord {
         self.db
             .remote_object_for_test(object.clone())
@@ -517,7 +520,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn remote_object_exists(
         &self,
-        object: &crate::storage::ExactObjectRef,
+        object: &crate::protocol::objects::ExactObjectRef,
     ) -> bool {
         self.db
             .remote_object_exists_for_test(object.clone())

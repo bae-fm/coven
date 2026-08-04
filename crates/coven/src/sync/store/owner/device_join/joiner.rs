@@ -391,7 +391,7 @@ impl PendingDeviceJoinObservation<'_> {
         {
             return Ok(abandonment);
         }
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.history_verifier
                 .verified_root()
                 .reference()
@@ -593,10 +593,11 @@ impl PendingDeviceJoinObservation<'_> {
             &approval.request.offer.store_root,
             &origin,
         );
-        let registration_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            approval.request.offer.store_root.store_root_hash,
-            ProtocolObjectDomain::StoreDeviceRegistration,
-        );
+        let registration_context =
+            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                approval.request.offer.store_root.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            );
         let registration_slot = storage
             .allocate_protocol_slot(
                 &registration_context,
@@ -606,7 +607,7 @@ impl PendingDeviceJoinObservation<'_> {
                 ".json",
             )
             .await?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
@@ -619,7 +620,7 @@ impl PendingDeviceJoinObservation<'_> {
             .await?;
         let store_commits =
             crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot };
-        let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -630,7 +631,7 @@ impl PendingDeviceJoinObservation<'_> {
                 ".json",
             )
             .await?;
-        let snapshot_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let snapshot_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
         );

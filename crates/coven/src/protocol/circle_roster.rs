@@ -15,7 +15,7 @@ use super::store_commit::{
     ObjectHash, StoreDeviceRegistration, SuccessorLink, STORE_PROTOCOL_VERSION,
 };
 use crate::keys::{self, UserKeypair};
-use crate::storage::ExactObjectRef;
+use crate::protocol::objects::ExactObjectRef;
 
 const ROSTER_DOMAIN: &str = "coven.circle-roster.v1";
 const ROSTER_HEAD_DOMAIN: &str = "coven.circle-roster-head.v1";
@@ -2112,9 +2112,9 @@ mod authority_tests {
         ));
     }
 
-    fn exact_object(logical_key: String, bytes: &[u8]) -> crate::storage::ExactObjectRef {
-        crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(logical_key)
+    fn exact_object(logical_key: String, bytes: &[u8]) -> crate::protocol::objects::ExactObjectRef {
+        crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(logical_key)
                 .expect("valid test Circle roster slot"),
             bytes.len() as u64,
             ObjectHash::digest(bytes),
@@ -2150,7 +2150,7 @@ mod authority_tests {
             ),
             &entry_bytes,
         );
-        let head_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+        let head_slot = crate::protocol::objects::ObjectSlot::logical(format!(
             "store-v1/test/circle-roster/{}/{}/head.json",
             entry.stream_id, entry.seq
         ))
@@ -2185,7 +2185,7 @@ mod authority_tests {
             SuccessorLink {
                 activation: activation.activation_id(),
                 predecessor: None,
-                next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                next_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                     "store-v1/test/circle-roster/{}/{}/next-head.json",
                     entry.stream_id,
                     entry
@@ -2199,7 +2199,7 @@ mod authority_tests {
             device_signer,
         );
         let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle roster head");
-        let object = crate::storage::ExactObjectRef::new(
+        let object = crate::protocol::objects::ExactObjectRef::new(
             head_slot,
             head_bytes.len() as u64,
             ObjectHash::digest(&head_bytes),

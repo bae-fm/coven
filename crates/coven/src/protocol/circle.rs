@@ -650,18 +650,21 @@ mod tests {
         store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(label.as_bytes()))
     }
 
-    fn exact_object(label: &str, bytes: &[u8]) -> crate::storage::ExactObjectRef {
-        crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(format!("store-v1/test/{label}.json"))
+    fn exact_object(label: &str, bytes: &[u8]) -> crate::protocol::objects::ExactObjectRef {
+        crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(format!("store-v1/test/{label}.json"))
                 .unwrap(),
             bytes.len() as u64,
             ObjectHash::digest(bytes),
         )
     }
 
-    fn exact_logical_object(logical_key: String, bytes: &[u8]) -> crate::storage::ExactObjectRef {
-        crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(logical_key).unwrap(),
+    fn exact_logical_object(
+        logical_key: String,
+        bytes: &[u8],
+    ) -> crate::protocol::objects::ExactObjectRef {
+        crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(logical_key).unwrap(),
             bytes.len() as u64,
             ObjectHash::digest(bytes),
         )
@@ -694,7 +697,7 @@ mod tests {
             label,
             owner,
             store_commit::GrantStreamAnchor::StoreMembership {
-                first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                     "store-v1/test/{label}/membership/1.json"
                 ))
                 .unwrap(),
@@ -770,7 +773,7 @@ mod tests {
             label: &str,
         ) -> store_commit::CircleControlRef {
             let control_object = exact_object(&format!("{label}/control"), &control.bytes);
-            let head_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+            let head_slot = crate::protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/control-head/1.json"
             ))
             .expect("valid test Circle control-head slot");
@@ -789,7 +792,7 @@ mod tests {
                 store_commit::SuccessorLink {
                     activation: activation.activation_id(),
                     predecessor: None,
-                    next_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                    next_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                         "store-v1/test/{label}/control-head/2.json"
                     ))
                     .expect("valid next test Circle control-head slot"),
@@ -797,7 +800,7 @@ mod tests {
                 &self.device_signer,
             );
             let head_bytes = serde_json::to_vec(&head).expect("serialize test Circle control head");
-            let head_object = crate::storage::ExactObjectRef::new(
+            let head_object = crate::protocol::objects::ExactObjectRef::new(
                 head_slot,
                 head_bytes.len() as u64,
                 ObjectHash::digest(&head_bytes),
@@ -835,7 +838,7 @@ mod tests {
             object: exact_object(&format!("{label}/root"), label.as_bytes()),
         };
         let slot = |stream: &str| {
-            crate::storage::cloud::ObjectSlot::logical(format!(
+            crate::protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/{stream}/1.json"
             ))
             .unwrap()
@@ -845,8 +848,8 @@ mod tests {
             store_commit::StoreDeviceRegistrationOrigin::Founder {
                 creation_id: store_commit::StoreCreationId::from_nonce(label),
             },
-            crate::storage::ProviderDeviceBinding {
-                principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+            crate::protocol::objects::ProviderDeviceBinding {
+                principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: ObjectHash::digest(label.as_bytes()),
                 },
             },

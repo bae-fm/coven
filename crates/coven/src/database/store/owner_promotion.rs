@@ -176,7 +176,7 @@ impl StoreDatabase {
         &self,
         transition: crate::sync::OwnerPromotionJournalTransition,
         candidate: crate::protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<crate::storage::ExactObjectRef>,
+        objects: Vec<crate::protocol::objects::ExactObjectRef>,
         nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         if nonactivation
@@ -221,7 +221,7 @@ impl StoreDatabase {
     pub(crate) async fn owner_promotion_candidate_cleanup_targets(
         &self,
         candidate: crate::protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<crate::storage::ExactObjectRef>,
+        objects: Vec<crate::protocol::objects::ExactObjectRef>,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         self.connection
             .call(move |conn| {

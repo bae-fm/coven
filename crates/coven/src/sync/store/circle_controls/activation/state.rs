@@ -178,17 +178,17 @@ impl CircleEpochAccess {
     pub(crate) fn protocol_context(
         &self,
         store_root_hash: ObjectHash,
-        domain: crate::storage::CircleProtocolObjectDomain,
-    ) -> crate::storage::ProtocolObjectContext {
-        crate::storage::ProtocolObjectContext::circle(
+        domain: crate::protocol::objects::CircleProtocolObjectDomain,
+    ) -> crate::protocol::objects::ProtocolObjectContext {
+        crate::protocol::objects::ProtocolObjectContext::circle(
             store_root_hash,
             domain,
             self.encryption.clone(),
         )
     }
 
-    pub(crate) fn blob_protection(&self) -> crate::storage::BlobSpoolProtection {
-        crate::storage::BlobSpoolProtection::Opaque(self.encryption.clone())
+    pub(crate) fn blob_protection(&self) -> crate::protocol::objects::BlobSpoolProtection {
+        crate::protocol::objects::BlobSpoolProtection::Opaque(self.encryption.clone())
     }
 
     pub(crate) fn from_historical(

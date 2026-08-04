@@ -2,10 +2,10 @@ use crate::database::*;
 use crate::protocol::circle::{
     CircleBootstrapCoverageRef, CircleControlCoord, CircleEpochId, CircleId,
 };
+use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::store_commit::{
     CircleAck, CircleAckRef, CommitFrontier, StoreDeviceId, StoreDeviceStatus, StoreHistoryCut,
 };
-use crate::storage::PreparedExactObject;
 use crate::sync::CircleCurrentState;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +29,7 @@ pub(crate) struct CircleAckPublicationInput {
 /// coverage it named (used to skip re-staging an unchanged acknowledgement).
 pub(crate) struct PublishedCircleAck {
     pub reference: CircleAckRef,
-    pub successor_slot: crate::storage::cloud::ObjectSlot,
+    pub successor_slot: crate::protocol::objects::ObjectSlot,
     pub store_cut: CommitFrontier,
     pub control: CircleControlCoord,
 }

@@ -54,13 +54,13 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .prepared_objects
         .get("metadata")
         .expect("operation carries exact metadata object");
-    let substituted_slot = crate::storage::cloud::ObjectSlot::opaque(
+    let substituted_slot = crate::protocol::objects::ObjectSlot::opaque(
         original.reference().slot().logical_key().to_string(),
         "substituted-metadata-object".to_string(),
     )
     .expect("construct alternate provider object slot");
     let substituted = PreparedExactObject::new(
-        crate::storage::ExactObjectRef::new(
+        crate::protocol::objects::ExactObjectRef::new(
             substituted_slot,
             original.reference().stored_size(),
             original.reference().stored_hash(),
@@ -431,8 +431,8 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .clone();
     let creation = &mut journal.operation_mut().creation;
     let CircleTransitionPolicyObjects { control_head, .. } = &mut creation.policy_objects;
-    control_head.successor.predecessor = Some(crate::storage::ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(
+    control_head.successor.predecessor = Some(crate::protocol::objects::ExactObjectRef::new(
+        crate::protocol::objects::ObjectSlot::logical(
             "store-v1/test-circle-controls/unreserved-predecessor.json".to_string(),
         )
         .expect("construct arbitrary predecessor slot"),
@@ -524,13 +524,13 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .prepared_objects
         .get("store-head")
         .expect("Merge operation carries an exact Store head");
-    let substituted_slot = crate::storage::cloud::ObjectSlot::opaque(
+    let substituted_slot = crate::protocol::objects::ObjectSlot::opaque(
         original.reference().slot().logical_key().to_string(),
         "substituted-store-head".to_string(),
     )
     .expect("construct alternate Store head slot");
     let substituted = PreparedExactObject::new(
-        crate::storage::ExactObjectRef::new(
+        crate::protocol::objects::ExactObjectRef::new(
             substituted_slot,
             original.reference().stored_size(),
             original.reference().stored_hash(),
@@ -723,7 +723,7 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
             .await
             .expect_err("sealed roster bytes must not open under another kind");
         assert!(
-            matches!(error, crate::storage::StorageError::Decryption(_)),
+            matches!(error, crate::protocol::objects::StorageError::Decryption(_)),
             "moving roster bytes across kinds must fail the sealing context: {error}",
         );
     }

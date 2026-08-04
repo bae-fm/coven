@@ -4,13 +4,13 @@ use crate::protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
     StoreMembershipConflictResolutionRef,
 };
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{remote_object_id, SharedLiveSetObjectDomain};
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, ObjectHash, RetainedStoreDeviceOperations,
     RetainedStoreDeviceRegistrationActivations, StoreBatchCommit, StoreBatchCommitRef,
     StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
 };
-use crate::storage::{ExactObjectRef, PreparedExactObject};
 use crate::sync::VerifiedCircleActivations;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

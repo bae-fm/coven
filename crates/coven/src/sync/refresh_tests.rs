@@ -17,11 +17,10 @@ use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::{MemberRole, MembershipChain};
-use crate::protocol::wrapped_store_key::{
-    load_wrapped_store_key, WrappedStoreKey, WrappedStoreKeyRef,
-};
+use crate::protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess, PendingRotation};
+use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{
     open_test_db, pubkey_hex, temp_store_dir, test_store_security, TestCustody, TestStore,
@@ -236,7 +235,7 @@ impl crate::sync::test_helpers::StorageInterceptor for MembershipReadCounter {
         &self,
         read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<(), crate::protocol::objects::StorageError> {
         if read != crate::sync::test_helpers::ProtocolRead::Object
             && semantic_prefix.starts_with("store-v1/membership/heads/")
         {

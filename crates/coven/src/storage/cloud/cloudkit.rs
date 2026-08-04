@@ -18,8 +18,9 @@ use crate::id_provider::{IdRef, UuidProvider};
 use super::{
     combine_cleanup_failure, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome,
     CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage,
-    ObjectSlot, RevokeOutcome, UploadProgress,
+    RevokeOutcome, UploadProgress,
 };
+use crate::protocol::objects::ObjectSlot;
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const CHUNK_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-chunk-manifest-v1\0";
@@ -152,7 +153,7 @@ pub enum CloudKitScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloudKitProviderIdentity {
     pub container_id: String,
-    pub environment: crate::storage::CloudKitEnvironment,
+    pub environment: crate::protocol::objects::CloudKitEnvironment,
     pub owner_name: String,
     pub zone_name: String,
     pub current_user_record_name: String,
@@ -1317,8 +1318,8 @@ fn read_exact_cloudkit_range(
 impl ExactSlotStorage for CloudKitCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
-        use crate::storage::{
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use crate::protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };
@@ -1385,8 +1386,9 @@ impl ExactSlotStorage for CloudKitCloudHome {
         let scope = self.scope.clone();
         let accepted = blocking(move || ops.accepted_read_write_share(&scope)).await?;
         let binding = self.provider_binding().await?;
-        let crate::storage::ProviderPrincipalId::CloudKitSharedZoneParticipant { record_name } =
-            binding.device.principal
+        let crate::protocol::objects::ProviderPrincipalId::CloudKitSharedZoneParticipant {
+            record_name,
+        } = binding.device.principal
         else {
             return Err(CloudHomeError::Configuration(
                 "CloudKit adapter returned a non-CloudKit principal".to_string(),
@@ -1411,7 +1413,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         ))?;
         Ok(CrossPrincipalProviderEvidence::CloudKit(
             CloudKitAcceptedShare {
-                share: crate::storage::ExactObjectRef::new(
+                share: crate::protocol::objects::ExactObjectRef::new(
                     share_slot,
                     accepted.canonical_record.len() as u64,
                     ObjectHash::digest(&accepted.canonical_record),
@@ -1782,7 +1784,7 @@ mod tests {
             };
             Ok(CloudKitProviderIdentity {
                 container_id: "iCloud.example.coven".to_string(),
-                environment: crate::storage::CloudKitEnvironment::Development,
+                environment: crate::protocol::objects::CloudKitEnvironment::Development,
                 owner_name: owner_name.to_string(),
                 zone_name: zone_name.to_string(),
                 current_user_record_name: "current-user".to_string(),
@@ -2160,7 +2162,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_uses_the_bridge_container_zone_and_current_user() {
-        use crate::storage::{ProviderPrincipalId, StoreProviderBinding};
+        use crate::protocol::objects::{ProviderPrincipalId, StoreProviderBinding};
         let (home, _) = make_cloud_home_with_ops();
 
         let binding = ExactSlotStorage::provider_binding(&home)
@@ -2171,7 +2173,7 @@ mod tests {
             binding.store,
             StoreProviderBinding::CloudKit {
                 container_id: "iCloud.example.coven".to_string(),
-                environment: crate::storage::CloudKitEnvironment::Development,
+                environment: crate::protocol::objects::CloudKitEnvironment::Development,
                 owner_name: "private-owner".to_string(),
                 zone_name: "private-zone".to_string(),
             }
@@ -2189,7 +2191,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::local_file::PlaintextChunkReader for FailingBodyReader {
+    impl crate::local_file::PlaintextChunkReader for FailingBodyReader {
+        type Error = crate::storage::local_file::PlaintextChunkError;
+
         async fn next_chunk(
             &mut self,
             _max: usize,
@@ -2211,7 +2215,9 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::local_file::PlaintextChunkReader for PausedBodyReader {
+    impl crate::local_file::PlaintextChunkReader for PausedBodyReader {
+        type Error = crate::storage::local_file::PlaintextChunkError;
+
         async fn next_chunk(
             &mut self,
             _max: usize,

@@ -6,11 +6,12 @@ use crate::protocol::membership::{
     MembershipHeadRef, MergeMembershipHeadTransition, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
 use crate::protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
-use crate::storage::{ExactObjectRef, PreparedExactObject, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::store::operations::PreparedStoreOperationCommit;
 
 use crate::sync::store::membership::InviteError;

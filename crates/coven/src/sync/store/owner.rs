@@ -14,6 +14,7 @@ pub(super) mod history;
 mod history_construction;
 mod host_write;
 mod keyring;
+pub(crate) use keyring::load_wrapped_store_key;
 pub(super) mod owner_promotion;
 pub(crate) mod pull;
 mod registration;
@@ -370,9 +371,9 @@ impl Store {
                 "Circle close-status inspection received an active control".to_string(),
             ));
         };
-        let context = crate::storage::ProtocolObjectContext::store_encrypted(
+        let context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
             current.control.value.store_root_hash,
-            crate::storage::ProtocolObjectDomain::CircleEpochCloseResponse,
+            crate::protocol::objects::ProtocolObjectDomain::CircleEpochCloseResponse,
         );
         let mut participants = Vec::with_capacity(close.participants.len());
         for participant in &close.participants {
@@ -403,10 +404,10 @@ impl Store {
                         }
                     }
                 }
-                Err(crate::storage::StorageError::NotFound(_)) => {
+                Err(crate::protocol::objects::StorageError::NotFound(_)) => {
                     crate::protocol::circle::CircleCloseSettlement::Pending
                 }
-                Err(error) => return Err(crate::storage::StoreObjectError::from(error).into()),
+                Err(error) => return Err(crate::protocol::objects::StoreObjectError::from(error).into()),
             };
             participants.push(crate::protocol::circle::CircleCloseParticipant {
                 device_id: participant.registration.device_id,
@@ -638,7 +639,7 @@ impl Store {
         &self,
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
-    ) -> Result<crate::storage::BlobSpoolProtection, String> {
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
         self.authorize_history()
             .await
             .map_err(|error| error.to_string())?
@@ -877,7 +878,7 @@ impl Store {
         &self,
         candidate: &crate::protocol::store_commit::StoreDeviceHead,
         candidate_commit: &crate::protocol::store_commit::StoreBatchCommit,
-        candidate_object: &crate::storage::ExactObjectRef,
+        candidate_object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<history::abandonment::ExcludedCandidateHeadObservation, StoreError> {
         let mut history = self
             .authorize_history()
@@ -1058,7 +1059,7 @@ impl Store {
         previous: Option<&crate::protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<
         (
-            crate::storage::cloud::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
         ),
         StoreError,
@@ -1268,9 +1269,9 @@ impl Store {
             .ok_or(crate::sync::store::CircleOperationError::MissingState(
                 "finalized Circle close outcome",
             ))?;
-        let context = crate::storage::ProtocolObjectContext::store_encrypted(
+        let context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
             self.root.reference().store_root_hash,
-            crate::storage::ProtocolObjectDomain::CircleEpochCloseOutcome,
+            crate::protocol::objects::ProtocolObjectDomain::CircleEpochCloseOutcome,
         );
         let prefix = crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
             circle_id, *close_id,
@@ -1279,7 +1280,7 @@ impl Store {
             .storage
             .read_protocol_object(&context, &outcome_ref.object, &prefix)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
             crate::protocol::circle::CircleEpochCloseSlotValue::parse(&bytes)?
         else {
@@ -1521,7 +1522,9 @@ impl Store {
     pub(crate) async fn load_founder_registration_for_test(
         &self,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+        crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        >,
         StoreError,
     > {
         let mut history = self
@@ -1567,7 +1570,7 @@ impl Store {
     pub(crate) async fn load_store_package_for_test(
         &self,
         reference: &crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<Option<crate::storage::VerifiedObject<Vec<u8>>>, StoreError> {
+    ) -> Result<Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>, StoreError> {
         let mut history = self
             .authorize_history()
             .await

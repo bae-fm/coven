@@ -226,8 +226,8 @@ mod tests {
         vec![MembershipHeadRef {
             coord,
             head_hash: ObjectHash::digest(b"test membership head semantic bytes"),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(
                     "store-v1/membership/heads/test-owner/1.json".to_string(),
                 )
                 .expect("valid test membership-head slot"),
@@ -246,8 +246,8 @@ mod tests {
             recipient_pubkey: recipient.clone(),
             generation: 1,
             wrap_hash,
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(format!(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(format!(
                     "keys/{owner}/{recipient}/1/{wrap_hash}.json"
                 ))
                 .expect("valid test wrapped-key slot"),
@@ -277,8 +277,8 @@ mod tests {
                     b"invite store protocol root",
                 ),
                 store_root_hash: ObjectHash::digest(b"root"),
-                object: crate::storage::ExactObjectRef::new(
-                    crate::storage::cloud::ObjectSlot::logical(
+                object: crate::protocol::objects::ExactObjectRef::new(
+                    crate::protocol::objects::ObjectSlot::logical(
                         "store-v1/protocol/root/test.json".to_string(),
                     )
                     .expect("valid test Store-root slot"),
@@ -484,8 +484,8 @@ mod tests {
     #[test]
     fn decode_rejects_a_relocated_wrapped_key_reference() {
         let mut code = sample_s3_code("lib-relocated-wrap");
-        code.wrapped_key.object = crate::storage::ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+        code.wrapped_key.object = crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(
                 "keys/attacker/recipient/1/different.json".to_string(),
             )
             .expect("syntactically valid but semantically relocated slot"),

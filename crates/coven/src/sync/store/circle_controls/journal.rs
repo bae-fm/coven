@@ -7,8 +7,8 @@ use crate::protocol::circle::{
     CircleId, CircleOperationId, CircleOperationKind, CircleOperationState,
     PreparedCircleTransition,
 };
+use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::store_commit::{StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead};
-use crate::storage::{ExactObjectRef, PreparedExactObject};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

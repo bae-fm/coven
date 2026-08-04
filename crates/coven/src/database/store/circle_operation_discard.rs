@@ -20,8 +20,8 @@ use crate::database::{
     TerminalCandidateCleanupVerification,
 };
 use crate::protocol::circle::{CircleAccessDisposition, CircleOperationId};
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::remote_object_id;
-use crate::storage::ExactObjectRef;
 use crate::sync::{CircleOperationJournal, PreparedCircleOperation};
 use rusqlite::Connection;
 

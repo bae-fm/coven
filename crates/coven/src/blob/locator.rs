@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::blob::BlobScope;
 use crate::encryption::KeyFingerprint;
 use crate::protocol::circle::{Audience, CircleId};
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
-use crate::storage::ExactObjectRef;
 use crate::store_dir::{validate_cloud_path, validate_path_token};
 
 const RESERVED_READABLE_VERSION_SEGMENT: &str = ".coven-versions";
@@ -407,9 +407,9 @@ pub enum BlobLocatorError {
 mod tests {
     use super::*;
     use crate::protocol::circle::{Audience, CircleId};
+    use crate::protocol::objects::ExactObjectRef;
+    use crate::protocol::objects::ObjectSlot;
     use crate::protocol::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
-    use crate::storage::cloud::ObjectSlot;
-    use crate::storage::ExactObjectRef;
     use crate::{BlobScope, KeyFingerprint};
 
     fn hash(bytes: &[u8]) -> ObjectHash {

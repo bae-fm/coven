@@ -474,7 +474,7 @@ impl PreparedStoreOperationCommit {
         identity_signer: &UserKeypair,
         prepare_head: impl FnOnce(
             &ProtocolObjectContext,
-            crate::storage::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             &str,
             Vec<u8>,
         ) -> Result<PreparedExactObject, StoreObjectError>,

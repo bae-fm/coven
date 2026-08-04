@@ -221,7 +221,7 @@ impl DeviceProviderAdmissionApproval {
         request: DeviceProviderAccessRequest,
         access_grant: ActivatedStoreMemberProviderAccessGrant,
         admission: DeviceProviderAdmissionChallenge,
-        store_root: &crate::storage::VerifiedObject<StoreProtocolRoot>,
+        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
         administrator: &StoreDeviceRegistration,
         administrator_device_signer: &UserKeypair,
     ) -> Result<Self, DeviceJoinError> {
@@ -267,7 +267,7 @@ impl DeviceProviderAdmissionApproval {
 
     pub(crate) fn verify(
         &self,
-        store_root: &crate::storage::VerifiedObject<StoreProtocolRoot>,
+        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
         owner: &StoreDeviceRegistration,
         administrator: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinError> {
@@ -283,7 +283,7 @@ impl DeviceProviderAdmissionApproval {
 
     fn validate_shape(
         &self,
-        store_root: &crate::storage::VerifiedObject<StoreProtocolRoot>,
+        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
         administrator: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinError> {
         let offer = &self.request.offer;

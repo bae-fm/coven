@@ -39,7 +39,7 @@ struct WriteRevocationRequest {
     producer: crate::sync::store::DeviceJoinProducer,
     authority: crate::sync::store::ProviderWriteAuthorityRef,
     locator: crate::protocol::provider::ProviderAccessLocator,
-    protected_slots: Vec<crate::storage::cloud::ObjectSlot>,
+    protected_slots: Vec<crate::protocol::objects::ObjectSlot>,
 }
 
 struct ConfirmedWriteRevocation {
@@ -73,7 +73,7 @@ impl crate::sync::store::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRev
         producer: crate::sync::store::DeviceJoinProducer,
         authority: &crate::sync::store::ProviderWriteAuthorityRef,
         locator: &crate::protocol::provider::ProviderAccessLocator,
-        protected_slots: &[crate::storage::cloud::ObjectSlot],
+        protected_slots: &[crate::protocol::objects::ObjectSlot],
     ) -> Result<
         crate::protocol::provider::ProviderAccessWithdrawal,
         crate::sync::store::DeviceJoinError,
@@ -250,9 +250,9 @@ impl CycleTestStoreOps for TestStore {
         match device.load_store_package_for_test(&reference).await {
             Ok(package) => package.is_some(),
             Err(crate::sync::store::StoreError::Object(
-                crate::storage::StoreObjectError::Storage(crate::storage::StorageError::NotFound(
-                    _,
-                )),
+                crate::protocol::objects::StoreObjectError::Storage(
+                    crate::protocol::objects::StorageError::NotFound(_),
+                ),
             )) => false,
             Err(error) => panic!("load Store package: {error}"),
         }
@@ -754,7 +754,7 @@ fn exercise_post_attempt_cancellation<'a>(
 #[tokio::test]
 async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     use crate::protocol::membership::MemberRole;
-    use crate::storage::{
+    use crate::protocol::objects::{
         ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
     };
 
@@ -799,7 +799,9 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     let member = &member;
 
     Box::pin(async move {
-        use crate::storage::{ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding};
+        use crate::protocol::objects::{
+            ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
+        };
         use crate::sync::store::{JoinerJoinTerminal, ProviderAdminJoinTerminal};
 
         let owner_device = storage
@@ -809,7 +811,8 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
         let owner_binding = crate::storage::SyncStorage::provider_binding(&*storage)
             .await
             .expect("resolve owner provider binding");
-        let crate::storage::StoreProviderBinding::Dropbox { namespace_id } = &owner_binding.store
+        let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
+            &owner_binding.store
         else {
             panic!("cross-principal test Store is not Dropbox");
         };
@@ -1708,7 +1711,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     );
     let (external_dir, store_dir) = temp_store_dir();
     let external_path = external_dir.path().join("audio1.flac");
-    crate::storage::StagedBlobFile::write_for_test(&external_path, b"AUDIO")
+    crate::local_file::AtomicStagedFile::write_for_test(&external_path, b"AUDIO")
         .await
         .expect("write external snapshot blob");
     db.execute_test_sql(
@@ -2392,7 +2395,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         ));
         let (_store_temp, store_dir) = temp_store_dir();
         db.set_protocol_state(
-            crate::storage::ROTATION_GATE_STATE_KEY,
+            crate::protocol::objects::ROTATION_GATE_STATE_KEY,
             "invalid rotation gate",
         )
         .await
@@ -2426,7 +2429,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
             "the in-memory pending-rotation marker is not restored",
         );
         assert_eq!(
-            db.get_protocol_state(crate::storage::ROTATION_GATE_STATE_KEY)
+            db.get_protocol_state(crate::protocol::objects::ROTATION_GATE_STATE_KEY)
                 .await
                 .unwrap(),
             Some("invalid rotation gate".to_string()),
@@ -2441,7 +2444,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
-use crate::storage::StorageError;
+use crate::protocol::objects::StorageError;
 
 /// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
 /// moment the cycle fetches an incoming changeset to apply — by running a host
@@ -2644,7 +2647,7 @@ impl CycleStorageInterception {
 impl crate::sync::test_helpers::StorageInterceptor for CycleStorageInterception {
     async fn before_protocol_create(
         &self,
-        prepared: &crate::storage::PreparedExactObject,
+        prepared: &crate::protocol::objects::PreparedExactObject,
     ) -> Result<(), StorageError> {
         if matches!(self, Self::RejectAckCreate { .. })
             && prepared
@@ -5072,9 +5075,9 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
             offer.owner_grant.clone(),
         )
         .expect("Owner signs the attempt envelope");
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         offer.store_root.store_root_hash,
-        crate::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        crate::protocol::objects::ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let prefix =
         crate::protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
@@ -5315,9 +5318,9 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .sequence()
         .checked_add(1)
         .expect("next sequence exists");
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::storage::ProtocolObjectDomain::StoreHead,
+        crate::protocol::objects::ProtocolObjectDomain::StoreHead,
     );
     let prefix = crate::protocol::store_commit::head_slot_prefix(
         &owner_authority.registration().device_id.to_string(),
@@ -5402,9 +5405,9 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
             },
         )
         .expect("sign malformed successor chain");
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::storage::ProtocolObjectDomain::StoreHead,
+        crate::protocol::objects::ProtocolObjectDomain::StoreHead,
     );
     let prefix = crate::protocol::store_commit::head_slot_prefix(
         &owner_authority.registration().device_id.to_string(),
@@ -5720,7 +5723,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
 #[tokio::test]
 async fn cross_principal_device_join_completes_on_the_runtime_stack() {
     use crate::protocol::membership::MemberRole;
-    use crate::storage::{
+    use crate::protocol::objects::{
         ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
     };
 

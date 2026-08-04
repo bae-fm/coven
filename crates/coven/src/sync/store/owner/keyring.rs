@@ -1,10 +1,10 @@
 use crate::encryption::EncryptionService;
 use crate::keys::{IdentityKeyAuthority, UserKeypair};
 use crate::protocol::membership::MembershipChain;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::protocol::wrapped_store_key::{
-    load_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
+    PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
 };
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 
 use crate::sync::store::membership::InviteError;
 
@@ -139,7 +139,7 @@ impl<'storage> StoreKeyrings<'storage> {
             });
         }
         merged.ok_or_else(|| {
-            InviteError::Bucket(crate::storage::StorageError::NotFound(format!(
+            InviteError::Bucket(crate::protocol::objects::StorageError::NotFound(format!(
                 "no activated wrapped Store-key ref for {recipient}"
             )))
         })
@@ -153,4 +153,25 @@ fn wrapped_key_references(
     membership
         .wrapped_key_authority_for(&hex::encode(identity.public_key()))
         .map_err(InviteError::from)
+}
+
+/// Read and validate one wrapped Store key through the exact reference the
+/// membership names.
+pub(crate) async fn load_wrapped_store_key(
+    storage: &dyn crate::storage::SyncStorage,
+    store_root_hash: crate::protocol::store_commit::ObjectHash,
+    reference: &WrappedStoreKeyRef,
+) -> Result<WrappedStoreKey, crate::protocol::objects::StorageError> {
+    let context = crate::protocol::objects::ProtocolObjectContext::recipient_sealed(
+        store_root_hash,
+        crate::protocol::objects::ProtocolObjectDomain::StoreWrappedKey,
+    );
+    let bytes = storage
+        .read_protocol_object(&context, &reference.object, &reference.semantic_prefix())
+        .await?;
+    let value: WrappedStoreKey = serde_json::from_slice(&bytes).map_err(|error| {
+        crate::protocol::objects::StorageError::Parse(format!("parse wrapped Store key: {error}"))
+    })?;
+    reference.validate_value(&value, &bytes)?;
+    Ok(value)
 }

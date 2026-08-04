@@ -1,6 +1,7 @@
 use crate::protocol::circle::PreparedCircleControl;
+use crate::protocol::objects::{ExactObjectRef, ProtocolObjectContext};
 use crate::protocol::store_commit::{CircleControlRef, VerifiedStoreBatchCommit};
-use crate::storage::{ExactObjectRef, ProtocolObjectContext, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
 
 pub(crate) fn verify_control_context_for_verified_commit(
@@ -38,6 +39,6 @@ pub(crate) async fn read_exact_circle_object(
     storage
         .read_protocol_object(context, object, semantic_prefix)
         .await
-        .map_err(crate::storage::StoreObjectError::from)
+        .map_err(crate::protocol::objects::StoreObjectError::from)
         .map_err(CircleOperationError::from)
 }

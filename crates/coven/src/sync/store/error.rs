@@ -1,5 +1,5 @@
+use crate::protocol::objects::StoreObjectError;
 use crate::protocol::store_commit::{StoreBatchCommitRef, StoreDeviceId};
-use crate::storage::StoreObjectError;
 
 #[derive(Debug)]
 pub enum StorePreparationError {
@@ -9,7 +9,7 @@ pub enum StorePreparationError {
     AssetUpload(String),
     Storage {
         operation: &'static str,
-        source: crate::storage::StorageError,
+        source: crate::protocol::objects::StorageError,
     },
     LocalUserBlob {
         namespace: String,
@@ -88,7 +88,7 @@ pub enum StoreError {
     BlobStorage {
         namespace: String,
         id: String,
-        source: crate::storage::StorageError,
+        source: crate::protocol::objects::StorageError,
     },
     #[error("candidate cleanup: {0}")]
     CandidateCleanup(#[from] crate::sync::store::owner::pull::StorePullError),

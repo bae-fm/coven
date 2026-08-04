@@ -1,5 +1,5 @@
+use crate::protocol::objects::{ProtocolObjectDomain, StoreObjectError};
 use crate::protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFrontier};
-use crate::storage::{ProtocolObjectDomain, StoreObjectError};
 
 use super::StoreAckError;
 

@@ -2,7 +2,7 @@
 
 use crate::database::CirclePartitionControl;
 use crate::protocol::circle;
-use crate::storage::PreparedExactObject;
+use crate::protocol::objects::PreparedExactObject;
 
 pub(crate) struct PreparedPartitionPackage {
     pub(crate) audience: circle::Audience,

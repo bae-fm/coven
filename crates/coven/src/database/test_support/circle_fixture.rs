@@ -52,14 +52,14 @@ impl DatabaseTestSql<'_> {
             MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
             MembershipStatus,
         };
+        use crate::protocol::objects::ExactObjectRef;
+        use crate::protocol::objects::ObjectSlot;
         use crate::protocol::store_commit::{
             CandidateFamilyId, CircleActivationObjects, CircleMetadataObjectRef,
             DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, StoreCreationId,
             StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
             StoreRootRef, StreamActivation, SuccessorLink,
         };
-        use crate::storage::cloud::ObjectSlot;
-        use crate::storage::ExactObjectRef;
         use crate::sync::store::{
             CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
         };
@@ -94,8 +94,8 @@ impl DatabaseTestSql<'_> {
         let registration = StoreDeviceRegistration::signed(
             root.clone(),
             registration_origin,
-            crate::storage::ProviderDeviceBinding {
-                principal: crate::storage::ProviderPrincipalId::CustomS3Credential {
+            crate::protocol::objects::ProviderDeviceBinding {
+                principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: ObjectHash::digest(
                         format!("{label} registration access key").as_bytes(),
                     ),

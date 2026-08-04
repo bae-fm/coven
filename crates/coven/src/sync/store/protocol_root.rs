@@ -1,11 +1,12 @@
 //! Durable creation and exact opening of the Store protocol root.
 
+use crate::protocol::objects::ProtocolObjectDomain;
+use crate::protocol::objects::StoreObjectError;
 use crate::protocol::store_commit::{
     DeviceStreamAnchor, ObjectHash, StoreCreationId, StoreProtocolError, StoreProtocolRoot,
     StoreRootRef,
 };
-use crate::storage::StoreObjectError;
-use crate::storage::{ProtocolObjectDomain, SyncStorage};
+use crate::storage::SyncStorage;
 
 pub(crate) const STORE_CREATION_ATTEMPT_STATE_KEY: &str = "store_creation_attempt_v1";
 
@@ -32,7 +33,7 @@ pub(crate) struct StoreCreationAuthority {
     pub founder_grant: crate::protocol::membership::MembershipGrantId,
     pub provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
     pub probes: StoreCreationProbeIds,
-    pub binding: crate::storage::ResolvedProviderBinding,
+    pub binding: crate::protocol::objects::ResolvedProviderBinding,
     pub access: crate::protocol::provider::ProviderAccessLocator,
     pub founder_pubkey: String,
     pub founder_timestamp: String,
@@ -44,34 +45,34 @@ pub(crate) struct StoreCreationAuthority {
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreRootReservation {
     pub authority: StoreCreationAuthority,
-    pub root_slot: crate::storage::cloud::ObjectSlot,
+    pub root_slot: crate::protocol::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FounderRegistrationReservation {
     pub root: StoreRootReservation,
-    pub registration_slot: crate::storage::cloud::ObjectSlot,
+    pub registration_slot: crate::protocol::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MembershipReservation {
     pub founder: FounderRegistrationReservation,
-    pub first_slot: crate::storage::cloud::ObjectSlot,
+    pub first_slot: crate::protocol::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DescriptorReservation {
     pub membership: MembershipReservation,
-    pub recovery_slot: crate::storage::cloud::ObjectSlot,
+    pub recovery_slot: crate::protocol::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FounderMembershipPublicationReservation {
-    pub next_head_slot: crate::storage::cloud::ObjectSlot,
+    pub next_head_slot: crate::protocol::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,7 +82,7 @@ pub(crate) struct FounderGraphReservation {
     pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
     pub snapshots: DeviceStreamAnchor,
-    pub next_ack_slot: crate::storage::cloud::ObjectSlot,
+    pub next_ack_slot: crate::protocol::objects::ObjectSlot,
     pub membership: FounderMembershipPublicationReservation,
 }
 
@@ -110,7 +111,7 @@ pub(crate) struct FounderSnapshotsReservation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct FounderNextAckReservation {
     pub snapshots: FounderSnapshotsReservation,
-    pub next_ack_slot: crate::storage::cloud::ObjectSlot,
+    pub next_ack_slot: crate::protocol::objects::ObjectSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -145,7 +146,7 @@ pub(super) enum StoreProtocolRootError {
 #[derive(Clone)]
 pub(crate) struct VerifiedStoreRoot {
     reference: StoreRootRef,
-    object: crate::storage::VerifiedObject<StoreProtocolRoot>,
+    object: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
 }
 
 impl VerifiedStoreRoot {
@@ -196,7 +197,7 @@ impl VerifiedStoreRoot {
 
     pub(crate) fn from_verified_object(
         reference: StoreRootRef,
-        object: crate::storage::VerifiedObject<StoreProtocolRoot>,
+        object: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
     ) -> Result<Self, StoreProtocolError> {
         let verified_reference = StoreRootRef {
             store_root_id: object.value.descriptor.store_root_id(),
@@ -219,7 +220,7 @@ impl VerifiedStoreRoot {
         &self.object.value
     }
 
-    pub(crate) fn object(&self) -> &crate::storage::VerifiedObject<StoreProtocolRoot> {
+    pub(crate) fn object(&self) -> &crate::protocol::objects::VerifiedObject<StoreProtocolRoot> {
         &self.object
     }
 }
@@ -227,8 +228,8 @@ impl VerifiedStoreRoot {
 pub(super) async fn load_pinned_store_protocol_root(
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
-) -> Result<crate::storage::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
-    let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+) -> Result<crate::protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
+    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
     );
@@ -248,7 +249,7 @@ pub(super) async fn load_pinned_store_protocol_root(
             source: Box::new(source),
         }
     })?;
-    Ok(crate::storage::VerifiedObject {
+    Ok(crate::protocol::objects::VerifiedObject {
         value: verified,
         bytes,
         semantic_hash: expected.store_root_hash,
@@ -260,7 +261,7 @@ pub(super) async fn load_exact_store_protocol_root(
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
     expected_sync_routing_hash: ObjectHash,
-) -> Result<crate::storage::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
+) -> Result<crate::protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
     let verified = load_pinned_store_protocol_root(storage, expected).await?;
     if verified.value.descriptor.sync_routing_hash != expected_sync_routing_hash {
         return Err(StoreObjectError::InvalidObject {

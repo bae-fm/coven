@@ -1,11 +1,11 @@
 use crate::database::*;
+use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CommitFrontier, ReferencedStoreDeviceRegistration,
     ResolvedStoreDeviceState, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
     StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreDeviceStateRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
-use crate::storage::PreparedExactObject;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeMap;
 

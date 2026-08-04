@@ -1,8 +1,8 @@
 use super::snapshot;
 use super::*;
+use crate::protocol::objects::StoreObjectError;
+use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
-use crate::storage::StoreObjectError;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {
@@ -211,7 +211,10 @@ impl AuthorizedWriterOperation<'_> {
                 .create_protocol_object(&outbound.ack.prepared)
                 .await
             {
-                if !matches!(error, crate::storage::StorageError::SlotCollision(_)) {
+                if !matches!(
+                    error,
+                    crate::protocol::objects::StorageError::SlotCollision(_)
+                ) {
                     return Err(StoreObjectError::from(error).into());
                 }
                 let semantic_prefix = ack_slot_prefix(&device_id, outbound.reference.sequence);

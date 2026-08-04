@@ -3,16 +3,17 @@ use crate::database::VerifiedMergeMembershipObjects;
 use crate::protocol::membership::{
     self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
 };
+use crate::protocol::objects::{
+    ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
+};
 use crate::protocol::store_commit::{
     self, commit_semantic_prefix, head_slot_prefix, membership_head_slot_prefix,
     StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
-use crate::protocol::wrapped_store_key::{
-    load_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKeyRef,
-};
+use crate::protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKeyRef};
 use crate::storage as store_objects;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError};
 use crate::sync::store::membership::InviteError;
+use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
 use std::sync::Arc;
 
@@ -286,7 +287,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         value: crate::protocol::wrapped_store_key::WrappedStoreKey,
     ) -> Result<
         crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::storage::StorageError,
+        crate::protocol::objects::StorageError,
     > {
         self.keyrings.prepare(recipient, value).await
     }
@@ -381,7 +382,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         authority: &crate::blob::RowBlobAuthority,
         stored: &crate::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, crate::sync::BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.history
             .stage_verified_blob_plaintext(authority, stored, destination)
             .await
@@ -422,7 +423,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         expected: &crate::protocol::store_commit::StoreDeviceHead,
         expected_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        slot: &crate::storage::cloud::ObjectSlot,
+        slot: &crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<super::history::abandonment::VerifiedMergeWinner, StoreError> {
         self.history
@@ -435,9 +436,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         candidate: &operations::PreparedStoreOperationCommit,
     ) -> Result<(), StoreError> {
         let stream_id = candidate.reference.coord.stream_id;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             candidate.commit.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreCommit,
+            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
         let prefix = crate::protocol::store_commit::commit_semantic_prefix(
             candidate.commit.candidate_family(),
@@ -449,13 +450,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .as_ref()
             .create_protocol_object(&candidate.prepared)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let opened = self
             .storage
             .as_ref()
             .read_protocol_object(&context, &candidate.reference.object, &prefix)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         if opened != candidate.commit.to_bytes() {
             return Err(StoreError::InvalidOutbound(
                 "Store operation commit exact readback differs from its signed bytes".to_string(),
@@ -2256,7 +2257,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         mut activation: operations::PreparedStoreOperationActivation,
         head: crate::protocol::store_commit::StoreDeviceHead,
-        prepared_head: crate::storage::PreparedExactObject,
+        prepared_head: crate::protocol::objects::PreparedExactObject,
         history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<operations::StoreMembershipJournalCompletion>,
@@ -2311,9 +2312,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     StoreError::InvalidOutbound(format!("record uploaded Store candidate: {error}"))
                 })?;
         }
-        let head_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let head_prefix = crate::protocol::store_commit::head_slot_prefix(
             &commit.author_registration.device_id.to_string(),
@@ -2326,7 +2327,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
         {
             Ok(()) => {}
-            Err(crate::storage::StorageError::SlotCollision(_)) => {
+            Err(crate::protocol::objects::StorageError::SlotCollision(_)) => {
                 return self
                     .resolve_head_collision(
                         activation.candidate,
@@ -2339,7 +2340,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await;
             }
             Err(error) => {
-                return Err(crate::storage::StoreObjectError::from(error).into());
+                return Err(crate::protocol::objects::StoreObjectError::from(error).into());
             }
         }
         let opened_head = self
@@ -2347,7 +2348,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .as_ref()
             .read_protocol_object(&head_context, prepared_head.reference(), &head_prefix)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         if opened_head != head.to_bytes() {
             return Err(StoreError::InvalidOutbound(
                 "Store operation head exact readback differs from its signed bytes".to_string(),
@@ -2464,9 +2465,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let (commit, registration_activation) =
             plan.sign_batch(self.database.new_store_write_id(), batch)?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             plan.root().store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreCommit,
+            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
         let stream_id = plan.coord().stream_id.to_string();
         let prefix = crate::protocol::store_commit::commit_semantic_prefix(
@@ -2478,10 +2479,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let slot = storage
             .allocate_protocol_slot(&context, &prefix, ".json")
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let prepared = storage
             .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let verified_commit =
             plan.verify_prepared_commit(&commit.to_bytes(), prepared.reference().clone())?;
         let common = operations::PreparedStoreOperationCommon {
@@ -2533,9 +2534,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         ))
         .await
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let head_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             common.commit.store_root_hash,
-            crate::storage::ProtocolObjectDomain::StoreHead,
+            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let device_id = plan.device_id().to_string();
         let successor = self
@@ -2556,7 +2557,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let next_slot = storage
             .allocate_protocol_slot(&head_context, &next_prefix, ".json")
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let head = plan.sign_device_head(
             common.reference.clone(),
             successor.summary.digest(),
@@ -2575,7 +2576,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 &head_prefix,
                 head.to_bytes(),
             )
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         Ok(operations::PreparedStoreOperationCommit {
             common,
             head,
@@ -2597,7 +2598,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .as_ref()
                 .delete_protocol_object(&target.object)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             self.database
                 .mark_candidate_cleanup_absent(target.object)
                 .await?;
@@ -2614,7 +2615,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
         reference: crate::protocol::store_commit::StoreBatchCommitRef,
         head: crate::protocol::store_commit::StoreDeviceHead,
-        prepared_head: crate::storage::PreparedExactObject,
+        prepared_head: crate::protocol::objects::PreparedExactObject,
         head_prefix: String,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
         let database = self.database.clone();
@@ -2993,12 +2994,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         write_id: &crate::WriteId,
     ) -> Result<(), StoreError> {
-        use crate::protocol::store_commit::{
-            circle_package_semantic_prefix, package_semantic_prefix, ObjectHash,
-        };
-        use crate::storage::{
+        use crate::protocol::objects::{
             BlobWriteAuthority, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
             StoreObjectError,
+        };
+        use crate::protocol::store_commit::{
+            circle_package_semantic_prefix, package_semantic_prefix, ObjectHash,
         };
 
         let database = &self.database;

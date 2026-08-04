@@ -119,3 +119,28 @@ impl StoreDatabase {
             .await
     }
 }
+
+#[async_trait::async_trait]
+impl crate::protocol::provider::DeviceJoinChallengePublicationJournal for StoreDatabase {
+    async fn prepare(
+        &self,
+        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<
+        crate::protocol::provider::DeviceJoinChallengePublicationRecord,
+        crate::protocol::objects::StorageError,
+    > {
+        self.prepare_device_join_challenge_publication(challenge.clone())
+            .await
+            .map_err(|error| crate::protocol::objects::StorageError::Storage(error.to_string()))
+    }
+
+    async fn claim_published(
+        &self,
+        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<(), crate::protocol::objects::StorageError> {
+        self.publish_device_join_challenge(authorization.clone(), challenge.clone())
+            .await
+            .map_err(|error| crate::protocol::objects::StorageError::Storage(error.to_string()))
+    }
+}

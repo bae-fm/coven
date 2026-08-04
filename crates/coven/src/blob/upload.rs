@@ -84,7 +84,7 @@ impl DrainOutcome {
 #[derive(Debug)]
 pub enum UploadFailureCause {
     Local(String),
-    Storage(crate::storage::StorageError),
+    Storage(crate::protocol::objects::StorageError),
 }
 
 impl std::fmt::Display for UploadFailureCause {

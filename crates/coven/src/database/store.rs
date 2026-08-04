@@ -53,13 +53,13 @@ use crate::database::{
     load_remote_object_on, persist_exact_remote_object_on, replace_prepared_merge_head_remote_on,
     required_store_root_authority_on, Database, DbError, OutboundStoreAckActivation,
 };
+use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::remote_object::{
     remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
 };
 #[cfg(test)]
 use crate::protocol::store_commit::StoreBatchCommitRef;
 use crate::protocol::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
-use crate::storage::PreparedExactObject;
 use crate::sync::PreparedStoreOperationCommit;
 
 const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";

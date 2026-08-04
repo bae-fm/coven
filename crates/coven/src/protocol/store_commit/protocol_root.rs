@@ -6,7 +6,7 @@ use super::*;
 pub(crate) struct StoreCreationDescriptor {
     pub version: u32,
     pub creation_id: StoreCreationId,
-    pub provider: crate::storage::StoreProviderBinding,
+    pub provider: crate::protocol::objects::StoreProviderBinding,
     pub schema_version: u32,
     pub sync_routing_hash: ObjectHash,
     pub founder_pubkey: String,
@@ -96,7 +96,7 @@ impl StoreProtocolRoot {
     }
 
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, StoreProtocolError> {
-        let store_protocol_root: Self = crate::storage::decode_protocol_object(bytes)?;
+        let store_protocol_root: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(store_protocol_root.descriptor.version)?;
         store_protocol_root.validate_descriptor()?;
         if !keys::verify_signature_hex(
@@ -130,7 +130,7 @@ impl StoreProtocolRoot {
     ) -> Result<Self, StoreProtocolError> {
         let store_protocol_root = Self::parse(bytes)?;
         let actual_hash = store_protocol_root.object_hash();
-        crate::storage::verify_store_root(expected.store_root_hash, actual_hash)?;
+        crate::protocol::objects::verify_store_root(expected.store_root_hash, actual_hash)?;
         let actual_root_id = store_protocol_root.descriptor.store_root_id();
         if actual_root_id != expected.store_root_id {
             return Err(StoreProtocolError::StoreRootIdMismatch {

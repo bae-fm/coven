@@ -9,8 +9,10 @@ use crate::protocol::circle::{
     CircleEpochCloseResponseRef, CircleEpochCloseResponseSlotValue, CircleEpochCloseSettlement,
     CircleId, CircleRole, PreparedCircleControl,
 };
+use crate::protocol::objects::{
+    ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
+};
 use crate::protocol::store_commit::CommitFrontier;
-use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError};
 
 pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     writer: &'writer mut AuthorizedWriterOperation<'storage>,
@@ -97,11 +99,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) async fn prepare_circle_object_for_test(
         &mut self,
-        context: &crate::storage::ProtocolObjectContext,
+        context: &crate::protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         bytes: Vec<u8>,
-    ) -> Result<crate::storage::PreparedExactObject, CircleOperationError> {
+    ) -> Result<crate::protocol::objects::PreparedExactObject, CircleOperationError> {
         self.preparer()
             .prepare_circle_object(context, semantic_prefix, extension, bytes)
             .await
@@ -110,11 +112,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) fn prepare_circle_object_at_for_test(
         &mut self,
-        context: &crate::storage::ProtocolObjectContext,
-        slot: crate::storage::cloud::ObjectSlot,
+        context: &crate::protocol::objects::ProtocolObjectContext,
+        slot: crate::protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         bytes: Vec<u8>,
-    ) -> Result<crate::storage::PreparedExactObject, CircleOperationError> {
+    ) -> Result<crate::protocol::objects::PreparedExactObject, CircleOperationError> {
         self.preparer()
             .prepare_circle_object_at(context, slot, semantic_prefix, bytes)
     }
@@ -246,8 +248,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         (
             crate::protocol::circle::PreparedCircleTransition,
             crate::protocol::store_commit::CircleActivationObjects,
-            std::collections::BTreeMap<String, crate::storage::PreparedExactObject>,
-            Option<crate::storage::ExactObjectRef>,
+            std::collections::BTreeMap<String, crate::protocol::objects::PreparedExactObject>,
+            Option<crate::protocol::objects::ExactObjectRef>,
             Vec<crate::protocol::store_commit::StreamActivation>,
         ),
         CircleOperationError,
@@ -713,7 +715,10 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .create_protocol_object(&circle.ack.prepared)
                 .await
             {
-                if matches!(error, crate::storage::StorageError::SlotCollision(_)) {
+                if matches!(
+                    error,
+                    crate::protocol::objects::StorageError::SlotCollision(_)
+                ) {
                     return Err(StoreAckError::InvalidOutbound(format!(
                         "Circle acknowledgement slot {} holds different bytes",
                         circle.reference.object.slot().logical_key()
@@ -1251,16 +1256,18 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 &prefix,
                 CircleEpochCloseResponseSlotValue::Exclusion(exclusion).to_bytes(),
             )
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         match self.storage.create_protocol_object(&prepared).await {
             Ok(()) | Err(StorageError::SlotCollision(_)) => {}
-            Err(error) => return Err(crate::storage::StoreObjectError::from(error).into()),
+            Err(error) => {
+                return Err(crate::protocol::objects::StoreObjectError::from(error).into())
+            }
         }
         let (winner_bytes, _) = self
             .storage
             .read_prepared_protocol_slot(&context, &participant.response_slot, &prefix)
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         match CircleEpochCloseResponseSlotValue::parse(&winner_bytes)? {
             CircleEpochCloseResponseSlotValue::Exclusion(winner) => {
                 if !winner.verify_for(&current.control) {

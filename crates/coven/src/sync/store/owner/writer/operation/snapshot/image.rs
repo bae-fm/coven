@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::database::{Database, SnapshotDatabaseImage};
-use crate::storage::{StorageError, SyncStorage};
+use crate::protocol::objects::StorageError;
+use crate::storage::SyncStorage;
 use crate::sync::session::SyncedTable;
 use crate::Migration;
 
@@ -27,7 +28,7 @@ pub enum SnapshotError {
     #[error("storage error: {0}")]
     Bucket(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
-    StoreObject(#[source] crate::storage::StoreObjectError),
+    StoreObject(#[source] crate::protocol::objects::StoreObjectError),
     #[error("Store history: {0}")]
     StoreHistory(#[from] crate::sync::store::owner::pull::StorePullError),
     /// The snapshot's author is not authorized to publish a catalog image: not a
@@ -122,8 +123,9 @@ pub(crate) struct PreparedSnapshotBootstrap<'storage> {
     db_hash: String,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
     storage: &'storage std::sync::Arc<dyn SyncStorage>,
-    founder_registration:
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+    founder_registration: crate::protocol::objects::VerifiedObject<
+        crate::protocol::store_commit::StoreDeviceRegistration,
+    >,
     restorer_identity: crate::keys::UserKeypair,
     snapshot: crate::database::PublishedStoreSnapshot,
     coverage: crate::protocol::store_commit::CommitFrontier,
@@ -200,7 +202,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .await
             .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
             .ok_or_else(|| {
-                SnapshotError::Bucket(crate::storage::StorageError::NotFound(
+                SnapshotError::Bucket(crate::protocol::objects::StorageError::NotFound(
                     "Store snapshot stream".to_string(),
                 ))
             })?;
@@ -618,8 +620,8 @@ mod tests {
             sync_routing_hash: source.sync_routing_hash(),
             image: crate::protocol::store_commit::SnapshotImageRef {
                 image_hash,
-                object: crate::storage::ExactObjectRef::new(
-                    crate::storage::cloud::ObjectSlot::logical(
+                object: crate::protocol::objects::ExactObjectRef::new(
+                    crate::protocol::objects::ObjectSlot::logical(
                         "circle-bootstrap-routing.db".to_string(),
                     )
                     .expect("construct Circle bootstrap routing slot"),
@@ -1977,8 +1979,8 @@ mod tests {
             registration_hash: crate::protocol::store_commit::ObjectHash::digest(
                 registration_bytes.as_bytes(),
             ),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(format!(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(format!(
                     "store-v1/test/{label}/snapshot-registration.json"
                 ))
                 .expect("valid blob graph registration slot"),
@@ -1992,7 +1994,7 @@ mod tests {
             ),
             registration,
             crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
-                first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                     "store-v1/test/{label}/snapshots/1.json"
                 ))
                 .expect("valid blob graph activation slot"),
@@ -2011,8 +2013,8 @@ mod tests {
         let uploader = crate::protocol::store_commit::StoreDeviceRegistrationRef {
             device_id: "aa".repeat(32).parse().expect("valid blob graph device id"),
             registration_hash: crate::protocol::store_commit::ObjectHash::digest(uploader_bytes),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(
                     "store-v1/devices/blob-graph-test-uploader.json".to_string(),
                 )
                 .expect("valid blob graph uploader slot"),
@@ -2029,9 +2031,9 @@ mod tests {
             plaintext_hash,
         )
         .expect("valid blob graph locator");
-        let slot = crate::storage::cloud::ObjectSlot::logical(locator.semantic_key())
+        let slot = crate::protocol::objects::ObjectSlot::logical(locator.semantic_key())
             .expect("valid blob graph object slot");
-        let object = crate::storage::ExactObjectRef::new(
+        let object = crate::protocol::objects::ExactObjectRef::new(
             slot,
             bytes.len() as u64,
             crate::protocol::store_commit::ObjectHash::digest(bytes),

@@ -1,8 +1,8 @@
 use crate::database::*;
+#[cfg(test)]
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
-#[cfg(test)]
-use crate::storage::ExactObjectRef;
 use crate::write::WriteId;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
@@ -137,12 +137,25 @@ impl StoreDatabase {
         let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
         for prepared in loaded.blobs {
             if let Some(spool_path) = prepared.spool_path() {
-                prepared
-                    .blob()
-                    .object()
-                    .verify_file(spool_path)
-                    .await
-                    .map_err(|error| DbError::Message(format!("prepared blob spool: {error}")))?;
+                {
+                    let (size, digest) =
+                        crate::local_file::file_facts(spool_path)
+                            .await
+                            .map_err(|error| {
+                                DbError::Message(format!("prepared blob spool: {error}"))
+                            })?;
+                    prepared
+                        .blob()
+                        .object()
+                        .verify_stored_facts(
+                            spool_path,
+                            size,
+                            crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                        )
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared blob spool: {error}"))
+                        })?;
+                }
             }
             verified_blobs.push(prepared);
         }

@@ -203,7 +203,7 @@ impl StoreBlobAccess {
         &self,
         reference: &RowBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::storage::StagedBlobFile, BlobCacheError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         match self.resolve().await? {
             ResolvedBlobAccess::Remote(access) => {
                 access
@@ -323,7 +323,7 @@ impl StoreBlobs {
     pub(crate) fn cloud_key(
         &self,
         blob: &crate::blob::BlobRef,
-    ) -> Result<String, crate::storage::StorageError> {
+    ) -> Result<String, crate::protocol::objects::StorageError> {
         self.sync.blob_cloud_key(blob)
     }
 

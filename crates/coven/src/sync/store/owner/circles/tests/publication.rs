@@ -1330,7 +1330,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let historical_stored = crate::blob::locator::StoredBlobRef::new(
         historical_locator.clone(),
         ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(historical_locator.semantic_key())
+            crate::protocol::objects::ObjectSlot::logical(historical_locator.semantic_key())
                 .expect("old-epoch blob locator has a valid logical key"),
             b"ciphertext".len() as u64,
             ObjectHash::digest(b"ciphertext"),
@@ -1472,10 +1472,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     )
     .expect("bind exact Circle epoch-close response");
     let response_storage_key = match participant.response_slot.physical() {
-        crate::storage::cloud::PhysicalObjectLocator::LogicalKey => {
+        crate::protocol::objects::PhysicalObjectLocator::LogicalKey => {
             participant.response_slot.logical_key().to_string()
         }
-        crate::storage::cloud::PhysicalObjectLocator::Opaque(provider_id) => format!(
+        crate::protocol::objects::PhysicalObjectLocator::Opaque(provider_id) => format!(
             "{}#exact#{provider_id}",
             participant.response_slot.logical_key()
         ),
@@ -1538,7 +1538,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .blob_protection_for_test(&historical_authority, &historical_stored)
         .await
         .expect("resolve old-epoch blob protection through retained Circle authority");
-    let crate::storage::BlobSpoolProtection::Opaque(historical_encryption) = historical_protection
+    let crate::protocol::objects::BlobSpoolProtection::Opaque(historical_encryption) =
+        historical_protection
     else {
         panic!("Circle blob protection must be opaque");
     };
@@ -3130,7 +3131,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
                 .store
                 .read_protocol_slot(&control_context, control_object.slot(), &control_prefix)
                 .await,
-            Err(crate::storage::StorageError::NotFound(_))
+            Err(crate::protocol::objects::StorageError::NotFound(_))
         ),
         "no finalization object reached storage before the payload was recorded"
     );
@@ -4092,7 +4093,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         .await
         .expect("read the finalized successor activation")
         .expect("the successor activation is retained");
-    let image_slots: Vec<crate::storage::cloud::ObjectSlot> = activation
+    let image_slots: Vec<crate::protocol::objects::ObjectSlot> = activation
         .reference
         .objects()
         .access
@@ -4108,7 +4109,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         !image_slots.is_empty(),
         "the finalized successor names a bootstrap image"
     );
-    let saved: Vec<(crate::storage::cloud::ObjectSlot, Vec<u8>)> = image_slots
+    let saved: Vec<(crate::protocol::objects::ObjectSlot, Vec<u8>)> = image_slots
         .iter()
         .map(|slot| {
             (

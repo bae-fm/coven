@@ -273,7 +273,7 @@ impl StoreOperationCommitPlan {
     pub(crate) fn verify_prepared_commit(
         &self,
         bytes: &[u8],
-        object: crate::storage::ExactObjectRef,
+        object: crate::protocol::objects::ExactObjectRef,
     ) -> Result<super::store_commit::VerifiedStoreBatchCommit, StoreError> {
         self.writer
             .verify_prepared_commit(bytes, self.root.store_root_hash, self.coord.clone(), object)
@@ -339,7 +339,7 @@ impl StoreOperationCommitPlan {
         proposal_id: super::store_commit::StoreDeviceExclusionProposalId,
         target: super::store_commit::StoreDeviceRegistrationRef,
         target_registration: &super::store_commit::StoreDeviceRegistration,
-        outcome_slot: crate::storage::cloud::ObjectSlot,
+        outcome_slot: crate::protocol::objects::ObjectSlot,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusionProposal, StoreError> {
         self.writer.sign_device_exclusion_proposal(

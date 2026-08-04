@@ -65,8 +65,8 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         creation_id: crate::protocol::store_commit::StoreCreationId::from_nonce(
             "required-store-root",
         ),
-        provider: crate::storage::StoreProviderBinding::S3 {
-            endpoint: crate::storage::S3EndpointBinding::Custom {
+        provider: crate::protocol::objects::StoreProviderBinding::S3 {
+            endpoint: crate::protocol::objects::S3EndpointBinding::Custom {
                 origin: "https://test.invalid".to_string(),
             },
             region: "test-region".to_string(),
@@ -79,23 +79,23 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
             "required-store-root founder",
         ),
-        root_slot: crate::storage::cloud::ObjectSlot::logical(
+        root_slot: crate::protocol::objects::ObjectSlot::logical(
             crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
         )
         .expect("valid Store root slot"),
-        founder_registration: crate::storage::cloud::ObjectSlot::logical(
+        founder_registration: crate::protocol::objects::ObjectSlot::logical(
             "store-v1/test/required-store-root/registration.json".to_string(),
         )
         .expect("valid founder registration slot"),
         founder_provider_admin,
         founder_membership: crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(
+            first_slot: crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/test/required-store-root/membership/1.json".to_string(),
             )
             .expect("valid membership slot"),
         },
         founder_recovery: crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(
+            first_slot: crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/test/required-store-root/recovery/1.json".to_string(),
             )
             .expect("valid recovery slot"),
@@ -109,7 +109,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         store_root_id: root.descriptor.store_root_id(),
         store_root_hash: expected,
         object: ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
+            crate::protocol::objects::ObjectSlot::logical(
                 "store-v1/store-protocol-root/required-store-root.json".to_string(),
             )
             .expect("valid Store root slot"),

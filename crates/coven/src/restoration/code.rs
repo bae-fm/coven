@@ -42,10 +42,10 @@ pub struct ActivatedContinuation {
     pub device_signing_secret: String,
     pub registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
     pub registration_bytes: Vec<u8>,
-    pub registration_prepared: crate::storage::PreparedExactObject,
+    pub registration_prepared: crate::protocol::objects::PreparedExactObject,
     pub initial_ack: crate::protocol::store_commit::StoreAckRef,
     pub initial_ack_bytes: Vec<u8>,
-    pub initial_ack_prepared: crate::storage::PreparedExactObject,
+    pub initial_ack_prepared: crate::protocol::objects::PreparedExactObject,
     pub activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation,
     pub latest_ack: crate::protocol::store_commit::StoreAckRef,
     pub latest_snapshot: Option<crate::protocol::store_commit::StoreSnapshotRef>,
@@ -302,8 +302,8 @@ mod tests {
         crate::protocol::store_commit::StoreRootRef {
             store_root_id: ObjectHash::digest(b"restore protocol root identity"),
             store_root_hash: ObjectHash::digest(stored),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(
                     "store-v1/protocol/root/restore-code-test.json".to_string(),
                 )
                 .expect("valid test Store-root slot"),
@@ -325,8 +325,8 @@ mod tests {
         MembershipFloor(vec![MembershipHeadRef {
             coord,
             head_hash: ObjectHash::digest(b"test restore membership head semantic bytes"),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(
                     "store-v1/membership/heads/test-restore-owner/1.json".to_string(),
                 )
                 .expect("valid restore membership-head slot"),
@@ -338,7 +338,7 @@ mod tests {
 
     fn test_authority() -> RestoreAuthority {
         let owner_grant = MembershipGrantId(ObjectHash::digest(b"test owner grant"));
-        let first_slot = crate::storage::cloud::ObjectSlot::logical(
+        let first_slot = crate::protocol::objects::ObjectSlot::logical(
             "store-v1/recovery/test-owner/first.json".to_string(),
         )
         .expect("valid recovery slot");

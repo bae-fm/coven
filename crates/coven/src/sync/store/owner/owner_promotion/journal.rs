@@ -90,7 +90,7 @@ pub(super) enum OwnerPromotionStaleEvidence {
         /// is stated rather than re-derived: whoever next reads this journal —
         /// the retry of this attempt, or the attempt that replaces it — finishes
         /// an interrupted cleanup from the list the transition validated.
-        published: Vec<crate::storage::ExactObjectRef>,
+        published: Vec<crate::protocol::objects::ExactObjectRef>,
     },
 }
 
@@ -99,7 +99,7 @@ pub(super) fn owner_promotion_published_objects(
     transition: &PreparedMembershipTransition,
     publication: &PreparedMembershipPublication,
     wrapped_key: &PreparedWrappedStoreKey,
-) -> Result<Vec<crate::storage::ExactObjectRef>, OwnerPromotionError> {
+) -> Result<Vec<crate::protocol::objects::ExactObjectRef>, OwnerPromotionError> {
     Ok(candidate
         .merge_owner_promotion_remote_objects(transition, publication, wrapped_key)?
         .iter()

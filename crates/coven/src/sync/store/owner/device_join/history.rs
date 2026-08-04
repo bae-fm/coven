@@ -1,9 +1,9 @@
 use super::*;
+use crate::protocol::objects::StoreObjectError;
 use crate::protocol::store_commit::{
     ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreAckRef,
     SuccessorLink,
 };
-use crate::storage::StoreObjectError;
 use crate::sync::store::StoreRegistrationError;
 
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
@@ -90,8 +90,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::storage::VerifiedObject<StoreDeviceRegistration>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history.load_registration(reference).await
     }
@@ -127,7 +127,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &mut self,
         reference: &DeviceJoinAttemptRef,
         owner: &StoreDeviceRegistration,
-    ) -> Result<crate::storage::VerifiedObject<DeviceJoinAttempt>, super::StorePullError> {
+    ) -> Result<crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>, super::StorePullError>
+    {
         self.history
             .load_verified_device_join_attempt(reference, owner)
             .await
@@ -138,8 +139,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         reference: &DeviceJoinOutcomeRef,
         owner: &StoreDeviceRegistration,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::DeviceJoinOutcome>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::DeviceJoinOutcome>,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history
             .load_device_join_outcome(reference, owner)
@@ -151,8 +152,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         reference: &crate::protocol::store_commit::StoreAckRef,
         registration: &StoreDeviceRegistration,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreAck>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::StoreAck>,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history.load_store_ack(reference, registration).await
     }
@@ -162,10 +163,10 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         reference: &DeviceJoinAttemptRef,
     ) -> Result<
         (
-            crate::storage::VerifiedObject<DeviceJoinAttempt>,
-            crate::storage::VerifiedObject<StoreDeviceRegistration>,
+            crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+            crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
         ),
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history
             .load_device_join_attempt_and_owner(reference)
@@ -177,8 +178,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         reference: &DeviceJoinAttemptRef,
     ) -> Result<
         (
-            crate::storage::VerifiedObject<DeviceJoinAttempt>,
-            crate::storage::VerifiedObject<StoreDeviceRegistration>,
+            crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+            crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
         ),
         super::StorePullError,
     > {
@@ -194,7 +195,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         attempt_activation: &StoreBatchCommitRef,
     ) -> Result<
         (
-            crate::storage::VerifiedObject<DeviceJoinAttempt>,
+            crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
             super::DeviceJoinBootstrapPlan,
         ),
         super::StorePullError,
@@ -213,7 +214,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &self,
         identity: &UserKeypair,
         attempt_ref: DeviceJoinAttemptRef,
-        verified_attempt: crate::storage::VerifiedObject<DeviceJoinAttempt>,
+        verified_attempt: crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
         bootstrap_plan: super::DeviceJoinBootstrapPlan,
         attempt_activation: StoreBatchCommitRef,
         owner: &StoreDeviceRegistration,
@@ -321,7 +322,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                     "join registration has no acknowledgement anchor".to_string(),
                 ));
             };
-            let ack_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+            let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 attempt.store_root.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
             );

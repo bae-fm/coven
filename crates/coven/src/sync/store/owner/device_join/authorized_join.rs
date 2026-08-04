@@ -21,7 +21,7 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuth
     storage: std::sync::Arc<dyn SyncStorage>,
     root: StoreRootRef,
     protocol_root: StoreProtocolRoot,
-    verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+    verified_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
     membership: crate::protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     authority: Authority,
@@ -34,7 +34,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         storage: std::sync::Arc<dyn SyncStorage>,
         root: StoreRootRef,
         protocol_root: StoreProtocolRoot,
-        verified_root: crate::storage::VerifiedObject<StoreProtocolRoot>,
+        verified_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
         membership: crate::protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
@@ -124,7 +124,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let root = self.root.clone();
         let binding = self.storage.provider_binding().await?;
         let attempt_id = self.database.new_device_join_attempt_id();
-        let attempt_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let attempt_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
@@ -136,7 +136,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 ".json",
             )
             .await?;
-        let outcome_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let outcome_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
@@ -220,7 +220,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let abandonment_object = self.local_writer.sign_device_join_abandonment(&offer)?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
         );
@@ -400,7 +400,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             request.response.clone(),
             offer.owner_grant.clone(),
         )?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
@@ -501,7 +501,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled,
             attempt.owner_grant.clone(),
         )?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
@@ -704,7 +704,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             },
             offer.owner_grant.clone(),
         )?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
@@ -752,7 +752,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 if durable_outcome != &expected {
                     return Err(DeviceJoinError::JournalConflict);
                 }
-                let prepared = crate::storage::PreparedExactObject::new(
+                let prepared = crate::protocol::objects::PreparedExactObject::new(
                     durable_prepared.object.clone(),
                     durable_prepared.stored_bytes.clone(),
                 )?;
@@ -918,7 +918,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );
@@ -996,7 +996,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 (
                     Box::new(receipt_object),
                     receipt.clone(),
-                    crate::storage::PreparedExactObject::new(
+                    crate::protocol::objects::PreparedExactObject::new(
                         prepared.object.clone(),
                         prepared.stored_bytes.clone(),
                     )?,
@@ -1107,7 +1107,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::JournalConflict);
         }
         let plan = self.writer.prepare_plan().await?;
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );

@@ -2,10 +2,10 @@ use super::*;
 
 use async_trait::async_trait;
 
+use crate::protocol::objects::StorageError;
 use crate::protocol::provider::{
     ProviderProbeId, ProviderProbeJournal, ProviderProbeJournalRecord,
 };
-use crate::storage::StorageError;
 
 #[async_trait]
 impl ProviderProbeJournal for StoreDatabase {

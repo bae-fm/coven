@@ -1,6 +1,6 @@
 use super::*;
+use crate::protocol::objects::ObjectSlot;
 use crate::protocol::store_commit::StoreCommitCoord;
-use crate::storage::cloud::ObjectSlot;
 
 fn proof_object(path: &str) -> ExactObjectRef {
     let bytes = path.as_bytes();

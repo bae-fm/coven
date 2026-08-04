@@ -3,9 +3,9 @@ use crate::protocol::membership::{
     MembershipEntry, MembershipGrantId, MembershipHeadRef, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
+use crate::protocol::objects::StorageError;
+use crate::protocol::objects::StoreObjectError;
 use crate::protocol::store_commit::{GrantStreamAnchor, StoreRootRef};
-use crate::storage::StorageError;
-use crate::storage::StoreObjectError;
 use crate::sync::store::membership::AnchoredChainError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -649,7 +649,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &self,
         reference: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+        crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        >,
         StoreObjectError,
     > {
         self.commit_verifier().load_registration(reference).await
@@ -695,7 +697,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     async fn load_founder_registration(
         &self,
     ) -> Result<
-        crate::storage::VerifiedObject<crate::protocol::store_commit::StoreDeviceRegistration>,
+        crate::protocol::objects::VerifiedObject<
+            crate::protocol::store_commit::StoreDeviceRegistration,
+        >,
         StoreObjectError,
     > {
         self.commit_verifier().load_founder_registration().await
@@ -751,7 +755,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     async fn load_membership_entry(
         &self,
         reference: &crate::protocol::membership::MembershipEntryRef,
-    ) -> Result<crate::storage::VerifiedObject<MembershipEntry>, StoreObjectError> {
+    ) -> Result<crate::protocol::objects::VerifiedObject<MembershipEntry>, StoreObjectError> {
         self.commit_verifier()
             .membership_objects()
             .load_entry(reference)
@@ -761,8 +765,10 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     async fn load_membership_resolution(
         &self,
         reference: &StoreMembershipConflictResolutionRef,
-    ) -> Result<crate::storage::VerifiedObject<StoreMembershipConflictResolution>, StoreObjectError>
-    {
+    ) -> Result<
+        crate::protocol::objects::VerifiedObject<StoreMembershipConflictResolution>,
+        StoreObjectError,
+    > {
         self.commit_verifier()
             .membership_objects()
             .load_resolution(reference)
@@ -771,12 +777,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
 
     async fn load_membership_head_at_slot(
         &self,
-        slot: &crate::storage::cloud::ObjectSlot,
+        slot: &crate::protocol::objects::ObjectSlot,
         author: &str,
         grant: &MembershipGrantId,
         stream_id: crate::protocol::membership::AuthorStreamId,
         sequence: u64,
-    ) -> Result<crate::storage::VerifiedObject<AuthorHead>, StoreObjectError> {
+    ) -> Result<crate::protocol::objects::VerifiedObject<AuthorHead>, StoreObjectError> {
         self.commit_verifier()
             .membership_objects()
             .load_head_at_slot(slot, author, grant, stream_id, sequence)

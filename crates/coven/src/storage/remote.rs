@@ -9,25 +9,24 @@
 //! control-plane and recipient-sealed objects).
 
 use async_trait::async_trait;
-use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use super::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
-    ResolvedProviderBinding, StorageError, SyncStorage,
-};
+use super::SyncStorage;
 use crate::encryption::{
     EncryptionError, EncryptionService, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
 };
 use crate::keys::UserKeypair;
+use crate::protocol::objects::ObjectSlot;
+#[cfg(test)]
+use crate::protocol::objects::ProtocolObjectDomain;
+use crate::protocol::objects::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
+    ResolvedProviderBinding, RotationGate, RotationPending, StorageError,
+};
 use crate::protocol::provider::ProviderProbeStorage;
 use crate::protocol::store_commit::ObjectHash;
-use crate::storage::cloud::{
-    BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage, ObjectSlot,
-};
-#[cfg(test)]
-use crate::storage::ProtocolObjectDomain;
+use crate::storage::cloud::{BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage};
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
 /// sealed under: magic, then the key's full SHA-256 fingerprint. A read resolves
@@ -220,350 +219,6 @@ impl CloudCipherAccess for RwLock<CloudCipher> {
     }
 }
 
-/// Store-key work is in flight or committed but not fully adopted. Every cloud
-/// seal refuses while this holds, including while a local removal candidate may
-/// still publish and after a committed rotation whose key is not locally
-/// adopted or whose exact operation journal remains open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "store-key rotation is pending ({state:?}) while this device is sealing under generation \
-     {live_generation}; refusing to seal for the cloud until the pending state is completed"
-)]
-pub struct RotationPending {
-    pub state: RotationPendingState,
-    pub live_generation: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RotationPendingState {
-    Candidate {
-        generation: u64,
-    },
-    LocalCommitted {
-        generation: u64,
-    },
-    PeerCommitted {
-        generation: u64,
-    },
-    CandidateAndPeer {
-        candidate_generation: u64,
-        peer_generation: u64,
-    },
-    LocalCommittedAndPeer {
-        local_generation: u64,
-        peer_generation: u64,
-    },
-}
-
-/// The exact store-key work that blocks sealing: a local candidate, an activated
-/// local removal awaiting adoption, a peer's committed generation awaiting
-/// adoption, or a local fact together with a peer fact. Durable database
-/// transitions and this in-memory copy move together at operation boundaries.
-///
-/// Shared (behind one `Arc`, via [`CloudSyncStorage::shared_pending_rotation`])
-/// across every path that seals data for the cloud — changesets, heads, blobs,
-/// tombstones, snapshots — so a rotation this device can't adopt blocks all of
-/// them the same way, not just the removal call that discovered it. This is the
-/// structural half of the invariant: this device must never seal under a
-/// generation the store has already superseded.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum RotationGate {
-    /// This device's own rotation, with no unadopted peer generation.
-    Local(LocalRotation),
-    /// A generation the store committed that this device has not adopted, with
-    /// no local rotation of its own.
-    Peer { generation: NonZeroU64 },
-    /// Both facts at once: this device's rotation, and a peer generation it has
-    /// not adopted.
-    LocalAndPeer {
-        local: LocalRotation,
-        peer_generation: NonZeroU64,
-    },
-}
-
-/// This device's own rotation: a candidate it may still publish or lose, or its
-/// committed rotation awaiting local adoption. The commit consumes the candidate,
-/// so the two are the same fact at different points of its life — a device holds
-/// one or the other, never both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum LocalRotation {
-    Candidate {
-        generation: NonZeroU64,
-        mutation: crate::protocol::store_commit::ObjectHash,
-    },
-    Committed {
-        generation: NonZeroU64,
-        mutation: crate::protocol::store_commit::ObjectHash,
-    },
-}
-
-impl LocalRotation {
-    /// Reported through [`PendingRotation::pending_generation`], which exists for
-    /// status reporting in tests and for hosts built with `test-utils`.
-    #[cfg(test)]
-    fn generation(&self) -> NonZeroU64 {
-        match self {
-            Self::Candidate { generation, .. } | Self::Committed { generation, .. } => *generation,
-        }
-    }
-}
-
-impl RotationGate {
-    /// This device's own rotation, if the gate holds one.
-    fn local(&self) -> Option<LocalRotation> {
-        match self {
-            Self::Local(local) | Self::LocalAndPeer { local, .. } => Some(*local),
-            Self::Peer { .. } => None,
-        }
-    }
-
-    /// The unadopted peer generation, if the gate holds one.
-    fn peer(&self) -> Option<NonZeroU64> {
-        match self {
-            Self::Peer { generation }
-            | Self::LocalAndPeer {
-                peer_generation: generation,
-                ..
-            } => Some(*generation),
-            Self::Local(_) => None,
-        }
-    }
-
-    /// The gate holding both facts — `None` when neither is left, which is the
-    /// absence of a gate rather than an empty one.
-    fn from_parts(local: Option<LocalRotation>, peer: Option<NonZeroU64>) -> Option<Self> {
-        match (local, peer) {
-            (Some(local), Some(peer_generation)) => Some(Self::LocalAndPeer {
-                local,
-                peer_generation,
-            }),
-            (Some(local), None) => Some(Self::Local(local)),
-            (None, Some(generation)) => Some(Self::Peer { generation }),
-            (None, None) => None,
-        }
-    }
-
-    /// The gate `local` owns, keeping whatever peer fact came with it.
-    fn with_local(local: LocalRotation, peer: Option<NonZeroU64>) -> Self {
-        match peer {
-            Some(peer_generation) => Self::LocalAndPeer {
-                local,
-                peer_generation,
-            },
-            None => Self::Local(local),
-        }
-    }
-
-    /// The newest generation the gate names. Reported through
-    /// [`PendingRotation::pending_generation`].
-    #[cfg(test)]
-    pub(crate) fn generation(&self) -> NonZeroU64 {
-        match self {
-            Self::Local(local) => local.generation(),
-            Self::Peer { generation } => *generation,
-            Self::LocalAndPeer {
-                local,
-                peer_generation,
-            } => local.generation().max(*peer_generation),
-        }
-    }
-
-    fn pending_state(&self) -> RotationPendingState {
-        match self {
-            Self::Local(LocalRotation::Candidate { generation, .. }) => {
-                RotationPendingState::Candidate {
-                    generation: generation.get(),
-                }
-            }
-            Self::Local(LocalRotation::Committed { generation, .. }) => {
-                RotationPendingState::LocalCommitted {
-                    generation: generation.get(),
-                }
-            }
-            Self::Peer { generation } => RotationPendingState::PeerCommitted {
-                generation: generation.get(),
-            },
-            Self::LocalAndPeer {
-                local: LocalRotation::Candidate { generation, .. },
-                peer_generation,
-            } => RotationPendingState::CandidateAndPeer {
-                candidate_generation: generation.get(),
-                peer_generation: peer_generation.get(),
-            },
-            Self::LocalAndPeer {
-                local: LocalRotation::Committed { generation, .. },
-                peer_generation,
-            } => RotationPendingState::LocalCommittedAndPeer {
-                local_generation: generation.get(),
-                peer_generation: peer_generation.get(),
-            },
-        }
-    }
-
-    /// Stage `mutation` as this device's rotation candidate, on whatever gate is
-    /// already open (`None` when none is).
-    pub(crate) fn with_candidate(
-        gate: Option<Self>,
-        generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
-    ) -> Result<Self, String> {
-        let Some(generation) = NonZeroU64::new(generation) else {
-            return Err("rotation candidate names generation zero".to_string());
-        };
-        let candidate = LocalRotation::Candidate {
-            generation,
-            mutation,
-        };
-        match gate.as_ref().and_then(Self::local) {
-            Some(LocalRotation::Committed { .. }) => {
-                Err("a committed local rotation already owns the gate".to_string())
-            }
-            Some(existing) if existing != candidate => {
-                Err("another rotation candidate already owns the gate".to_string())
-            }
-            _ => Ok(Self::with_local(
-                candidate,
-                gate.as_ref().and_then(Self::peer),
-            )),
-        }
-    }
-
-    /// Promote this device's staged candidate to its committed rotation.
-    pub(crate) fn commit_candidate(
-        gate: Option<Self>,
-        generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
-    ) -> Result<Self, String> {
-        let refusal = "rotation commit does not own the pending candidate gate";
-        let Some(generation) = NonZeroU64::new(generation) else {
-            return Err(refusal.to_string());
-        };
-        let committed = LocalRotation::Committed {
-            generation,
-            mutation,
-        };
-        let local = gate.as_ref().and_then(Self::local);
-        // The gate must hold this exact candidate — or already hold the commit,
-        // which is the same fact arriving twice rather than a second rotation.
-        if local
-            != Some(LocalRotation::Candidate {
-                generation,
-                mutation,
-            })
-            && local != Some(committed)
-        {
-            return Err(refusal.to_string());
-        }
-        Ok(Self::with_local(
-            committed,
-            gate.as_ref().and_then(Self::peer),
-        ))
-    }
-
-    /// Record that the store committed `generation`. Forward-only: an older
-    /// generation never displaces a newer one already recorded.
-    pub(crate) fn merge_peer_commit(gate: Option<Self>, generation: u64) -> Result<Self, String> {
-        let Some(generation) = NonZeroU64::new(generation) else {
-            return Err("committed rotation names generation zero".to_string());
-        };
-        let peer_generation = gate
-            .as_ref()
-            .and_then(Self::peer)
-            .map_or(generation, |recorded| recorded.max(generation));
-        Ok(match gate.as_ref().and_then(Self::local) {
-            Some(local) => Self::LocalAndPeer {
-                local,
-                peer_generation,
-            },
-            None => Self::Peer {
-                generation: peer_generation,
-            },
-        })
-    }
-
-    pub(crate) fn remove_candidate(
-        self,
-        generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
-    ) -> Result<Option<Self>, String> {
-        let lost = NonZeroU64::new(generation).map(|generation| LocalRotation::Candidate {
-            generation,
-            mutation,
-        });
-        if lost.is_none() || self.local() != lost {
-            return Err("rotation loss does not own the pending candidate gate".to_string());
-        }
-        Ok(Self::from_parts(None, self.peer()))
-    }
-
-    pub(crate) fn replace_candidate_mutation(
-        self,
-        generation: u64,
-        previous: crate::protocol::store_commit::ObjectHash,
-        replacement: crate::protocol::store_commit::ObjectHash,
-    ) -> Result<Self, String> {
-        let refusal = "rotation candidate replacement lost its exact owner";
-        let Some(generation) = NonZeroU64::new(generation) else {
-            return Err(refusal.to_string());
-        };
-        if self.local()
-            != Some(LocalRotation::Candidate {
-                generation,
-                mutation: previous,
-            })
-        {
-            return Err(refusal.to_string());
-        }
-        Ok(Self::with_local(
-            LocalRotation::Candidate {
-                generation,
-                mutation: replacement,
-            },
-            self.peer(),
-        ))
-    }
-
-    pub(crate) fn complete_local_adoption(
-        self,
-        generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
-    ) -> Result<Option<Self>, String> {
-        match self.local() {
-            Some(LocalRotation::Candidate { .. }) => {
-                return Err(
-                    "rotation adoption cannot close while a candidate is pending".to_string(),
-                )
-            }
-            Some(LocalRotation::Committed {
-                generation: committed,
-                mutation: committed_mutation,
-            }) if committed.get() == generation && committed_mutation == mutation => {}
-            _ => return Err("rotation adoption does not own the committed gate".to_string()),
-        }
-        // Adopting the local rotation adopts every peer generation it covers; a
-        // newer peer generation is a separate fact and stays.
-        Ok(Self::from_parts(
-            None,
-            self.peer().filter(|peer| peer.get() > generation),
-        ))
-    }
-
-    pub(crate) fn complete_peer_adoption(
-        self,
-        adopted_generation: u64,
-    ) -> Result<Option<Self>, String> {
-        if adopted_generation == 0 {
-            return Err("adopted rotation names generation zero".to_string());
-        }
-        Ok(Self::from_parts(
-            self.local(),
-            self.peer().filter(|peer| peer.get() > adopted_generation),
-        ))
-    }
-}
-
 pub(crate) struct PendingRotation(std::sync::RwLock<Option<RotationGate>>);
 
 pub(crate) trait CloudRotationAccess: Send + Sync {
@@ -734,11 +389,6 @@ impl CloudRotationAccess for PendingRotation {
     }
 }
 
-/// The `protocol_state` key for the serialized `RotationGate`. Restored before
-/// the first cycle so a restart cannot forget an unfinished candidate or an
-/// unadopted committed rotation and resume sealing under an unauthorized key.
-pub(crate) const ROTATION_GATE_STATE_KEY: &str = "rotation_gate";
-
 /// How a cloud home names its blob objects. Paired with the at-rest
 /// [`CloudCipher`] by the home's [`HomeStorage`](crate::config::HomeStorage): an
 /// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
@@ -876,7 +526,7 @@ impl CloudCipher {
         aad_context: &[u8],
         chunk_size: std::num::NonZeroU32,
     ) -> Result<BlobBody, String> {
-        let plaintext_len = crate::storage::local_file::file_len(file_path).await?;
+        let plaintext_len = crate::local_file::file_len(file_path).await?;
         let header = SealedBlobHeader::new(chunk_size, plaintext_len);
         let reader = crate::storage::local_file::open_reader(file_path).await?;
         Ok(match self {
@@ -937,7 +587,7 @@ impl BlobChunking {
 /// nothing else to check and no whole-object pass to amortize.
 pub(crate) struct BlobRangeReader {
     exact: Arc<dyn ExactSlotStorage>,
-    slot: crate::storage::cloud::ObjectSlot,
+    slot: crate::protocol::objects::ObjectSlot,
     opener: crate::encryption::SealedBlobOpener,
     plaintext_size: u64,
     window: std::num::NonZeroU64,
@@ -1115,7 +765,7 @@ impl CloudSyncStorage {
     async fn validate_blob_append_authority(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<(), StorageError> {
         authority
             .reference
@@ -1574,7 +1224,7 @@ impl ExactBlobPlaintextReader {
         stored_file: &Path,
         store_id: &str,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Result<Self, StorageError> {
         let locator = blob.locator();
         let mut source = crate::storage::local_file::open_reader(stored_file)
@@ -1588,7 +1238,7 @@ impl ExactBlobPlaintextReader {
                     key_fingerprint,
                     ..
                 },
-                crate::storage::BlobSpoolProtection::Opaque(master),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(master),
             ) => {
                 let prefix = read_source_exact(
                     &mut source,
@@ -1611,7 +1261,7 @@ impl ExactBlobPlaintextReader {
             }
             (
                 crate::blob::locator::BlobLocator::Browsable { .. },
-                crate::storage::BlobSpoolProtection::Browsable,
+                crate::protocol::objects::BlobSpoolProtection::Browsable,
             ) => {
                 check_stored_blob_length(blob, locator.plaintext_size())?;
                 ExactBlobOpening::Browsable
@@ -1781,7 +1431,9 @@ async fn read_source_exact(
 }
 
 #[async_trait]
-impl crate::storage::local_file::PlaintextChunkReader for ExactBlobPlaintextReader {
+impl crate::local_file::PlaintextChunkReader for ExactBlobPlaintextReader {
+    type Error = crate::storage::local_file::PlaintextChunkError;
+
     async fn next_chunk(
         &mut self,
         max: usize,
@@ -1971,7 +1623,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
         probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
         administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
     ) -> Result<
@@ -1995,7 +1647,7 @@ impl SyncStorage for CloudSyncStorage {
         authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
     ) -> Result<
         crate::protocol::provider::CrossPrincipalProbeChallenge,
         crate::protocol::provider::ProviderProbeError,
@@ -2015,7 +1667,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         administrator_signing_pubkey: &str,
         peer_signer: &UserKeypair,
     ) -> Result<
@@ -2039,7 +1691,7 @@ impl SyncStorage for CloudSyncStorage {
         challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
         response: &crate::protocol::provider::CrossPrincipalProbeResponse,
         context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::storage::StoreProviderBinding,
+        store: &crate::protocol::objects::StoreProviderBinding,
         administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<
@@ -2059,12 +1711,14 @@ impl SyncStorage for CloudSyncStorage {
             .await
     }
 
-    fn store_blob_protection(&self) -> Result<crate::storage::BlobSpoolProtection, StorageError> {
+    fn store_blob_protection(
+        &self,
+    ) -> Result<crate::protocol::objects::BlobSpoolProtection, StorageError> {
         Ok(match self.cipher_for_seal()? {
             CloudCipher::Encrypted(encryption) => {
-                crate::storage::BlobSpoolProtection::Opaque(encryption)
+                crate::protocol::objects::BlobSpoolProtection::Opaque(encryption)
             }
-            CloudCipher::Plaintext => crate::storage::BlobSpoolProtection::Browsable,
+            CloudCipher::Plaintext => crate::protocol::objects::BlobSpoolProtection::Browsable,
         })
     }
 
@@ -2265,7 +1919,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn allocate_blob_slot(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<ObjectSlot, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
@@ -2276,11 +1930,11 @@ impl SyncStorage for CloudSyncStorage {
     async fn seal_blob_to_spool(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
-        protection: crate::storage::BlobSpoolProtection,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         plaintext_file: &Path,
         spool_file: &Path,
-    ) -> Result<crate::storage::BlobSpoolWrite, StorageError> {
+    ) -> Result<crate::protocol::objects::BlobSpoolWrite, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
@@ -2320,17 +1974,15 @@ impl SyncStorage for CloudSyncStorage {
                     ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
                         .await?;
                 loop {
-                    let chunk = crate::storage::local_file::PlaintextChunkReader::next_chunk(
-                        &mut reader,
-                        1 << 20,
-                    )
-                    .await
-                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    let chunk =
+                        crate::local_file::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
+                            .await
+                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                     if chunk.is_empty() {
                         break;
                     }
                 }
-                return Ok(crate::storage::BlobSpoolWrite::Reused);
+                return Ok(crate::protocol::objects::BlobSpoolWrite::Reused);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -2349,7 +2001,7 @@ impl SyncStorage for CloudSyncStorage {
                     key_fingerprint,
                     ..
                 },
-                crate::storage::BlobSpoolProtection::Opaque(encryption),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(encryption),
             ) => {
                 if encryption.seal_key_fingerprint() != *key_fingerprint {
                     return Err(StorageError::InvalidContent(format!(
@@ -2370,7 +2022,7 @@ impl SyncStorage for CloudSyncStorage {
             }
             (
                 crate::blob::locator::BlobLocator::Browsable { .. },
-                crate::storage::BlobSpoolProtection::Browsable,
+                crate::protocol::objects::BlobSpoolProtection::Browsable,
             ) => BlobBody::from_file(plaintext_file)
                 .await
                 .map_err(StorageError::LocalFilesystem)?,
@@ -2392,7 +2044,7 @@ impl SyncStorage for CloudSyncStorage {
                 None => Ok::<_, crate::storage::cloud::CloudHomeError>(None),
             }
         });
-        let staged = crate::storage::local_file::AtomicStagedFile::create(spool_file)
+        let staged = crate::local_file::AtomicStagedFile::create(spool_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let (staged, written) =
@@ -2400,15 +2052,14 @@ impl SyncStorage for CloudSyncStorage {
                 .write_byte_stream(Box::pin(stream))
                 .await
                 .map_err(|error| match error {
-                    crate::storage::local_file::ByteStreamWriteError::Source(error) => error.into(),
-                    crate::storage::local_file::ByteStreamWriteError::SourceCleanup {
-                        source,
-                        cleanup,
-                    } => StorageError::CleanupFailed {
-                        operation: Box::new(source.into()),
-                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
-                    },
-                    crate::storage::local_file::ByteStreamWriteError::Local(error) => {
+                    crate::local_file::ByteStreamWriteError::Source(error) => error.into(),
+                    crate::local_file::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
+                        StorageError::CleanupFailed {
+                            operation: Box::new(source.into()),
+                            cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+                        }
+                    }
+                    crate::local_file::ByteStreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;
@@ -2419,8 +2070,8 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         match staged.commit_new().await {
-            Ok(()) => Ok(crate::storage::BlobSpoolWrite::Created),
-            Err(crate::storage::local_file::CommitNewFileError::DestinationExists(_)) => {
+            Ok(()) => Ok(crate::protocol::objects::BlobSpoolWrite::Created),
+            Err(crate::local_file::CommitNewFileError::DestinationExists(_)) => {
                 let (stored_size, stored_hash) =
                     crate::storage::local_file::exact_file_facts(spool_file)
                         .await
@@ -2440,17 +2091,15 @@ impl SyncStorage for CloudSyncStorage {
                 )
                 .await?;
                 loop {
-                    let chunk = crate::storage::local_file::PlaintextChunkReader::next_chunk(
-                        &mut reader,
-                        1 << 20,
-                    )
-                    .await
-                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    let chunk =
+                        crate::local_file::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
+                            .await
+                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                     if chunk.is_empty() {
                         break;
                     }
                 }
-                Ok(crate::storage::BlobSpoolWrite::Reused)
+                Ok(crate::protocol::objects::BlobSpoolWrite::Reused)
             }
             Err(error) => Err(StorageError::LocalFilesystem(error.to_string())),
         }
@@ -2459,7 +2108,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn prepare_blob_object(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         slot: ObjectSlot,
         stored_file: &Path,
     ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
@@ -2486,7 +2135,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn create_blob_object_from_file(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        authority: &crate::storage::BlobWriteAuthority<'_>,
+        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
     ) -> Result<(), StorageError> {
@@ -2502,7 +2151,18 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        object.verify_file(stored_file).await?;
+        {
+            let (size, digest) = crate::local_file::file_facts(stored_file)
+                .await
+                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+            object
+                .verify_stored_facts(
+                    stored_file,
+                    size,
+                    crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                )
+                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+        }
         let body = BlobBody::from_file(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
@@ -2557,7 +2217,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
         dest: &Path,
-    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
         let object = blob.object();
         self.validate_blob_locator_home(locator)?;
@@ -2568,7 +2228,7 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        let mut staged = crate::storage::local_file::AtomicStagedFile::create(dest)
+        let mut staged = crate::local_file::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         self.exact
@@ -2584,21 +2244,32 @@ impl SyncStorage for CloudSyncStorage {
                 }
                 CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
             })?;
-        object.verify_file(staged.path()).await?;
+        {
+            let (size, digest) = crate::local_file::file_facts(staged.path())
+                .await
+                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+            object
+                .verify_stored_facts(
+                    staged.path(),
+                    size,
+                    crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                )
+                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+        }
         Ok(staged)
     }
 
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::storage::local_file::AtomicStagedFile, StorageError> {
+    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
         let stored_destination = dest.with_extension("coven-stored-download");
         let stored = self
             .stage_exact_blob_download(blob, &stored_destination)
             .await?;
-        let mut plaintext = crate::storage::local_file::AtomicStagedFile::create(dest)
+        let mut plaintext = crate::local_file::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let mut reader =
@@ -2608,16 +2279,16 @@ impl SyncStorage for CloudSyncStorage {
                 .write_plaintext(&mut reader)
                 .await
                 .map_err(|error| match error {
-                    crate::storage::local_file::StreamWriteError::Source(
+                    crate::local_file::StreamWriteError::Source(
                         crate::storage::local_file::PlaintextChunkError::Remote(error),
                     ) => error,
-                    crate::storage::local_file::StreamWriteError::Source(
+                    crate::local_file::StreamWriteError::Source(
                         crate::storage::local_file::PlaintextChunkError::InvalidContent(error),
                     ) => StorageError::InvalidContent(error),
-                    crate::storage::local_file::StreamWriteError::Source(
+                    crate::local_file::StreamWriteError::Source(
                         crate::storage::local_file::PlaintextChunkError::Local(error),
                     )
-                    | crate::storage::local_file::StreamWriteError::Local(error) => {
+                    | crate::local_file::StreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;
@@ -2634,7 +2305,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn open_blob_range_reader(
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
-        protection: crate::storage::BlobSpoolProtection,
+        protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Result<BlobRangeReader, StorageError> {
         let locator = blob.locator();
         self.validate_blob_locator_home(locator)?;
@@ -2657,7 +2328,7 @@ impl SyncStorage for CloudSyncStorage {
                 )));
             }
         };
-        let crate::storage::BlobSpoolProtection::Opaque(master) = protection else {
+        let crate::protocol::objects::BlobSpoolProtection::Opaque(master) = protection else {
             return Err(StorageError::Configuration(
                 "opaque blob locator requires audience encryption".to_string(),
             ));
@@ -2711,9 +2382,11 @@ mod tests {
     use super::*;
     use crate::blob::locator::{BlobLocator, RemoteAudience};
     use crate::blob::BlobScope;
+    use crate::protocol::objects::BlobWriteAuthority;
+    use crate::protocol::objects::{LocalRotation, RotationPendingState};
     use crate::protocol::store_commit::ObjectHash;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::BlobWriteAuthority;
+    use std::num::NonZeroU64;
 
     #[test]
     fn encrypted_cloud_object_tag_carries_the_full_key_digest() {
@@ -2888,7 +2561,7 @@ mod tests {
             .seal_blob_to_spool(
                 &locator,
                 &authority,
-                crate::storage::BlobSpoolProtection::Opaque(audience_key.clone()),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
                 &source,
                 &spool,
             )
@@ -2951,7 +2624,10 @@ mod tests {
         home.clear_exact_range_reads();
 
         let reader = storage
-            .open_blob_range_reader(&blob, crate::storage::BlobSpoolProtection::Opaque(key))
+            .open_blob_range_reader(
+                &blob,
+                crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            )
             .await
             .expect("open a ranged reader");
         // Opening reads the prefix that names the key and the chunk size. Every
@@ -3038,7 +2714,7 @@ mod tests {
             .seal_blob_to_spool(
                 &locator,
                 &authority,
-                crate::storage::BlobSpoolProtection::Browsable,
+                crate::protocol::objects::BlobSpoolProtection::Browsable,
                 &source,
                 &spool,
             )
@@ -3064,7 +2740,10 @@ mod tests {
 
         assert!(matches!(
             storage
-                .open_blob_range_reader(&blob, crate::storage::BlobSpoolProtection::Browsable,)
+                .open_blob_range_reader(
+                    &blob,
+                    crate::protocol::objects::BlobSpoolProtection::Browsable,
+                )
                 .await,
             Err(StorageError::Configuration(_))
         ));
@@ -3073,7 +2752,7 @@ mod tests {
         let staged = storage
             .stage_verified_blob_plaintext(
                 &blob,
-                crate::storage::BlobSpoolProtection::Browsable,
+                crate::protocol::objects::BlobSpoolProtection::Browsable,
                 &destination,
             )
             .await
@@ -3115,7 +2794,10 @@ mod tests {
             (&big_storage, &big_blob, big_key, 4 * 1024 * 1024),
         ] {
             let reader = storage
-                .open_blob_range_reader(blob, crate::storage::BlobSpoolProtection::Opaque(key))
+                .open_blob_range_reader(
+                    blob,
+                    crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+                )
                 .await
                 .expect("open a ranged reader");
             home.clear_exact_range_reads();
@@ -3155,7 +2837,10 @@ mod tests {
         home.replace_exact_object(blob.object().slot(), stored);
 
         let reader = storage
-            .open_blob_range_reader(&blob, crate::storage::BlobSpoolProtection::Opaque(key))
+            .open_blob_range_reader(
+                &blob,
+                crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            )
             .await
             .expect("open a ranged reader");
         for chunk in 0..10u64 {
@@ -3201,7 +2886,7 @@ mod tests {
                 storage
                     .open_blob_range_reader(
                         &blob,
-                        crate::storage::BlobSpoolProtection::Opaque(key.clone()),
+                        crate::protocol::objects::BlobSpoolProtection::Opaque(key.clone()),
                     )
                     .await,
                 Err(StorageError::InvalidContent(_))
@@ -3223,7 +2908,7 @@ mod tests {
                 storage
                     .open_blob_range_reader(
                         &blob,
-                        crate::storage::BlobSpoolProtection::Opaque(key.clone()),
+                        crate::protocol::objects::BlobSpoolProtection::Opaque(key.clone()),
                     )
                     .await,
                 Err(StorageError::InvalidContent(_))
@@ -3259,7 +2944,10 @@ mod tests {
         home.replace_exact_object(blob.object().slot(), stored);
 
         let reader = storage
-            .open_blob_range_reader(&blob, crate::storage::BlobSpoolProtection::Opaque(key))
+            .open_blob_range_reader(
+                &blob,
+                crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            )
             .await
             .expect("every length check passes, so the reader opens");
         assert!(
@@ -3296,7 +2984,7 @@ mod tests {
         let reader = storage
             .open_blob_range_reader(
                 &victim,
-                crate::storage::BlobSpoolProtection::Opaque(victim_key.clone()),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(victim_key.clone()),
             )
             .await
             .expect("open a ranged reader");
@@ -3317,7 +3005,7 @@ mod tests {
         let reader = storage
             .open_blob_range_reader(
                 &donor,
-                crate::storage::BlobSpoolProtection::Opaque(victim_key),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(victim_key),
             )
             .await
             .expect("open a ranged reader");
@@ -3354,7 +3042,10 @@ mod tests {
         )
         .await;
         let reader = storage
-            .open_blob_range_reader(&blob, crate::storage::BlobSpoolProtection::Opaque(key))
+            .open_blob_range_reader(
+                &blob,
+                crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            )
             .await
             .expect("open a ranged reader");
         let size = plaintext.len() as u64;
@@ -3422,7 +3113,10 @@ mod tests {
             )
             .await;
             let reader = storage
-                .open_blob_range_reader(&blob, crate::storage::BlobSpoolProtection::Opaque(key))
+                .open_blob_range_reader(
+                    &blob,
+                    crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+                )
                 .await
                 .expect("open a ranged reader");
             home.clear_exact_range_reads();
@@ -3487,7 +3181,7 @@ mod tests {
             .seal_blob_to_spool(
                 &locator,
                 &authority,
-                crate::storage::BlobSpoolProtection::Opaque(circle_key.clone()),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(circle_key.clone()),
                 &source,
                 &spool,
             )
@@ -3549,9 +3243,9 @@ mod tests {
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
-                    crate::storage::BlobSpoolProtection::Opaque(EncryptionService::from_key(
-                        [10u8; 32]
-                    ),),
+                    crate::protocol::objects::BlobSpoolProtection::Opaque(
+                        EncryptionService::from_key([10u8; 32]),
+                    ),
                     &source,
                     &spool,
                 )
@@ -3601,7 +3295,7 @@ mod tests {
             .seal_blob_to_spool(
                 &locator,
                 &authority,
-                crate::storage::BlobSpoolProtection::Opaque(audience_key.clone()),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
                 &source,
                 &spool,
             )
@@ -3628,7 +3322,7 @@ mod tests {
         let staged = storage
             .stage_verified_blob_plaintext(
                 &blob,
-                crate::storage::BlobSpoolProtection::Opaque(audience_key),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key),
                 &destination,
             )
             .await
@@ -3679,7 +3373,7 @@ mod tests {
             .seal_blob_to_spool(
                 &locator,
                 &authority,
-                crate::storage::BlobSpoolProtection::Opaque(audience_key.clone()),
+                crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
                 &source,
                 &spool,
             )
@@ -3708,7 +3402,7 @@ mod tests {
             storage
                 .stage_verified_blob_plaintext(
                     &blob,
-                    crate::storage::BlobSpoolProtection::Opaque(audience_key),
+                    crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key),
                     &destination,
                 )
                 .await,
@@ -3730,7 +3424,7 @@ mod tests {
         .expect("test cloud storage supports exact slots");
         let root = crate::protocol::store_commit::ObjectHash::digest(b"reserved slot root");
         let semantic = "store-v1/heads/device-a/1".to_string();
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root,
             ProtocolObjectDomain::StoreHead,
         );
@@ -3770,7 +3464,7 @@ mod tests {
             UserKeypair::generate(),
         )
         .expect("test cloud storage supports exact slots");
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             ObjectHash::digest(b"prepare domain root"),
             ProtocolObjectDomain::StoreHead,
         );
@@ -3802,7 +3496,7 @@ mod tests {
         .expect("test cloud storage supports exact slots");
         let root = ObjectHash::digest(b"exact delete root");
         let semantic = "store-v1/heads/device-a/1";
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root,
             ProtocolObjectDomain::StoreHead,
         );
@@ -3841,7 +3535,7 @@ mod tests {
         )
         .expect("test cloud storage supports exact slots");
         let root = crate::protocol::store_commit::ObjectHash::digest(b"reserved slot root");
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root,
             ProtocolObjectDomain::StoreHead,
         );
@@ -3879,7 +3573,7 @@ mod tests {
         );
         let semantic =
             crate::protocol::store_commit::commit_semantic_prefix(family, "device", 1, commit_hash);
-        let context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root,
             ProtocolObjectDomain::StoreCommit,
         );
@@ -3903,7 +3597,7 @@ mod tests {
                 .expect("read with the exact authenticated context"),
             b"signed commit",
         );
-        let other_root_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let other_root_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             other_root,
             ProtocolObjectDomain::StoreCommit,
         );
@@ -3921,18 +3615,19 @@ mod tests {
             storage
                 .read_protocol_object(&context, &object, &other_semantic)
                 .await,
-            Err(crate::storage::StorageError::Parse(_))
+            Err(crate::protocol::objects::StorageError::Parse(_))
         ));
 
-        let other_domain_context = crate::storage::ProtocolObjectContext::signed_plaintext(
-            root,
-            ProtocolObjectDomain::StoreHead,
-        );
+        let other_domain_context =
+            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                root,
+                ProtocolObjectDomain::StoreHead,
+            );
         assert!(matches!(
             storage
                 .read_protocol_object(&other_domain_context, &object, &semantic)
                 .await,
-            Err(crate::storage::StorageError::Parse(_))
+            Err(crate::protocol::objects::StorageError::Parse(_))
         ));
     }
 
@@ -3957,7 +3652,7 @@ mod tests {
         .expect("stale reader storage");
         let root = ObjectHash::digest(b"control plane root");
         let head_semantic = "store-v1/heads/device-a/1";
-        let head_context = crate::storage::ProtocolObjectContext::signed_plaintext(
+        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
             root,
             ProtocolObjectDomain::StoreHead,
         );
@@ -3993,7 +3688,7 @@ mod tests {
             "store-v1/candidates/{}/packages/device-a/1/{package_hash}",
             family.as_hash()
         );
-        let package_context = crate::storage::ProtocolObjectContext::store_encrypted(
+        let package_context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
             root,
             ProtocolObjectDomain::StorePackage,
         );
@@ -4073,9 +3768,12 @@ mod tests {
             .await
             .expect("read pending-rotation Store root")
             .expect("pending-rotation Store root exists");
-        db.set_protocol_state(ROTATION_GATE_STATE_KEY, "not-a-rotation-gate")
-            .await
-            .expect("persist malformed pending rotation");
+        db.set_protocol_state(
+            crate::protocol::objects::ROTATION_GATE_STATE_KEY,
+            "not-a-rotation-gate",
+        )
+        .await
+        .expect("persist malformed pending rotation");
         drop(components);
         drop(db);
 

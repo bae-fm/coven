@@ -12,13 +12,14 @@ use crate::protocol::circle::{
     CircleMetadataHeadRef, CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef,
     PreparedAccessLeaf, PreparedCircleControl, ResolvedCircleRoster,
 };
+use crate::protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreRootRef, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
-use crate::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
 
 mod metadata;
@@ -100,7 +101,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &envelope_prefix,
                 )
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let envelope: AccessEnvelope =
                 serde_json::from_slice(&envelope_bytes).map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -139,7 +140,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &leaf_prefix,
                 )
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle access leaf bytes differ from the paired leaf hash".to_string(),
@@ -394,7 +395,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &intent_prefix,
             )
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let intent: crate::protocol::circle::CircleEpochCloseIntent =
             serde_json::from_slice(&bytes).map_err(|error| {
                 CircleOperationError::InvalidState(format!(
@@ -566,7 +567,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &outcome_prefix,
             )
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
             crate::protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes).map_err(
                 |error| {
@@ -618,7 +619,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &prefix,
                 )
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             // Dispatch on the slot's actual settled arm, not the outcome's claim: the
             // outcome's declared settlement must equal the one derived here, which is
             // what refuses an outcome naming an exclusion for a slot holding a response.
@@ -791,7 +792,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &cancellation_prefix,
             )
             .await
-            .map_err(crate::storage::StoreObjectError::from)?;
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
         let crate::protocol::circle::CircleEpochCloseSlotValue::Cancellation(cancellation) =
             crate::protocol::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes)
                 .map_err(|error| {
@@ -864,7 +865,7 @@ fn verify_merge_circle_owner_authority(
 
 struct CircleStreamAuthority {
     activation_id: StreamActivationId,
-    first_slot: crate::storage::cloud::ObjectSlot,
+    first_slot: crate::protocol::objects::ObjectSlot,
     registration: StoreDeviceRegistration,
     activated_here: bool,
 }
@@ -1054,7 +1055,7 @@ impl CircleActivationVerifier<'_, '_> {
                 .storage
                 .read_protocol_object(context, &predecessor_object, predecessor_prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let predecessor = CircleHeadValue::parse(kind, &predecessor_bytes)?;
             let predecessor_position = predecessor.position()?;
             if predecessor.semantic_prefix(predecessor_object.clone()) != predecessor_prefix
@@ -1098,7 +1099,7 @@ impl CircleActivationVerifier<'_, '_> {
                 .storage
                 .read_protocol_object(&context, &reference.object, &prefix)
                 .await
-                .map_err(crate::storage::StoreObjectError::from)?;
+                .map_err(crate::protocol::objects::StoreObjectError::from)?;
             let head: crate::protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                 CircleOperationError::InvalidState(format!(
@@ -1154,7 +1155,7 @@ impl CircleActivationVerifier<'_, '_> {
         stream_id: crate::protocol::causal_grants::AuthorStreamId,
         circle_id: CircleId,
         grant_id: &crate::protocol::membership::MembershipGrantId,
-        expected_anchor: fn(CircleId, crate::storage::cloud::ObjectSlot) -> GrantStreamAnchor,
+        expected_anchor: fn(CircleId, crate::protocol::objects::ObjectSlot) -> GrantStreamAnchor,
     ) -> Result<CircleStreamAuthority, CircleOperationError> {
         let root = self.root().clone();
         let current = commit

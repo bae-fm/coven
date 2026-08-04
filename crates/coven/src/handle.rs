@@ -36,11 +36,11 @@ use crate::keys::{
 };
 use crate::protocol::membership::MemberInfo;
 use crate::protocol::membership::MemberRole;
+use crate::protocol::objects::StorageError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::CloudCipher;
-use crate::storage::StorageError;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
 use crate::store_cloud_storage::StoreCloudStorage;

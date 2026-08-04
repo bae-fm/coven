@@ -148,7 +148,7 @@ impl CircleSnapshotMeta {
     }
 
     pub(crate) fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
-        let meta: Self = crate::storage::decode_protocol_object(bytes)?;
+        let meta: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         Ok(meta.snapshot_hash())
     }
 
@@ -168,9 +168,12 @@ impl CircleSnapshotMeta {
         expected: &CircleSnapshotRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
-        let meta: Self = crate::storage::decode_protocol_object(bytes)?;
+        let meta: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(meta.version)?;
-        crate::storage::verify_store_root(expected_store_root_hash, meta.store_root_hash)?;
+        crate::protocol::objects::verify_store_root(
+            expected_store_root_hash,
+            meta.store_root_hash,
+        )?;
         meta.author_registration.verify_registration(author)?;
         if meta.generation != expected.generation {
             return Err(StoreProtocolError::RelocatedSlot {

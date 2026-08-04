@@ -8,7 +8,8 @@ use crate::database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWriteBlobMoveDestination,
 };
-use crate::storage::{BlobSpoolProtection, BlobWriteAuthority, SyncStorage};
+use crate::protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
+use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
 
 #[doc(hidden)]
@@ -157,7 +158,7 @@ impl HostWriteBlobStaging {
                         )
                         .await
                         .map_err(|error| move_materialization_error(fact, error.to_string()))?;
-                    if spool_write == crate::storage::BlobSpoolWrite::Created {
+                    if spool_write == crate::protocol::objects::BlobSpoolWrite::Created {
                         files
                             .created
                             .push(StagedAudienceBlobFile::new(spool_path.clone()));
@@ -490,7 +491,7 @@ fn source_authority(
 
 enum MoveSourcePlaintext {
     Existing(PathBuf),
-    Downloaded(crate::storage::StagedBlobFile),
+    Downloaded(crate::local_file::AtomicStagedFile),
 }
 
 impl MoveSourcePlaintext {

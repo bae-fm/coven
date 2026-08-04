@@ -388,11 +388,11 @@ mod tests {
     use crate::protocol::circle::CircleId;
     use crate::protocol::circle_control::CircleControlCoord;
     use crate::protocol::membership::AuthorStreamId;
+    use crate::protocol::objects::ExactObjectRef;
+    use crate::protocol::objects::ObjectSlot;
     use crate::protocol::store_commit::{
         CandidateFamilyId, ObjectHash, StoreCommitCoord, StoreDeviceRegistrationRef,
     };
-    use crate::storage::cloud::ObjectSlot;
-    use crate::storage::ExactObjectRef;
     use crate::{BlobScope, KeyFingerprint, WriteId};
 
     fn uploader() -> StoreDeviceRegistrationRef {

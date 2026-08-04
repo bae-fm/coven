@@ -27,7 +27,7 @@ use super::store_commit::{
 };
 use super::wrapped_store_key::WrappedStoreKeyRef;
 use crate::keys::{self, UserKeypair};
-use crate::storage::ExactObjectRef;
+use crate::protocol::objects::ExactObjectRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemberRole {
@@ -66,7 +66,7 @@ pub(crate) fn test_wrapped_key_ref(
         generation,
         wrap_hash,
         object: ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(logical_key)
+            crate::protocol::objects::ObjectSlot::logical(logical_key)
                 .expect("test wrapped-key slot is valid"),
             label.len() as u64,
             ObjectHash::digest(label),
@@ -423,7 +423,7 @@ pub enum MembershipHeadActivation {
 #[serde(deny_unknown_fields)]
 pub struct MergeMembershipHeadTransition {
     pub body: MembershipHeadBody,
-    pub head_slot: crate::storage::cloud::ObjectSlot,
+    pub head_slot: crate::protocol::objects::ObjectSlot,
 }
 
 impl MergeMembershipHeadTransition {
@@ -1309,7 +1309,7 @@ fn test_provider_admin_genesis(
         ),
         store_root_hash: ObjectHash::digest(root_bytes),
         object: ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(format!(
+            crate::protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{}/root.json",
                 founder.0.store_id
             ))
@@ -2307,7 +2307,7 @@ impl MembershipChain {
             MembershipStatus::Conflict(_) => return Err(MembershipError::InvalidOwnerPromotion),
         };
         let object = |name: &str| {
-            let slot = crate::storage::cloud::ObjectSlot::logical(format!(
+            let slot = crate::protocol::objects::ObjectSlot::logical(format!(
                 "test/owner-promotion/{promotion_id:?}/{name}.json"
             ))
             .expect("test Owner-promotion slot is valid");
@@ -2331,7 +2331,7 @@ impl MembershipChain {
             object: object("activation-commit"),
         };
         let membership = GrantStreamAnchor::StoreMembership {
-            first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+            first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                 "{}.json",
                 super::store_commit::membership_head_slot_prefix(
                     &user_pubkey,
@@ -2387,7 +2387,7 @@ impl MembershipChain {
             anchors: OwnerPromotionAnchors {
                 membership: membership.clone(),
                 recovery: GrantStreamAnchor::OwnerRecovery {
-                    first_slot: crate::storage::cloud::ObjectSlot::logical(format!(
+                    first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
                         "test/owner-promotion/{promotion_id:?}/recovery/1.json"
                     ))
                     .expect("test recovery slot is valid"),
@@ -2572,7 +2572,7 @@ impl MembershipChain {
                                     format!("test recovery node {grant}").as_bytes(),
                                 ),
                                 object: ExactObjectRef::new(
-                                    crate::storage::cloud::ObjectSlot::logical(format!(
+                                    crate::protocol::objects::ObjectSlot::logical(format!(
                                         "test/recovery/{grant}/1.json"
                                     ))
                                     .expect("test recovery node slot is valid"),
@@ -4148,6 +4148,8 @@ impl AuthorHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::objects::ObjectSlot;
+    use crate::protocol::objects::{ProviderDeviceBinding, ProviderPrincipalId};
     use crate::protocol::store_commit::{
         membership_entry_semantic_prefix, membership_head_semantic_prefix,
         membership_resolution_semantic_prefix, registration_semantic_prefix, CommitFrontier,
@@ -4155,8 +4157,6 @@ mod tests {
         StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
         StoreRootRef, StreamActivation,
     };
-    use crate::storage::cloud::ObjectSlot;
-    use crate::storage::{ProviderDeviceBinding, ProviderPrincipalId};
 
     fn key() -> UserKeypair {
         UserKeypair::generate()

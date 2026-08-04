@@ -3,16 +3,16 @@ use super::candidate_records::{
 };
 use super::*;
 use crate::database::*;
+use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::RemoteObjectRecord;
 use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
-use crate::storage::ExactObjectRef;
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 impl StoreDatabase {
     pub(crate) async fn load_rotation_gate(
         &self,
-    ) -> Result<Option<crate::storage::RotationGate>, DbError> {
+    ) -> Result<Option<crate::protocol::objects::RotationGate>, DbError> {
         self.connection
             .call(|connection| {
                 Self::load_rotation_gate_on(connection).map(|gate| gate.map(|(_, gate)| gate))
@@ -226,7 +226,7 @@ impl StoreDatabase {
             return Ok(());
         };
         let existing = Self::load_rotation_gate_on(tx)?;
-        let gate = crate::storage::RotationGate::with_candidate(
+        let gate = crate::protocol::objects::RotationGate::with_candidate(
             existing.as_ref().map(|(_, gate)| gate.clone()),
             generation,
             mutation,
@@ -237,11 +237,11 @@ impl StoreDatabase {
 
     fn load_rotation_gate_on(
         connection: &rusqlite::Connection,
-    ) -> Result<Option<(String, crate::storage::RotationGate)>, DbError> {
-        let key = crate::storage::ROTATION_GATE_STATE_KEY;
+    ) -> Result<Option<(String, crate::protocol::objects::RotationGate)>, DbError> {
+        let key = crate::protocol::objects::ROTATION_GATE_STATE_KEY;
         crate::database::get_protocol_state_on(connection, key)?
             .map(|encoded| {
-                let gate = serde_json::from_str::<crate::storage::RotationGate>(&encoded)
+                let gate = serde_json::from_str::<crate::protocol::objects::RotationGate>(&encoded)
                     .map_err(|error| DbError::Message(format!("parse rotation gate: {error}")))?;
                 Ok((encoded, gate))
             })
@@ -250,11 +250,11 @@ impl StoreDatabase {
 
     fn replace_rotation_gate_on(
         tx: &rusqlite::Transaction<'_>,
-        expected: Option<&(String, crate::storage::RotationGate)>,
-        next: Option<crate::storage::RotationGate>,
+        expected: Option<&(String, crate::protocol::objects::RotationGate)>,
+        next: Option<crate::protocol::objects::RotationGate>,
         operation: &'static str,
     ) -> Result<(), DbError> {
-        let key = crate::storage::ROTATION_GATE_STATE_KEY;
+        let key = crate::protocol::objects::ROTATION_GATE_STATE_KEY;
         let changed = match (expected, next) {
             (Some((expected, _)), Some(next)) => {
                 let encoded = serde_json::to_string(&next).map_err(|error| {
@@ -299,12 +299,12 @@ impl StoreDatabase {
     pub(crate) async fn record_peer_rotation(
         &self,
         generation: u64,
-    ) -> Result<crate::storage::RotationGate, DbError> {
+    ) -> Result<crate::protocol::objects::RotationGate, DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = Self::load_rotation_gate_on(&tx)?;
-                let next = crate::storage::RotationGate::merge_peer_commit(
+                let next = crate::protocol::objects::RotationGate::merge_peer_commit(
                     existing.as_ref().map(|(_, gate)| gate.clone()),
                     generation,
                 )
@@ -324,7 +324,7 @@ impl StoreDatabase {
     pub(crate) async fn complete_peer_rotation_adoption(
         &self,
         adopted_generation: u64,
-    ) -> Result<Option<crate::storage::RotationGate>, DbError> {
+    ) -> Result<Option<crate::protocol::objects::RotationGate>, DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -354,7 +354,7 @@ impl StoreDatabase {
         &self,
         intent_hash: ObjectHash,
         generation: u64,
-    ) -> Result<Option<crate::storage::RotationGate>, DbError> {
+    ) -> Result<Option<crate::protocol::objects::RotationGate>, DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -823,7 +823,7 @@ impl StoreDatabase {
         let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
             DbError::Message("rotation gate is absent during candidate activation".to_string())
         })?;
-        let gate = crate::storage::RotationGate::commit_candidate(
+        let gate = crate::protocol::objects::RotationGate::commit_candidate(
             Some(existing.1.clone()),
             generation,
             intent_hash,

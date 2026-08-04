@@ -17,10 +17,10 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, sharing, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, RevokeOutcome,
-    UploadProgress,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::oauth::OAuthConfig;
+use crate::protocol::objects::ObjectSlot;
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
@@ -607,8 +607,8 @@ impl CloudHome for OneDriveCloudHome {
 impl ExactSlotStorage for OneDriveCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
-        use crate::storage::{
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use crate::protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };

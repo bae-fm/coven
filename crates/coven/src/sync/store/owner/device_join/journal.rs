@@ -191,7 +191,7 @@ pub(crate) struct PreparedDeviceJoinObject {
 }
 
 impl PreparedDeviceJoinObject {
-    pub(super) fn from_prepared(prepared: &crate::storage::PreparedExactObject) -> Self {
+    pub(super) fn from_prepared(prepared: &crate::protocol::objects::PreparedExactObject) -> Self {
         Self {
             object: prepared.reference().clone(),
             stored_bytes: prepared.stored_bytes().to_vec(),

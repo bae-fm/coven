@@ -19,10 +19,11 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PartSink,
-    RevokeOutcome, UploadProgress,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, PartSink, RevokeOutcome,
+    UploadProgress,
 };
 use crate::oauth::OAuthConfig;
+use crate::protocol::objects::ObjectSlot;
 use tracing::warn;
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
@@ -1068,8 +1069,8 @@ impl CloudHome for DropboxCloudHome {
 impl ExactSlotStorage for DropboxCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::storage::ResolvedProviderBinding, CloudHomeError> {
-        use crate::storage::{
+    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use crate::protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };
@@ -1576,7 +1577,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_binding_uses_the_folder_identity_and_current_account() {
-        use crate::storage::{ProviderPrincipalId, StoreProviderBinding};
+        use crate::protocol::objects::{ProviderPrincipalId, StoreProviderBinding};
         let (home, requests, shutdown) = binding_and_close_test_home().await;
 
         let binding = ExactSlotStorage::provider_binding(&home)

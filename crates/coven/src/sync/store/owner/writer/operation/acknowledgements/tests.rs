@@ -89,8 +89,8 @@ impl LosingAckFixture {
         let grant = crate::protocol::provider::StoreMemberProviderAccessGrantRef {
             grant_id,
             grant_hash: crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
-            object: crate::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(format!("{grant_prefix}.json"))
+            object: crate::protocol::objects::ExactObjectRef::new(
+                crate::protocol::objects::ObjectSlot::logical(format!("{grant_prefix}.json"))
                     .expect("valid provider grant slot"),
                 grant_bytes.len() as u64,
                 crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
@@ -534,8 +534,8 @@ async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
         .mark_uploaded_verified()
         .expect("acknowledgement upload is durable");
     let winner_bytes = b"different valid winner head";
-    let winner_object = crate::storage::ExactObjectRef::new(
-        crate::storage::cloud::ObjectSlot::logical(
+    let winner_object = crate::protocol::objects::ExactObjectRef::new(
+        crate::protocol::objects::ObjectSlot::logical(
             "store-v1/heads/ack-nonactivation-winner.json".to_string(),
         )
         .expect("valid winner slot"),
@@ -723,7 +723,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
                 panic!("test head has a non-Merge loss proof");
             };
             let tampered_bytes = b"different winner at the same head slot";
-            winner_head.object = crate::storage::ExactObjectRef::new(
+            winner_head.object = crate::protocol::objects::ExactObjectRef::new(
                 winner_head.object.slot().clone(),
                 tampered_bytes.len() as u64,
                 crate::protocol::store_commit::ObjectHash::digest(tampered_bytes),
@@ -771,7 +771,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         .await;
     let expected_head = candidate.head.clone();
     let expected_prepared = candidate.prepared_head.clone();
-    let alternate_next = crate::storage::cloud::ObjectSlot::opaque(
+    let alternate_next = crate::protocol::objects::ObjectSlot::opaque(
         expected_head.successor.next_slot.logical_key().to_string(),
         "alternate-next-slot".to_string(),
     )
@@ -1005,14 +1005,15 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
         .await
         .expect("read staged Circle acknowledgement object");
     let sabotage = b"different bytes at the reserved Circle acknowledgement slot".to_vec();
-    let sabotage_ref = crate::storage::ExactObjectRef::new(
+    let sabotage_ref = crate::protocol::objects::ExactObjectRef::new(
         prepared.reference().slot().clone(),
         sabotage.len() as u64,
         crate::protocol::store_commit::ObjectHash::digest(&sabotage),
     );
     assert_ne!(&sabotage_ref, prepared.reference());
-    let sabotage_prepared = crate::storage::PreparedExactObject::new(sabotage_ref, sabotage)
-        .expect("build sabotage object");
+    let sabotage_prepared =
+        crate::protocol::objects::PreparedExactObject::new(sabotage_ref, sabotage)
+            .expect("build sabotage object");
     storage
         .create_protocol_object(&sabotage_prepared)
         .await

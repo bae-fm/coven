@@ -92,9 +92,12 @@ impl StoreDeviceHead {
         expected_registration: &StoreDeviceRegistration,
         expected_ref: &StoreBatchCommitRef,
     ) -> Result<Self, StoreProtocolError> {
-        let head: Self = crate::storage::decode_protocol_object(bytes)?;
+        let head: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         require_version(head.version)?;
-        crate::storage::verify_store_root(expected_store_root_hash, head.store_root_hash)?;
+        crate::protocol::objects::verify_store_root(
+            expected_store_root_hash,
+            head.store_root_hash,
+        )?;
         head.author_registration
             .verify_registration(expected_registration)?;
         if &head.commit != expected_ref {

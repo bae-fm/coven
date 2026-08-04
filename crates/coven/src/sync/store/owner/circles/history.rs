@@ -42,7 +42,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         bytes: &[u8],
     ) -> Result<
         crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.history
             .authenticate_commit_bytes(reference, bytes)
@@ -76,7 +76,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         &mut self,
         candidate: &crate::protocol::store_commit::StoreDeviceHead,
         candidate_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_object: &crate::storage::ExactObjectRef,
+        candidate_object: &crate::protocol::objects::ExactObjectRef,
     ) -> Result<
         crate::sync::store::owner::history::abandonment::ExcludedCandidateHeadObservation,
         crate::sync::store::StoreError,

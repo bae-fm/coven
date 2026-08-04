@@ -13,6 +13,9 @@ use crate::protocol::circle::{
     CircleTransitionPolicyObjects, PreparedCircleTransition,
 };
 use crate::protocol::membership::MemberRole;
+use crate::protocol::objects::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
+};
 use crate::protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
@@ -20,9 +23,7 @@ use crate::protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StreamActivation,
 };
 use crate::storage::cloud::CloudHome;
-use crate::storage::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-};
+use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
 };

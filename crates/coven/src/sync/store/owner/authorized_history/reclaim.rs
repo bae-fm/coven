@@ -245,7 +245,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<
         crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.owner.reclaim_authorization(reference).await
     }
@@ -255,8 +255,10 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         reference: &StoreDeviceHeadRef,
         registration: &StoreDeviceRegistration,
         commit: &StoreBatchCommitRef,
-    ) -> Result<crate::storage::VerifiedObject<StoreDeviceHead>, crate::storage::StoreObjectError>
-    {
+    ) -> Result<
+        crate::protocol::objects::VerifiedObject<StoreDeviceHead>,
+        crate::protocol::objects::StoreObjectError,
+    > {
         self.owner
             .reclaim_device_head(reference, registration, commit)
             .await
@@ -269,7 +271,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         previous: Option<&VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::storage::cloud::ObjectSlot,
+            crate::protocol::objects::ObjectSlot,
             Option<StoreDeviceHeadRef>,
         ),
         crate::sync::store::StoreError,
@@ -308,8 +310,8 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::storage::VerifiedObject<StoreDeviceRegistration>,
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.owner.load_registration(reference).await
     }
@@ -324,7 +326,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             crate::protocol::store_commit::StoreSnapshotRef,
             crate::protocol::store_commit::SnapshotMeta,
         ),
-        crate::storage::StoreObjectError,
+        crate::protocol::objects::StoreObjectError,
     > {
         self.owner
             .load_store_snapshot(registration_ref, registration, reference)

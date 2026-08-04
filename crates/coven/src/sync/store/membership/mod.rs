@@ -5,8 +5,8 @@
 
 use crate::keys::KeyError;
 use crate::protocol::membership::MembershipConflict;
-use crate::storage::StorageError;
-use crate::storage::StoreObjectError;
+use crate::protocol::objects::StorageError;
+use crate::protocol::objects::StoreObjectError;
 
 /// Why a high-level membership operation (list members, invite, remove, rotate)
 /// failed. The security-critical orchestration layer that downloads the chain,
@@ -20,7 +20,7 @@ pub enum MembershipOpsError {
     #[error("membership storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
-    StoreObject(#[from] crate::storage::StoreObjectError),
+    StoreObject(#[from] crate::protocol::objects::StoreObjectError),
     #[error("membership database state error: {0}")]
     Database(String),
     #[error("{0}")]
