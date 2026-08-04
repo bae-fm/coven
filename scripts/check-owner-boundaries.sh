@@ -16,4 +16,5 @@ cargo run --quiet -p owner-construction-check -- \
     --keyring-boundary \
     --runtime-boundary \
     --ambient-boundary \
+    --filesystem-boundary \
     .

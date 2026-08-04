@@ -18,9 +18,9 @@ use tracing::{debug, error, info};
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
-use crate::coven::StoreOpenGuard;
 #[cfg(test)]
 use crate::store_dir::StoreDir;
+use crate::store_dir::StoreOpenGuard;
 use crate::store_security::StoreSecurity;
 
 use super::cycle::SyncComponents;

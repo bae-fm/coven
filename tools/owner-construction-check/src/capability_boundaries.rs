@@ -222,8 +222,21 @@ pub(crate) const FILESYSTEM_BOUNDARY: &[GatedCapability] = &[GatedCapability {
 }];
 
 /// Reviewed filesystem owners. Each entry either owns a filesystem lifetime
-/// (staging, rollback, cache, spool, config, sealed files, database images) or
-/// is the provider/local-storage implementation whose subject is the file.
+/// (staging, rollback, cache, spool, lock, config, sealed files, database
+/// images) or is the provider/local-storage implementation whose subject is
+/// the file:
+///
+/// - `atomic_file.rs` / `store_dir.rs`: the staged-write and store-directory
+///   owners, including the single-writer open guard.
+/// - `config.rs`, `custody.rs`, `envelope.rs`, `identity_custody.rs`: config
+///   and sealed-secret files.
+/// - `database/`: SQLite files, staged database images, the device-join
+///   journal.
+/// - `storage/`: provider implementations, local files, and spools.
+/// - `blob/transition.rs`: `ExactPlaintextFile` and blob locality moves.
+/// - `sync/store/blob.rs`: local blob access and cache materialization.
+/// - `host_write.rs`, `blob_preparation.rs`, `snapshot.rs`,
+///   `snapshot/image.rs`: blob and snapshot staging with rollback state.
 const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven/src/atomic_file.rs",
     "crates/coven/src/store_dir.rs",
@@ -233,6 +246,12 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven/src/identity_custody.rs",
     "crates/coven/src/database/",
     "crates/coven/src/storage/",
+    "crates/coven/src/blob/transition.rs",
+    "crates/coven/src/sync/store/blob.rs",
+    "crates/coven/src/sync/store/owner/host_write.rs",
+    "crates/coven/src/sync/store/owner/writer/operation/blob_preparation.rs",
+    "crates/coven/src/sync/store/owner/writer/operation/snapshot.rs",
+    "crates/coven/src/sync/store/owner/writer/operation/snapshot/image.rs",
 ];
 
 pub(crate) struct CapabilityBoundaryViolation {

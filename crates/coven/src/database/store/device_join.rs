@@ -14,6 +14,10 @@ impl DeviceJoinJournalStore {
         path: impl AsRef<std::path::Path>,
     ) -> Result<Self, crate::database::DbError> {
         let path = path.as_ref().to_path_buf();
+        if let Some(directory) = path.parent() {
+            std::fs::create_dir_all(directory)
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+        }
         let connection =
             rusqlite::Connection::open(&path).map_err(crate::database::DbError::from)?;
         connection

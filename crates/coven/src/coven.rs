@@ -13,6 +13,7 @@ use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
 use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
+use crate::store_dir::StoreOpenGuard;
 use crate::store_dir::{LocalBlobStoreError, PathTokenError};
 use crate::store_sync::ConfigProvider;
 use crate::sync::session::SyncedTable;
@@ -153,57 +154,16 @@ pub struct CovenBuilder {
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
-/// The single-writer store lock: an exclusive advisory lock on
-/// `<store>/.coven-lock`, held for the life of a full [`open`](CovenBuilder::open)
-/// handle (and its running sync loop). A second full open of the same store is
-/// refused with [`CovenError::AlreadyOpen`] while the lock is held — the invariant
-/// that keeps two writers from racing the same db and blob store.
-///
-/// # Read-only opens take no lock
-///
-/// [`open_read_only`](CovenBuilder::open_read_only) deliberately does **not** touch
-/// this lock. The lock is exclusive, so a shared lock on the same file would block
-/// against a writer that already holds it (and vice versa) — a reader could never
-/// coexist with the writer it exists to read alongside. But a read-only open needs
-/// no lock at all: the lock guards against a second *writer*, and a read-only handle
-/// holds a `SQLITE_OPEN_READONLY` connection that cannot write. So a read-only open
-/// skips the guard entirely. Cross-process safety comes from WAL mode (a reader sees
-/// committed rows while the writer commits more), not from this lock; the blob cache
-/// a reader may populate is per-device scratch written atomically (temp + rename), so
-/// a reader and the writer touching the same cache file never tear it. This lets one
-/// writer and any number of read-only readers coexist on one store.
-pub(crate) struct StoreOpenGuard {
-    _file: std::fs::File,
-}
-
-impl StoreOpenGuard {
-    /// Acquire the guard for a test, panicking on refusal.
-    #[cfg(test)]
-    pub(crate) fn acquire_for_test(store_dir: &crate::store_dir::StoreDir) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::acquire(store_dir).expect("acquire store open guard"))
-    }
-
-    pub(crate) fn acquire(store_dir: &crate::store_dir::StoreDir) -> CovenResult<Self> {
-        let db_path = store_dir.db_path();
-        let Some(dir) = db_path.parent() else {
-            return Err(CovenError::MalformedPath(format!(
-                "store database path has no parent: {}",
-                db_path.display()
-            )));
-        };
-        std::fs::create_dir_all(dir)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.join(".coven-lock"))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(CovenError::AlreadyOpen {
-                store_dir: dir.to_path_buf(),
-            }),
-            Err(std::fs::TryLockError::Error(error)) => Err(CovenError::Io(error)),
+impl From<crate::store_dir::StoreOpenGuardError> for CovenError {
+    fn from(error: crate::store_dir::StoreOpenGuardError) -> Self {
+        match error {
+            crate::store_dir::StoreOpenGuardError::AlreadyOpen { store_dir } => {
+                CovenError::AlreadyOpen { store_dir }
+            }
+            crate::store_dir::StoreOpenGuardError::MalformedPath(message) => {
+                CovenError::MalformedPath(message)
+            }
+            crate::store_dir::StoreOpenGuardError::Io(error) => CovenError::Io(error),
         }
     }
 }

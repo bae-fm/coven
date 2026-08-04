@@ -982,6 +982,86 @@ async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
     Ok(files)
 }
 
+impl StoreDir {
+    /// Create the store directory tree if it is absent.
+    pub(crate) fn ensure_created(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.path)
+    }
+
+    /// Remove the complete store directory tree. Absence is success: the tree
+    /// is already gone.
+    pub(crate) fn remove_tree(&self) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(&self.path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The single-writer store lock: an exclusive advisory lock on
+/// `<store>/.coven-lock`, held for the life of a full open handle (and its
+/// running sync loop). A second full open of the same store is refused with
+/// [`StoreOpenGuardError::AlreadyOpen`] while the lock is held — the invariant
+/// that keeps two writers from racing the same db and blob store.
+///
+/// # Read-only opens take no lock
+///
+/// A read-only open deliberately does **not** touch this lock. The lock is
+/// exclusive, so a shared lock on the same file would block against a writer
+/// that already holds it (and vice versa) — a reader could never coexist with
+/// the writer it exists to read alongside. But a read-only open needs no lock
+/// at all: the lock guards against a second *writer*, and a read-only handle
+/// holds a `SQLITE_OPEN_READONLY` connection that cannot write. So a read-only
+/// open skips the guard entirely. Cross-process safety comes from WAL mode (a
+/// reader sees committed rows while the writer commits more), not from this
+/// lock; the blob cache a reader may populate is per-device scratch written
+/// atomically (temp + rename), so a reader and the writer touching the same
+/// cache file never tear it. This lets one writer and any number of read-only
+/// readers coexist on one store.
+pub(crate) struct StoreOpenGuard {
+    _file: std::fs::File,
+}
+
+#[derive(Debug)]
+pub(crate) enum StoreOpenGuardError {
+    AlreadyOpen { store_dir: PathBuf },
+    MalformedPath(String),
+    Io(std::io::Error),
+}
+
+impl StoreOpenGuard {
+    /// Acquire the guard for a test, panicking on refusal.
+    #[cfg(test)]
+    pub(crate) fn acquire_for_test(store_dir: &StoreDir) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::acquire(store_dir).expect("acquire store open guard"))
+    }
+
+    pub(crate) fn acquire(store_dir: &StoreDir) -> Result<Self, StoreOpenGuardError> {
+        let db_path = store_dir.db_path();
+        let Some(dir) = db_path.parent() else {
+            return Err(StoreOpenGuardError::MalformedPath(format!(
+                "store database path has no parent: {}",
+                db_path.display()
+            )));
+        };
+        std::fs::create_dir_all(dir).map_err(StoreOpenGuardError::Io)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".coven-lock"))
+            .map_err(StoreOpenGuardError::Io)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(StoreOpenGuardError::AlreadyOpen {
+                store_dir: dir.to_path_buf(),
+            }),
+            Err(std::fs::TryLockError::Error(error)) => Err(StoreOpenGuardError::Io(error)),
+        }
+    }
+}
+
 impl Deref for StoreDir {
     type Target = Path;
 

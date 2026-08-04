@@ -164,10 +164,8 @@ impl<'a> BootstrapCleanup<'a> {
     pub(crate) fn remove(&self) -> Vec<String> {
         let mut failures = Vec::new();
 
-        match std::fs::remove_dir_all(&**self.store_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => failures.push(format!("store directory: {error}")),
+        if let Err(error) = self.store_dir.remove_tree() {
+            failures.push(format!("store directory: {error}"));
         }
         if let Err(error) = self.custody.forget() {
             failures.push(format!("master key: {error}"));
@@ -571,7 +569,7 @@ impl DeviceJoinClient {
         if store_dir.config_path().exists() {
             return Err(BootstrapError::StoreExists(self.code.store_id.clone()));
         }
-        std::fs::create_dir_all(&*store_dir)?;
+        store_dir.ensure_created()?;
         on_status("Downloading store snapshot...");
         let db_path = store_dir.db_path();
         let history_verifier = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
@@ -747,7 +745,6 @@ impl DeviceJoinClient {
 
     fn open_pending_journal(&self) -> Result<crate::DeviceJoinJournalDatabase, BootstrapError> {
         let directory = self.layout.stores_root().join(".pending-device-joins");
-        std::fs::create_dir_all(&directory)?;
         Ok(crate::DeviceJoinJournalDatabase::open(
             directory.join(format!("{}.sqlite", self.code.store_id)),
         )?)

@@ -287,7 +287,7 @@ pub async fn restore_from_cloud(
             }
             crate::restoration::RestoreAuthority::OwnerRecovery(_) => ids.new_id(),
         };
-        std::fs::create_dir_all(&*store_dir)?;
+        store_dir.ensure_created()?;
 
         let continuation = match (authority, continuation_device_signer) {
             (

@@ -29,7 +29,6 @@ use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteEr
 use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::clock::ClockRef;
-use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError, StoreDatabase};
 use crate::encryption::SealError;
 use crate::keys::{
@@ -46,6 +45,7 @@ use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_dir::StoreDir;
+use crate::store_dir::StoreOpenGuard;
 use crate::store_joining::StoreJoining;
 use crate::store_membership::StoreMembership;
 use crate::store_recovery::StoreRecovery;
