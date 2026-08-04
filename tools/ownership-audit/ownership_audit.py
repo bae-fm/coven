@@ -3707,6 +3707,56 @@ def retained_parameter_categories(parameter_type: str) -> list[str]:
     ]
 
 
+def receiver_dependency_parameter_calls(
+    records: list[dict[str, Any]],
+    records_by_symbol: dict[str, dict[str, Any]],
+    construction_root_by_symbol: dict[str, str],
+) -> list[dict[str, Any]]:
+    calls = []
+    for record in records:
+        if record.get("kind") not in {"method", "trait-method"}:
+            continue
+        parameters = [
+            parameter
+            for parameter in record.get("parameters", [])
+            if parameter["name"] != "self"
+        ]
+        for position, parameter in enumerate(parameters):
+            categories = retained_parameter_categories(parameter["type"])
+            if not categories:
+                continue
+            for caller_edge in record.get("callers", []):
+                caller = records_by_symbol.get(caller_edge["symbol"])
+                if (
+                    caller is None
+                    or caller["symbol"] in construction_root_by_symbol
+                ):
+                    continue
+                for site in caller_edge.get("sites", []):
+                    argument = parameter_site_argument(record, site, position)
+                    if argument is None:
+                        continue
+                    calls.append(
+                        {
+                            "symbol": record["symbol"],
+                            "parameter": parameter["name"],
+                            "parameter_type": parameter["type"],
+                            "categories": categories,
+                            "caller": caller["symbol"],
+                            "caller_owner": anchored_owner(
+                                caller,
+                                records_by_symbol,
+                            ),
+                            "argument": argument["text"],
+                            "range": site["range"],
+                        }
+                    )
+    return sorted(
+        calls,
+        key=lambda call: json.dumps(call, sort_keys=True),
+    )
+
+
 def field_arguments(call: dict[str, Any]) -> dict[str, set[str]]:
     fields: dict[str, set[str]] = {}
     for argument in call.get("arguments", []):
@@ -3733,6 +3783,7 @@ def build_reach_through_reports(
         "associated_function_calls": [],
         "constructor_calls": [],
         "receiver_dependency_parameters": [],
+        "receiver_dependency_parameter_calls": [],
         "receiverless_stateful_callables": [],
         "field_bundle_calls": [],
     }
@@ -3740,6 +3791,14 @@ def build_reach_through_reports(
         record["symbol"]: record
         for record in records
     }
+    _, construction_root_by_symbol = construction_boundary_members(records)
+    reports["receiver_dependency_parameter_calls"] = (
+        receiver_dependency_parameter_calls(
+            records,
+            records_by_symbol,
+            construction_root_by_symbol,
+        )
+    )
     for record in records:
         for path in record.get("paths", []):
             entry = {

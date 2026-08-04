@@ -2756,6 +2756,83 @@ class SemanticIndexTests(unittest.TestCase):
             target["symbol"],
         )
 
+    def test_receiver_dependency_parameter_calls_exclude_constructor_injection(self):
+        operation = self.graph_record(
+            "sample::rows::<StoreRows>::write",
+            kind="method",
+            receiver_type="StoreRows",
+            parameters=[
+                {"name": "self", "type": "&self"},
+                {"name": "database", "type": "StoreDatabase"},
+            ],
+            callers=[
+                {
+                    "symbol": "sample::sync::<StoreSync>::run",
+                    "sites": [
+                        {
+                            "range": {
+                                "start": {"line": 8, "character": 4},
+                                "end": {"line": 8, "character": 30},
+                            },
+                            "arguments": [{"text": "self.database"}],
+                            "expression": "self.rows.write(self.database)",
+                        }
+                    ],
+                },
+                {
+                    "symbol": "sample::rows::<StoreRows>::new",
+                    "sites": [
+                        {
+                            "range": {
+                                "start": {"line": 3, "character": 4},
+                                "end": {"line": 3, "character": 25},
+                            },
+                            "arguments": [{"text": "database"}],
+                            "expression": "rows.write(database)",
+                        }
+                    ],
+                },
+            ],
+        )
+        runtime_caller = self.graph_record(
+            "sample::sync::<StoreSync>::run",
+            kind="method",
+            receiver_type="StoreSync",
+            parameters=[{"name": "self", "type": "&self"}],
+        )
+        constructor = self.graph_record(
+            "sample::rows::<StoreRows>::new",
+            kind="associated",
+            receiver_type="StoreRows",
+            parameters=[{"name": "database", "type": "StoreDatabase"}],
+            return_type="Self",
+            receiver_constructor=True,
+        )
+
+        reports = ownership_audit.build_reach_through_reports(
+            [operation, runtime_caller, constructor],
+            {},
+        )
+
+        self.assertEqual(
+            reports["receiver_dependency_parameter_calls"],
+            [
+                {
+                    "argument": "self.database",
+                    "caller": runtime_caller["symbol"],
+                    "caller_owner": "StoreSync",
+                    "categories": ["database"],
+                    "parameter": "database",
+                    "parameter_type": "StoreDatabase",
+                    "range": {
+                        "start": {"line": 8, "character": 4},
+                        "end": {"line": 8, "character": 30},
+                    },
+                    "symbol": operation["symbol"],
+                }
+            ],
+        )
+
     def test_callable_argument_reference_ignores_borrow_wrappers(self):
         self.assertEqual(
             ownership_audit.callable_argument_reference("&mut build_request"),
