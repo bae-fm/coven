@@ -702,15 +702,12 @@ impl SyncLoopHandle {
     }
 
     pub(crate) fn is_encrypted(&self) -> bool {
-        self.inner.components.current_encryption().is_some()
+        self.inner.components.is_encrypted()
     }
 
     #[cfg(test)]
     pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
-        self.inner
-            .components
-            .current_encryption()
-            .map(|encryption| encryption.current_generation())
+        self.inner.components.encryption_generation_for_test()
     }
 
     #[cfg(test)]
@@ -719,18 +716,9 @@ impl SyncLoopHandle {
         stored: &[u8],
         aad_context: &[u8],
     ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
-        let encryption = self
-            .inner
+        self.inner
             .components
-            .current_encryption()
-            .ok_or_else(|| "session is not encrypted".to_string())?;
-        let (fingerprint, header, chunks) =
-            crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
-        let plaintext = encryption
-            .blob_opener(header, aad_context)
-            .open_chunks(0..header.chunk_count(), chunks)
-            .map_err(|error| error.to_string())?;
-        Ok((fingerprint, plaintext))
+            .open_sealed_blob_for_test(stored, aad_context)
     }
 
     pub(crate) async fn invite_member(

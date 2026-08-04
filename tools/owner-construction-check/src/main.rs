@@ -1163,6 +1163,18 @@ fn find_service_return_violations(
         })
         .cloned()
         .collect::<BTreeSet<_>>();
+    let declared_types = collect_declared_types(files);
+    let retained_capabilities = retained_owners
+        .iter()
+        .map(|owner| {
+            let capabilities =
+                collect_root_retained_types(&declared_types, stateful_services, &[owner.as_str()])
+                    .into_iter()
+                    .filter(|service| CAPABILITY_TYPES.contains(&service.as_str()))
+                    .collect::<BTreeSet<_>>();
+            (owner.clone(), capabilities)
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut violations = BTreeSet::new();
     for file in files {
         if is_test_source(&file.relative_path) {
@@ -1173,6 +1185,7 @@ fn find_service_return_violations(
             &file.syntax.items,
             retained_owners,
             &returned_services,
+            &retained_capabilities,
             &mut violations,
         );
     }
@@ -1184,6 +1197,7 @@ fn find_service_returns_in_items(
     items: &[syn::Item],
     retained_owners: &BTreeSet<String>,
     returned_services: &BTreeSet<String>,
+    retained_capabilities: &BTreeMap<String, BTreeSet<String>>,
     violations: &mut BTreeSet<ServiceReturnViolation>,
 ) {
     for item in items {
@@ -1195,6 +1209,10 @@ fn find_service_returns_in_items(
                 let owner = type_name(&item.self_ty).unwrap_or_else(|| "<impl>".to_string());
                 if !retained_owners.contains(&owner) {
                     continue;
+                }
+                let mut owner_returned_services = returned_services.clone();
+                if let Some(capabilities) = retained_capabilities.get(&owner) {
+                    owner_returned_services.extend(capabilities.iter().cloned());
                 }
                 for impl_item in &item.items {
                     let syn::ImplItem::Fn(method) = impl_item else {
@@ -1212,7 +1230,7 @@ fn find_service_returns_in_items(
                         &method.sig.ident.to_string(),
                         &method.sig.output,
                         method.sig.ident.span(),
-                        returned_services,
+                        &owner_returned_services,
                         violations,
                     );
                 }
@@ -1227,6 +1245,7 @@ fn find_service_returns_in_items(
                         items,
                         retained_owners,
                         returned_services,
+                        retained_capabilities,
                         violations,
                     );
                 }
@@ -2173,16 +2192,18 @@ mod tests {
     }
 
     #[test]
-    fn dependency_values_root_results_and_test_fixtures_are_not_child_service_leaks() {
+    fn retained_owner_cannot_return_its_dependency_capability() {
         let production = syn::parse_file(
             r#"
             struct EncryptionService;
+            struct CloudHome;
             struct Child { encryption: EncryptionService }
             struct Root { child: Child }
             struct Builder;
 
             impl Child {
-                fn derived_encryption(&self) -> EncryptionService { EncryptionService }
+                pub(crate) fn derived_encryption(&self) -> EncryptionService { EncryptionService }
+                pub(crate) fn create_cloud_home(&self) -> CloudHome { CloudHome }
             }
             impl Builder {
                 fn open() -> Root { todo!() }
@@ -2210,10 +2231,12 @@ mod tests {
         let owners = infer_owners(&declared_types);
         let retained_services = collect_root_retained_types(&declared_types, &owners, &["Root"]);
 
-        assert!(
-            find_service_return_violations(&files, &retained_services, &owners, &["Root"])
-                .is_empty()
-        );
+        let violations =
+            find_service_return_violations(&files, &retained_services, &owners, &["Root"]);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].owner, "Child");
+        assert_eq!(violations[0].returned, "EncryptionService");
     }
 
     #[test]

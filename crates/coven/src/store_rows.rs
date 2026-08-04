@@ -79,7 +79,7 @@ impl StoreRows {
             .map_err(map_host_write_error)
     }
 
-    pub(crate) fn routing_encryption(
+    fn routing_encryption(
         &self,
     ) -> Result<Option<crate::encryption::EncryptionService>, crate::database::DbError> {
         self.security

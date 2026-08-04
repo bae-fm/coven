@@ -980,11 +980,39 @@ impl SyncComponents {
         self.store.blob_path_scheme()
     }
 
-    pub(crate) fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
+    fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
         match self.storage.snapshot() {
             crate::storage::CloudCipher::Encrypted(encryption) => Some(encryption),
             crate::storage::CloudCipher::Plaintext => None,
         }
+    }
+
+    pub(crate) fn is_encrypted(&self) -> bool {
+        self.current_encryption().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
+        self.current_encryption()
+            .map(|encryption| encryption.current_generation())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
+        let encryption = self
+            .current_encryption()
+            .ok_or_else(|| "session is not encrypted".to_string())?;
+        let (fingerprint, header, chunks) =
+            crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
+        let plaintext = encryption
+            .blob_opener(header, aad_context)
+            .open_chunks(0..header.chunk_count(), chunks)
+            .map_err(|error| error.to_string())?;
+        Ok((fingerprint, plaintext))
     }
 
     pub(crate) fn self_uploader(&self) -> String {
