@@ -45,53 +45,6 @@ impl CircleBootstrapBlobVerification for CircleCandidatePreparer<'_, '_> {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn signed_circle_commit(
-    store_root_hash: ObjectHash,
-    operation_id: crate::WriteId,
-    coord: StoreCommitCoord,
-    author_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-    author: &crate::protocol::store_commit::StoreDeviceRegistration,
-    order: StoreCommitOrder,
-    membership_state: StoreMembershipStateRef,
-    device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-    membership_authority: StoreOperationMembershipAuthority,
-    circle_reference: crate::protocol::store_commit::CircleControlRef,
-    stream_activations: Vec<StreamActivation>,
-    device_signer: &crate::keys::UserKeypair,
-) -> Result<crate::protocol::store_commit::StoreBatchCommit, CircleOperationError> {
-    crate::protocol::store_commit::StoreBatchCommit::signed_operations(
-        store_root_hash,
-        operation_id,
-        coord,
-        author_registration,
-        author,
-        order,
-        membership_state,
-        device_state,
-        membership_authority,
-        crate::protocol::store_commit::StoreCommitOperationsInput {
-            acknowledgement: None,
-            circle_acknowledgements: Vec::new(),
-            control: None,
-            device_join_attempt_decisions: Vec::new(),
-            device_join_outcomes: Vec::new(),
-            device_join_cleanup_receipts: Vec::new(),
-            provider_access_grants: Vec::new(),
-            device_registrations: Vec::new(),
-            device_exclusion_proposals: Vec::new(),
-            device_exclusion_outcomes: Vec::new(),
-            stream_activations,
-            circle_controls: vec![circle_reference],
-            store_package: None,
-            circle_packages: &[],
-        },
-        device_signer,
-    )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
-}
-
 impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     pub(super) async fn prepare_circle_object(
         &self,

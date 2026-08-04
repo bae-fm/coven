@@ -934,6 +934,7 @@ impl LocalStoreWriter {
         old_commit: &crate::protocol::store_commit::StoreBatchCommit,
         coord: crate::protocol::store_commit::StoreCommitCoord,
         reference: crate::protocol::store_commit::CircleControlRef,
+        stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
     ) -> Result<
         crate::protocol::store_commit::StoreBatchCommit,
         crate::sync::store::circle_controls::CircleOperationError,
@@ -962,7 +963,7 @@ impl LocalStoreWriter {
                     )
                 })?,
             reference,
-            old_commit.stream_activations().to_vec(),
+            stream_activations,
         )
     }
 

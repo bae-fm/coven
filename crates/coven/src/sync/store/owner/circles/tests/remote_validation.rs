@@ -87,15 +87,10 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         },
         bootstrap: None,
     });
-    let database = crate::database::StoreDatabase::new(&db);
-    let author = database
+    let author = crate::database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
-    let device_signer = author
-        .value()
-        .device_signer(&signer)
-        .expect("derive Circle commit device signer");
     let commit_coord = journal.operation().commit_ref.coord.clone();
     let original_control = &old_commit.circle_controls()[0];
     let circle_reference = journal
@@ -103,23 +98,15 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .creation
         .control_ref(objects, Some(original_control.head_object().clone()));
     let stream_activations = old_commit.stream_activations().to_vec();
-    let commit = signed_circle_commit(
-        old_commit.store_root_hash,
-        old_commit.write_id.clone(),
-        commit_coord.clone(),
-        old_commit.author_registration.clone(),
-        author.value(),
-        old_commit.order.clone(),
-        old_commit.membership_state.clone(),
-        old_commit.device_state.clone(),
-        old_commit
-            .operations_membership_authority()
-            .expect("prepared Circle commit carries validated operations"),
-        circle_reference,
-        stream_activations,
-        &device_signer,
-    )
-    .expect("sign commit naming invented access refs");
+    let commit = device
+        .sign_circle_commit(
+            &old_commit,
+            commit_coord.clone(),
+            circle_reference,
+            stream_activations,
+        )
+        .await
+        .expect("sign commit naming invented access refs");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
     let commit_prepared = device
         .prepare_circle_object(
@@ -182,15 +169,14 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("prepare matching retained history for the forged Circle commit");
     let original_head = &journal.operation().policy.head;
-    let forged_head = StoreDeviceHead::signed(
-        commit.store_root_hash,
-        commit.author_registration.clone(),
-        commit_ref.clone(),
-        history.summary.digest(),
-        original_head.successor.clone(),
-        &device_signer,
-    )
-    .expect("sign Store head naming the re-signed commit");
+    let forged_head = device
+        .sign_device_head_for_test(
+            commit_ref.clone(),
+            history.summary.digest(),
+            original_head.successor.clone(),
+        )
+        .await
+        .expect("sign Store head naming the re-signed commit");
     let original_head_object = journal
         .operation()
         .prepared_objects
@@ -295,10 +281,6 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
-    let device_signer = author
-        .value()
-        .device_signer(&founder)
-        .expect("derive Circle commit device signer");
     let mut draft = draft_from_transition(&journal.operation().creation);
     promote_store_member_access_without_adding_to_circle_roster(&mut draft, &founder, &peer);
     let (creation, objects, prepared, control_head_object, stream_activations) = device
@@ -313,23 +295,15 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     }
     let commit_coord = journal.operation().commit_ref.coord.clone();
     let circle_reference = creation.control_ref(objects, control_head_object);
-    let commit = signed_circle_commit(
-        old_commit.store_root_hash,
-        old_commit.write_id.clone(),
-        commit_coord.clone(),
-        old_commit.author_registration.clone(),
-        author.value(),
-        old_commit.order.clone(),
-        old_commit.membership_state.clone(),
-        old_commit.device_state.clone(),
-        old_commit
-            .operations_membership_authority()
-            .expect("prepared Circle commit carries validated operations"),
-        circle_reference,
-        stream_activations,
-        &device_signer,
-    )
-    .expect("sign promoted access commit");
+    let commit = device
+        .sign_circle_commit(
+            &old_commit,
+            commit_coord.clone(),
+            circle_reference,
+            stream_activations,
+        )
+        .await
+        .expect("sign promoted access commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
     let commit_prepared = device
         .prepare_circle_object(
@@ -560,10 +534,6 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
-    let device_signer = author
-        .value()
-        .device_signer(&signer)
-        .expect("derive Circle commit device signer");
     let (creation, objects, prepared, control_head_object, stream_activations) = device
         .prepare_circle_activation_objects(draft, &journal.operation().history, candidate_family)
         .await
@@ -575,23 +545,15 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
             .expect("publish forged exact Circle activation object");
     }
     let circle_reference = creation.control_ref(objects, control_head_object);
-    let commit = signed_circle_commit(
-        store_root_hash,
-        old_commit.write_id.clone(),
-        commit_coord.clone(),
-        old_commit.author_registration.clone(),
-        author.value(),
-        old_commit.order.clone(),
-        old_commit.membership_state.clone(),
-        old_commit.device_state.clone(),
-        old_commit
-            .operations_membership_authority()
-            .expect("prepared Circle commit carries validated operations"),
-        circle_reference,
-        stream_activations,
-        &device_signer,
-    )
-    .expect("sign forged metadata activation commit");
+    let commit = device
+        .sign_circle_commit(
+            &old_commit,
+            commit_coord.clone(),
+            circle_reference,
+            stream_activations,
+        )
+        .await
+        .expect("sign forged metadata activation commit");
     let StoreCommitCoord { stream_id, .. } = commit_coord.clone();
     let commit_prepared = device
         .prepare_circle_object(

@@ -125,9 +125,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     ) -> Result<(), CircleOperationError> {
         let old_commit = journal.commit()?;
         let coord = journal.operation().commit_ref.coord.clone();
-        let mut commit =
-            self.local_writer
-                .sign_circle_commit_for_test(&old_commit, coord.clone(), reference)?;
+        let mut commit = self.local_writer.sign_circle_commit_for_test(
+            &old_commit,
+            coord.clone(),
+            reference,
+            old_commit.stream_activations().to_vec(),
+        )?;
         mutate_commit(&mut commit);
         self.local_writer.resign_store_commit_for_test(&mut commit);
         let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
@@ -212,6 +215,22 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         };
         operation.uploaded.clear();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sign_circle_commit_for_test(
+        &self,
+        old_commit: &crate::protocol::store_commit::StoreBatchCommit,
+        coord: crate::protocol::store_commit::StoreCommitCoord,
+        reference: crate::protocol::store_commit::CircleControlRef,
+        stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
+    ) -> Result<crate::protocol::store_commit::StoreBatchCommit, CircleOperationError> {
+        self.local_writer.sign_circle_commit_for_test(
+            old_commit,
+            coord,
+            reference,
+            stream_activations,
+        )
     }
 
     #[cfg(test)]

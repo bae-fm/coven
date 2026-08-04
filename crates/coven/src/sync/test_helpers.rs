@@ -2691,6 +2691,26 @@ mod test_device {
                 .await
         }
 
+        pub(crate) async fn sign_circle_commit(
+            &self,
+            old_commit: &crate::protocol::store_commit::StoreBatchCommit,
+            coord: crate::protocol::store_commit::StoreCommitCoord,
+            reference: crate::protocol::store_commit::CircleControlRef,
+            stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
+        ) -> Result<
+            crate::protocol::store_commit::StoreBatchCommit,
+            crate::sync::store::CircleOperationError,
+        > {
+            self.store
+                .authorize_writer()
+                .await
+                .map_err(|error| {
+                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
+                })?
+                .circles()
+                .sign_circle_commit_for_test(old_commit, coord, reference, stream_activations)
+        }
+
         pub(crate) async fn rename_circle(
             &self,
             metadata_stamp: &str,
