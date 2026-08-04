@@ -168,7 +168,7 @@ pub(crate) fn finish_outbound_store_ack_on(
 
 pub(crate) fn load_outbound_circle_acks_on(
     conn: &Connection,
-) -> Result<Vec<crate::sync::store::CircleAckActivation>, DbError> {
+) -> Result<Vec<crate::protocol::prepared_commit::CircleAckActivation>, DbError> {
     let authority = local_store_authority_on(conn)?;
     let registration = authority.value();
     let root = &registration.store_root;
@@ -208,7 +208,7 @@ pub(crate) fn load_outbound_circle_acks_on(
             CircleAck::parse_at(&bytes, root, &reference, registration).map_err(|error| {
                 DbError::Message(format!("outbound Circle acknowledgement: {error}"))
             })?;
-        activations.push(crate::sync::store::CircleAckActivation {
+        activations.push(crate::protocol::prepared_commit::CircleAckActivation {
             reference,
             ack: ExactProtocolObject {
                 value,

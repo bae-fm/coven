@@ -84,3 +84,15 @@ impl From<crate::database::DbError> for CircleOperationError {
         }
     }
 }
+
+impl From<crate::protocol::circle_journal::CircleJournalError> for CircleOperationError {
+    fn from(error: crate::protocol::circle_journal::CircleJournalError) -> Self {
+        CircleOperationError::Journal(error.to_string())
+    }
+}
+
+impl From<crate::protocol::circle_activation::CircleStateError> for CircleOperationError {
+    fn from(error: crate::protocol::circle_activation::CircleStateError) -> Self {
+        CircleOperationError::InvalidState(error.to_string())
+    }
+}

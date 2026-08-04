@@ -141,9 +141,10 @@ mod tests {
     use super::*;
 
     use crate::protocol::causal_grants::AuthorStreamId;
+    use crate::protocol::membership::HeldStorePositionReason;
     use crate::protocol::objects::ExactObjectRef;
     use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
-    use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
+    use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 
     fn held(n: usize) -> Vec<HeldStorePosition> {
         (0..n)

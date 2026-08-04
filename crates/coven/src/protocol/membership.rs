@@ -6377,3 +6377,100 @@ mod tests {
         assert!(!verify_membership_entry(&duplicate));
     }
 }
+
+pub(crate) const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalStoreMembership {
+    Current,
+    NotYetMember,
+    Removed,
+    IdentityNotSupplied,
+}
+
+impl LocalStoreMembership {
+    pub(crate) fn from_membership(
+        membership: &MembershipChain,
+        identity: Option<&crate::keys::UserKeypair>,
+    ) -> Result<Self, crate::protocol::membership::MembershipError> {
+        membership.ensure_resolved()?;
+        let Some(identity) = identity else {
+            return Ok(Self::IdentityNotSupplied);
+        };
+        let identity = crate::keys::public_key_hex(identity);
+        if membership
+            .current_members()
+            .iter()
+            .any(|(member, _)| member == &identity)
+        {
+            Ok(Self::Current)
+        } else if membership.contains_member_history(&identity) {
+            Ok(Self::Removed)
+        } else {
+            Ok(Self::NotYetMember)
+        }
+    }
+
+    pub(crate) fn allows_circle_access(self) -> bool {
+        matches!(self, Self::Current)
+    }
+
+    pub(crate) fn retains_circle_rows(self) -> bool {
+        !matches!(self, Self::Removed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldStorePositionReason {
+    MissingCommit,
+    MissingPackage,
+    MissingDeviceRegistration {
+        device_id: String,
+        revision: u64,
+        registration_hash: ObjectHash,
+    },
+    MissingPredecessor(StoreBatchCommitRef),
+    MissingDependency {
+        device_id: String,
+        commit: StoreBatchCommitRef,
+    },
+    NewerSchema {
+        local: u32,
+        required: u32,
+    },
+    Unauthorized,
+    DeviceExclusionFreeze {
+        proposal: super::store_commit::StoreDeviceExclusionProposalRef,
+        target_cut: crate::protocol::store_commit::StoreHistoryCut,
+    },
+    InactiveDevice {
+        terminals: Vec<super::store_commit::StoreDeviceExclusionRef>,
+        accepted_cut: crate::protocol::store_commit::StoreHistoryCut,
+    },
+    InvalidChangeset(String),
+    InvalidRowIdentity {
+        table: String,
+        reason: String,
+    },
+    BlobDownloadFailed,
+    ForeignKeyDependency,
+    ConstraintConflict(Vec<String>),
+    HashMismatch {
+        referenced_device_id: String,
+        referenced_commit: StoreBatchCommitRef,
+        materialized_hash: ObjectHash,
+    },
+    InvalidSignature,
+    WrongSlot(String),
+    ObjectCollision(String),
+    ObjectUnreadable {
+        key: String,
+        detail: String,
+    },
+    InvalidObject(String),
+}
+
+pub(crate) enum ApplyOutcome {
+    Applied(Vec<crate::changeset::RowChange>),
+    Held(HeldStorePositionReason),
+}

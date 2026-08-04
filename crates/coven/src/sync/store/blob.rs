@@ -205,7 +205,7 @@ impl LocalStoreBlobAccess {
                 .await
                 .map_err(|error| asset_upload_error(error.to_string()))?;
             let remove_local = match (deferred.disposition, local) {
-                (crate::sync::cycle::DeferredLocalBlobDisposition::Pin, Some(source)) => {
+                (crate::protocol::blob::DeferredLocalBlobDisposition::Pin, Some(source)) => {
                     self.store_dir
                         .populate_pinned_blob_from_file(
                             &deferred.namespace,
@@ -218,7 +218,7 @@ impl LocalStoreBlobAccess {
                         .map_err(|error| asset_upload_error(error.to_string()))?;
                     true
                 }
-                (crate::sync::cycle::DeferredLocalBlobDisposition::Cache, Some(source)) => {
+                (crate::protocol::blob::DeferredLocalBlobDisposition::Cache, Some(source)) => {
                     self.cache
                         .populate_from_file(
                             &deferred.namespace,
@@ -231,14 +231,14 @@ impl LocalStoreBlobAccess {
                         .map_err(|error| asset_upload_error(error.to_string()))?;
                     true
                 }
-                (crate::sync::cycle::DeferredLocalBlobDisposition::Drop, _) => true,
+                (crate::protocol::blob::DeferredLocalBlobDisposition::Drop, _) => true,
                 (
-                    crate::sync::cycle::DeferredLocalBlobDisposition::Pin
-                    | crate::sync::cycle::DeferredLocalBlobDisposition::Cache,
+                    crate::protocol::blob::DeferredLocalBlobDisposition::Pin
+                    | crate::protocol::blob::DeferredLocalBlobDisposition::Cache,
                     None,
                 ) => {
                     let exact = match deferred.disposition {
-                        crate::sync::cycle::DeferredLocalBlobDisposition::Pin => {
+                        crate::protocol::blob::DeferredLocalBlobDisposition::Pin => {
                             self.store_dir
                                 .pinned_blob_is_exact(
                                     &deferred.namespace,
@@ -248,7 +248,7 @@ impl LocalStoreBlobAccess {
                                 )
                                 .await
                         }
-                        crate::sync::cycle::DeferredLocalBlobDisposition::Cache => {
+                        crate::protocol::blob::DeferredLocalBlobDisposition::Cache => {
                             self.store_dir
                                 .cached_blob_is_exact(
                                     &deferred.namespace,
@@ -258,7 +258,7 @@ impl LocalStoreBlobAccess {
                                 )
                                 .await
                         }
-                        crate::sync::cycle::DeferredLocalBlobDisposition::Drop => unreachable!(),
+                        crate::protocol::blob::DeferredLocalBlobDisposition::Drop => unreachable!(),
                     }
                     .map_err(|error| asset_upload_error(error.to_string()))?;
                     if !exact {

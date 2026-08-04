@@ -54,13 +54,13 @@ use crate::database::{
     required_store_root_authority_on, Database, DbError, OutboundStoreAckActivation,
 };
 use crate::protocol::objects::PreparedExactObject;
+use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
 use crate::protocol::remote_object::{
     remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
 };
 #[cfg(test)]
 use crate::protocol::store_commit::StoreBatchCommitRef;
 use crate::protocol::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
-use crate::sync::PreparedStoreOperationCommit;
 
 const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
 
@@ -82,8 +82,12 @@ pub use host_write_operation::WriteBatch;
 pub(crate) use host_write_operation::{HostWriteError, HostWriteOperation};
 pub(crate) use local_blob_cleanup::LocalBlobCleanup;
 pub(crate) use materialization_models::{
-    OwnedVerifiedMergeMaterialization, RetainedAudiencePackage, RetainedMergeMaterializationKey,
+    activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
+    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
+    OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
+    PreparedMergeMaterializationPackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
     RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+    VerifiedStoreSnapshotStability,
 };
 #[cfg(test)]
 pub(crate) use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};
@@ -213,7 +217,7 @@ impl StoreDatabaseConnection {
 pub(crate) struct StoreDatabase {
     connection: StoreDatabaseConnection,
     runtime: StoreDatabaseRuntime,
-    hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
+    hlc: std::sync::Arc<crate::protocol::hlc::Hlc>,
     synced_tables: std::sync::Arc<Vec<crate::SyncedTable>>,
     schema_version: u32,
     sync_routing_hash: crate::protocol::store_commit::ObjectHash,
@@ -310,7 +314,7 @@ impl StoreDatabase {
         self.blob_decls.clone()
     }
 
-    fn hlc(&self) -> std::sync::Arc<crate::sync::hlc::Hlc> {
+    fn hlc(&self) -> std::sync::Arc<crate::protocol::hlc::Hlc> {
         self.hlc.clone()
     }
 
@@ -320,7 +324,7 @@ impl StoreDatabase {
 
     pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), DbError> {
         self.set_protocol_state(
-            crate::sync::hlc::HIGHWATER_STATE_KEY,
+            crate::protocol::hlc::HIGHWATER_STATE_KEY,
             &self.hlc.high_water().to_string(),
         )
         .await
@@ -518,8 +522,8 @@ impl StoreDatabase {
 
     pub(crate) async fn begin_store_creation_attempt(
         &self,
-        initialized: crate::sync::StoreCreationAttempt,
-    ) -> Result<crate::sync::StoreCreationAttempt, DbError> {
+        initialized: crate::protocol::store_creation::StoreCreationAttempt,
+    ) -> Result<crate::protocol::store_creation::StoreCreationAttempt, DbError> {
         let value = serde_json::to_string(&initialized).map_err(|error| {
             DbError::Message(format!("serialize Store creation attempt: {error}"))
         })?;
@@ -529,12 +533,15 @@ impl StoreDatabase {
                 tx.execute(
                     "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
                      ON CONFLICT(key) DO NOTHING",
-                    (crate::sync::STORE_CREATION_ATTEMPT_STATE_KEY, &value),
+                    (
+                        crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                        &value,
+                    ),
                 )
                 .map_err(DbError::from)?;
                 let actual = crate::database::required_protocol_state_on(
                     &tx,
-                    crate::sync::STORE_CREATION_ATTEMPT_STATE_KEY,
+                    crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?;
                 tx.commit().map_err(DbError::from)?;
                 serde_json::from_str(&actual).map_err(|error| {
@@ -546,12 +553,12 @@ impl StoreDatabase {
 
     pub(crate) async fn load_store_creation_attempt(
         &self,
-    ) -> Result<Option<crate::sync::StoreCreationAttempt>, DbError> {
+    ) -> Result<Option<crate::protocol::store_creation::StoreCreationAttempt>, DbError> {
         self.connection
             .call(move |conn| {
                 crate::database::get_protocol_state_on(
                     conn,
-                    crate::sync::STORE_CREATION_ATTEMPT_STATE_KEY,
+                    crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?
                 .map(|value| {
                     serde_json::from_str(&value).map_err(|error| {
@@ -565,8 +572,8 @@ impl StoreDatabase {
 
     pub(crate) async fn advance_store_creation_attempt(
         &self,
-        previous: crate::sync::StoreCreationAttempt,
-        next: crate::sync::StoreCreationAttempt,
+        previous: crate::protocol::store_creation::StoreCreationAttempt,
+        next: crate::protocol::store_creation::StoreCreationAttempt,
     ) -> Result<(), DbError> {
         let previous = serde_json::to_string(&previous).map_err(|error| {
             DbError::Message(format!("serialize Store creation predecessor: {error}"))
@@ -581,7 +588,7 @@ impl StoreDatabase {
                         "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
                         (
                             &next,
-                            crate::sync::STORE_CREATION_ATTEMPT_STATE_KEY,
+                            crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                             &previous,
                         ),
                     )
@@ -684,7 +691,13 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn circle_bootstrap_replay_inputs(
         &self,
-    ) -> Result<Vec<(StoreBatchCommitRef, crate::sync::VerifiedCircleImage)>, DbError> {
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            crate::protocol::circle_activation::VerifiedCircleImage,
+        )>,
+        DbError,
+    > {
         self.connection
             .call(Self::circle_bootstrap_replay_inputs_on)
             .await

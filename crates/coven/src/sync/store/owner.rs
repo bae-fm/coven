@@ -1477,7 +1477,7 @@ impl Store {
     pub(crate) async fn prepare_acknowledgement_activation_for_test(
         &self,
         acknowledgement: crate::protocol::store_commit::StoreAckRef,
-        candidate: crate::sync::store::operations::PreparedStoreOperationCommit,
+        candidate: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<(), crate::database::DbError> {
         self.database
             .prepare_acknowledgement_activation(acknowledgement, candidate)
@@ -1556,7 +1556,7 @@ impl Store {
         coverage: &crate::protocol::store_commit::StoreHistoryCut,
         attempt_activation: &crate::protocol::store_commit::StoreBatchCommitRef,
         membership_state: &crate::protocol::circle_control::StoreMembershipStateRef,
-    ) -> Result<crate::sync::store::owner::pull::DeviceJoinBootstrapPlan, StoreError> {
+    ) -> Result<crate::database::DeviceJoinBootstrapPlan, StoreError> {
         let mut history = self
             .authorize_history()
             .await

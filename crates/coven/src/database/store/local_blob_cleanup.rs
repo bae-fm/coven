@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     use crate::protocol::blob::{CacheFill, Provenance};
     use crate::protocol::store_commit::ObjectHash;
-    use crate::sync::session::BlobDecl;
+    use crate::protocol::synced_schema::BlobDecl;
     use crate::sync::test_helpers::open_test_db_with_blob;
 
     #[tokio::test]

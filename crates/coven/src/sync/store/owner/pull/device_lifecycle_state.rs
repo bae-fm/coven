@@ -1,40 +1,5 @@
 use super::*;
 
-pub(crate) struct DeviceJoinBootstrapCommit {
-    pub reference: StoreBatchCommitRef,
-    pub commit: VerifiedStoreBatchCommit,
-    pub registrations: Vec<ActivatedStoreDeviceRegistration>,
-    pub device_operations: VerifiedStoreDeviceOperations,
-    pub activation: DeviceJoinBootstrapActivation,
-}
-
-pub(crate) struct DeviceJoinBootstrapActivation {
-    pub(crate) head: StoreDeviceHead,
-    pub(crate) object: ExactObjectRef,
-    pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
-}
-
-pub(crate) struct DeviceJoinBootstrapPlan {
-    pub founder_reference: StoreDeviceRegistrationRef,
-    pub founder: StoreDeviceRegistration,
-    pub founder_bytes: Vec<u8>,
-    pub genesis: ResolvedStoreDeviceState,
-    pub membership: crate::database::InitialStoreMembershipAuthority,
-    pub commits: Vec<DeviceJoinBootstrapCommit>,
-}
-
-impl DeviceJoinBootstrapPlan {
-    pub(crate) fn verified_commit(
-        &self,
-        reference: &StoreBatchCommitRef,
-    ) -> Option<&VerifiedStoreBatchCommit> {
-        self.commits
-            .iter()
-            .find(|commit| &commit.reference == reference)
-            .map(|commit| &commit.commit)
-    }
-}
-
 pub(crate) fn history_cut_references(cut: &StoreHistoryCut) -> Vec<StoreBatchCommitRef> {
     cut.0.values().cloned().collect()
 }

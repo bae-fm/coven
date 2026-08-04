@@ -1,6 +1,6 @@
 use super::*;
+use crate::protocol::circle_activation::VerifiedStreamActivations;
 use crate::protocol::store_commit::StreamActivationId;
-use crate::sync::store::VerifiedStreamActivations;
 use rusqlite::{Connection, OptionalExtension};
 
 impl StoreDatabase {

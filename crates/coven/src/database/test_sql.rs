@@ -1200,7 +1200,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn insert_published_blob_drop_intent(
         &self,
         seq: u64,
-        drop: &crate::sync::cycle::DeferredLocalBlobDrop,
+        drop: &crate::protocol::blob::DeferredLocalBlobDrop,
     ) -> Result<(), DbError> {
         self.connection
             .execute(
@@ -1285,7 +1285,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn circle_current_state(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::sync::store::CircleCurrentState>, DbError> {
+    ) -> Result<Option<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
         crate::database::StoreDatabase::circle_current_state_on(self.connection, circle_id)
     }
 
@@ -1635,7 +1635,7 @@ impl DatabaseTestSql<'_> {
     ) -> Result<
         Vec<(
             crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::sync::VerifiedCircleImage,
+            crate::protocol::circle_activation::VerifiedCircleImage,
         )>,
         DbError,
     > {
@@ -1661,7 +1661,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn record_verified_circle_activations(
         &self,
         commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        activations: &[crate::sync::VerifiedCircleReference],
+        activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         let transaction = self
             .connection
@@ -1675,7 +1675,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn apply_changeset(
         &self,
         bytes: &[u8],
-        tables: &[crate::sync::session::SyncedTable],
+        tables: &[crate::protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<crate::database::ApplyResult, DbError> {
         crate::database::resolve_and_apply_changeset(
@@ -1689,7 +1689,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn apply_changesets_atomically(
         &self,
         changesets: Vec<Vec<u8>>,
-        tables: &[crate::sync::session::SyncedTable],
+        tables: &[crate::protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<(Vec<crate::database::ApplyResult>, bool), DbError> {
         let schema = std::sync::Arc::new(crate::database::TableSchema::from_db(

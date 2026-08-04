@@ -2,14 +2,23 @@ pub(crate) mod audience_package;
 pub(crate) mod blob;
 pub(crate) mod causal_grants;
 pub(crate) mod circle;
+pub(crate) mod circle_activation;
 pub(crate) mod circle_control;
+pub(crate) mod circle_journal;
 pub(crate) mod circle_roster;
+pub(crate) mod device_exclusion_journal;
+pub(crate) mod hlc;
 pub(crate) mod membership;
+pub(crate) mod membership_mutation;
 pub(crate) mod objects;
+pub(crate) mod owner_promotion_journal;
+pub(crate) mod prepared_commit;
 pub(crate) mod provider;
 pub(crate) mod reclaim;
 pub(crate) mod remote_object;
 pub(crate) mod store_commit;
+pub(crate) mod store_creation;
+pub(crate) mod synced_schema;
 pub(crate) mod wrapped_store_key;
 
 pub use objects::{

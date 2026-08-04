@@ -72,6 +72,7 @@ use crate::protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::protocol::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::protocol::circle::Audience;
+use crate::protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
 };
@@ -86,8 +87,7 @@ use crate::protocol::store_commit::{
     StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
     StoreSnapshotRef,
 };
-use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
-use crate::sync::session::SyncedTable;
+use crate::protocol::synced_schema::SyncedTable;
 use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -154,6 +154,7 @@ pub(crate) use test_transaction::DatabaseTestTransaction;
 mod write_lifecycle;
 mod write_models;
 
+pub(crate) use crate::protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
 #[cfg(test)]
 pub(crate) use blob_declarations::{from_tables_call_count, reset_from_tables_call_count};
 pub(crate) use blob_declarations::{BlobDeclError, BlobDecls, PublicationBlob};
@@ -214,6 +215,12 @@ pub(crate) use schema_introspection::{
     CreateTableSchemaError, ForeignKeyEdge, ForeignKeySchemaError,
 };
 pub(crate) use store::{
+    activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
+    DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
+    PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
+    VerifiedStoreSnapshotStability,
+};
+pub(crate) use store::{
     copy_table_with_conflicts, install_circle_bootstrap_image_on,
     install_circle_bootstrap_remote_objects_on, projection_table_names,
     verify_circle_bootstrap_image, BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot,
@@ -249,12 +256,12 @@ pub(crate) use store_authority_records::{
 };
 pub(crate) use write_models::{
     AuthorExclusionActivationLocator, BlockedMergeCandidate, CompletePreparedStoreWriteOutcome,
-    ExactProtocolObject, InitialStoreMembershipAuthority, MergeAbandonmentState,
-    MergeReplayWriteOverlay, OutboundStoreAck, OutboundStoreAckActivation,
-    PreparedMergeAbandonmentCandidates, PreparedProtocolObject, PreparedStoreWrite,
-    PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase,
-    StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob,
-    StoreWriteRouting, TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
+    InitialStoreMembershipAuthority, MergeAbandonmentState, MergeReplayWriteOverlay,
+    OutboundStoreAck, OutboundStoreAckActivation, PreparedMergeAbandonmentCandidates,
+    PreparedStoreWrite, PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck,
+    StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination,
+    StoreWriteRemoteBlob, StoreWriteRouting, TerminalCandidateAuthority,
+    TerminalCandidateCleanupVerification,
 };
 
 pub(crate) const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
@@ -640,7 +647,7 @@ struct DatabaseCore {
 pub(crate) enum StagedCircleDecision {
     Install {
         activation_commit: StoreBatchCommitRef,
-        image: crate::sync::store::VerifiedCircleImage,
+        image: crate::protocol::circle_activation::VerifiedCircleImage,
     },
     ClearCoverage(crate::protocol::circle::CircleId),
 }
@@ -665,7 +672,7 @@ impl VerifiedSnapshotBootstrapInstall {
         snapshot: PublishedStoreSnapshot,
         store_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
         founder: crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        stability: crate::sync::store::VerifiedStoreSnapshotStability,
+        stability: crate::database::VerifiedStoreSnapshotStability,
         membership: InitialStoreMembershipAuthority,
         routing_encryption: Option<&EncryptionService>,
         circle_decisions: Vec<StagedCircleDecision>,
@@ -779,7 +786,7 @@ impl VerifiedSnapshotBootstrapInstall {
         )?;
         crate::database::set_protocol_state_on(
             conn,
-            crate::sync::store::OWNER_PUBKEY_STATE_KEY,
+            crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
             &self.store_root.value.descriptor.founder_pubkey,
         )?;
         self.membership.install_on(conn)?;

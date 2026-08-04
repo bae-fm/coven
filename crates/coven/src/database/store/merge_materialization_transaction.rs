@@ -42,8 +42,11 @@ use crate::database::{
     DurableStoreReclaimOperation, OwnedVerifiedMergeMaterialization, ReclaimedStorePackage,
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
+use crate::database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::blob::locator::RemoteAudience;
+use crate::protocol::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
+use crate::protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
 use crate::protocol::store_commit::{
@@ -52,16 +55,12 @@ use crate::protocol::store_commit::{
     StoreDeviceProposalState, StoreDeviceRegistrationRef, StoreHistoryCut,
     VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
-use crate::sync::{
-    ApplyOutcome, HeldStorePositionReason, LocalStoreMembership, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage, SyncedTable, VerifiedCircleActivations,
-    VerifiedStreamActivations,
-};
+use crate::protocol::synced_schema::SyncedTable;
 use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 
 pub(crate) struct AppliedMergeMaterialization {
     pub(crate) outcome: ApplyOutcome,
-    pub(crate) max_updated_at: Option<crate::sync::hlc::Timestamp>,
+    pub(crate) max_updated_at: Option<crate::protocol::hlc::Timestamp>,
     pub(crate) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
     pub(crate) retained: Option<crate::database::OwnedVerifiedMergeMaterialization>,
 }
@@ -87,7 +86,7 @@ impl MergeSubsetOutcome {
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
-/// as an HLC [`crate::sync::hlc::Timestamp`]. A row whose `_updated_at` fails to
+/// as an HLC [`crate::protocol::hlc::Timestamp`]. A row whose `_updated_at` fails to
 /// parse is logged and skipped — it must not panic the pull or silently default
 /// the clock.
 ///
@@ -95,13 +94,13 @@ impl MergeSubsetOutcome {
 /// advance is deliberately uncapped (it trusts a value already written to disk).
 /// So the bound lives here, at the point a stamp is *collected*: a grossly-future
 /// stamp — beyond `receiver_wall_ms` +
-/// [`crate::sync::hlc::MAX_FUTURE_SKEW_MS`] — is logged and skipped, so it can
+/// [`crate::protocol::hlc::MAX_FUTURE_SKEW_MS`] — is logged and skipped, so it can
 /// never ratchet the clock. A conflicting row with such a stamp was already
 /// refused by the apply, but a *non-conflicting* INSERT (no local row to conflict
 /// with) reaches here as an applied row, so this is the gate that stops it from
 /// dragging the clock forward.
 fn advance_max_updated_at(
-    max: &mut Option<crate::sync::hlc::Timestamp>,
+    max: &mut Option<crate::protocol::hlc::Timestamp>,
     changes: &[RowChange],
     schema: &TableSchema,
     receiver_wall_ms: u64,
@@ -129,7 +128,7 @@ fn advance_max_updated_at(
             );
             continue;
         };
-        match crate::sync::hlc::Timestamp::parse(raw) {
+        match crate::protocol::hlc::Timestamp::parse(raw) {
             Some(ts) if !ts.is_within_future_bound(receiver_wall_ms) => warn!(
                 table = %change.table,
                 value = raw,
@@ -546,11 +545,11 @@ impl MergeMaterializationTransaction<'_, '_> {
 
     pub(crate) fn complete_membership_journal(
         &self,
-        completion: crate::sync::StoreMembershipJournalCompletion,
+        completion: crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
         candidate: &StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         match completion {
-            crate::sync::StoreMembershipJournalCompletion::Mutation {
+            crate::protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                 intent_hash,
                 progress_bytes,
                 remote_objects,
@@ -565,7 +564,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 progress_bytes,
                 crate::database::MembershipMutationActivation::WithoutRotation,
             ),
-            crate::sync::StoreMembershipJournalCompletion::RotationMutation {
+            crate::protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
                 intent_hash,
                 progress_bytes,
                 generation,
@@ -581,7 +580,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                 progress_bytes,
                 crate::database::MembershipMutationActivation::Rotation { generation },
             ),
-            crate::sync::StoreMembershipJournalCompletion::OwnerPromotion {
+            crate::protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                 transition,
                 remote_objects,
             } => {
@@ -1240,7 +1239,7 @@ impl MergeMaterializationTransaction<'_, '_> {
     pub(crate) fn record_verified_circle_activations(
         &self,
         verified_commit: &VerifiedStoreBatchCommit,
-        activations: &[crate::sync::VerifiedCircleReference],
+        activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         let conn = self.transaction;
         let commit = verified_commit.value();
@@ -1326,7 +1325,7 @@ impl MergeMaterializationTransaction<'_, '_> {
                     )));
                 }
             }
-            let next_state = crate::sync::CircleCurrentState::from_verified(
+            let next_state = crate::protocol::circle_activation::CircleCurrentState::from_verified(
                 commit.candidate_family(),
                 activation,
             )
@@ -1441,7 +1440,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         bytes: Vec<u8>,
         package_audience: Option<&crate::protocol::circle::Audience>,
         timestamp_policy: IncomingTimestampPolicy,
-        changeset_max: &mut Option<crate::sync::hlc::Timestamp>,
+        changeset_max: &mut Option<crate::protocol::hlc::Timestamp>,
         returned_changes: &mut Vec<RowChange>,
         package_reported_fk_violation: &mut bool,
     ) -> Result<MergeSubsetOutcome, DbError> {
@@ -1504,7 +1503,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         changeset: &ValidatedChangeset<Vec<u8>>,
         store_audience_transitions: &crate::database::StoreAudienceTransitions,
         timestamp_policy: IncomingTimestampPolicy,
-        changeset_max: &mut Option<crate::sync::hlc::Timestamp>,
+        changeset_max: &mut Option<crate::protocol::hlc::Timestamp>,
         returned_changes: &mut Vec<RowChange>,
         package_reported_fk_violation: &mut bool,
     ) -> Result<MergeSubsetOutcome, DbError> {

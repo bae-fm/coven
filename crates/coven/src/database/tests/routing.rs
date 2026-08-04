@@ -57,10 +57,11 @@ async fn capture_scoped_write_then_reopen(
 ) {
     let temp = tempfile::tempdir().expect("temporary scoped Store");
     let path = temp.path().join(format!("{name}.db"));
-    let tables = vec![
-        SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
-            .scoped_by("audience"),
-    ];
+    let tables = vec![SyncedTable::new(
+        "accounts",
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )
+    .scoped_by("audience")];
     let migrations = vec![Migration::sql(
         1,
         "accounts",
@@ -299,10 +300,11 @@ async fn merge_local_only_scoped_write_is_not_pending() {
 /// nothing.
 #[tokio::test]
 async fn circle_only_write_emits_a_mirror_only_store_package() {
-    let tables = vec![
-        SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
-            .scoped_by("audience"),
-    ];
+    let tables = vec![SyncedTable::new(
+        "accounts",
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )
+    .scoped_by("audience")];
     let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
@@ -424,10 +426,11 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
 
 #[tokio::test]
 async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
-    let tables = vec![
-        SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
-            .scoped_by("audience"),
-    ];
+    let tables = vec![SyncedTable::new(
+        "accounts",
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )
+    .scoped_by("audience")];
     let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
@@ -547,12 +550,21 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
 #[tokio::test]
 async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
     let tables = vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
-            .scoped_by("audience"),
-        SyncedTable::new("categories", crate::sync::session::RowIdentity::SharedKey)
-            .scoped_by("audience"),
-        SyncedTable::new("comments", crate::sync::session::RowIdentity::SharedKey)
-            .inherits_audience_through("note_id"),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .scoped_by("audience"),
+        SyncedTable::new(
+            "categories",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .scoped_by("audience"),
+        SyncedTable::new(
+            "comments",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .inherits_audience_through("note_id"),
     ];
     let db = Database::open(
         Path::new(":memory:"),

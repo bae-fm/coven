@@ -20,9 +20,9 @@ use crate::database::{
     TerminalCandidateCleanupVerification,
 };
 use crate::protocol::circle::{CircleAccessDisposition, CircleOperationId};
+use crate::protocol::circle_journal::{CircleOperationJournal, PreparedCircleOperation};
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::remote_object_id;
-use crate::sync::{CircleOperationJournal, PreparedCircleOperation};
 use rusqlite::Connection;
 
 /// The candidate a Circle operation would activate, plus the shared bootstrap

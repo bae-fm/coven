@@ -90,7 +90,7 @@
 //! The types below ([`BlobRef`], [`BlobScope`], [`Provenance`],
 //! [`CacheFill`], [`BlobTransitionObserver`]) are the vocabulary both halves and
 //! the host speak. Which rows carry blobs is not a runtime callback but a per-table
-//! declaration ([`crate::sync::session::BlobDecl`]) coven resolves into a
+//! declaration ([`crate::protocol::synced_schema::BlobDecl`]) coven resolves into a
 //! [`crate::database::BlobDecls`] each cycle to derive the blob set itself.
 //!
 //! coven also owns the two locality transitions ([`transition`]): `make_remote`
@@ -335,7 +335,7 @@ pub(crate) fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
 /// A blob a row references: its cloud identity, encryption scope, and the two
 /// declared properties ([`provenance`](BlobRef::provenance) +
 /// [`fill`](BlobRef::fill)). coven derives it from the row's declared columns
-/// ([`crate::sync::session::BlobDecl`]) via [`crate::database::BlobDecls`]. Where its bytes
+/// ([`crate::protocol::synced_schema::BlobDecl`]) via [`crate::database::BlobDecls`]. Where its bytes
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
@@ -973,4 +973,44 @@ impl std::error::Error for UploadFailures {
             _ => None,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeferredLocalBlobDisposition {
+    Drop,
+    Cache,
+    Pin,
+}
+
+impl DeferredLocalBlobDisposition {
+    pub(crate) fn as_db(self) -> &'static str {
+        match self {
+            Self::Drop => "drop",
+            Self::Cache => "cache",
+            Self::Pin => "pin",
+        }
+    }
+
+    pub(crate) fn from_db(raw: &str) -> Result<Self, String> {
+        match raw {
+            "drop" => Ok(Self::Drop),
+            "cache" => Ok(Self::Cache),
+            "pin" => Ok(Self::Pin),
+            other => Err(format!(
+                "unknown disposition in published blob drop intent: {other}"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeferredLocalBlobDrop {
+    pub namespace: String,
+    pub id: String,
+    pub size: u64,
+    pub plaintext_hash: crate::protocol::store_commit::ObjectHash,
+    pub locator_hash: crate::protocol::store_commit::ObjectHash,
+    pub disposition: DeferredLocalBlobDisposition,
 }

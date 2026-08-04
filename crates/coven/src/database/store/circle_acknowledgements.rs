@@ -2,11 +2,11 @@ use crate::database::*;
 use crate::protocol::circle::{
     CircleBootstrapCoverageRef, CircleControlCoord, CircleEpochId, CircleId,
 };
+use crate::protocol::circle_activation::CircleCurrentState;
 use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::store_commit::{
     CircleAck, CircleAckRef, CommitFrontier, StoreDeviceId, StoreDeviceStatus, StoreHistoryCut,
 };
-use crate::sync::CircleCurrentState;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,7 +20,7 @@ pub(crate) struct CircleAckPublicationInput {
     pub circle_id: CircleId,
     pub control: CircleControlCoord,
     pub epoch_id: CircleEpochId,
-    pub access: crate::sync::CircleEpochAccess,
+    pub access: crate::protocol::circle_activation::CircleEpochAccess,
     pub seeded_from: Option<CircleBootstrapCoverageRef>,
 }
 

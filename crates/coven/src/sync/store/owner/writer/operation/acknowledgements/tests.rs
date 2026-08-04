@@ -54,7 +54,7 @@ struct LosingAckFixture {
     db: Database,
     device: TestDevice,
     outbound: crate::database::OutboundStoreAck,
-    losing: crate::sync::store::operations::PreparedStoreOperationCommit,
+    losing: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
 }
 
 impl LosingAckFixture {

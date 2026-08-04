@@ -4,6 +4,7 @@
 //! pulls and applies them through a real [`crate::database::Database`], exercising
 //! the real `pull_changes` + blob plumbing.
 
+use crate::protocol::membership::HeldStorePositionReason;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -13,23 +14,21 @@ use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::protocol::blob::{CacheFill, Provenance};
+use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::protocol::store_commit::StoreDeviceHead;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
-use crate::sync::store::{
-    HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
-};
+use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition, StorePullError};
 use crate::Migration;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
 use crate::protocol::objects::ProtocolObjectDomain;
+use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::storage::SyncStorage;
-use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::test_helpers::*;
 
 fn exact_cache_path(
@@ -575,7 +574,7 @@ fn unique_note_db() -> crate::database::Database {
     open_test_db_schema(
         vec![SyncedTable::new(
             "unique_notes",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         vec![Migration::run(1, "unique-note-schema", |conn| {
             conn.execute_batch(
@@ -596,7 +595,7 @@ fn uuid_note_db() -> crate::database::Database {
     open_test_db_schema(
         vec![SyncedTable::new(
             "uuid_notes",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )],
         vec![Migration::run(1, "uuid-note-schema", |conn| {
             conn.execute_batch(
@@ -616,11 +615,11 @@ fn mixed_constraint_db() -> crate::database::Database {
         vec![
             SyncedTable::new(
                 "constraint_parents",
-                crate::sync::session::RowIdentity::SharedKey,
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
             ),
             SyncedTable::new(
                 "constraint_items",
-                crate::sync::session::RowIdentity::SharedKey,
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
             ),
         ],
         vec![Migration::run(1, "mixed-constraint-schema", |conn| {
@@ -3705,11 +3704,14 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
 fn open_scoped_circle_test_db() -> crate::database::Database {
     open_test_db_schema(
         vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
-                .scoped_by("audience"),
+            SyncedTable::new(
+                "notes",
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            )
+            .scoped_by("audience"),
             SyncedTable::new(
                 "comments",
-                crate::sync::session::RowIdentity::IndependentUuid,
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .inherits_audience_through("note_id"),
         ],
@@ -3917,16 +3919,19 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
 fn scoped_fk_circle_db() -> crate::database::Database {
     open_test_db_schema(
         vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
-                .scoped_by("audience"),
+            SyncedTable::new(
+                "notes",
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            )
+            .scoped_by("audience"),
             SyncedTable::new(
                 "categories",
-                crate::sync::session::RowIdentity::IndependentUuid,
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "comments",
-                crate::sync::session::RowIdentity::IndependentUuid,
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .inherits_audience_through("note_id"),
         ],

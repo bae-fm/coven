@@ -9,13 +9,13 @@ use crate::database::{
     DbError, COVEN_INITIALIZED_STATE_KEY, COVEN_SCHEMA_MANIFEST_STATE_KEY,
     STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY, SYNC_ROUTING_HASH_STATE_KEY,
 };
+use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::protocol::store_commit::{
     CommitFrontier, ObjectHash, ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedActivatedAck, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
     VerifiedStoreBatchCommit,
 };
-use crate::sync::OWNER_PUBKEY_STATE_KEY;
 
 pub(crate) const GENERATION_ZERO: u64 = 0;
 

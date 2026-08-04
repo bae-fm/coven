@@ -27,23 +27,13 @@ pub use blob::{BlobCacheError, BlobStream};
 pub(crate) use circle_controls::CircleOperationError;
 #[cfg(test)]
 pub(crate) use circle_controls::CircleTransitionHistory;
-pub(crate) use circle_controls::{
-    CircleAuthoringState, CircleCurrentState, CircleEpochAccess, CircleOperationIntent,
-    CircleOperationJournal, LocalCircleExclusion, PreparedCircleOperation,
-    VerifiedCircleActivations, VerifiedCircleImage, VerifiedCircleReference,
-    VerifiedStreamActivations,
-};
 #[cfg(test)]
 pub(crate) use circle_controls::{VerifiedCircleAccess, VerifiedCircleActive};
 pub(crate) use error::StoreError;
 pub(crate) use error::StorePreparationError;
 #[cfg(test)]
 pub(crate) use membership::AnchoredChainError;
-pub(crate) use membership::{InviteError, MembershipOpsError, OWNER_PUBKEY_STATE_KEY};
-pub(crate) use owner::device_exclusion::{
-    DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
-    StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
-};
+pub(crate) use membership::{InviteError, MembershipOpsError};
 #[cfg(test)]
 pub(crate) use owner::device_exclusion::{
     StoreDeviceExclusionError, StoreDeviceExclusionOperationInfo, StoreDeviceExclusionResult,
@@ -77,20 +67,11 @@ pub(crate) use owner::device_join_transport::{
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
 #[cfg(test)]
 pub(crate) use owner::history::{ExcludedCandidateHeadObservation, MergeCandidateAbandonment};
-pub(crate) use owner::operations::{
-    CircleAckActivation, PreparedStoreOperationCommit, StoreMembershipJournalCompletion,
-};
 #[cfg(test)]
 pub(crate) use owner::operations::{StoreOperationBatch, StoreOperationCommitPlan};
 #[cfg(test)]
 pub(crate) use owner::owner_promotion::OwnerPromotionError;
-pub(crate) use owner::owner_promotion::{OwnerPromotionJournal, OwnerPromotionJournalTransition};
-pub(crate) use owner::pull::VerifiedStoreSnapshotStability;
-pub(crate) use owner::pull::{
-    activated_merge_membership_remote_objects, ApplyOutcome, DeviceJoinBootstrapPlan,
-    HeldStorePositionReason, LocalStoreMembership, MembershipAuthorityBytes,
-    PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
-};
+
 #[cfg(test)]
 pub(crate) use owner::pull::{
     HeldStoreCoordinate, LoadedCirclePackage, Readiness, StorePullMembershipError,
@@ -116,4 +97,3 @@ pub(crate) use owner::{
     PreparedMergeHistorySuccessor, StoreRestoreMembership, VerifiedMergeMembershipPrefix,
 };
 pub(crate) use owner::{RestoringStore, StoreRegistrationError};
-pub(crate) use protocol_root::{StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY};

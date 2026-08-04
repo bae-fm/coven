@@ -5,22 +5,22 @@ use crate::database::{
     install_store_founder_state_on, required_store_root_authority_on, DbError,
     VerifiedMergeMaterialization,
 };
+use crate::protocol::circle_activation::VerifiedCircleActivations;
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
-use crate::sync::VerifiedCircleActivations;
 
 impl StoreDatabase {
     pub(crate) async fn apply_received_merge_materialization(
         &self,
-        materialization: crate::sync::PreparedMergeMaterialization,
+        materialization: crate::database::PreparedMergeMaterialization,
         retractions: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
-        local_store_membership: crate::sync::LocalStoreMembership,
+        local_store_membership: crate::protocol::membership::LocalStoreMembership,
         routing_key: Option<crate::protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<crate::sync::ApplyOutcome, DbError> {
+    ) -> Result<crate::protocol::membership::ApplyOutcome, DbError> {
         let root = materialization.root.clone();
         let blob_decls = self.blob_decls();
         let gates = self.gates();
@@ -79,7 +79,7 @@ impl StoreDatabase {
                     )?;
                 if matches!(
                     applied.outcome,
-                    crate::sync::ApplyOutcome::Applied(_)
+                    crate::protocol::membership::ApplyOutcome::Applied(_)
                 ) {
                     let mut transaction_cache = retained_cache.clone();
                     let retained = applied.retained.take().ok_or_else(|| {
@@ -222,7 +222,7 @@ impl StoreDatabase {
                                 &intent,
                             )?;
                         }
-                        if let crate::sync::ApplyOutcome::Applied(rows) =
+                        if let crate::protocol::membership::ApplyOutcome::Applied(rows) =
                             &mut applied.outcome
                         {
                             rows.extend(new_projection);
@@ -256,7 +256,9 @@ impl StoreDatabase {
         history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
         operation_object_ids: Option<Vec<crate::protocol::store_commit::ObjectHash>>,
-        membership_completion: Option<crate::sync::StoreMembershipJournalCompletion>,
+        membership_completion: Option<
+            crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
         self.connection
@@ -364,7 +366,7 @@ impl StoreDatabase {
     pub(crate) async fn install_device_join_bootstrap(
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
-        plan: crate::sync::DeviceJoinBootstrapPlan,
+        plan: crate::database::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -384,7 +386,7 @@ impl StoreDatabase {
             )?;
             crate::database::set_protocol_state_on(
                 &tx,
-                crate::sync::OWNER_PUBKEY_STATE_KEY,
+                crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
                 &plan.founder.author_pubkey,
             )?;
             plan.membership.install_on(&tx)?;

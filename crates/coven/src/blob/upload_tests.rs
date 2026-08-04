@@ -13,6 +13,7 @@ use crate::keys::UserKeypair;
 use crate::protocol::blob::DrainOutcome;
 use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::protocol::objects::ObjectSlot;
+use crate::protocol::synced_schema::BlobDecl;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
@@ -21,7 +22,6 @@ use crate::storage::cloud::{
 };
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreDir;
-use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 
 const T0: &str = "2024-06-01T00:00:00Z";

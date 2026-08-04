@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::store_commit::StoreDeviceHead;
 use crate::protocol::store_commit::StorePackageInput;
 use crate::protocol::store_commit::SuccessorLink;
 use crate::protocol::store_commit::{commit_semantic_prefix, package_semantic_prefix};

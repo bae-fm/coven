@@ -15,7 +15,7 @@ pub(super) fn live_blob_row(
     conn: &Connection,
     table: &str,
     row_id: &str,
-    declaration: &crate::sync::session::BlobDecl,
+    declaration: &crate::protocol::synced_schema::BlobDecl,
 ) -> Result<Option<LiveBlobRow>, DbError> {
     let cloud_path = declaration
         .cloud_path_column
@@ -70,7 +70,7 @@ pub(super) fn live_blob_row(
 
 pub(super) fn validate_live_blob_row(
     binding: &RowBlobLocatorBinding,
-    declaration: &crate::sync::session::BlobDecl,
+    declaration: &crate::protocol::synced_schema::BlobDecl,
     row: &LiveBlobRow,
     live_audience: &RemoteAudience,
 ) -> Result<(), DbError> {
@@ -93,7 +93,7 @@ pub(super) fn validate_live_blob_locator(
     column: &str,
     row_stamp: &str,
     stored: &StoredBlobRef,
-    declaration: &crate::sync::session::BlobDecl,
+    declaration: &crate::protocol::synced_schema::BlobDecl,
     row: &LiveBlobRow,
     live_audience: &RemoteAudience,
 ) -> Result<(), DbError> {

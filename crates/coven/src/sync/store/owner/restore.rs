@@ -33,18 +33,18 @@ pub(crate) struct RestoringStore<'storage> {
 
 enum RecoveryProtocolObject<T, R> {
     Existing {
-        exact: crate::database::ExactProtocolObject<T>,
+        exact: crate::protocol::objects::ExactProtocolObject<T>,
         reference: R,
     },
     Prepared {
-        exact: crate::database::ExactProtocolObject<T>,
+        exact: crate::protocol::objects::ExactProtocolObject<T>,
         reference: R,
     },
 }
 
 impl<T, R> RecoveryProtocolObject<T, R> {
     fn from_remote_state(
-        exact: crate::database::ExactProtocolObject<T>,
+        exact: crate::protocol::objects::ExactProtocolObject<T>,
         reference: R,
         exists: bool,
     ) -> Self {
@@ -55,7 +55,7 @@ impl<T, R> RecoveryProtocolObject<T, R> {
         }
     }
 
-    fn exact(&self) -> &crate::database::ExactProtocolObject<T> {
+    fn exact(&self) -> &crate::protocol::objects::ExactProtocolObject<T> {
         match self {
             Self::Existing { exact, .. } | Self::Prepared { exact, .. } => exact,
         }
@@ -74,7 +74,7 @@ impl<T, R> RecoveryProtocolObject<T, R> {
         }
     }
 
-    fn into_exact(self) -> crate::database::ExactProtocolObject<T> {
+    fn into_exact(self) -> crate::protocol::objects::ExactProtocolObject<T> {
         match self {
             Self::Existing { exact, .. } | Self::Prepared { exact, .. } => exact,
         }
@@ -122,7 +122,7 @@ impl<'storage> RestoringStore<'storage> {
                 );
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
-                    exact: crate::database::ExactProtocolObject {
+                    exact: crate::protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes,
                         object,
@@ -143,7 +143,7 @@ impl<'storage> RestoringStore<'storage> {
                 );
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
-                    exact: crate::database::ExactProtocolObject {
+                    exact: crate::protocol::objects::ExactProtocolObject {
                         value: expected,
                         bytes,
                         object,
@@ -234,7 +234,7 @@ impl<'storage> RestoringStore<'storage> {
                 }
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
-                    exact: crate::database::ExactProtocolObject {
+                    exact: crate::protocol::objects::ExactProtocolObject {
                         value: ack,
                         bytes,
                         object,
@@ -286,7 +286,7 @@ impl<'storage> RestoringStore<'storage> {
                 };
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
-                    exact: crate::database::ExactProtocolObject {
+                    exact: crate::protocol::objects::ExactProtocolObject {
                         value: ack,
                         bytes,
                         object,
@@ -354,7 +354,7 @@ impl<'storage> RestoringStore<'storage> {
                 }
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
-                    exact: crate::database::ExactProtocolObject {
+                    exact: crate::protocol::objects::ExactProtocolObject {
                         value: node,
                         bytes,
                         object,
@@ -404,7 +404,7 @@ impl<'storage> RestoringStore<'storage> {
                 };
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
-                    exact: crate::database::ExactProtocolObject {
+                    exact: crate::protocol::objects::ExactProtocolObject {
                         value: node,
                         bytes,
                         object,
@@ -538,14 +538,14 @@ impl<'storage> RestoringStore<'storage> {
         }
         let already_activated = database
             .stage_owner_recovery_registration(
-                crate::database::ExactProtocolObject {
+                crate::protocol::objects::ExactProtocolObject {
                     value: registration.value().clone(),
                     bytes: registration_bytes,
                     object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 initial_ack_ref,
-                crate::database::ExactProtocolObject {
+                crate::protocol::objects::ExactProtocolObject {
                     value: initial_ack.value,
                     bytes: initial_ack_bytes,
                     object: initial_ack_prepared.reference().clone(),
@@ -723,7 +723,7 @@ impl<'storage> RestoringStore<'storage> {
             let registration_object = durable.prepared.reference().clone();
             PreparedRecoveryReadiness {
                 registration: RecoveryProtocolObject::from_remote_state(
-                    crate::database::ExactProtocolObject {
+                    crate::protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes: durable.registration_bytes,
                         object: registration_object,
@@ -1156,7 +1156,7 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn install_device_join_bootstrap_for_test(
         &self,
-        plan: crate::sync::DeviceJoinBootstrapPlan,
+        plan: crate::database::DeviceJoinBootstrapPlan,
     ) -> Result<(), crate::database::DbError> {
         self.database
             .install_device_join_bootstrap(self.root.clone(), plan)
@@ -1259,7 +1259,7 @@ impl<'storage> RestoringStore<'storage> {
     ) -> Result<
         Vec<(
             crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::sync::VerifiedCircleImage,
+            crate::protocol::circle_activation::VerifiedCircleImage,
         )>,
         crate::database::DbError,
     > {

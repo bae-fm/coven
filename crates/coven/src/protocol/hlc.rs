@@ -1,27 +1,6 @@
-/// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
-///
-/// This clock is coven's `_updated_at` register: hosts stamp every synced
-/// row's `_updated_at` with [`crate::SqlContext::stamp`], and pull records every
-/// applied row's `_updated_at` as a floor so a subsequent local write sorts causally
-/// after anything just pulled. The row arbiter (`conflict.rs`) picks a conflict
-/// winner by comparing these strings, whose order is lexicographic. Because the
-/// clock never mints a
-/// stamp behind a value it has already seen — even under wall-clock skew or a
-/// same-millisecond restart — a device that edits a row right after pulling a
-/// peer's edit always wins, which a plain wall clock cannot guarantee.
-///
-/// `_updated_at` is opaque to the host: it binds the string coven hands it and
-/// never parses it. Format (coven-internal): `{millis:013}-{counter:04}-{device_id}`.
-///
-/// The in-memory monotonic state is seeded on construction ([`Hlc::seed`]) so
-/// it cannot regress across restarts. The seed floor is the max of two sources:
-/// the persisted high-water mark ([`Hlc::high_water`], flushed at cycle end) and
-/// the max `_updated_at` coven scans across the synced tables in
-/// its open path. The on-disk row scan is the authoritative floor — the
-/// high-water flush lags any local row stamp minted between cycles, so seeding
-/// from it alone could let the first post-restart stamp sort below the device's
-/// own un-flushed rows.
-use std::sync::{Arc, Mutex};
+//! Hybrid-logical-clock timestamps: the total order behind last-writer-wins
+//! registers. The value model lives here; [`crate::protocol::hlc::Hlc`] is the
+//! clock-retaining service that mints and advances them.
 
 /// `protocol_state` key under which the clock's high-water mark is persisted, so it
 /// cannot regress across restarts (see [`Hlc::seed`]). Written whenever the
@@ -99,6 +78,35 @@ impl std::fmt::Display for Timestamp {
     }
 }
 
+/// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
+///
+/// This clock is coven's `_updated_at` register: hosts stamp every synced
+/// row's `_updated_at` with [`crate::SqlContext::stamp`], and pull records every
+/// applied row's `_updated_at` as a floor so a subsequent local write sorts causally
+/// after anything just pulled. The row arbiter (`conflict.rs`) picks a conflict
+/// winner by comparing these strings, whose order is lexicographic. Because the
+/// clock never mints a
+/// stamp behind a value it has already seen — even under wall-clock skew or a
+/// same-millisecond restart — a device that edits a row right after pulling a
+/// peer's edit always wins, which a plain wall clock cannot guarantee.
+///
+/// `_updated_at` is opaque to the host: it binds the string coven hands it and
+/// never parses it. Format (coven-internal): `{millis:013}-{counter:04}-{device_id}`.
+///
+/// The in-memory monotonic state is seeded on construction ([`Hlc::seed`]) so
+/// it cannot regress across restarts. The seed floor is the max of two sources:
+/// the persisted high-water mark ([`Hlc::high_water`], flushed at cycle end) and
+/// the max `_updated_at` coven scans across the synced tables in
+/// its open path. The on-disk row scan is the authoritative floor — the
+/// high-water flush lags any local row stamp minted between cycles, so seeding
+/// from it alone could let the first post-restart stamp sort below the device's
+/// own un-flushed rows.
+use std::sync::{Arc, Mutex};
+
+/// Hybrid Logical Clock.
+///
+/// Thread-safe via interior `Mutex`. Create one per application lifetime,
+/// pass by reference to write methods.
 struct HlcState {
     millis: u64,
     counter: u16,
@@ -115,10 +123,6 @@ fn increment(state: &mut HlcState) {
     }
 }
 
-/// Hybrid Logical Clock.
-///
-/// Thread-safe via interior `Mutex`. Create one per application lifetime,
-/// pass by reference to write methods.
 pub struct Hlc {
     device_id: String,
     state: Mutex<HlcState>,

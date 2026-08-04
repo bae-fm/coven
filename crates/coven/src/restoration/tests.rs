@@ -21,6 +21,7 @@ use crate::joining::BootstrapError;
 use crate::joining::MembershipFloor;
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::protocol::blob::{CacheFill, Provenance};
+use crate::protocol::synced_schema::BlobDecl;
 use crate::restoration::restore_from_code;
 use crate::restoration::{
     decode_restore_code, encode_restore_code, OwnerRecoveryAuthority, RestoreAuthority,
@@ -35,7 +36,6 @@ use crate::storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedOb
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreLayout;
-use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
     test_synced_tables, test_synced_tables_with_blob, TestDevice,
@@ -1010,7 +1010,7 @@ async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_devi
 struct OwnerRecoveryRestoreFixture {
     code: String,
     owner_pubkey: String,
-    tables: Vec<crate::sync::session::SyncedTable>,
+    tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
     app: tempfile::TempDir,
@@ -1062,7 +1062,7 @@ impl OwnerRecoveryRestoreFixture {
             .expect("recovered Store device identity exists");
         assert_eq!(
             restored
-                .get_protocol_state(crate::sync::store::OWNER_PUBKEY_STATE_KEY)
+                .get_protocol_state(crate::protocol::membership::OWNER_PUBKEY_STATE_KEY)
                 .await
                 .expect("load recovered Store owner"),
             Some(owner_pubkey),

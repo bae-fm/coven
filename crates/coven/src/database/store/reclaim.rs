@@ -412,7 +412,7 @@ impl StoreDatabase {
         &self,
         expected: DurableStoreReclaimOperation,
         object: DurableStoreReclaimObject,
-        candidate: crate::sync::PreparedStoreOperationCommit,
+        candidate: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let DurableStoreReclaimOperation::AbsentVerified {
             authorization,
@@ -512,7 +512,7 @@ impl StoreDatabase {
     pub(crate) async fn replace_store_reclaim_candidate(
         &self,
         expected: DurableStoreReclaimOperation,
-        replacement: crate::sync::PreparedStoreOperationCommit,
+        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let current_candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store reclaim state has no replaceable candidate".to_string())
@@ -585,7 +585,7 @@ impl StoreDatabase {
     pub(crate) async fn begin_store_reclaim_candidate_replacement(
         &self,
         expected: DurableStoreReclaimOperation,
-        replacement: crate::sync::PreparedStoreOperationCommit,
+        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
         nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let object = expected.object().cloned().ok_or_else(|| {

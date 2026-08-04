@@ -8,19 +8,18 @@ use super::*;
 
 mod authorized;
 use crate::changeset::RowChange;
-use crate::database::{DbError, ValidatedChangeset};
+use crate::database::DbError;
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::objects::StoreObjectError;
 use crate::protocol::objects::{BlobSpoolProtection, ExactObjectRef, StorageError};
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
-    ResolvedStoreDeviceState, RetainedVerifiedMergeHistorySummary, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
-    StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceStateRef, StoreHistoryCut,
+    StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
-use crate::protocol::{circle, remote_object, store_commit};
+use crate::protocol::{circle, store_commit};
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
@@ -86,17 +85,16 @@ pub(crate) struct StorePullExecution {
 }
 
 pub(crate) use super::verification::{CommitCoverageError, LoadedDeviceJoinAttemptEvidence};
+pub(crate) use crate::protocol::membership::{HeldStorePositionReason, LocalStoreMembership};
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use discovery::*;
 pub(crate) use join_activation::*;
 pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub(crate) use model::{
-    commit_stream_id, Candidate, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
-    LoadedCirclePackage, LocalStoreMembership, StorePullError, StorePullMembershipError,
-    StorePullResult, VerifiedStoreDeviceHead,
+    commit_stream_id, Candidate, HeldStoreCoordinate, HeldStorePosition, LoadedCirclePackage,
+    StorePullError, StorePullMembershipError, StorePullResult, VerifiedStoreDeviceHead,
 };
-pub(crate) use root_validation::*;
 pub(crate) use snapshot_evidence::*;
 pub(crate) use support::{BlobDownloadFailure, BlobDownloadFailures, PullError};
 

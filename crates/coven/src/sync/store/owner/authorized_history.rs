@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -206,14 +207,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
         self.database
             .install_existing_local_founder_device(
-                crate::database::ExactProtocolObject {
+                crate::protocol::objects::ExactProtocolObject {
                     value: founder.value,
                     bytes: registration_bytes,
                     object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 ack_ref,
-                crate::database::ExactProtocolObject {
+                crate::protocol::objects::ExactProtocolObject {
                     value: ack,
                     bytes: ack_bytes,
                     object: ack_prepared.reference().clone(),
@@ -320,7 +321,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_protection: crate::protocol::objects::BlobSpoolProtection,
         schema: std::sync::Arc<crate::database::TableSchema>,
     ) -> Result<
-        Result<pull::PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
+        Result<PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
         pull::StorePullError,
     > {
         let changeset =
@@ -439,7 +440,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 error.to_string(),
             )));
         }
-        Ok(Ok(pull::PreparedMergeMaterializationPackage {
+        Ok(Ok(PreparedMergeMaterializationPackage {
             package,
             changeset,
         }))
@@ -565,7 +566,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::CircleEpochAccess>, crate::database::DbError> {
+    ) -> Result<
+        Option<crate::protocol::circle_activation::CircleEpochAccess>,
+        crate::database::DbError,
+    > {
         self.database
             .circle_epoch_access(self.root().clone(), circle_id, control.clone())
             .await
@@ -641,7 +645,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         snapshot: &crate::database::PublishedStoreSnapshot,
     ) -> Result<
-        crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
+        crate::database::VerifiedStoreSnapshotStability,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.history_verifier
@@ -1296,7 +1300,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn record_pull_circle_close_exclusions(
         &self,
-        exclusions: Vec<crate::sync::LocalCircleExclusion>,
+        exclusions: Vec<crate::protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), crate::database::DbError> {
         self.database
             .record_circle_close_exclusions(exclusions)
@@ -1320,12 +1324,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn commit_pull_materialization(
         &self,
-        materialization: pull::PreparedMergeMaterialization,
+        materialization: PreparedMergeMaterialization,
         retractions: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
         local_store_membership: pull::LocalStoreMembership,
         routing_key: Option<crate::protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<pull::ApplyOutcome, crate::database::DbError> {
+    ) -> Result<crate::protocol::membership::ApplyOutcome, crate::database::DbError> {
         self.database
             .apply_received_merge_materialization(
                 materialization,
@@ -3116,7 +3120,7 @@ impl AuthorizedStoreHistory<'_> {
         coverage: &crate::protocol::store_commit::StoreHistoryCut,
         attempt_activation: &crate::protocol::store_commit::StoreBatchCommitRef,
         membership_state: &crate::protocol::circle_control::StoreMembershipStateRef,
-    ) -> Result<crate::sync::store::owner::pull::DeviceJoinBootstrapPlan, StoreError> {
+    ) -> Result<crate::database::DeviceJoinBootstrapPlan, StoreError> {
         self.history_verifier
             .prepare_device_join_bootstrap(coverage, attempt_activation, membership_state)
             .await

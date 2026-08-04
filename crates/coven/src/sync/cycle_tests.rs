@@ -20,12 +20,12 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::store_commit::SnapshotMeta;
+use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreDir;
 use crate::sync::cycle;
-use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::test_helpers::*;
 
 const T0: &str = "2024-01-01T00:00:00Z";
@@ -1232,14 +1232,24 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let keypair = UserKeypair::generate();
     let db = open_test_db_schema(
         vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(BlobDecl::new(
-                    "photos",
-                    Provenance::HostProvided,
-                    CacheFill::CacheEager,
-                )),
+            SyncedTable::new(
+                "notes",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .remote_root(),
+            SyncedTable::new(
+                "note_tags",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new(
+                "note_photos",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .carries_blob(BlobDecl::new(
+                "photos",
+                Provenance::HostProvided,
+                CacheFill::CacheEager,
+            )),
         ],
         test_migrations(),
     );
@@ -1288,11 +1298,24 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
 async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let keypair = UserKeypair::generate();
     let tables = vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey).carries_blob(
-            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .remote_root(),
+        SyncedTable::new(
+            "note_tags",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         ),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        )),
     ];
     let db = open_test_db_schema(tables.clone(), test_migrations());
     let storage = Arc::new(
@@ -1468,10 +1491,20 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
 async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
     let keypair = UserKeypair::generate();
     let tables = vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey).carries_blob(
-            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
-        ),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .remote_root(),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        )),
     ];
     let db = open_test_db_schema(tables, test_migrations());
     let storage = Arc::new(
@@ -1542,11 +1575,24 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
 async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let keypair = UserKeypair::generate();
     let tables = vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey).carries_blob(
-            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .remote_root(),
+        SyncedTable::new(
+            "note_tags",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         ),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        )),
     ];
     let database_dir = tempfile::tempdir().expect("snapshot cleanup database directory");
     let database_path = database_dir.path().join("store.db");
@@ -1638,14 +1684,15 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
 #[tokio::test]
 async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
     let keypair = UserKeypair::generate();
-    let tables = vec![
-        SyncedTable::new("assets", crate::sync::session::RowIdentity::SharedKey)
-            .remote_root()
-            .carries_blob(
-                BlobDecl::new("assets", Provenance::HostProvided, CacheFill::CacheEager)
-                    .with_id_column("blob_id"),
-            ),
-    ];
+    let tables = vec![SyncedTable::new(
+        "assets",
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )
+    .remote_root()
+    .carries_blob(
+        BlobDecl::new("assets", Provenance::HostProvided, CacheFill::CacheEager)
+            .with_id_column("blob_id"),
+    )];
     let migrations = vec![crate::Migration::sql(
         1,
         "shared snapshot blob",
@@ -1845,7 +1892,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
 /// is refused as a takeover attempt.
 #[tokio::test]
 async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -1944,7 +1991,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
 /// branch that previously adopted any founder on trust.
 #[tokio::test]
 async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -2008,7 +2055,7 @@ fn cloud_objects(home: &InMemoryCloudHome) -> BTreeMap<String, Vec<u8>> {
 
 #[tokio::test]
 async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2055,7 +2102,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
 
 #[tokio::test]
 async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2130,7 +2177,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
 
 #[tokio::test]
 async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
@@ -2198,7 +2245,7 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
 
 #[tokio::test]
 async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2265,7 +2312,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
 
 #[tokio::test]
 async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mutation() {
-    use crate::sync::store::OWNER_PUBKEY_STATE_KEY;
+    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();

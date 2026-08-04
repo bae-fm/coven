@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::objects::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
+use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
 use crate::protocol::reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
@@ -13,8 +14,6 @@ use crate::protocol::remote_object::{
 };
 use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
 use crate::storage::SyncStorage;
-use crate::sync::PreparedStoreOperationCommit;
-use crate::sync::StoreError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -604,7 +603,7 @@ pub(crate) enum StoreReclaimJournalError {
     #[error(transparent)]
     RemoteObject(#[from] RemoteObjectRecordError),
     #[error(transparent)]
-    Outbound(#[from] StoreError),
+    Outbound(#[from] crate::protocol::prepared_commit::PreparedCommitError),
     #[error(transparent)]
     Storage(#[from] crate::protocol::objects::StorageError),
 }

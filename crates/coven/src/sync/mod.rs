@@ -6,7 +6,6 @@ mod blob_content_hash_tests;
 pub(crate) mod backoff;
 pub(crate) mod blocking;
 pub(crate) mod cycle;
-pub(crate) mod hlc;
 pub(crate) mod store;
 // Exercises the register clock through `Database::hlc()`.
 #[cfg(test)]
@@ -20,7 +19,6 @@ pub(crate) mod loop_policy;
 mod pull_tests;
 #[cfg(test)]
 mod refresh_tests;
-pub(crate) mod session;
 pub(crate) mod status;
 #[cfg(test)]
 mod store_history_checkpoint_tests;
@@ -31,22 +29,10 @@ pub(crate) mod test_helpers;
 pub(crate) mod test_owner_graph;
 #[cfg(test)]
 mod tests;
+pub use crate::protocol::hlc::Hlc;
 pub use crate::store_sync::SyncError;
-pub use hlc::{Hlc, Timestamp};
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
-pub use session::{BlobDecl, RowIdentity, SyncedTable};
 pub use status::DeviceActivity;
-pub(crate) use store::{
-    activated_merge_membership_remote_objects, ApplyOutcome, CircleAuthoringState,
-    CircleCurrentState, CircleEpochAccess, CircleOperationIntent, CircleOperationJournal,
-    DeviceJoinBootstrapPlan, HeldStorePositionReason, HostWriteBlobStaging, LocalCircleExclusion,
-    LocalStoreMembership, MembershipAuthorityBytes, OwnerPromotionJournal,
-    OwnerPromotionJournalTransition, PreparedCircleOperation, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage, PreparedStoreOperationCommit, Store, StoreCreationAttempt,
-    StoreError, StoreMembershipJournalCompletion, VerifiedCircleActivations, VerifiedCircleImage,
-    VerifiedCircleReference, VerifiedStreamActivations, OWNER_PUBKEY_STATE_KEY,
-    STORE_CREATION_ATTEMPT_STATE_KEY,
-};
 pub use store::{BlobCacheError, BlobStream};
 pub use store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval,
@@ -62,4 +48,5 @@ pub use store::{
     ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
     ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap,
 };
+pub(crate) use store::{HostWriteBlobStaging, Store};
 pub use sync_loop::SyncLoopStatus;

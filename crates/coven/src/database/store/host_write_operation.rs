@@ -348,7 +348,7 @@ impl StoreRowWrites {
         let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
         let cleanup_store_dir = self.store_dir.clone();
-        let stamper = crate::sync::hlc::UpdatedAtStamper::new(database.hlc.clone());
+        let stamper = crate::protocol::hlc::UpdatedAtStamper::new(database.hlc.clone());
 
         let outcome = database
             .connection

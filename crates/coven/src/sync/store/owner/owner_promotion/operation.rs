@@ -2,6 +2,9 @@ use crate::encryption::EncryptionService;
 use crate::keys;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::StoreMembershipRoleGrant;
+use crate::protocol::membership_mutation::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
 use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
@@ -13,9 +16,6 @@ use crate::protocol::store_commit::{
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::sync::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
-};
-use crate::sync::store::owner::writer::{
-    PreparedMembershipPublication, PreparedMembershipTransition,
 };
 
 use super::authority::target_key;
@@ -865,7 +865,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 &transition,
                 &publication,
                 candidate,
-                crate::sync::store::operations::StoreMembershipJournalCompletion::OwnerPromotion {
+                crate::protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                     transition: journal_transition,
                     remote_objects,
                 },

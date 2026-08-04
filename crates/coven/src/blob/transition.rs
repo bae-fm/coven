@@ -30,7 +30,7 @@
 //! Both transitions operate on every exact blob-bearing row under the root and
 //! branch on provenance only to choose its Local filesystem home.
 //!
-//! A [`SyncedTable::remote_root`](crate::sync::session::SyncedTable::remote_root)
+//! A [`SyncedTable::remote_root`](crate::protocol::synced_schema::SyncedTable::remote_root)
 //! has no Local state in this model: its rows sync normally and its blobs are
 //! Remote by construction, so these transition APIs reject it.
 //!
@@ -46,8 +46,8 @@ use std::collections::HashMap;
 use crate::database::DbError;
 use crate::database::StoreDatabase;
 use crate::protocol::blob::{Provenance, RowBlobRef};
+use crate::protocol::synced_schema::SyncedTable;
 use crate::store_dir::StoreDir;
-use crate::sync::session::SyncedTable;
 
 use crate::protocol::blob::BlobTransitionObserver;
 use std::path::PathBuf;

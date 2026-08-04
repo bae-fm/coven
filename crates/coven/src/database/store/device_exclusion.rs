@@ -5,14 +5,14 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::*;
 use crate::database::{mark_remote_object_uploaded_on, update_remote_object_on};
+use crate::protocol::device_exclusion_journal::{
+    DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
+    StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
+};
 use crate::protocol::remote_object::{
     remote_object_id, RemoteObjectRecord, RetainedAuthorityObjectState,
 };
 use crate::protocol::store_commit::ObjectHash;
-use crate::sync::store::{
-    DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
-    StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
-};
 
 pub(super) fn store_device_exclusion_journal_error(
     error: StoreDeviceExclusionJournalError,
@@ -281,7 +281,7 @@ impl StoreDatabase {
     pub(crate) async fn replace_outbound_store_device_exclusion_candidate(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        replacement: crate::sync::PreparedStoreOperationCommit,
+        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let DurableStoreDeviceExclusionOperation::CandidatePrepared { object, candidate } =
             expected.clone()
@@ -510,7 +510,7 @@ impl StoreDatabase {
     pub(crate) async fn begin_outbound_store_device_exclusion_replacement(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        replacement: crate::sync::PreparedStoreOperationCommit,
+        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
         nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let expected_candidate = expected.candidate().cloned().ok_or_else(|| {

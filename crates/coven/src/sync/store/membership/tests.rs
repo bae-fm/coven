@@ -3,6 +3,7 @@ use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{MasterKeyCustody, UserKeypair};
+use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::protocol::membership::{
     validate_membership_floor, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
     MembershipCoord, MembershipGrantId, MembershipHeadRef,

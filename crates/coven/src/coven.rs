@@ -13,10 +13,10 @@ use crate::handle::CovenHandle;
 use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
 use crate::protocol::blob::BlobTransitionObserver;
+use crate::protocol::synced_schema::SyncedTable;
 use crate::store_dir::StoreOpenGuard;
 use crate::store_dir::{LocalBlobStoreError, PathTokenError};
 use crate::store_sync::ConfigProvider;
-use crate::sync::session::SyncedTable;
 use crate::{Migration, MigrationError};
 
 pub type CovenResult<T> = Result<T, CovenError>;
@@ -420,6 +420,7 @@ mod tests {
     use crate::keys::test_keyring;
     use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
     use crate::protocol::objects::ObjectSlot;
+    use crate::protocol::synced_schema::BlobDecl;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
         BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
@@ -427,7 +428,6 @@ mod tests {
     };
     use crate::storage::CloudCipher;
     use crate::store_dir::StoreDir;
-    use crate::sync::session::BlobDecl;
     use crate::sync::test_helpers::TestStore;
     use crate::{WriteId, WriteReceipt};
     use async_trait::async_trait;

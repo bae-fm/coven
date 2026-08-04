@@ -16,7 +16,7 @@ use crate::database::quote_ident;
 use crate::protocol::circle::{
     row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey,
 };
-use crate::sync::store::CircleCurrentState;
+use crate::protocol::circle_activation::CircleCurrentState;
 
 pub(crate) fn is_routing_table(table: &str) -> bool {
     matches!(table, "_coven_audience" | "_coven_row_routes")
@@ -2149,7 +2149,7 @@ pub(crate) fn active_circle_control(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::session::{RowIdentity, SyncedTable};
+    use crate::protocol::synced_schema::{RowIdentity, SyncedTable};
     use rusqlite::session::{ConflictAction, Session};
 
     fn routing_schema(conn: &Connection) {

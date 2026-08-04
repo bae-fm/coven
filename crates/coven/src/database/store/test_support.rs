@@ -293,7 +293,7 @@ impl StoreDatabase {
     pub(crate) async fn install_test_active_circle_state(
         &self,
         label: String,
-    ) -> Result<crate::sync::CircleCurrentState, DbError> {
+    ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
         self.connection
             .call(move |connection| {
                 let database = crate::database::DatabaseTestSql::new(connection);
@@ -309,7 +309,7 @@ impl StoreDatabase {
     pub(crate) async fn install_test_inactive_circle_state(
         &self,
         label: String,
-    ) -> Result<crate::sync::CircleCurrentState, DbError> {
+    ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
         self.connection
             .call(move |connection| {
                 let database = crate::database::DatabaseTestSql::new(connection);
@@ -453,7 +453,7 @@ impl StoreDatabase {
                     &BTreeSet::new(),
                     None,
                     false,
-                    crate::sync::LocalStoreMembership::Current,
+                    crate::protocol::membership::LocalStoreMembership::Current,
                 )?;
                 let retained_count = retained.query_row(
                     "SELECT COUNT(*) FROM documents WHERE id = ?1",
@@ -478,7 +478,7 @@ impl StoreDatabase {
                     &BTreeSet::new(),
                     None,
                     false,
-                    crate::sync::LocalStoreMembership::Current,
+                    crate::protocol::membership::LocalStoreMembership::Current,
                 )?;
                 let sabotaged_count = sabotaged.query_row(
                     "SELECT COUNT(*) FROM documents WHERE id = ?1",

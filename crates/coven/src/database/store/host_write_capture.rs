@@ -64,7 +64,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::CircleEpochAccess, DbError> {
+    ) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
         super::circle_publication_context_on(self.transaction, circle_id, expected_control)
     }
 

@@ -270,7 +270,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         circle_id: CircleId,
         control: CircleControlCoord,
         epoch_id: CircleEpochId,
-        access: crate::sync::CircleEpochAccess,
+        access: crate::protocol::circle_activation::CircleEpochAccess,
         snapshot: CreatedSnapshot,
         coverage: CommitFrontier,
         schema_version: u32,
@@ -421,7 +421,7 @@ impl CircleSnapshotWriter<'_, '_> {
     pub(crate) async fn load_circle_snapshot_refs_for_test(
         &mut self,
         circle_id: CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
         Vec<(
             crate::protocol::store_commit::CircleSnapshotRef,
@@ -439,7 +439,7 @@ impl CircleSnapshotWriter<'_, '_> {
     pub(crate) async fn load_circle_snapshot_metas_for_test(
         &mut self,
         circle_id: CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let mut history = self.writer.circle_history();
@@ -451,7 +451,7 @@ impl CircleSnapshotWriter<'_, '_> {
     pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
         &mut self,
         circle_id: CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
         store_routing: &EncryptionService,
     ) -> Result<(), SnapshotError> {
         let stream = self
@@ -560,7 +560,7 @@ impl CircleSnapshotReader<'_, '_> {
     pub(crate) async fn load_stream_refs(
         &self,
         circle_id: CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
         registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
         registration: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<

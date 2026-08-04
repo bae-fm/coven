@@ -1,7 +1,8 @@
 use crate::database::{
-    DurablePreparedProtocolObject, PreparedAudienceObjects, PreparedProtocolObject,
-    StoreBatchCompletion, StoreBatchLocalCleanup,
+    DurablePreparedProtocolObject, PreparedAudienceObjects, StoreBatchCompletion,
+    StoreBatchLocalCleanup,
 };
+use crate::protocol::objects::PreparedProtocolObject;
 use crate::protocol::remote_object::RemoteObjectRecord;
 use crate::protocol::store_commit::{
     StoreBatchCommitRef, StoreDeviceHead, StoreRootRef, VerifiedStoreBatchCommit,

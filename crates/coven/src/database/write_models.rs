@@ -95,19 +95,6 @@ impl StoreWriteBlobFact {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ExactProtocolObject<T> {
-    pub value: T,
-    pub bytes: Vec<u8>,
-    pub object: ExactObjectRef,
-    pub prepared: PreparedExactObject,
-}
-
-pub(crate) struct PreparedProtocolObject<T> {
-    pub value: T,
-    pub prepared: PreparedExactObject,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct PreparedStoreWriteCommit {
     pub audiences: PreparedAudienceObjects,
     pub commit: ExactProtocolObject<VerifiedStoreBatchCommit>,
@@ -300,7 +287,7 @@ pub(crate) enum MergeAbandonmentState {
 pub(crate) struct OutboundStoreAck {
     pub reference: StoreAckRef,
     pub ack: ExactProtocolObject<StoreAck>,
-    pub circle_acknowledgements: Vec<crate::sync::store::CircleAckActivation>,
+    pub circle_acknowledgements: Vec<crate::protocol::prepared_commit::CircleAckActivation>,
     pub activation: OutboundStoreAckActivation,
 }
 
@@ -308,8 +295,8 @@ pub(crate) struct OutboundStoreAck {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum OutboundStoreAckActivation {
     AwaitingCandidate,
-    Prepared(crate::sync::store::PreparedStoreOperationCommit),
-    Nonactivating(crate::sync::store::PreparedStoreOperationCommit),
+    Prepared(crate::protocol::prepared_commit::PreparedStoreOperationCommit),
+    Nonactivating(crate::protocol::prepared_commit::PreparedStoreOperationCommit),
 }
 
 #[derive(Debug, Clone)]

@@ -3,6 +3,9 @@ use crate::database::VerifiedMergeMembershipObjects;
 use crate::protocol::membership::{
     self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
 };
+use crate::protocol::membership_mutation::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
 use crate::protocol::objects::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
 };
@@ -1393,7 +1396,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     &plan.transition,
                     &plan.publication,
                     plan.candidate.clone(),
-                    operations::StoreMembershipJournalCompletion::Mutation {
+                    crate::protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                         intent_hash: persistence.intent_hash(),
                         progress_bytes: MembershipMutationProgress::ResolutionActivated {
                             candidate: plan.candidate.reference.clone(),
@@ -1999,7 +2002,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         candidate: Box<operations::PreparedStoreOperationCommit>,
-        completion: operations::StoreMembershipJournalCompletion,
+        completion: crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
     ) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
         transition.validate()?;
         publication.validate()?;
@@ -2230,7 +2233,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         candidate: Box<operations::PreparedStoreOperationCommit>,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
-        membership_completion: Option<operations::StoreMembershipJournalCompletion>,
+        membership_completion: Option<
+            crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
         let retained_operation_objects = candidate
             .commit
@@ -2260,7 +2265,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         prepared_head: crate::protocol::objects::PreparedExactObject,
         history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
-        membership_completion: Option<operations::StoreMembershipJournalCompletion>,
+        membership_completion: Option<
+            crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
         let database = self.database.clone();
         let root = self.store_root().clone();

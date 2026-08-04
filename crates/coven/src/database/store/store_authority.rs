@@ -55,11 +55,11 @@ impl StoreDatabase {
                         "local Store root differs from the operation authority".to_string(),
                     ));
                 }
-                let owner =
-                    get_protocol_state_on(conn, crate::sync::store::OWNER_PUBKEY_STATE_KEY)?
-                        .ok_or_else(|| {
-                            DbError::Message("Store owner anchor is absent".to_string())
-                        })?;
+                let owner = get_protocol_state_on(
+                    conn,
+                    crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
+                )?
+                .ok_or_else(|| DbError::Message("Store owner anchor is absent".to_string()))?;
                 if owner != protocol_root.descriptor.founder_pubkey {
                     return Err(DbError::Message(
                         "Store owner anchor differs from its signed root".to_string(),
@@ -136,7 +136,7 @@ impl StoreDatabase {
                 )?;
                 crate::database::set_protocol_state_on(
                     &tx,
-                    crate::sync::OWNER_PUBKEY_STATE_KEY,
+                    crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
                     &owner,
                 )?;
                 membership.install_on(&tx)?;
@@ -181,7 +181,9 @@ impl StoreDatabase {
                     ));
                 }
                 use crate::protocol::provider::{ExactProbeProgress, ProviderProbeJournalRecord};
-                use crate::sync::{StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY};
+                use crate::protocol::store_creation::{
+                    StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY,
+                };
 
                 let attempt_json = crate::database::required_protocol_state_on(
                     &tx,
@@ -552,7 +554,7 @@ impl StoreDatabase {
             }
             crate::database::set_protocol_state_on(
                 &tx,
-                crate::sync::OWNER_PUBKEY_STATE_KEY,
+                crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
                 &graph.root.value.descriptor.founder_pubkey,
             )?;
             crate::database::InitialStoreMembershipAuthority {

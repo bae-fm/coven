@@ -77,7 +77,7 @@ impl CircleSnapshotFixture {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         control: crate::protocol::circle::CircleControlCoord,
-    ) -> crate::sync::CircleEpochAccess {
+    ) -> crate::protocol::circle_activation::CircleEpochAccess {
         self.store_database
             .circle_publication_context(circle_id, control)
             .await
@@ -87,7 +87,7 @@ impl CircleSnapshotFixture {
     async fn load_snapshot_metas(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Vec<CircleSnapshotMeta> {
         self.store
             .load_circle_snapshot_metas(&self.database, circle_id, access)
@@ -98,7 +98,7 @@ impl CircleSnapshotFixture {
     async fn read_snapshot_image(
         &self,
         selected: &CircleSnapshotMeta,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Vec<u8> {
         self.store
             .read_circle_snapshot_image(selected, access)

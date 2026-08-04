@@ -2,13 +2,13 @@ use super::*;
 use std::collections::BTreeSet;
 
 fn circle_routing_test_schema() -> (
-    Vec<crate::sync::session::SyncedTable>,
+    Vec<crate::protocol::synced_schema::SyncedTable>,
     Vec<crate::Migration>,
 ) {
     (
-        vec![crate::sync::session::SyncedTable::new(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
         vec![crate::Migration::sql(
@@ -554,15 +554,15 @@ async fn a_forged_deletion_control_is_held_invalid() {
 
 #[tokio::test]
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
-    let blob_decl = crate::sync::session::BlobDecl::new(
+    let blob_decl = crate::protocol::synced_schema::BlobDecl::new(
         "files",
         crate::protocol::blob::Provenance::HostProvided,
         crate::protocol::blob::CacheFill::CacheEager,
     );
     let db = crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::sync::session::SyncedTable::new(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")
         .carries_blob(blob_decl)],
@@ -603,12 +603,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("invite Store member");
     let member_db = crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::sync::session::SyncedTable::new(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")
-        .carries_blob(crate::sync::session::BlobDecl::new(
+        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
             "files",
             crate::protocol::blob::Provenance::HostProvided,
             crate::protocol::blob::CacheFill::CacheEager,
@@ -708,12 +708,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("invite concurrent Store writer");
     let concurrent_db = crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::sync::session::SyncedTable::new(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")
-        .carries_blob(crate::sync::session::BlobDecl::new(
+        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
             "files",
             crate::protocol::blob::Provenance::HostProvided,
             crate::protocol::blob::CacheFill::CacheEager,

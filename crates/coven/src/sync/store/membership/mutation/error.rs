@@ -32,3 +32,9 @@ impl From<crate::database::DbError> for InviteError {
         Self::Database(error.into_message())
     }
 }
+
+impl From<crate::protocol::membership_mutation::MembershipPreparationError> for InviteError {
+    fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
+        InviteError::InvalidDurableMutation(error.to_string())
+    }
+}

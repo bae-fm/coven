@@ -707,7 +707,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn publish_acknowledgement_objects(
         &self,
         outbound: &crate::database::OutboundStoreAck,
-        candidate: &crate::sync::store::operations::PreparedStoreOperationCommit,
+        candidate: &crate::protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<(), StoreAckError> {
         for circle in &outbound.circle_acknowledgements {
             if let Err(error) = self

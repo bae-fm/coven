@@ -297,3 +297,9 @@ impl AuthorizedWriterOperation<'_> {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::protocol::prepared_commit::PreparedCommitError> for StoreAckError {
+    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+        StoreAckError::InvalidOutbound(error.to_string())
+    }
+}

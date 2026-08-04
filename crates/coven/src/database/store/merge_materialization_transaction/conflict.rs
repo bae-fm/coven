@@ -20,7 +20,7 @@
 //! can stamp a row far in the future — a value that would beat every honest stamp
 //! and win every conflict forever — so the receiver bounds an incoming stamp to
 //! its own wall clock plus an offline allowance
-//! ([`crate::sync::hlc::MAX_FUTURE_SKEW_MS`]) and refuses to let a grossly-future one win
+//! ([`crate::protocol::hlc::MAX_FUTURE_SKEW_MS`]) and refuses to let a grossly-future one win
 //! (the matching refusal to let it ratchet the clock lives in the pull's HLC
 //! advance — a rejected stamp never becomes an applied row there either).
 //!
@@ -38,8 +38,8 @@ use tracing::warn;
 
 use crate::database::changeset::value_ref_to_string;
 use crate::database::{table_columns, DbError};
-use crate::sync::hlc::Timestamp;
-use crate::sync::session::SyncedTable;
+use crate::protocol::hlc::Timestamp;
+use crate::protocol::synced_schema::SyncedTable;
 
 /// Schema info for all synced tables: maps table name to column indices. Built
 /// once before an apply and moved (owned) into the conflict closure, which must
@@ -83,7 +83,7 @@ impl TableSchema {
             for table in ["_coven_audience", "_coven_row_routes"] {
                 tables.push(SyncedTable::new(
                     table,
-                    crate::sync::session::RowIdentity::SharedKey,
+                    crate::protocol::synced_schema::RowIdentity::SharedKey,
                 ));
             }
         }
@@ -180,7 +180,7 @@ pub(crate) fn compare_lww_stamps(
 /// delete carries only the row's pre-delete stamp and cannot be reconstructed
 /// from a later partial UPDATE. Non-delete conflicts parse both stamps as HLC
 /// [`Timestamp`]s; an unparseable value keeps local. A grossly-future incoming
-/// stamp — beyond `receiver_wall_ms` + [`crate::sync::hlc::MAX_FUTURE_SKEW_MS`] — is
+/// stamp — beyond `receiver_wall_ms` + [`crate::protocol::hlc::MAX_FUTURE_SKEW_MS`] — is
 /// refused (kept local) so a broken clock can't win every conflict.
 pub(crate) fn arbitrate_row_conflict(
     conflict_type: ConflictType,

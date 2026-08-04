@@ -1319,7 +1319,7 @@ mod tests {
 
     fn host_blob_test_db(namespace: &str) -> Database {
         open_test_db_with_blob(
-            crate::sync::session::BlobDecl::new(
+            crate::protocol::synced_schema::BlobDecl::new(
                 namespace,
                 Provenance::HostProvided,
                 CacheFill::CacheLazy,

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::foreign_key_edges;
 use crate::protocol::store_commit::ObjectHash;
-use crate::sync::session::{GateRole, RowIdentity, SyncedTable};
+use crate::protocol::synced_schema::{GateRole, RowIdentity, SyncedTable};
 
 const SYNC_ROUTING_CONTRACT_VERSION: u32 = 1;
 

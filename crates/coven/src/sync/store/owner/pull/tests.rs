@@ -254,13 +254,13 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
 }
 
 fn scoped_replay_schema() -> (
-    Vec<crate::sync::session::SyncedTable>,
+    Vec<crate::protocol::synced_schema::SyncedTable>,
     Vec<crate::Migration>,
 ) {
     (
-        vec![crate::sync::session::SyncedTable::new(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
             "notes",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
         vec![crate::Migration::sql(

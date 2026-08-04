@@ -72,7 +72,7 @@ pub(super) fn things_migration() -> Migration {
     )
 }
 
-pub(super) fn things_table(identity: crate::sync::session::RowIdentity) -> SyncedTable {
+pub(super) fn things_table(identity: crate::protocol::synced_schema::RowIdentity) -> SyncedTable {
     SyncedTable::new("things", identity)
 }
 
@@ -90,7 +90,11 @@ pub(super) fn scoped_things_migration() -> Migration {
 }
 
 pub(super) fn scoped_things_table() -> SyncedTable {
-    SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey).scoped_by("audience")
+    SyncedTable::new(
+        "things",
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )
+    .scoped_by("audience")
 }
 
 pub(super) fn exact_blob_binding(row_id: &str, stamp: &str, bytes: &[u8]) -> RowBlobLocatorBinding {
@@ -203,8 +207,12 @@ pub(super) fn test_commit_ref() -> StoreBatchCommitRef {
 }
 
 pub(super) fn blob_binding_table() -> SyncedTable {
-    SyncedTable::new("photos", crate::sync::session::RowIdentity::SharedKey).carries_blob(
-        crate::sync::session::BlobDecl::new(
+    SyncedTable::new(
+        "photos",
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )
+    .carries_blob(
+        crate::protocol::synced_schema::BlobDecl::new(
             "images",
             Provenance::HostProvided,
             crate::protocol::blob::CacheFill::CacheLazy,

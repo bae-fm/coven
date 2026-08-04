@@ -52,7 +52,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) async fn load_circle_snapshot_stream_refs(
         &mut self,
         circle_id: crate::protocol::circle::CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
     ) -> Result<
@@ -337,7 +337,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         snapshot: &crate::database::PublishedStoreSnapshot,
     ) -> Result<
-        crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
+        crate::database::VerifiedStoreSnapshotStability,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.owner.reclaim_snapshot_stability(snapshot).await

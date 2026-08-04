@@ -1,6 +1,8 @@
 //! Causal discovery and atomic materialization for immutable Store commits.
 
 use super::*;
+use crate::database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
+use crate::protocol::membership::ApplyOutcome;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
 use std::collections::BTreeMap;

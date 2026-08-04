@@ -17,7 +17,7 @@ struct LocalBlobDropRequest {
     id: String,
     size: u64,
     plaintext_hash: crate::protocol::store_commit::ObjectHash,
-    disposition: crate::sync::cycle::DeferredLocalBlobDisposition,
+    disposition: crate::protocol::blob::DeferredLocalBlobDisposition,
 }
 
 impl AuthorizedWriterOperation<'_> {
@@ -92,10 +92,10 @@ impl AuthorizedWriterOperation<'_> {
                 }
                 let disposition = match fact.blob.fill {
                     crate::protocol::blob::CacheFill::CacheEager => {
-                        crate::sync::cycle::DeferredLocalBlobDisposition::Cache
+                        crate::protocol::blob::DeferredLocalBlobDisposition::Cache
                     }
                     crate::protocol::blob::CacheFill::CacheLazy => {
-                        crate::sync::cycle::DeferredLocalBlobDisposition::Drop
+                        crate::protocol::blob::DeferredLocalBlobDisposition::Drop
                     }
                 };
                 let drop = LocalBlobDropRequest {
@@ -383,7 +383,7 @@ fn bind_local_cleanup(
                 ),
             ));
         }
-        drops.push(crate::sync::cycle::DeferredLocalBlobDrop {
+        drops.push(crate::protocol::blob::DeferredLocalBlobDrop {
             namespace: request.namespace,
             id: request.id,
             size: request.size,

@@ -10,9 +10,9 @@ use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::protocol::store_commit::ObjectHash;
+use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
-use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::Migration;
 
 #[cfg(test)]
@@ -104,9 +104,19 @@ pub(crate) fn test_store_security(
 /// [`test_synced_tables_with_blob`].
 pub(crate) fn test_synced_tables() -> Vec<SyncedTable> {
     vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).gated_by("shared"),
-        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("shared"),
+        SyncedTable::new(
+            "note_tags",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        ),
     ]
 }
 
@@ -118,10 +128,20 @@ pub(crate) fn test_synced_tables() -> Vec<SyncedTable> {
 /// the row keeps its primary key.
 pub(crate) fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
     vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).gated_by("shared"),
-        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-            .carries_blob(decl),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("shared"),
+        SyncedTable::new(
+            "note_tags",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(decl),
     ]
 }
 
@@ -136,12 +156,25 @@ pub(crate) fn test_synced_tables_with_user_and_host_blobs(
     cover_decl: BlobDecl,
 ) -> Vec<SyncedTable> {
     vec![
-        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).gated_by("shared"),
-        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-            .carries_blob(photo_decl),
-        SyncedTable::new("note_covers", crate::sync::session::RowIdentity::SharedKey)
-            .carries_blob(cover_decl),
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("shared"),
+        SyncedTable::new(
+            "note_tags",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(photo_decl),
+        SyncedTable::new(
+            "note_covers",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(cover_decl),
     ]
 }
 
@@ -304,7 +337,7 @@ fn open_test_db_schema_with_tombstone_grace(
 ///
 /// Used only by the register-clock tests (`hlc_register_tests`).
 pub(crate) fn open_test_db_with_hlc(
-    hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
+    hlc: std::sync::Arc<crate::protocol::hlc::Hlc>,
     seed: impl for<'connection> Fn(&crate::MigrationContext<'connection>) -> Result<(), DbError>
         + Send
         + Sync
@@ -1128,8 +1161,10 @@ mod test_device {
             &self,
             circle_id: crate::protocol::circle::CircleId,
             expected_control: crate::protocol::circle::CircleControlCoord,
-        ) -> Result<Option<crate::sync::store::CircleEpochAccess>, crate::database::DbError>
-        {
+        ) -> Result<
+            Option<crate::protocol::circle_activation::CircleEpochAccess>,
+            crate::database::DbError,
+        > {
             self.store
                 .circle_epoch_access(circle_id, expected_control)
                 .await
@@ -1429,7 +1464,7 @@ mod test_device {
 
         pub(crate) async fn open_circle_package_for_test(
             &self,
-            access: &crate::sync::store::CircleEpochAccess,
+            access: &crate::protocol::circle_activation::CircleEpochAccess,
             commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
             reference: &crate::protocol::store_commit::CirclePackageRef,
         ) -> Result<Vec<u8>, crate::sync::store::StoreError> {
@@ -1492,8 +1527,10 @@ mod test_device {
             &self,
             circle_id: crate::protocol::circle::CircleId,
             control: crate::protocol::circle::CircleControlCoord,
-        ) -> Result<Option<crate::sync::store::VerifiedCircleReference>, crate::database::DbError>
-        {
+        ) -> Result<
+            Option<crate::protocol::circle_activation::VerifiedCircleReference>,
+            crate::database::DbError,
+        > {
             self.store
                 .verified_circle_activation_for_test(circle_id, control)
                 .await
@@ -1534,9 +1571,9 @@ mod test_device {
         pub(crate) async fn load_applicable_circle_packages_for_test(
             &self,
             verified: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-            activations: &[crate::sync::store::VerifiedCircleReference],
+            activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
             author: &crate::protocol::store_commit::StoreDeviceRegistration,
-            local_store_membership: crate::sync::store::LocalStoreMembership,
+            local_store_membership: crate::protocol::membership::LocalStoreMembership,
         ) -> Result<
             Vec<crate::sync::store::LoadedCirclePackage>,
             crate::sync::store::CirclePackageReadError,
@@ -1560,7 +1597,7 @@ mod test_device {
         pub(crate) async fn prepare_acknowledgement_activation_for_test(
             &self,
             acknowledgement: crate::protocol::store_commit::StoreAckRef,
-            candidate: crate::sync::store::PreparedStoreOperationCommit,
+            candidate: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
         ) -> Result<(), crate::database::DbError> {
             self.store
                 .prepare_acknowledgement_activation_for_test(acknowledgement, candidate)
@@ -1588,7 +1625,7 @@ mod test_device {
             coverage: &crate::protocol::store_commit::StoreHistoryCut,
             attempt_activation: &crate::protocol::store_commit::StoreBatchCommitRef,
             membership_state: &crate::protocol::circle_control::StoreMembershipStateRef,
-        ) -> Result<crate::sync::store::DeviceJoinBootstrapPlan, crate::sync::store::StoreError>
+        ) -> Result<crate::database::DeviceJoinBootstrapPlan, crate::sync::store::StoreError>
         {
             self.store
                 .prepare_device_join_bootstrap_for_test(
@@ -2378,7 +2415,7 @@ mod test_device {
             metadata_stamp: &str,
             name: &str,
         ) -> Result<
-            crate::sync::store::CircleOperationJournal,
+            crate::protocol::circle_journal::CircleOperationJournal,
             crate::sync::store::CircleOperationError,
         > {
             self.store
@@ -2770,7 +2807,7 @@ mod test_device {
             commit: &crate::protocol::store_commit::StoreBatchCommit,
             author: &crate::protocol::store_commit::StoreDeviceRegistration,
         ) -> Result<
-            crate::sync::store::VerifiedCircleActivations,
+            crate::protocol::circle_activation::VerifiedCircleActivations,
             crate::sync::store::CircleOperationError,
         > {
             let routing_key = crate::protocol::circle::derive_row_routing_key(
@@ -2797,7 +2834,7 @@ mod test_device {
         pub(crate) async fn load_circle_snapshot_refs(
             &self,
             circle_id: crate::CircleId,
-            access: &crate::sync::CircleEpochAccess,
+            access: &crate::protocol::circle_activation::CircleEpochAccess,
         ) -> Result<
             Vec<(
                 crate::protocol::store_commit::CircleSnapshotRef,
@@ -2988,7 +3025,7 @@ mod test_device {
         pub(crate) async fn prepare_acknowledgement_candidate_for_test(
             &self,
             outbound: &crate::database::OutboundStoreAck,
-        ) -> crate::sync::store::PreparedStoreOperationCommit {
+        ) -> crate::protocol::prepared_commit::PreparedStoreOperationCommit {
             let mut writer = self
                 .authorize_writer()
                 .await
@@ -3857,7 +3894,7 @@ impl TestStore {
 
     pub(crate) async fn publish_competing_store_head(
         &self,
-        journal: &crate::sync::store::CircleOperationJournal,
+        journal: &crate::protocol::circle_journal::CircleOperationJournal,
     ) -> (
         crate::protocol::objects::ExactObjectRef,
         crate::protocol::objects::ExactObjectRef,
@@ -4291,7 +4328,7 @@ impl TestStore {
         &self,
         db: &Database,
         circle_id: crate::protocol::circle::CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
         Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
         crate::sync::store::SnapshotError,
@@ -4315,7 +4352,7 @@ impl TestStore {
         &self,
         db: &Database,
         circle_id: crate::protocol::circle::CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
         store_routing: &crate::encryption::EncryptionService,
     ) -> Result<(), crate::sync::store::SnapshotError> {
         self.bind_device(db, &self.signer)
@@ -4370,7 +4407,7 @@ impl TestStore {
     pub(crate) async fn read_circle_snapshot_image(
         &self,
         selected: &crate::protocol::store_commit::CircleSnapshotMeta,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
         let context = access.protocol_context(
             self.root.store_root_hash,
@@ -4813,10 +4850,20 @@ pub(crate) fn photo_decl() -> BlobDecl {
 pub(crate) fn remote_root_db(decl: BlobDecl) -> Database {
     open_test_db_schema(
         vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
-            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(decl),
+            SyncedTable::new(
+                "notes",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .remote_root(),
+            SyncedTable::new(
+                "note_tags",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new(
+                "note_photos",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .carries_blob(decl),
         ],
         test_migrations(),
     )

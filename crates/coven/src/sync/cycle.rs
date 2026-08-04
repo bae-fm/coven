@@ -165,46 +165,6 @@ mod sync_cycle_failure_tests {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DeferredLocalBlobDisposition {
-    Drop,
-    Cache,
-    Pin,
-}
-
-impl DeferredLocalBlobDisposition {
-    pub(crate) fn as_db(self) -> &'static str {
-        match self {
-            Self::Drop => "drop",
-            Self::Cache => "cache",
-            Self::Pin => "pin",
-        }
-    }
-
-    pub(crate) fn from_db(raw: &str) -> Result<Self, String> {
-        match raw {
-            "drop" => Ok(Self::Drop),
-            "cache" => Ok(Self::Cache),
-            "pin" => Ok(Self::Pin),
-            other => Err(format!(
-                "unknown disposition in published blob drop intent: {other}"
-            )),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DeferredLocalBlobDrop {
-    pub namespace: String,
-    pub id: String,
-    pub size: u64,
-    pub plaintext_hash: crate::protocol::store_commit::ObjectHash,
-    pub locator_hash: crate::protocol::store_commit::ObjectHash,
-    pub disposition: DeferredLocalBlobDisposition,
-}
-
 struct PreparedCycle {
     sync_time: String,
     resume_drain_promptly: bool,

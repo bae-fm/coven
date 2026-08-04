@@ -178,7 +178,7 @@ impl super::AuthorizedWriterOperation<'_> {
 
     pub(crate) async fn capture_snapshot_cut(
         &self,
-        tables: Vec<crate::sync::session::SyncedTable>,
+        tables: Vec<crate::protocol::synced_schema::SyncedTable>,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<StoreSnapshotCut, crate::database::DbError> {
         let (snapshot, coverage) = self

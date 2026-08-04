@@ -913,7 +913,7 @@ mod object_slot_tests {
 
         assert_eq!(
             error.to_string(),
-            "configuration error: S3 slot for protocol/object must use its logical key"
+            "storage configuration is invalid: S3 slot for protocol/object must use its logical key"
         );
     }
 }

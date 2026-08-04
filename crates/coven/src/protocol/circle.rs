@@ -1307,7 +1307,7 @@ mod tests {
             .iter()
             .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
             .expect("author access");
-        let verified = crate::sync::store::VerifiedCircleReference {
+        let verified = crate::protocol::circle_activation::VerifiedCircleReference {
             reference,
             circle_id: creation.circle_id,
             control: control.clone(),
@@ -1453,12 +1453,14 @@ mod tests {
             .test_sql(move |database| {
                 database.record_verified_circle_activations(
                     &second_commit,
-                    &[crate::sync::store::VerifiedCircleReference {
-                        reference: second_reference,
-                        circle_id: creation.circle_id,
-                        control: second_control,
-                        local_access: None,
-                    }],
+                    &[
+                        crate::protocol::circle_activation::VerifiedCircleReference {
+                            reference: second_reference,
+                            circle_id: creation.circle_id,
+                            control: second_control,
+                            local_access: None,
+                        },
+                    ],
                 )
             })
             .await

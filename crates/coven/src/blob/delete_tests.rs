@@ -20,9 +20,9 @@ use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::membership::MemberRole;
 use crate::protocol::objects::StorageError;
+use crate::protocol::synced_schema::BlobDecl;
 use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
 use crate::store_dir::StoreDir;
-use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
     plaintext_cipher, pubkey_hex, InterceptedStorage, StorageInterceptor, TestStore,

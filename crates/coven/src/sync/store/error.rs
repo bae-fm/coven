@@ -178,3 +178,15 @@ impl From<crate::database::DbError> for StoreError {
         Self::Database(error.into_message())
     }
 }
+
+impl From<crate::protocol::prepared_commit::PreparedCommitError> for StoreError {
+    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+        StoreError::InvalidOutbound(error.to_string())
+    }
+}
+
+impl From<crate::protocol::membership_mutation::MembershipPreparationError> for StoreError {
+    fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
+        StoreError::InvalidOutbound(error.to_string())
+    }
+}

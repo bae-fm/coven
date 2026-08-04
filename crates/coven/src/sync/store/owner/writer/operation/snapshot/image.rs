@@ -6,8 +6,8 @@ use tracing::info;
 
 use crate::database::{Database, SnapshotDatabaseImage};
 use crate::protocol::objects::StorageError;
+use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::SyncStorage;
-use crate::sync::session::SyncedTable;
 use crate::Migration;
 
 /// Default: create a snapshot after this many changesets since the last one.
@@ -129,7 +129,7 @@ pub(crate) struct PreparedSnapshotBootstrap<'storage> {
     restorer_identity: crate::keys::UserKeypair,
     snapshot: crate::database::PublishedStoreSnapshot,
     coverage: crate::protocol::store_commit::CommitFrontier,
-    stability: crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
+    stability: crate::database::VerifiedStoreSnapshotStability,
     membership: crate::protocol::membership::MembershipChain,
     #[cfg(test)]
     fail_circle_install: bool,
@@ -509,12 +509,12 @@ mod tests {
             vec![
                 SyncedTable::new(
                     "documents",
-                    crate::sync::session::RowIdentity::IndependentUuid,
+                    crate::protocol::synced_schema::RowIdentity::IndependentUuid,
                 )
                 .scoped_by("audience"),
                 SyncedTable::new(
                     "paragraphs",
-                    crate::sync::session::RowIdentity::IndependentUuid,
+                    crate::protocol::synced_schema::RowIdentity::IndependentUuid,
                 )
                 .inherits_audience_through("document_id"),
             ],
@@ -757,12 +757,12 @@ mod tests {
             vec![
                 SyncedTable::new(
                     "documents",
-                    crate::sync::session::RowIdentity::IndependentUuid,
+                    crate::protocol::synced_schema::RowIdentity::IndependentUuid,
                 )
                 .scoped_by("audience"),
                 SyncedTable::new(
                     "settings",
-                    crate::sync::session::RowIdentity::IndependentUuid,
+                    crate::protocol::synced_schema::RowIdentity::IndependentUuid,
                 ),
             ],
             vec![Migration::sql(
@@ -1133,11 +1133,11 @@ mod tests {
         let tables = vec![
             SyncedTable::new(
                 "folders",
-                crate::sync::session::RowIdentity::IndependentUuid,
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
             ),
             SyncedTable::new(
                 "documents",
-                crate::sync::session::RowIdentity::IndependentUuid,
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
         ];
@@ -1354,7 +1354,7 @@ mod tests {
          ) STRICT;";
         let source_tables = vec![SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")];
         let source = crate::sync::test_helpers::open_test_db_schema(
@@ -1864,7 +1864,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         Box::pin(async {
-            let declaration = crate::sync::session::BlobDecl::new(
+            let declaration = crate::protocol::synced_schema::BlobDecl::new(
                 "photos",
                 crate::protocol::blob::Provenance::HostProvided,
                 crate::protocol::blob::CacheFill::CacheEager,

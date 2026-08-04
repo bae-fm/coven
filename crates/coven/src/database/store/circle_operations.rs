@@ -204,7 +204,13 @@ impl StoreDatabase {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         identity_pubkey: &str,
-    ) -> Result<(crate::sync::CircleAuthoringState, StoreBatchCommitRef), DbError> {
+    ) -> Result<
+        (
+            crate::protocol::circle_activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
@@ -243,7 +249,13 @@ impl StoreDatabase {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         identity_pubkey: &str,
-    ) -> Result<(crate::sync::CircleAuthoringState, StoreBatchCommitRef), DbError> {
+    ) -> Result<
+        (
+            crate::protocol::circle_activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
@@ -392,7 +404,13 @@ impl StoreDatabase {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         identity_pubkey: &str,
-    ) -> Result<(crate::sync::CircleAuthoringState, StoreBatchCommitRef), DbError> {
+    ) -> Result<
+        (
+            crate::protocol::circle_activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
@@ -423,7 +441,7 @@ impl StoreDatabase {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::CircleEpochAccess, DbError> {
+    ) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
         self.connection
             .call(move |conn| circle_publication_context_on(conn, circle_id, &expected_control))
             .await
@@ -478,7 +496,7 @@ pub(super) fn circle_publication_context_on(
     conn: &Connection,
     circle_id: crate::protocol::circle::CircleId,
     expected_control: &crate::protocol::circle::CircleControlCoord,
-) -> Result<crate::sync::CircleEpochAccess, DbError> {
+) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
     // An exclusion blocks publication until this device's bootstrap coverage
     // records the exact successor commit that excluded it. The gate derives
     // clear from that coverage; no reset flag is mutated.
@@ -532,7 +550,7 @@ impl StoreDatabase {
     /// coverage records.
     pub(crate) fn record_circle_close_exclusion_on(
         conn: &Connection,
-        exclusion: &crate::sync::LocalCircleExclusion,
+        exclusion: &crate::protocol::circle_activation::LocalCircleExclusion,
     ) -> Result<(), DbError> {
         let circle_id = exclusion.circle_id.to_string();
         let close_id = serde_json::to_string(&exclusion.close_id)
@@ -571,7 +589,7 @@ impl StoreDatabase {
 
     pub(crate) async fn record_circle_close_exclusions(
         &self,
-        exclusions: Vec<crate::sync::LocalCircleExclusion>,
+        exclusions: Vec<crate::protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), DbError> {
         self.connection
             .call(move |conn| {
@@ -589,7 +607,7 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::CircleEpochAccess>, DbError> {
+    ) -> Result<Option<crate::protocol::circle_activation::CircleEpochAccess>, DbError> {
         self.with_retained_merge_materializations(move |conn, retained| {
             retained.replay_inputs_on(conn, &root)?;
             let Some(activation) =
@@ -668,7 +686,13 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<(crate::sync::VerifiedCircleReference, StoreBatchCommitRef)>, DbError> {
+    ) -> Result<
+        Option<(
+            crate::protocol::circle_activation::VerifiedCircleReference,
+            StoreBatchCommitRef,
+        )>,
+        DbError,
+    > {
         self.connection
             .call(move |conn| {
                 let Some(commit) =
@@ -802,7 +826,7 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::VerifiedCircleReference>, DbError> {
+    ) -> Result<Option<crate::protocol::circle_activation::VerifiedCircleReference>, DbError> {
         self.connection
             .call(move |conn| Self::verified_circle_activation_on(conn, &root, circle_id, &control))
             .await
@@ -1042,7 +1066,7 @@ impl StoreDatabase {
         root: &crate::protocol::store_commit::StoreRootRef,
         circle_id: crate::protocol::circle::CircleId,
         control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::VerifiedCircleReference>, DbError> {
+    ) -> Result<Option<crate::protocol::circle_activation::VerifiedCircleReference>, DbError> {
         let Some(activation_commit) =
             Self::circle_activation_commit_ref_on(conn, circle_id, control)?
         else {
@@ -1127,7 +1151,7 @@ impl StoreDatabase {
     pub(crate) fn circle_current_state_on(
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::sync::CircleCurrentState>, DbError> {
+    ) -> Result<Option<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
         let stored = conn
             .query_row(
                 "SELECT circle_id, state FROM circle_current_state WHERE circle_id = ?1",
@@ -1146,12 +1170,14 @@ impl StoreDatabase {
     fn parse_circle_current_state(
         stored_circle_id: &str,
         payload: &[u8],
-    ) -> Result<crate::sync::CircleCurrentState, DbError> {
+    ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
         let circle_id: crate::protocol::circle::CircleId = stored_circle_id
             .parse()
             .map_err(|error| DbError::Message(format!("parse current Circle id: {error}")))?;
-        let state: crate::sync::CircleCurrentState = serde_json::from_slice(payload)
-            .map_err(|error| DbError::Message(format!("parse Circle current state: {error}")))?;
+        let state: crate::protocol::circle_activation::CircleCurrentState =
+            serde_json::from_slice(payload).map_err(|error| {
+                DbError::Message(format!("parse Circle current state: {error}"))
+            })?;
         if !state.verify() || state.circle_id() != circle_id {
             return Err(DbError::Message(format!(
                 "Circle {circle_id} has invalid current state"

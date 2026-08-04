@@ -1,25 +1,5 @@
 use super::*;
 
-#[derive(Debug)]
-pub(crate) struct VerifiedStoreSnapshotStability {
-    authority: crate::database::RetainedReplaySnapshotAuthority,
-}
-
-impl VerifiedStoreSnapshotStability {
-    pub(crate) fn from_authority(
-        authority: crate::database::RetainedReplaySnapshotAuthority,
-    ) -> Result<Self, StorePullError> {
-        authority
-            .validate()
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
-        Ok(Self { authority })
-    }
-
-    pub(crate) fn into_authority(self) -> crate::database::RetainedReplaySnapshotAuthority {
-        self.authority
-    }
-}
-
 pub(crate) struct VerifiedActivatedStoreAck {
     pub(crate) reference: super::store_commit::StoreAckRef,
     pub(crate) value: super::store_commit::StoreAck,

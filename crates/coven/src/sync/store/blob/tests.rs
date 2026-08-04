@@ -12,9 +12,9 @@ use super::StoreBlobCache;
 use crate::database::{Database, StoreDatabase};
 use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::protocol::store_commit::ObjectHash;
+use crate::protocol::synced_schema::BlobDecl;
+use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::SyncStorage;
-use crate::sync::session::BlobDecl;
-use crate::sync::session::SyncedTable;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, photo_decl, read_test_db,
@@ -100,10 +100,19 @@ fn host_blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
 fn plain_blob_db(decl: BlobDecl) -> Database {
     open_test_db_schema(
         vec![
-            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(decl),
+            SyncedTable::new(
+                "notes",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new(
+                "note_tags",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new(
+                "note_photos",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .carries_blob(decl),
         ],
         test_migrations(),
     )

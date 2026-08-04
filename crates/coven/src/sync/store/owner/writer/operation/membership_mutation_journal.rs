@@ -2,17 +2,19 @@ use crate::database::DurableMembershipMutation;
 use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
 use crate::protocol::membership::{
-    self, AuthorHead, MemberRole, MembershipChange, MembershipEntry, MembershipEntryRef,
-    MembershipHeadRef, MergeMembershipHeadTransition, StoreMembershipConflictResolution,
+    self, MemberRole, MembershipChange, MembershipEntry, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
+use crate::protocol::membership_mutation::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
 use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
+use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
 use crate::protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
 use crate::protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
 use crate::storage::SyncStorage;
-use crate::sync::store::operations::PreparedStoreOperationCommit;
 
 use crate::sync::store::membership::InviteError;
 
@@ -395,112 +397,6 @@ impl RevokeMembershipPublication {
 
     pub(super) fn entry(&self) -> &MembershipEntry {
         &self.publication().entry
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PreparedMembershipPublication {
-    pub(crate) entry: MembershipEntry,
-    pub(crate) entry_ref: MembershipEntryRef,
-    pub(crate) entry_object: PreparedExactObject,
-    pub(crate) head: AuthorHead,
-    pub(crate) head_ref: MembershipHeadRef,
-    pub(crate) head_object: PreparedExactObject,
-}
-
-impl PreparedMembershipPublication {
-    pub(crate) fn validate(&self) -> Result<(), InviteError> {
-        PreparedMembershipTransition {
-            entry: self.entry.clone(),
-            entry_ref: self.entry_ref.clone(),
-            entry_object: self.entry_object.clone(),
-            transition: membership::MergeMembershipHeadTransition {
-                body: self.head.body.clone(),
-                head_slot: self.head_ref.object.slot().clone(),
-            },
-        }
-        .validate()?;
-        let coord = self.entry.coord();
-        if self.entry_ref.coord != coord
-            || self.entry_ref.object != *self.entry_object.reference()
-            || self.head.body.entry != self.entry_ref
-            || self.head.entry_coord() != coord
-            || self.head_ref.coord != coord
-            || self.head_ref.head_hash != self.head.head_hash()
-            || self.head_ref.object != *self.head_object.reference()
-            || self.head_object.stored_bytes()
-                != serde_json::to_vec(&self.head)
-                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?
-        {
-            return Err(InviteError::InvalidDurableMutation(
-                "prepared membership publication does not bind one exact entry and head"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PreparedMembershipTransition {
-    pub(crate) entry: MembershipEntry,
-    pub(crate) entry_ref: MembershipEntryRef,
-    pub(crate) entry_object: PreparedExactObject,
-    pub(crate) transition: MergeMembershipHeadTransition,
-}
-
-impl PreparedMembershipTransition {
-    pub(crate) fn validate(&self) -> Result<(), InviteError> {
-        let coord = self.entry.coord();
-        let entry_bytes = serde_json::to_vec(&self.entry)
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-        let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
-            InviteError::InvalidDurableMutation("membership sequence is exhausted".to_string())
-        })?;
-        let entry_key = format!(
-            "{}.json",
-            crate::protocol::store_commit::membership_entry_semantic_prefix(
-                &coord.author_pubkey,
-                &coord.author_owner_grant,
-                coord.stream_id,
-                coord.seq,
-                coord.entry_hash,
-            )
-        );
-        let head_key = format!(
-            "{}.json",
-            crate::protocol::store_commit::membership_head_slot_prefix(
-                &coord.author_pubkey,
-                &coord.author_owner_grant,
-                coord.stream_id,
-                coord.seq,
-            )
-        );
-        let successor_key = format!(
-            "{}.json",
-            crate::protocol::store_commit::membership_head_slot_prefix(
-                &coord.author_pubkey,
-                &coord.author_owner_grant,
-                coord.stream_id,
-                next_sequence,
-            )
-        );
-        if self.entry_ref.coord != self.entry.coord()
-            || self.entry_ref.object != *self.entry_object.reference()
-            || self.entry_object.stored_bytes() != entry_bytes
-            || self.entry_ref.object.slot().logical_key() != entry_key
-            || self.transition.body.entry != self.entry_ref
-            || self.transition.body.resolutions != self.entry.resolution_dependencies
-            || self.transition.head_slot.logical_key() != head_key
-            || self.transition.body.successor.next_slot.logical_key() != successor_key
-        {
-            return Err(InviteError::InvalidDurableMutation(
-                "prepared membership transition does not bind its exact entry".to_string(),
-            ));
-        }
-        Ok(())
     }
 }
 

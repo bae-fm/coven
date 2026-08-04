@@ -25,11 +25,13 @@ use crate::sync::store::circle_controls::CircleOperationError;
 mod metadata;
 mod roster;
 
+#[cfg(test)]
+use crate::protocol::circle_activation::CircleCurrentState;
+#[cfg(test)]
+use crate::sync::store::circle_controls::activation::CircleCurrentControl;
 use crate::sync::store::circle_controls::activation::{
     read_exact_circle_object, verify_control_context_for_verified_commit,
 };
-#[cfg(test)]
-use crate::sync::store::circle_controls::activation::{CircleCurrentControl, CircleCurrentState};
 use crate::sync::store::circle_controls::activation::{
     LocalCircleExclusion, VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive,
     VerifiedCircleImage, VerifiedCircleReference, VerifiedStreamActivationPrefix,
@@ -1458,6 +1460,7 @@ impl CircleActivationVerifier<'_, '_> {
             bootstrap.clone(),
             image_bytes,
         )
+        .map_err(CircleOperationError::from)
     }
 }
 

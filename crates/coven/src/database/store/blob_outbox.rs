@@ -111,7 +111,7 @@ pub struct QueuedUpload {
 #[derive(Clone)]
 pub(crate) struct PublishedBlobDropIntent {
     pub(crate) seq: u64,
-    pub(crate) drop: crate::sync::cycle::DeferredLocalBlobDrop,
+    pub(crate) drop: crate::protocol::blob::DeferredLocalBlobDrop,
 }
 
 impl StoreDatabase {
@@ -333,7 +333,7 @@ impl StoreDatabase {
                             })?;
                         let disposition_raw: String = row.get(6)?;
                         let disposition =
-                            crate::sync::cycle::DeferredLocalBlobDisposition::from_db(
+                            crate::protocol::blob::DeferredLocalBlobDisposition::from_db(
                                 &disposition_raw,
                             )
                             .map_err(|message| {
@@ -348,7 +348,7 @@ impl StoreDatabase {
                             })?;
                         Ok(PublishedBlobDropIntent {
                             seq: row.get::<_, i64>(0)? as u64,
-                            drop: crate::sync::cycle::DeferredLocalBlobDrop {
+                            drop: crate::protocol::blob::DeferredLocalBlobDrop {
                                 namespace: row.get(1)?,
                                 id: row.get(2)?,
                                 size: size as u64,

@@ -35,3 +35,25 @@ impl From<StorageError> for OwnerPromotionError {
         Self::Storage(error.to_string())
     }
 }
+
+impl From<crate::protocol::prepared_commit::PreparedCommitError> for OwnerPromotionError {
+    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+        OwnerPromotionError::Protocol(error.to_string())
+    }
+}
+
+impl From<crate::protocol::membership_mutation::MembershipPreparationError>
+    for OwnerPromotionError
+{
+    fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
+        OwnerPromotionError::Protocol(error.to_string())
+    }
+}
+
+impl From<crate::protocol::owner_promotion_journal::OwnerPromotionJournalError>
+    for OwnerPromotionError
+{
+    fn from(error: crate::protocol::owner_promotion_journal::OwnerPromotionJournalError) -> Self {
+        OwnerPromotionError::Protocol(error.to_string())
+    }
+}

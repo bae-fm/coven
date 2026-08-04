@@ -26,15 +26,6 @@ pub(crate) enum StoreOperationBatch {
     },
 }
 
-/// One Circle acknowledgement object riding an activating Store commit: its
-/// exact reference (named in the signed commit body) and the exact object the
-/// commit uploads and takes ownership of.
-#[derive(Debug, Clone)]
-pub(crate) struct CircleAckActivation {
-    pub reference: super::store_commit::CircleAckRef,
-    pub ack: crate::database::ExactProtocolObject<super::store_commit::CircleAck>,
-}
-
 pub(crate) struct StoreOperationPlanCommon {
     /// This device's turn to author its own next Store commit, taken when the
     /// position this plan's order extends was read. A plan is the live claim on

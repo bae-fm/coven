@@ -1,5 +1,9 @@
 use super::verification::{StoreMembershipObjectVerifier, VerifiedMergeMembershipClosure};
 use super::*;
+use crate::database::VerifiedStoreSnapshotStability;
+use crate::database::{
+    DeviceJoinBootstrapActivation, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
+};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::{MembershipChain, MembershipStatus};
 use crate::protocol::objects::{
@@ -1946,7 +1950,7 @@ pub(crate) struct MergeHistoryVerifier<'a> {
 
 pub(crate) struct SelectedStableStoreSnapshot {
     pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
-    pub(crate) stability: crate::sync::store::owner::pull::VerifiedStoreSnapshotStability,
+    pub(crate) stability: crate::database::VerifiedStoreSnapshotStability,
 }
 
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;
@@ -3770,6 +3774,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             acknowledgements: retained_acknowledgements,
         };
         VerifiedStoreSnapshotStability::from_authority(authority)
+            .map_err(|error| StorePullError::Database(error.to_string()))
     }
 
     pub(crate) async fn verify_membership_grant_revocation_nonactivation(

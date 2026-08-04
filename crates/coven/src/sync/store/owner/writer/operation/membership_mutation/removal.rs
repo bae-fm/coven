@@ -552,7 +552,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         &transition,
                         &publication,
                         candidate.clone(),
-                        crate::sync::store::operations::StoreMembershipJournalCompletion::RotationMutation {
+                        crate::protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
                         intent_hash: persistence.intent_hash(),
                         progress_bytes: MembershipMutationProgress::RevokeActivated {
                             candidate: Some(candidate.reference.clone()),

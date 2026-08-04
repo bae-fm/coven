@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use tracing::info;
 
 use crate::database::*;
-use crate::sync::session::SyncedTable;
+use crate::protocol::synced_schema::SyncedTable;
 
 use super::*;
 
@@ -749,7 +749,7 @@ impl StoreDatabase {
                 &std::collections::BTreeSet::new(),
                 Some(&cutoff),
                 false,
-                crate::sync::LocalStoreMembership::Current,
+                crate::protocol::membership::LocalStoreMembership::Current,
             )?;
             transaction.rollback().map_err(DbError::from)?;
             let replay_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(

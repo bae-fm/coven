@@ -1756,6 +1756,21 @@ pub(crate) fn verify_membership_head_reference(
     Ok(())
 }
 
+/// One loaded protocol object: its typed value, exact bytes, reference, and
+/// prepared upload representation.
+#[derive(Debug, Clone)]
+pub(crate) struct ExactProtocolObject<T> {
+    pub value: T,
+    pub bytes: Vec<u8>,
+    pub object: ExactObjectRef,
+    pub prepared: PreparedExactObject,
+}
+
+pub(crate) struct PreparedProtocolObject<T> {
+    pub value: T,
+    pub prepared: PreparedExactObject,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

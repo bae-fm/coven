@@ -11,7 +11,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -135,7 +135,9 @@ fn fresh_open_rolls_back_host_schema_and_coven_metadata_when_routing_is_invalid(
     let path = directory.path().join("fresh-routing-failure.sqlite");
     let result = Database::open(
         &path,
-        vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+        vec![things_table(
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "fresh-routing-failure".to_string(),
@@ -179,7 +181,9 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
     let migrations = [things_migration()];
     let database = Database::open(
         &path,
-        vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+        vec![things_table(
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
@@ -201,7 +205,9 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
     ];
     let database = Database::open(
         &path,
-        vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+        vec![things_table(
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
@@ -240,8 +246,11 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         )
     };
     let table = || {
-        SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey)
-            .gated_by("audience")
+        SyncedTable::new(
+            "things",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("audience")
     };
     let database = Database::open(
         &path,
@@ -428,9 +437,15 @@ fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
          ) STRICT;",
     );
     let tables = vec![
-        SyncedTable::new("parents", crate::sync::session::RowIdentity::SharedKey)
-            .gated_by("shared"),
-        SyncedTable::new("children", crate::sync::session::RowIdentity::SharedKey),
+        SyncedTable::new(
+            "parents",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("shared"),
+        SyncedTable::new(
+            "children",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        ),
     ];
 
     let error = match Database::open(
@@ -477,7 +492,9 @@ fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_i
          INSERT INTO things VALUES ('old', 'base', '0000000001000-0000-writer');",
     )
     .expect("schema and seed");
-    let tables = vec![things_table(crate::sync::session::RowIdentity::SharedKey)];
+    let tables = vec![things_table(
+        crate::protocol::synced_schema::RowIdentity::SharedKey,
+    )];
 
     let mut primary_key_session = attach_session(&conn, &tables).expect("attach session");
     let primary_key_tx = conn.unchecked_transaction().expect("transaction");
@@ -528,7 +545,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
     let writer_error = match Database::open(
         Path::new(":memory:"),
         vec![things_table(
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -557,7 +574,9 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
     let path = dir.path().join("read-only-invalid.sqlite");
     let writer = Database::open(
         &path,
-        vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+        vec![things_table(
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-seed".to_string(),
@@ -579,7 +598,7 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
     let reader_error = match Database::open_read_only(
         &path,
         vec![things_table(
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -601,8 +620,8 @@ fn database_open_rejects_duplicate_synced_table_declarations() {
     let error = match Database::open(
         Path::new(":memory:"),
         vec![
-            things_table(crate::sync::session::RowIdentity::SharedKey),
-            things_table(crate::sync::session::RowIdentity::IndependentUuid),
+            things_table(crate::protocol::synced_schema::RowIdentity::SharedKey),
+            things_table(crate::protocol::synced_schema::RowIdentity::IndependentUuid),
         ],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -622,7 +641,7 @@ fn database_open_rejects_duplicate_synced_table_declarations() {
 #[tokio::test]
 async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     let tables = vec![things_table(
-        crate::sync::session::RowIdentity::IndependentUuid,
+        crate::protocol::synced_schema::RowIdentity::IndependentUuid,
     )];
     let db = Database::open(
         Path::new(":memory:"),
@@ -692,7 +711,7 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
 #[tokio::test]
 async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid_rolls_back() {
     let tables = vec![things_table(
-        crate::sync::session::RowIdentity::IndependentUuid,
+        crate::protocol::synced_schema::RowIdentity::IndependentUuid,
     )];
     let db = Database::open(
         Path::new(":memory:"),
@@ -834,7 +853,7 @@ async fn database_open_rejects_host_declared_reserved_tables() {
             Path::new(":memory:"),
             vec![SyncedTable::new(
                 table_name,
-                crate::sync::session::RowIdentity::SharedKey,
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -860,7 +879,7 @@ fn database_open_rejects_host_triggers_using_coven_cleanup_guard_names() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -892,7 +911,7 @@ async fn database_open_rejects_empty_synced_table_name() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -917,7 +936,7 @@ async fn database_open_accepts_normal_host_synced_table() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -957,7 +976,7 @@ async fn database_open_rejects_integer_primary_key() {
         "CREATE TABLE things (id INTEGER PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "integer-pk",
     );
@@ -974,7 +993,7 @@ async fn database_open_rejects_primary_key_not_at_column_zero() {
          _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "pk-not-first",
     );
@@ -990,7 +1009,7 @@ async fn database_open_rejects_primary_key_named_other_than_id() {
         "CREATE TABLE things (thing_id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "pk-misnamed",
     );
@@ -1007,7 +1026,7 @@ async fn database_open_rejects_composite_primary_key() {
          _updated_at TEXT NOT NULL, PRIMARY KEY (id, part)) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "composite-pk",
     );
@@ -1023,7 +1042,7 @@ async fn database_open_rejects_nullable_updated_at() {
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "nullable-updated-at",
     );
@@ -1039,7 +1058,7 @@ async fn database_open_rejects_non_strict_synced_table() {
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL);",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "non-strict",
     );
@@ -1055,7 +1074,7 @@ async fn database_open_rejects_declared_table_no_migration_creates() {
         "CREATE TABLE other (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "declared-never-created",
     );
@@ -1071,7 +1090,7 @@ async fn database_open_rejects_synced_table_spelling_that_differs_from_live_sche
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "Things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "case-variant-table-name",
     );
@@ -1086,8 +1105,14 @@ async fn database_open_rejects_case_variant_duplicate_synced_tables() {
     let error = open_contract_error(
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![
-            SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey),
-            SyncedTable::new("THINGS", crate::sync::session::RowIdentity::IndependentUuid),
+            SyncedTable::new(
+                "things",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new(
+                "THINGS",
+                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            ),
         ],
         "case-variant-duplicate-table",
     );
@@ -1103,7 +1128,7 @@ async fn database_open_accepts_strict_synced_table() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -1127,7 +1152,7 @@ async fn database_open_ignores_undeclared_non_strict_local_table() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "things",
-            crate::sync::session::RowIdentity::SharedKey,
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
@@ -1146,7 +1171,7 @@ async fn database_open_ignores_undeclared_non_strict_local_table() {
 #[tokio::test]
 async fn database_open_rejects_duplicate_blob_namespace() {
     let blob = |namespace| {
-        crate::sync::session::BlobDecl::new(
+        crate::protocol::synced_schema::BlobDecl::new(
             namespace,
             crate::protocol::blob::Provenance::HostProvided,
             crate::protocol::blob::CacheFill::CacheLazy,
@@ -1158,10 +1183,16 @@ async fn database_open_rejects_duplicate_blob_namespace() {
          CREATE TABLE thumbs (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
          hash TEXT, _updated_at TEXT NOT NULL) STRICT;",
         vec![
-            SyncedTable::new("covers", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(blob("images")),
-            SyncedTable::new("thumbs", crate::sync::session::RowIdentity::SharedKey)
-                .carries_blob(blob("images")),
+            SyncedTable::new(
+                "covers",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .carries_blob(blob("images")),
+            SyncedTable::new(
+                "thumbs",
+                crate::protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .carries_blob(blob("images")),
         ],
         "dup-namespace",
     );

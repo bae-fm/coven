@@ -379,9 +379,9 @@ impl Database {
         blob_id: &str,
         bytes: &[u8],
         locator_hash: crate::protocol::store_commit::ObjectHash,
-        disposition: crate::sync::cycle::DeferredLocalBlobDisposition,
+        disposition: crate::protocol::blob::DeferredLocalBlobDisposition,
     ) -> Result<(), DbError> {
-        let drop = crate::sync::cycle::DeferredLocalBlobDrop {
+        let drop = crate::protocol::blob::DeferredLocalBlobDrop {
             namespace: namespace.to_string(),
             id: blob_id.to_string(),
             size: bytes.len() as u64,

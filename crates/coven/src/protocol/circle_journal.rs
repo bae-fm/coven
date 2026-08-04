@@ -2,13 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::CircleOperationError;
 use crate::protocol::circle::{
     CircleId, CircleOperationId, CircleOperationKind, CircleOperationState,
     PreparedCircleTransition,
 };
 use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::store_commit::{StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead};
+
+/// A journal whose recorded state contradicts itself or the commit it
+/// describes. Produced by the journal's own validation; workflow errors wrap
+/// it at the operation boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Circle operation journal: {0}")]
+pub(crate) struct CircleJournalError(pub(crate) String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,22 +125,22 @@ impl CircleOperationJournal {
 
     pub(crate) fn closed_remote_objects(
         &self,
-    ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, CircleOperationError> {
+    ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, CircleJournalError> {
         self.uploaded_object_ids()?;
         let operation = self.operation();
         let commit: StoreBatchCommit = serde_json::from_slice(&operation.commit_bytes)
-            .map_err(|error| CircleOperationError::Journal(format!("Circle commit: {error}")))?;
+            .map_err(|error| CircleJournalError(format!("Circle commit: {error}")))?;
         operation
             .commit_ref
             .verify_commit(&commit)
-            .map_err(|error| CircleOperationError::Journal(error.to_string()))?;
+            .map_err(|error| CircleJournalError(error.to_string()))?;
         let access_refs = commit
             .circle_controls()
             .iter()
             .flat_map(|control| control.objects().access.iter())
             .collect::<Vec<_>>();
         if access_refs.len() != operation.creation.access.len() {
-            return Err(CircleOperationError::Journal(
+            return Err(CircleJournalError(
                 "Circle access material does not cover the signed candidate graph".to_string(),
             ));
         }
@@ -144,7 +150,7 @@ impl CircleOperationJournal {
                 .values()
                 .find(|prepared| prepared.reference() == object)
                 .ok_or_else(|| {
-                    CircleOperationError::Journal(format!(
+                    CircleJournalError(format!(
                         "Circle candidate object {} has no prepared bytes",
                         crate::protocol::remote_object::remote_object_id(object)
                     ))
@@ -152,7 +158,7 @@ impl CircleOperationJournal {
         };
         let mut materials = Vec::with_capacity(access_refs.len() * 3 + 1);
         let [circle_reference] = commit.circle_controls() else {
-            return Err(CircleOperationError::Journal(
+            return Err(CircleJournalError(
                 "Circle operation commit must activate exactly one Circle control".to_string(),
             ));
         };
@@ -168,14 +174,14 @@ impl CircleOperationJournal {
                 materials.push(crate::protocol::remote_object::CandidateObjectMaterial {
                     object: reference.object.clone(),
                     canonical_semantic_bytes: serde_json::to_vec(intent).map_err(|error| {
-                        CircleOperationError::Journal(format!("Circle epoch-close intent: {error}"))
+                        CircleJournalError(format!("Circle epoch-close intent: {error}"))
                     })?,
                     stored_bytes: prepared.stored_bytes().to_vec(),
                 });
             }
             (None, None) => {}
             _ => {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleJournalError(
                     "Circle epoch-close intent does not match its signed candidate graph"
                         .to_string(),
                 ));
@@ -200,7 +206,7 @@ impl CircleOperationJournal {
             }
             (None, None) => {}
             _ => {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleJournalError(
                     "Circle epoch-close outcome does not match its signed candidate graph"
                         .to_string(),
                 ));
@@ -227,7 +233,7 @@ impl CircleOperationJournal {
             }
             (None, None) => {}
             _ => {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleJournalError(
                     "Circle epoch-close cancellation does not match its signed candidate graph"
                         .to_string(),
                 ));
@@ -238,18 +244,15 @@ impl CircleOperationJournal {
             let leaf = prepared_for(&reference.leaf.object)?;
             materials.push(crate::protocol::remote_object::CandidateObjectMaterial {
                 object: reference.leaf.object.clone(),
-                canonical_semantic_bytes: serde_json::to_vec(&access.leaf.value).map_err(
-                    |error| CircleOperationError::Journal(format!("Circle access leaf: {error}")),
-                )?,
+                canonical_semantic_bytes: serde_json::to_vec(&access.leaf.value)
+                    .map_err(|error| CircleJournalError(format!("Circle access leaf: {error}")))?,
                 stored_bytes: leaf.stored_bytes().to_vec(),
             });
             let envelope = prepared_for(&reference.envelope.object)?;
             materials.push(crate::protocol::remote_object::CandidateObjectMaterial {
                 object: reference.envelope.object.clone(),
                 canonical_semantic_bytes: serde_json::to_vec(&access.envelope).map_err(
-                    |error| {
-                        CircleOperationError::Journal(format!("Circle access envelope: {error}"))
-                    },
+                    |error| CircleJournalError(format!("Circle access envelope: {error}")),
                 )?,
                 stored_bytes: envelope.stored_bytes().to_vec(),
             });
@@ -268,7 +271,7 @@ impl CircleOperationJournal {
             {
                 for blob in &bootstrap.blobs {
                     let stored = blob.stored().ok_or_else(|| {
-                        CircleOperationError::Journal(
+                        CircleJournalError(
                             "Circle bootstrap row blob has no exact stored locator".to_string(),
                         )
                     })?;
@@ -278,7 +281,7 @@ impl CircleOperationJournal {
                         .insert(object_id, stored.clone())
                         .is_some_and(|existing| existing != *stored)
                     {
-                        return Err(CircleOperationError::Journal(format!(
+                        return Err(CircleJournalError(format!(
                             "Circle bootstrap blob {object_id} has conflicting exact references"
                         )));
                     }
@@ -288,7 +291,7 @@ impl CircleOperationJournal {
         let mut remotes =
             crate::protocol::remote_object::CandidateObjectGraph::from_commit(&commit)
                 .and_then(|graph| graph.close(&commit, &operation.commit_ref, materials))
-                .map_err(|error| CircleOperationError::Journal(error.to_string()))?;
+                .map_err(|error| CircleJournalError(error.to_string()))?;
         for blob in bootstrap_blobs.into_values() {
             remotes.push(
                 crate::protocol::remote_object::RemoteObjectRecord::candidate_owned_blob(
@@ -296,16 +299,14 @@ impl CircleOperationJournal {
                     operation.commit_ref.clone(),
                     true,
                 )
-                .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+                .map_err(|error| CircleJournalError(error.to_string()))?,
             );
         }
         let commit_prepared = operation
             .prepared_objects
             .get("store-commit")
             .ok_or_else(|| {
-                CircleOperationError::Journal(
-                    "Circle operation lacks its prepared Store commit".to_string(),
-                )
+                CircleJournalError("Circle operation lacks its prepared Store commit".to_string())
             })?;
         remotes.push(
             crate::protocol::remote_object::RemoteObjectRecord::candidate_commit(
@@ -313,15 +314,13 @@ impl CircleOperationJournal {
                 operation.commit_bytes.clone(),
                 commit_prepared.stored_bytes().to_vec(),
             )
-            .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+            .map_err(|error| CircleJournalError(error.to_string()))?,
         );
         let prepared = operation
             .prepared_objects
             .get("store-head")
             .ok_or_else(|| {
-                CircleOperationError::Journal(
-                    "Circle operation lacks its prepared Store head".to_string(),
-                )
+                CircleJournalError("Circle operation lacks its prepared Store head".to_string())
             })?;
         remotes.push(
             crate::protocol::remote_object::RemoteObjectRecord::candidate_activated_store_head(
@@ -333,20 +332,20 @@ impl CircleOperationJournal {
                 prepared.stored_bytes().to_vec(),
                 operation.commit_ref.clone(),
             )
-            .map_err(|error| CircleOperationError::Journal(error.to_string()))?,
+            .map_err(|error| CircleJournalError(error.to_string()))?,
         );
         Ok(remotes)
     }
 
     pub(crate) fn uploaded_object_ids(
         &self,
-    ) -> Result<BTreeSet<crate::protocol::store_commit::ObjectHash>, CircleOperationError> {
+    ) -> Result<BTreeSet<crate::protocol::store_commit::ObjectHash>, CircleJournalError> {
         self.operation()
             .uploaded
             .iter()
             .map(|step| {
                 let prepared = self.operation().prepared_objects.get(step).ok_or_else(|| {
-                    CircleOperationError::Journal(format!(
+                    CircleJournalError(format!(
                         "Circle upload marker {step} names no prepared object"
                     ))
                 })?;
@@ -375,14 +374,14 @@ impl CircleOperationJournal {
     /// from any state whose candidate has not activated — a ready or blocked
     /// initial candidate, or a finalization candidate. A candidate that already
     /// won its slot has no journal row in these states, so no path reaches here.
-    pub(crate) fn begin_discard(&mut self) -> Result<(), CircleOperationError> {
+    pub(crate) fn begin_discard(&mut self) -> Result<(), CircleJournalError> {
         let operation = match &self.progress {
             CircleOperationProgress::Ready(operation)
             | CircleOperationProgress::Finalizing(operation)
             | CircleOperationProgress::Blocked { operation, .. } => operation.clone(),
             CircleOperationProgress::WaitingForCloseResponses(_)
             | CircleOperationProgress::Discarding(_) => {
-                return Err(CircleOperationError::Journal(format!(
+                return Err(CircleJournalError(format!(
                     "Circle operation {} cannot enter discard from its current state",
                     self.operation_id
                 )));
@@ -399,7 +398,7 @@ impl CircleOperationJournal {
     pub(crate) fn block(
         &mut self,
         block: crate::protocol::circle::CircleOperationBlock,
-    ) -> Result<(), CircleOperationError> {
+    ) -> Result<(), CircleJournalError> {
         let (phase, operation) = match &self.progress {
             CircleOperationProgress::Ready(operation) => {
                 (CircleOperationPhase::Initial, operation.clone())
@@ -410,7 +409,7 @@ impl CircleOperationJournal {
             CircleOperationProgress::WaitingForCloseResponses(_)
             | CircleOperationProgress::Blocked { .. }
             | CircleOperationProgress::Discarding(_) => {
-                return Err(CircleOperationError::Journal(format!(
+                return Err(CircleJournalError(format!(
                     "Circle operation {} is not publishable",
                     self.operation_id
                 )));
@@ -426,12 +425,12 @@ impl CircleOperationJournal {
 
     /// Return a blocked operation to the phase captured when it blocked, so it
     /// re-enters the idempotent publish pipeline with its exact retained payload.
-    pub(crate) fn unblock(&mut self) -> Result<(), CircleOperationError> {
+    pub(crate) fn unblock(&mut self) -> Result<(), CircleJournalError> {
         let CircleOperationProgress::Blocked {
             phase, operation, ..
         } = &self.progress
         else {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleJournalError(format!(
                 "Circle operation {} is not blocked",
                 self.operation_id
             )));
@@ -444,9 +443,9 @@ impl CircleOperationJournal {
         Ok(())
     }
 
-    pub(crate) fn wait_for_close_responses(&mut self) -> Result<(), CircleOperationError> {
+    pub(crate) fn wait_for_close_responses(&mut self) -> Result<(), CircleJournalError> {
         let CircleOperationProgress::Ready(operation) = &mut self.progress else {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleJournalError(format!(
                 "Circle operation {} is not ready to enter close-response waiting",
                 self.operation_id
             )));
@@ -459,12 +458,12 @@ impl CircleOperationJournal {
     pub(crate) fn begin_finalization(
         &mut self,
         operation: PreparedCircleOperation,
-    ) -> Result<(), CircleOperationError> {
+    ) -> Result<(), CircleJournalError> {
         if !matches!(
             &self.progress,
             CircleOperationProgress::WaitingForCloseResponses(_)
         ) {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleJournalError(format!(
                 "Circle operation {} is not waiting for close responses",
                 self.operation_id
             )));
@@ -491,14 +490,14 @@ impl CircleOperationJournal {
         )
     }
 
-    pub(crate) fn commit(&self) -> Result<StoreBatchCommit, CircleOperationError> {
+    pub(crate) fn commit(&self) -> Result<StoreBatchCommit, CircleJournalError> {
         serde_json::from_slice(&self.operation().commit_bytes)
-            .map_err(|error| CircleOperationError::Journal(format!("parse Store commit: {error}")))
+            .map_err(|error| CircleJournalError(format!("parse Store commit: {error}")))
     }
 
-    pub(crate) fn validate_identity(&self) -> Result<(), CircleOperationError> {
+    pub(crate) fn validate_identity(&self) -> Result<(), CircleJournalError> {
         if self.operation().creation.circle_id != self.circle_id {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleJournalError(format!(
                 "circle operation {} payload names circle {} but its operation names circle {}",
                 self.operation_id,
                 self.circle_id,
@@ -516,7 +515,7 @@ impl CircleOperationJournal {
             crate::WriteId::from_generated(self.operation_id.as_str().to_string())
         };
         if commit.write_id != expected_write_id {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleJournalError(format!(
                 "circle operation id {} differs from payload commit operation id {}",
                 self.operation_id, commit.write_id
             )));

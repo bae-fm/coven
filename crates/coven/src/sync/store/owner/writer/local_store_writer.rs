@@ -891,7 +891,7 @@ impl LocalStoreWriter {
         &self,
         history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
         circle_id: crate::protocol::circle::CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
         Vec<(
             crate::protocol::store_commit::CircleSnapshotRef,
@@ -915,7 +915,7 @@ impl LocalStoreWriter {
         &self,
         history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
         circle_id: crate::protocol::circle::CircleId,
-        access: &crate::sync::CircleEpochAccess,
+        access: &crate::protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
         Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
         crate::sync::store::owner::snapshot::SnapshotError,
@@ -1621,7 +1621,7 @@ impl LocalStoreWriter {
     pub(super) fn attach_merge_membership_proof(
         &self,
         candidate: &mut super::operation::operations::PreparedStoreOperationCommit,
-        publication: &super::PreparedMembershipPublication,
+        publication: &crate::protocol::membership_mutation::PreparedMembershipPublication,
         resolution: Option<&crate::protocol::membership::StoreMembershipConflictResolution>,
         prepare_head: impl FnOnce(
             &crate::protocol::objects::ProtocolObjectContext,
@@ -1633,12 +1633,14 @@ impl LocalStoreWriter {
             crate::protocol::objects::StoreObjectError,
         >,
     ) -> Result<(), crate::sync::store::StoreError> {
-        candidate.attach_merge_membership_proof_with(
-            publication,
-            resolution,
-            &self.identity,
-            prepare_head,
-        )
+        candidate
+            .attach_merge_membership_proof_with(
+                publication,
+                resolution,
+                &self.identity,
+                prepare_head,
+            )
+            .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
     }
 
     #[allow(clippy::too_many_arguments)]

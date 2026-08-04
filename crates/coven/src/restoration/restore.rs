@@ -16,10 +16,10 @@ use crate::identity_custody::IdentityCustody;
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::oauth::OAuthTokens;
+use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_dir::StoreLayout;
-use crate::sync::session::SyncedTable;
 use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 use crate::Migration;
 

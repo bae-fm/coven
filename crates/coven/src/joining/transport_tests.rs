@@ -49,7 +49,7 @@ struct TransportFixture {
     invite_code: String,
     join_request: String,
     layout: crate::store_dir::StoreLayout,
-    tables: Vec<crate::sync::session::SyncedTable>,
+    tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     /// The cloud home the joining device sees. Same principal as the owner's
     /// in the ordinary case; a different account for the cross-principal one,
     /// which is what makes the admission run its provider probe.

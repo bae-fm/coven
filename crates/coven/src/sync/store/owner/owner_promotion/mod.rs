@@ -4,11 +4,10 @@ use super::AuthorizedWriterOperation;
 
 mod authority;
 mod error;
-mod journal;
+pub(crate) use crate::protocol::owner_promotion_journal as journal;
 mod operation;
 
 pub(crate) use error::OwnerPromotionError;
-pub(crate) use journal::{OwnerPromotionJournal, OwnerPromotionJournalTransition};
 pub(crate) use operation::AuthorizedOwnerPromotion;
 
 #[cfg(test)]

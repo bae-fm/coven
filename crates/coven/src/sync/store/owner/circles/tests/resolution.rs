@@ -495,9 +495,9 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
 /// successor.
 fn open_routing_db() -> Database {
     crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::sync::session::SyncedTable::new(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
         vec![crate::Migration::sql(

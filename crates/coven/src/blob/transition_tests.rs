@@ -25,13 +25,13 @@ use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
+use crate::protocol::blob::DeferredLocalBlobDisposition;
 use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use crate::protocol::store_commit::ObjectHash;
+use crate::protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
-use crate::sync::cycle::DeferredLocalBlobDisposition;
-use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,

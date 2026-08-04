@@ -110,7 +110,9 @@ pub use protocol::blob::{
     ContentHasher, DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure,
     UploadFailureCause, UploadFailures,
 };
+pub use protocol::hlc::Timestamp;
 pub use protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
+pub use protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 pub use protocol::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
     CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
@@ -149,7 +151,7 @@ pub use storage::{
 };
 pub use store_dir::{StoreDir, StoreLayout};
 pub use sync::{
-    BlobCacheError, BlobDecl, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
+    BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
     DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
     DeviceJoinDriveOutcome, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
@@ -161,8 +163,7 @@ pub use sync::{
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest, Hlc,
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
-    ProvisionalDeviceBootstrap, RowIdentity, SyncError, SyncLoopAlerts, SyncLoopStatus,
-    SyncLoopSuccess, SyncedTable, Timestamp,
+    ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts, SyncLoopStatus, SyncLoopSuccess,
 };
 pub use write::{
     AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,

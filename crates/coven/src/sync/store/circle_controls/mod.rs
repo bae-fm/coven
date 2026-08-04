@@ -2,16 +2,14 @@
 
 pub(crate) mod activation;
 mod error;
-mod journal;
 
-pub(crate) use activation::{
-    read_exact_circle_object, verify_control_context_for_verified_commit, CircleAuthoringState,
-    CircleCurrentState, CircleEpochAccess, LocalCircleExclusion, VerifiedCircleAccess,
-    VerifiedCircleActivations, VerifiedCircleActive, VerifiedCircleImage, VerifiedCircleReference,
-    VerifiedStreamActivations,
-};
-pub(crate) use error::CircleOperationError;
-pub(crate) use journal::{
+pub(crate) use crate::protocol::circle_journal::{
     CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,
     CircleTransitionHistory, PreparedCircleOperation,
 };
+pub(crate) use activation::{
+    read_exact_circle_object, verify_control_context_for_verified_commit, CircleAuthoringState,
+    CircleEpochAccess, VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive,
+    VerifiedCircleImage, VerifiedCircleReference,
+};
+pub(crate) use error::CircleOperationError;

@@ -1,7 +1,13 @@
 use crate::database::*;
+use crate::database::{
+    activated_merge_membership_remote_objects, MembershipAuthorityBytes,
+    PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
+};
 use crate::database::{RetainedReplayAuthority, RetainedReplayBaseline};
 use crate::protocol::audience_package::AudiencePackage;
 use crate::protocol::blob::locator::{RemoteAudience, StoredBlobRef};
+use crate::protocol::circle_activation::VerifiedCircleActivations;
+use crate::protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
 use crate::protocol::membership::{AuthorHead, MembershipEntry};
 use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{
@@ -11,11 +17,6 @@ use crate::protocol::store_commit::{
     CommitFrontier, ObjectHash, RetainedStoreDeviceRegistrationActivations, StoreBatchCommit,
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
     StoreRootRef,
-};
-use crate::sync::{
-    activated_merge_membership_remote_objects, ApplyOutcome, HeldStorePositionReason,
-    LocalStoreMembership, MembershipAuthorityBytes, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage, VerifiedCircleActivations,
 };
 use crate::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
@@ -209,7 +210,7 @@ impl RetainedMergeMaterializationCache {
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
         control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::sync::VerifiedCircleReference>, DbError> {
+    ) -> Result<Option<crate::protocol::circle_activation::VerifiedCircleReference>, DbError> {
         let Some(activation_commit) =
             StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, control)?
         else {
@@ -686,7 +687,10 @@ pub(crate) struct CircleRestoreSelectionIndex {
         crate::protocol::circle::CircleId,
         Vec<crate::protocol::circle::CircleControlCoord>,
     )>,
-    pub(crate) preserved_images: Vec<(StoreBatchCommitRef, crate::sync::VerifiedCircleImage)>,
+    pub(crate) preserved_images: Vec<(
+        StoreBatchCommitRef,
+        crate::protocol::circle_activation::VerifiedCircleImage,
+    )>,
 }
 
 impl CircleReplayEpochIndex {
@@ -732,7 +736,7 @@ impl CircleReplayEpochIndex {
 
     pub(crate) fn include_verified_activations(
         &mut self,
-        activations: &[crate::sync::VerifiedCircleReference],
+        activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         for activation in activations {
             self.record_control(activation.circle_id, &activation.control)?;
@@ -895,7 +899,7 @@ impl StoreDatabase {
         conn: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
-        bootstrap: &crate::sync::VerifiedCircleImage,
+        bootstrap: &crate::protocol::circle_activation::VerifiedCircleImage,
         activation_control: &crate::protocol::circle::PreparedCircleControl,
     ) -> Result<(), DbError> {
         {
@@ -1133,7 +1137,13 @@ impl StoreDatabase {
 
     pub(crate) fn circle_bootstrap_replay_inputs_on(
         conn: &Connection,
-    ) -> Result<Vec<(StoreBatchCommitRef, crate::sync::VerifiedCircleImage)>, DbError> {
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            crate::protocol::circle_activation::VerifiedCircleImage,
+        )>,
+        DbError,
+    > {
         let mut statement = conn
             .prepare(
                 "SELECT circle_id, control_coord, activation_commit, exact_cut,
@@ -1208,13 +1218,14 @@ impl StoreDatabase {
             // bootstraps both write. `from_stored_image` re-binds the digest; the
             // replay loop runs the full image verification against the retained
             // control and routing key.
-            let bootstrap = crate::sync::VerifiedCircleImage::from_stored_image(
-                circle_id,
-                control,
-                reference,
-                image_bytes,
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            let bootstrap =
+                crate::protocol::circle_activation::VerifiedCircleImage::from_stored_image(
+                    circle_id,
+                    control,
+                    reference,
+                    image_bytes,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
             bootstraps.push((activation_commit, bootstrap));
         }
         Ok(bootstraps)

@@ -8,12 +8,13 @@ use crate::database::{
     VerifiedMergeMaterialization,
 };
 use crate::protocol::circle::{CircleOperationId, CircleOperationState};
+use crate::protocol::circle_activation::VerifiedCircleActivations;
+use crate::protocol::circle_journal::CircleOperationJournal;
 use crate::protocol::remote_object::remote_object_id;
 use crate::protocol::store_commit::{
     commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
-use crate::sync::{CircleOperationJournal, VerifiedCircleActivations};
 
 impl StoreDatabase {
     pub(crate) async fn insert_circle_operation(
@@ -520,7 +521,7 @@ impl StoreDatabase {
                 if !journal.is_finalizing()
                     && matches!(
                     journal.intent,
-                    crate::sync::CircleOperationIntent::RemoveMember { .. }
+                    crate::protocol::circle_journal::CircleOperationIntent::RemoveMember { .. }
                 )
                 {
                     let mut waiting = journal;

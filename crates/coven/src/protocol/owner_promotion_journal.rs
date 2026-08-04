@@ -1,7 +1,35 @@
+//! The durable Owner-promotion journal: the request, acceptance, and
+//! finalization values one promotion binds, validated against the exact
+//! target and identities they retain.
+
+use crate::protocol::store_commit::ObjectHash;
+
+/// A promotion journal whose recorded state contradicts the request, target,
+/// or acceptance it retains. Workflow errors wrap it at the operation
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Owner promotion journal: {0}")]
+pub(crate) struct OwnerPromotionJournalError(pub(crate) String);
+
+const TARGET_PREFIX: &str = "owner_promotion_target/";
+
+pub(crate) fn target_key(
+    target: &StoreDeviceRegistrationRef,
+) -> Result<String, OwnerPromotionJournalError> {
+    let bytes = serde_json::to_vec(target).map_err(|error| {
+        OwnerPromotionJournalError(format!("serialize promotion target: {error}"))
+    })?;
+    Ok(format!("{TARGET_PREFIX}{}", ObjectHash::digest(&bytes)))
+}
+
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::StoreMembershipRoleGrant;
+use crate::protocol::membership_mutation::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
+use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
 use crate::protocol::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
     OwnerPromotionAcceptance, OwnerPromotionAnchors, OwnerPromotionFinalization, OwnerPromotionId,
@@ -9,27 +37,20 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
 };
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
-use crate::sync::store::operations::PreparedStoreOperationCommit;
-use crate::sync::store::owner::writer::{
-    PreparedMembershipPublication, PreparedMembershipTransition,
-};
-
-use super::authority::target_key;
-use super::OwnerPromotionError;
 
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OwnerPromotionJournal {
-    pub(super) promotion_id: OwnerPromotionId,
-    pub(super) target: StoreDeviceRegistrationRef,
-    pub(super) state: OwnerPromotionJournalState,
+    pub(crate) promotion_id: OwnerPromotionId,
+    pub(crate) target: StoreDeviceRegistrationRef,
+    pub(crate) state: OwnerPromotionJournalState,
 }
 
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum OwnerPromotionJournalState {
+pub(crate) enum OwnerPromotionJournalState {
     Allocated,
     RequestPrepared {
         request: OwnerPromotionRequest,
@@ -73,15 +94,15 @@ pub(super) enum OwnerPromotionJournalState {
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct OwnerPromotionFinalizationReceipt {
-    pub(super) candidate: Box<PreparedStoreOperationCommit>,
-    pub(super) publication: Box<PreparedMembershipPublication>,
+pub(crate) struct OwnerPromotionFinalizationReceipt {
+    pub(crate) candidate: Box<PreparedStoreOperationCommit>,
+    pub(crate) publication: Box<PreparedMembershipPublication>,
 }
 
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum OwnerPromotionStaleEvidence {
+pub(crate) enum OwnerPromotionStaleEvidence {
     BeforePublication,
     Candidate {
         nonactivation: crate::protocol::remote_object::CandidateNonactivation,
@@ -94,12 +115,12 @@ pub(super) enum OwnerPromotionStaleEvidence {
     },
 }
 
-pub(super) fn owner_promotion_published_objects(
+pub(crate) fn owner_promotion_published_objects(
     candidate: &PreparedStoreOperationCommit,
     transition: &PreparedMembershipTransition,
     publication: &PreparedMembershipPublication,
     wrapped_key: &PreparedWrappedStoreKey,
-) -> Result<Vec<crate::protocol::objects::ExactObjectRef>, OwnerPromotionError> {
+) -> Result<Vec<crate::protocol::objects::ExactObjectRef>, OwnerPromotionJournalError> {
     Ok(candidate
         .merge_owner_promotion_remote_objects(transition, publication, wrapped_key)?
         .iter()
@@ -425,40 +446,45 @@ impl OwnerPromotionJournal {
         self.promotion_id
     }
 
-    pub(crate) fn target_state_key(&self) -> Result<String, OwnerPromotionError> {
+    pub(crate) fn target_state_key(&self) -> Result<String, OwnerPromotionJournalError> {
         target_key(&self.target)
     }
 
     pub(crate) fn validate_id(
         &self,
         expected: OwnerPromotionId,
-    ) -> Result<(), OwnerPromotionError> {
+    ) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if self.promotion_id != expected {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion journal is stored under another identity".to_string(),
             ));
         }
         Ok(())
     }
 
-    pub(crate) fn validate_target_key(&self, expected: &str) -> Result<(), OwnerPromotionError> {
+    pub(crate) fn validate_target_key(
+        &self,
+        expected: &str,
+    ) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if self.target_state_key()? != expected {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion journal is stored under another target".to_string(),
             ));
         }
         Ok(())
     }
 
-    pub(super) fn into_predecessor(
+    pub(crate) fn into_predecessor(
         self,
-    ) -> Result<(OwnerPromotionJournalPredecessor, OwnerPromotionJournalState), OwnerPromotionError>
-    {
+    ) -> Result<
+        (OwnerPromotionJournalPredecessor, OwnerPromotionJournalState),
+        OwnerPromotionJournalError,
+    > {
         self.validate_contents()?;
         let previous_value = serde_json::to_string(&self).map_err(|error| {
-            OwnerPromotionError::Protocol(format!("serialize Owner-promotion predecessor: {error}"))
+            OwnerPromotionJournalError(format!("serialize Owner-promotion predecessor: {error}"))
         })?;
         let Self {
             promotion_id,
@@ -475,7 +501,7 @@ impl OwnerPromotionJournal {
         ))
     }
 
-    fn validate_contents(&self) -> Result<(), OwnerPromotionError> {
+    fn validate_contents(&self) -> Result<(), OwnerPromotionJournalError> {
         let valid = match &self.state {
             OwnerPromotionJournalState::Allocated => true,
             OwnerPromotionJournalState::RequestPrepared { request, candidate } => {
@@ -569,30 +595,30 @@ impl OwnerPromotionJournal {
             }
         };
         if !valid {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion journal state violates its closed protocol invariants".to_string(),
             ));
         }
         Ok(())
     }
 
-    pub(crate) fn validate_begin(&self) -> Result<(), OwnerPromotionError> {
+    pub(crate) fn validate_begin(&self) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if !matches!(self.state, OwnerPromotionJournalState::Allocated) {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion journal begins in a non-initial state".to_string(),
             ));
         }
         Ok(())
     }
 
-    pub(crate) fn validate_acceptance_begin(&self) -> Result<(), OwnerPromotionError> {
+    pub(crate) fn validate_acceptance_begin(&self) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if !matches!(
             self.state,
             OwnerPromotionJournalState::AcceptanceReady { .. }
         ) {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "candidate promotion journal must begin with its signed acceptance".to_string(),
             ));
         }
@@ -602,11 +628,11 @@ impl OwnerPromotionJournal {
     pub(crate) fn validate_transition(
         &self,
         next: &OwnerPromotionJournal,
-    ) -> Result<(), OwnerPromotionError> {
+    ) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         next.validate_contents()?;
         if self.promotion_id != next.promotion_id || self.target != next.target {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion journal transition changes its identity".to_string(),
             ));
         }
@@ -804,7 +830,7 @@ impl OwnerPromotionJournal {
             _ => false,
         };
         if !valid {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion journal transition skips or reverses protocol state".to_string(),
             ));
         }
@@ -814,11 +840,11 @@ impl OwnerPromotionJournal {
     pub(crate) fn validate_failed_attempt_replacement(
         &self,
         replacement: &OwnerPromotionJournal,
-    ) -> Result<(), OwnerPromotionError> {
+    ) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         replacement.validate_begin()?;
         if self.target != replacement.target || self.promotion_id == replacement.promotion_id {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "promotion retry must retain its target and use a fresh identity".to_string(),
             ));
         }
@@ -827,7 +853,7 @@ impl OwnerPromotionJournal {
             OwnerPromotionJournalState::Nonactivated { .. }
                 | OwnerPromotionJournalState::Stale { .. }
         ) {
-            return Err(OwnerPromotionError::Protocol(
+            return Err(OwnerPromotionJournalError(
                 "only a failed promotion attempt can be replaced".to_string(),
             ));
         }
@@ -835,27 +861,27 @@ impl OwnerPromotionJournal {
     }
 }
 
-pub(super) struct OwnerPromotionJournalPredecessor {
-    pub(super) promotion_id: OwnerPromotionId,
-    pub(super) target: StoreDeviceRegistrationRef,
+pub(crate) struct OwnerPromotionJournalPredecessor {
+    pub(crate) promotion_id: OwnerPromotionId,
+    pub(crate) target: StoreDeviceRegistrationRef,
     previous_value: String,
 }
 
 impl OwnerPromotionJournalPredecessor {
-    pub(super) fn transition_to(
+    pub(crate) fn transition_to(
         &self,
         next: &OwnerPromotionJournal,
         remote_objects: Vec<crate::protocol::remote_object::RemoteObjectRecord>,
-    ) -> Result<OwnerPromotionJournalTransition, OwnerPromotionError> {
+    ) -> Result<OwnerPromotionJournalTransition, OwnerPromotionJournalError> {
         let previous: OwnerPromotionJournal =
             serde_json::from_str(&self.previous_value).map_err(|error| {
-                OwnerPromotionError::Protocol(format!(
+                OwnerPromotionJournalError(format!(
                     "parse exact Owner-promotion predecessor: {error}"
                 ))
             })?;
         previous.validate_transition(next)?;
         let next_value = serde_json::to_string(next).map_err(|error| {
-            OwnerPromotionError::Protocol(format!("serialize Owner-promotion successor: {error}"))
+            OwnerPromotionJournalError(format!("serialize Owner-promotion successor: {error}"))
         })?;
         Ok(OwnerPromotionJournalTransition {
             journal_key: format!("owner_promotion/{}", self.promotion_id),
@@ -892,5 +918,11 @@ impl OwnerPromotionJournalTransition {
             self.next_value,
             self.remote_objects,
         )
+    }
+}
+
+impl From<crate::protocol::prepared_commit::PreparedCommitError> for OwnerPromotionJournalError {
+    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+        OwnerPromotionJournalError(error.to_string())
     }
 }

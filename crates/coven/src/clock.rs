@@ -5,7 +5,7 @@
 //! deterministic fake ([`FixedClock`] / [`SteppingClock`]) and pass it to the
 //! unit under test.
 //!
-//! [`crate::sync::hlc::Hlc`] retains this same clock and derives epoch
+//! [`crate::protocol::hlc::Hlc`] retains this same clock and derives epoch
 //! milliseconds for hybrid-logical-clock math. Other consumers use the full
 //! `DateTime<Utc>` for `created_at`, `updated_at`, and expiry comparisons.
 

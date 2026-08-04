@@ -1,7 +1,7 @@
 use crate::database::DbError;
+use crate::protocol::circle_activation::VerifiedCircleImage;
 use crate::protocol::remote_object;
 use crate::protocol::store_commit::StoreBatchCommitRef;
-use crate::sync::VerifiedCircleImage;
 use crate::SyncedTable;
 
 /// Install one verified Circle image's rows, routes, and blob graph onto `conn`

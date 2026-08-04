@@ -8,6 +8,7 @@ use crate::protocol::store_commit::{
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
     SuccessorLink,
 };
+use crate::protocol::store_creation::*;
 use crate::sync::store::protocol_root::*;
 use crate::sync::store::registration_object::prepare_registration_object;
 use std::sync::Arc;
@@ -665,14 +666,14 @@ impl<'operation> FounderStoreCreation<'operation> {
             let founder_bytes = serde_json::to_vec(&founder)
                 .expect("founder membership entry serialization cannot fail");
             crate::database::DurableFounderMembership {
-                entry: crate::database::ExactProtocolObject {
+                entry: crate::protocol::objects::ExactProtocolObject {
                     value: founder,
                     bytes: founder_bytes,
                     object: entry_prepared.reference().clone(),
                     prepared: entry_prepared,
                 },
                 entry_ref,
-                head: crate::database::ExactProtocolObject {
+                head: crate::protocol::objects::ExactProtocolObject {
                     value: head_value,
                     bytes: head_bytes,
                     object: head_prepared.reference().clone(),
@@ -682,19 +683,19 @@ impl<'operation> FounderStoreCreation<'operation> {
             }
         };
         Ok(Box::new(crate::database::DurableFounderGraph {
-            root: crate::database::ExactProtocolObject {
+            root: crate::protocol::objects::ExactProtocolObject {
                 value: root_value,
                 bytes: root_bytes,
                 object: root_prepared.reference().clone(),
                 prepared: root_prepared,
             },
-            registration: crate::database::ExactProtocolObject {
+            registration: crate::protocol::objects::ExactProtocolObject {
                 value: registration_value,
                 bytes: registration_bytes,
                 object: registration_prepared.reference().clone(),
                 prepared: registration_prepared,
             },
-            initial_ack: crate::database::ExactProtocolObject {
+            initial_ack: crate::protocol::objects::ExactProtocolObject {
                 value: initial_ack_value,
                 bytes: initial_ack_bytes,
                 object: initial_ack_prepared.reference().clone(),

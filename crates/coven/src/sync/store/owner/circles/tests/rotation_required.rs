@@ -27,19 +27,19 @@ fn circle_routing_migrations() -> Vec<crate::Migration> {
 /// `documents` is scoped by its audience column; `document_files` carries a blob
 /// and inherits its document's audience, so moving a document between audiences
 /// republishes its file's ciphertext under the destination audience's locator.
-fn circle_routing_tables() -> Vec<crate::sync::session::SyncedTable> {
+fn circle_routing_tables() -> Vec<crate::protocol::synced_schema::SyncedTable> {
     vec![
-        crate::sync::session::SyncedTable::new(
+        crate::protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience"),
-        crate::sync::session::SyncedTable::new(
+        crate::protocol::synced_schema::SyncedTable::new(
             "document_files",
-            crate::sync::session::RowIdentity::IndependentUuid,
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .inherits_audience_through("document_id")
-        .carries_blob(crate::sync::session::BlobDecl::new(
+        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
             "files",
             crate::protocol::blob::Provenance::HostProvided,
             crate::protocol::blob::CacheFill::CacheEager,

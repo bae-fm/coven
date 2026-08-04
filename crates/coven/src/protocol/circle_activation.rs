@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::verify_control_context_for_verified_commit;
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::protocol::circle::{
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
@@ -15,12 +14,44 @@ use crate::protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
-use crate::sync::store::circle_controls::CircleOperationError;
 
 /// The local device's own exclusion from a Circle epoch close, derived strictly
 /// from the verified successor outcome at materialization. It records the exact
 /// close and successor an excluded device must reset from. Never derived from
 /// unverified storage.
+/// Verified Circle activation state that contradicts itself, its control, or
+/// the commit that carries it. Produced by the activation values' own
+/// validation; workflow errors wrap it at the operation boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid Circle state: {0}")]
+pub(crate) struct CircleStateError(pub(crate) String);
+
+pub(crate) fn verify_control_context_for_verified_commit(
+    reference: &CircleControlRef,
+    control: &PreparedCircleControl,
+    verified: &VerifiedStoreBatchCommit,
+) -> Result<(), CircleStateError> {
+    verified
+        .reference()
+        .verify_commit(verified.value())
+        .map_err(|error| CircleStateError(error.to_string()))?;
+    let commit = verified.value();
+    let author = verified.author();
+    let device_matches = control.value.value.order.device_id == author.device_id.to_string();
+    if !control.verify()
+        || reference.circle_id() != control.value.circle_id
+        || reference.control() != &control.coord
+        || control.value.store_root_hash != commit.store_root_hash
+        || control.value.author_pubkey != author.author_pubkey
+        || !device_matches
+    {
+        return Err(CircleStateError(
+            "circle control context differs from its Store reference and commit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalCircleExclusion {
     pub circle_id: CircleId,
@@ -67,7 +98,7 @@ impl VerifiedCircleImage {
         access: &CircleAccessLeaf,
         reference: CircleBootstrapRef,
         image_bytes: Vec<u8>,
-    ) -> Result<Self, CircleOperationError> {
+    ) -> Result<Self, CircleStateError> {
         let verified = Self {
             circle_id,
             control,
@@ -90,9 +121,9 @@ impl VerifiedCircleImage {
         control: CircleControlCoord,
         reference: CircleBootstrapRef,
         image_bytes: Vec<u8>,
-    ) -> Result<Self, CircleOperationError> {
+    ) -> Result<Self, CircleStateError> {
         if reference.image.image_hash != ObjectHash::digest(&image_bytes) {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "stored Circle image differs from its exact image hash".to_string(),
             ));
         }
@@ -104,12 +135,12 @@ impl VerifiedCircleImage {
         })
     }
 
-    fn verify_for_access(&self, access: &CircleAccessLeaf) -> Result<(), CircleOperationError> {
+    fn verify_for_access(&self, access: &CircleAccessLeaf) -> Result<(), CircleStateError> {
         if self.circle_id != access.circle_id
             || !self.reference.verify_for_access(access)
             || self.reference.image.image_hash != ObjectHash::digest(&self.image_bytes)
         {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "verified Circle bootstrap differs from its signed access leaf".to_string(),
             ));
         }
@@ -151,14 +182,11 @@ impl VerifiedCircleKeyring {
         self.keyring
     }
 
-    fn epoch_encryption(
-        &self,
-        circle_id: CircleId,
-    ) -> Result<EncryptionService, CircleOperationError> {
+    fn epoch_encryption(&self, circle_id: CircleId) -> Result<EncryptionService, CircleStateError> {
         self.keyring
             .service_for_fingerprint(self.key_fingerprint.as_bytes())
             .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
+                CircleStateError(format!(
                     "select Circle package key for {circle_id}: {error}"
                 ))
             })
@@ -196,21 +224,21 @@ impl CircleEpochAccess {
         key_fingerprint: KeyFingerprint,
         serialized_keyring: &str,
         roster: &CircleMaterializedRoster,
-    ) -> Result<Self, CircleOperationError> {
+    ) -> Result<Self, CircleStateError> {
         if !roster.verify() {
-            return Err(CircleOperationError::InvalidState(format!(
+            return Err(CircleStateError(format!(
                 "Circle {circle_id} historical package roster is invalid"
             )));
         }
         let keyring = MasterKeyring::from_serialized(serialized_keyring).map_err(|error| {
-            CircleOperationError::InvalidState(format!(
+            CircleStateError(format!(
                 "parse Circle {circle_id} historical package keyring: {error}"
             ))
         })?;
         let encryption = EncryptionService::from(keyring)
             .service_for_fingerprint(key_fingerprint.as_bytes())
             .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
+                CircleStateError(format!(
                     "select Circle {circle_id} historical package key: {error}"
                 ))
             })?;
@@ -226,21 +254,21 @@ impl CircleEpochAccess {
         &self,
         reference: &CirclePackageRef,
         author: &StoreDeviceRegistration,
-    ) -> Result<(), CircleOperationError> {
+    ) -> Result<(), CircleStateError> {
         if reference.circle_id != self.circle_id {
-            return Err(CircleOperationError::InvalidState(format!(
+            return Err(CircleStateError(format!(
                 "Circle package names {}, but access belongs to {}",
                 reference.circle_id, self.circle_id
             )));
         }
         if !self.writers.contains(&author.author_pubkey) {
-            return Err(CircleOperationError::InvalidState(format!(
+            return Err(CircleStateError(format!(
                 "Circle package author is not a member of {} at its exact control",
                 reference.circle_id
             )));
         }
         if self.key_fingerprint != reference.key_fingerprint {
-            return Err(CircleOperationError::InvalidState(format!(
+            return Err(CircleStateError(format!(
                 "Circle package key for {} differs from its activated control",
                 reference.circle_id
             )));
@@ -250,9 +278,7 @@ impl CircleEpochAccess {
 }
 
 impl VerifiedCircleReference {
-    pub(crate) fn retained_keyring(
-        &self,
-    ) -> Result<Option<EncryptionService>, CircleOperationError> {
+    pub(crate) fn retained_keyring(&self) -> Result<Option<EncryptionService>, CircleStateError> {
         let Some(access) = self.local_access.as_ref() else {
             return Ok(None);
         };
@@ -268,7 +294,7 @@ impl VerifiedCircleReference {
         .map(|keyring| Some(keyring.into_keyring()))
     }
 
-    pub(crate) fn epoch_access(&self) -> Result<Option<CircleEpochAccess>, CircleOperationError> {
+    pub(crate) fn epoch_access(&self) -> Result<Option<CircleEpochAccess>, CircleStateError> {
         let Some(access) = self.local_access.as_ref() else {
             return Ok(None);
         };
@@ -290,7 +316,7 @@ fn epoch_access_from(
     control: &CircleControl,
     disposition: &CircleAccessDisposition,
     roster: &CircleMaterializedRoster,
-) -> Result<CircleEpochAccess, CircleOperationError> {
+) -> Result<CircleEpochAccess, CircleStateError> {
     let verified = verified_keyring_from(circle_id, control, disposition, roster)?;
     let encryption = verified.epoch_encryption(circle_id)?;
     let key_fingerprint = verified.key_fingerprint;
@@ -307,12 +333,12 @@ fn verified_keyring_from(
     control: &CircleControl,
     disposition: &CircleAccessDisposition,
     roster: &CircleMaterializedRoster,
-) -> Result<VerifiedCircleKeyring, CircleOperationError> {
+) -> Result<VerifiedCircleKeyring, CircleStateError> {
     if control.circle_id != circle_id
         || !roster.verify()
         || roster.state_hash() != control.roster_state_ref().state_hash
     {
-        return Err(CircleOperationError::InvalidState(format!(
+        return Err(CircleStateError(format!(
             "Circle {circle_id} package roster differs from its activated control"
         )));
     }
@@ -322,17 +348,17 @@ fn verified_keyring_from(
         ..
     } = disposition
     else {
-        return Err(CircleOperationError::InvalidState(format!(
+        return Err(CircleStateError(format!(
             "active Circle access for {circle_id} has an inactive leaf"
         )));
     };
     if *key_fingerprint != control.key_fingerprint() {
-        return Err(CircleOperationError::InvalidState(format!(
+        return Err(CircleStateError(format!(
             "Circle package key for {circle_id} differs from its activated control"
         )));
     }
     let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
-        CircleOperationError::InvalidState(format!(
+        CircleStateError(format!(
             "parse Circle package keyring for {circle_id}: {error}"
         ))
     })?;
@@ -340,7 +366,7 @@ fn verified_keyring_from(
     keyring
         .service_for_fingerprint(key_fingerprint.as_bytes())
         .map_err(|error| {
-            CircleOperationError::InvalidState(format!(
+            CircleStateError(format!(
                 "select Circle package key for {circle_id}: {error}"
             ))
         })?;
@@ -555,7 +581,7 @@ impl VerifiedCircleActivations {
         &self.bootstrap_pending_exclusions
     }
 
-    pub(crate) fn to_retained(&self) -> Result<Vec<u8>, CircleOperationError> {
+    pub(crate) fn to_retained(&self) -> Result<Vec<u8>, CircleStateError> {
         let retained = RetainedCircleActivations {
             activating_commit: self.stream_activations.activating_commit.clone(),
             circles: self
@@ -566,9 +592,7 @@ impl VerifiedCircleActivations {
             bootstraps: self.bootstraps.clone(),
         };
         serde_json::to_vec(&retained).map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "serialize retained Circle activations: {error}"
-            ))
+            CircleStateError(format!("serialize retained Circle activations: {error}"))
         })
     }
 
@@ -579,14 +603,14 @@ impl VerifiedCircleActivations {
         commit_ref: &StoreBatchCommitRef,
         author: &StoreDeviceRegistration,
         recipient_pubkey: Option<&str>,
-    ) -> Result<Self, CircleOperationError> {
+    ) -> Result<Self, CircleStateError> {
         let verified = VerifiedStoreBatchCommit::parse(
             &commit.to_bytes(),
             commit.store_root_hash,
             commit_ref,
             author,
         )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        .map_err(|error| CircleStateError(error.to_string()))?;
         Self::parse_retained_for_verified_commit(bytes, &verified, recipient_pubkey)
     }
 
@@ -594,29 +618,27 @@ impl VerifiedCircleActivations {
         bytes: &[u8],
         verified: &VerifiedStoreBatchCommit,
         recipient_pubkey: Option<&str>,
-    ) -> Result<Self, CircleOperationError> {
+    ) -> Result<Self, CircleStateError> {
         let commit = verified.value();
         let commit_ref = verified.reference();
         let retained: RetainedCircleActivations =
             serde_json::from_slice(bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse retained Circle activations: {error}"
-                ))
+                CircleStateError(format!("parse retained Circle activations: {error}"))
             })?;
         let canonical = serde_json::to_vec(&retained).map_err(|error| {
-            CircleOperationError::InvalidState(format!(
+            CircleStateError(format!(
                 "serialize parsed retained Circle activations: {error}"
             ))
         })?;
         if canonical != bytes {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "retained Circle activation bytes are not canonical".to_string(),
             ));
         }
         if retained.activating_commit != *commit_ref
             || retained.circles.len() != commit.circle_controls().len()
         {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "retained Circle activations differ from their exact Store commit".to_string(),
             ));
         }
@@ -648,13 +670,13 @@ impl VerifiedCircleActivations {
                 )
                 .is_some()
             {
-                return Err(CircleOperationError::InvalidState(
+                return Err(CircleStateError(
                     "retained Circle activations repeat a bootstrap recipient".to_string(),
                 ));
             }
         }
         if retained.bootstraps.len() != expected_bootstraps.len() {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "retained Circle bootstrap set is incomplete".to_string(),
             ));
         }
@@ -662,12 +684,12 @@ impl VerifiedCircleActivations {
             let (access, reference) = expected_bootstraps
                 .remove(&(bootstrap.circle_id, bootstrap.control.clone()))
                 .ok_or_else(|| {
-                    CircleOperationError::InvalidState(
+                    CircleStateError(
                         "retained Circle bootstrap has no signed access leaf".to_string(),
                     )
                 })?;
             if bootstrap.reference != *reference {
-                return Err(CircleOperationError::InvalidState(
+                return Err(CircleStateError(
                     "retained Circle bootstrap reference differs from its access leaf".to_string(),
                 ));
             }
@@ -678,7 +700,7 @@ impl VerifiedCircleActivations {
             stream_activations: VerifiedStreamActivations::from_verified_circle_commit(
                 commit, commit_ref,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
+            .map_err(|error| CircleStateError(error.to_string()))?,
             bootstraps: retained.bootstraps,
             local_exclusions: Vec::new(),
             bootstrap_pending_exclusions: Vec::new(),
@@ -704,10 +726,10 @@ impl RetainedCircleReference {
         verified: &VerifiedStoreBatchCommit,
         recipient_pubkey: Option<&str>,
         reference: &CircleControlRef,
-    ) -> Result<VerifiedCircleReference, CircleOperationError> {
+    ) -> Result<VerifiedCircleReference, CircleStateError> {
         let commit = verified.value();
         if self.reference != *reference || self.circle_id != reference.circle_id() {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "retained Circle reference differs from its exact Store commit".to_string(),
             ));
         }
@@ -726,7 +748,7 @@ impl RetainedCircleReference {
         };
         CircleCurrentState::from_verified(commit.candidate_family(), &verified).map_err(
             |error| {
-                CircleOperationError::InvalidState(format!(
+                CircleStateError(format!(
                     "retained Circle activation state failed verification: {error}"
                 ))
             },
@@ -759,19 +781,19 @@ impl RetainedCircleAccess {
         reference: &CircleControlRef,
         control: &PreparedCircleControl,
         recipient_pubkey: Option<&str>,
-    ) -> Result<VerifiedCircleAccess, CircleOperationError> {
+    ) -> Result<VerifiedCircleAccess, CircleStateError> {
         if !self.access.leaf.verify_envelope(
             control,
             &self.access.envelope,
             commit.candidate_family(),
         ) {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "retained Circle access leaf and envelope failed verification".to_string(),
             ));
         }
         if let Some(recipient_pubkey) = recipient_pubkey {
             if self.access.leaf.value.recipient_pubkey != recipient_pubkey {
-                return Err(CircleOperationError::InvalidState(
+                return Err(CircleStateError(
                     "retained Circle access names another local recipient".to_string(),
                 ));
             }
@@ -782,7 +804,7 @@ impl RetainedCircleAccess {
             .iter()
             .any(|candidate| retained_access_matches(candidate, &self.access))
         {
-            return Err(CircleOperationError::InvalidState(
+            return Err(CircleStateError(
                 "retained Circle access differs from every exact commit reference".to_string(),
             ));
         }
@@ -793,7 +815,7 @@ impl RetainedCircleAccess {
             ) => Some(VerifiedCircleActive { roster, metadata }),
             (CircleAccessDisposition::Inactive, RetainedCircleAccessState::Inactive) => None,
             _ => {
-                return Err(CircleOperationError::InvalidState(
+                return Err(CircleStateError(
                     "retained Circle access state differs from its signed disposition".to_string(),
                 ));
             }
@@ -1271,7 +1293,7 @@ impl CircleCurrentState {
     pub(crate) fn epoch_access(
         &self,
         expected_control: &CircleControlCoord,
-    ) -> Result<Option<CircleEpochAccess>, CircleOperationError> {
+    ) -> Result<Option<CircleEpochAccess>, CircleStateError> {
         let Self::Active(active) = self else {
             return Ok(None);
         };
@@ -1279,7 +1301,7 @@ impl CircleCurrentState {
             return Ok(None);
         }
         if !verify_accessible_state(active) {
-            return Err(CircleOperationError::InvalidState(format!(
+            return Err(CircleStateError(format!(
                 "Circle {} current package access is invalid",
                 active.current.circle_id()
             )));

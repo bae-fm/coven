@@ -1,5 +1,6 @@
 use crate::database::DatabaseTestSql;
 use crate::keys::{UserKeypair, SIGN_SECRETKEYBYTES};
+use crate::protocol::circle_activation::{CircleCurrentState, VerifiedCircleReference};
 
 pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
     let keypair_bytes: [u8; SIGN_SECRETKEYBYTES] = hex::decode(concat!(
@@ -48,6 +49,7 @@ impl DatabaseTestSql<'_> {
             CircleRosterPolicyObjects, CircleTransitionDraft, CircleTransitionPolicyObjects,
             PreparedCircleTransition, StoreMembershipStateRef,
         };
+        use crate::protocol::circle_activation::{VerifiedCircleAccess, VerifiedCircleActive};
         use crate::protocol::membership::{
             MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
             MembershipStatus,
@@ -59,9 +61,6 @@ impl DatabaseTestSql<'_> {
             DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, StoreCreationId,
             StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
             StoreRootRef, StreamActivation, SuccessorLink,
-        };
-        use crate::sync::store::{
-            CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
         };
 
         fn exact_object(label: &str, bytes: &[u8]) -> ExactObjectRef {

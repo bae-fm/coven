@@ -58,8 +58,6 @@ pub enum MembershipOpsError {
     NotEncryptedHome,
 }
 
-pub(crate) const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
-
 mod mutation;
 
 /// Why loading an owner-anchored membership chain failed.

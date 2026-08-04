@@ -86,7 +86,7 @@ impl<'storage> RegistrationOutbox<'storage> {
             }
             self.database
                 .mark_local_store_device_registration_created(
-                    crate::database::ExactProtocolObject {
+                    crate::protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes: outbound.registration_bytes,
                         object: outbound.prepared.reference().clone(),

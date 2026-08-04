@@ -1,5 +1,7 @@
+use crate::database::RetainedReplaySnapshotAuthority;
 use crate::database::*;
 use crate::protocol::audience_package::AudiencePackage;
+use crate::protocol::circle_activation::VerifiedCircleActivations;
 use crate::protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
     StoreMembershipConflictResolutionRef,
@@ -11,7 +13,9 @@ use crate::protocol::store_commit::{
     RetainedStoreDeviceRegistrationActivations, StoreBatchCommit, StoreBatchCommitRef,
     StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
 };
-use crate::sync::VerifiedCircleActivations;
+use crate::protocol::store_commit::{
+    RetainedVerifiedMergeHistorySummary, StoreRootRef, VerifiedStoreBatchCommit,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,7 +351,7 @@ impl OwnedVerifiedMergeMaterialization {
         &self,
         circle_id: crate::protocol::circle::CircleId,
         control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::sync::VerifiedCircleReference, DbError> {
+    ) -> Result<crate::protocol::circle_activation::VerifiedCircleReference, DbError> {
         let mut matches = self
             .circle_activations
             .circles()
@@ -500,5 +504,139 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             package_application,
             registrations,
         })
+    }
+}
+
+pub(crate) struct PreparedMergeMaterializationPackage {
+    pub(crate) package: AudiencePackage,
+    pub(crate) changeset: ValidatedChangeset<Vec<u8>>,
+}
+
+pub(crate) struct PreparedMergeMaterialization {
+    pub(crate) root: StoreRootRef,
+    pub(crate) verified_commit: VerifiedStoreBatchCommit,
+    pub(crate) activation_head: StoreDeviceHead,
+    pub(crate) activation_head_object: ExactObjectRef,
+    pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
+    pub(crate) membership_objects: Option<VerifiedMergeMembershipObjects>,
+    pub(crate) membership_remote_objects: Vec<crate::protocol::remote_object::RemoteObjectRecord>,
+    pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
+    pub(crate) packages: Vec<PreparedMergeMaterializationPackage>,
+    pub(crate) device_operations: VerifiedStoreDeviceOperations,
+    pub(crate) circle_activations: VerifiedCircleActivations,
+    pub(crate) package_application: Option<crate::database::RetainedPackageApplication>,
+}
+
+pub(crate) struct MembershipAuthorityBytes {
+    canonical: Vec<u8>,
+    stored: Vec<u8>,
+}
+
+impl MembershipAuthorityBytes {
+    pub(crate) fn new(canonical: Vec<u8>, stored: Vec<u8>) -> Self {
+        Self { canonical, stored }
+    }
+}
+
+pub(crate) fn activated_merge_membership_remote_objects(
+    family: crate::protocol::store_commit::CandidateFamilyId,
+    objects: &VerifiedMergeMembershipObjects,
+    entry_bytes: MembershipAuthorityBytes,
+    head_bytes: MembershipAuthorityBytes,
+    resolution_bytes: Option<MembershipAuthorityBytes>,
+    commit_ref: &StoreBatchCommitRef,
+) -> Result<
+    Vec<crate::protocol::remote_object::RemoteObjectRecord>,
+    crate::protocol::remote_object::RemoteObjectRecordError,
+> {
+    let mut remotes = vec![
+        crate::protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
+            family,
+            objects.entry().clone(),
+            entry_bytes.canonical,
+            entry_bytes.stored,
+            commit_ref.clone(),
+        )?
+        .into_observed_activated(commit_ref)?,
+        crate::protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
+            family,
+            objects.head().clone(),
+            head_bytes.canonical,
+            head_bytes.stored,
+            commit_ref.clone(),
+        )?
+        .into_observed_activated(commit_ref)?,
+    ];
+    if let Some(resolution) = objects.resolution() {
+        let bytes = resolution_bytes.ok_or(
+            crate::protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
+        )?;
+        remotes.push(
+            crate::protocol::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
+                resolution.clone(),
+                bytes.canonical,
+                bytes.stored,
+                commit_ref.clone(),
+            )?
+            .into_observed_activated(commit_ref)?,
+        );
+    } else if resolution_bytes.is_some() {
+        return Err(
+            crate::protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
+        );
+    }
+    Ok(remotes)
+}
+
+#[derive(Debug)]
+pub(crate) struct VerifiedStoreSnapshotStability {
+    authority: RetainedReplaySnapshotAuthority,
+}
+
+impl VerifiedStoreSnapshotStability {
+    pub(crate) fn from_authority(
+        authority: RetainedReplaySnapshotAuthority,
+    ) -> Result<Self, crate::database::DbError> {
+        authority.validate()?;
+        Ok(Self { authority })
+    }
+
+    pub(crate) fn into_authority(self) -> RetainedReplaySnapshotAuthority {
+        self.authority
+    }
+}
+
+pub(crate) struct DeviceJoinBootstrapCommit {
+    pub reference: StoreBatchCommitRef,
+    pub commit: VerifiedStoreBatchCommit,
+    pub registrations: Vec<ActivatedStoreDeviceRegistration>,
+    pub device_operations: VerifiedStoreDeviceOperations,
+    pub activation: DeviceJoinBootstrapActivation,
+}
+
+pub(crate) struct DeviceJoinBootstrapActivation {
+    pub(crate) head: StoreDeviceHead,
+    pub(crate) object: ExactObjectRef,
+    pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
+}
+
+pub(crate) struct DeviceJoinBootstrapPlan {
+    pub founder_reference: StoreDeviceRegistrationRef,
+    pub founder: StoreDeviceRegistration,
+    pub founder_bytes: Vec<u8>,
+    pub genesis: ResolvedStoreDeviceState,
+    pub membership: InitialStoreMembershipAuthority,
+    pub commits: Vec<DeviceJoinBootstrapCommit>,
+}
+
+impl DeviceJoinBootstrapPlan {
+    pub(crate) fn verified_commit(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&VerifiedStoreBatchCommit> {
+        self.commits
+            .iter()
+            .find(|commit| &commit.reference == reference)
+            .map(|commit| &commit.commit)
     }
 }

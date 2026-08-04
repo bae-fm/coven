@@ -8,9 +8,6 @@ pub(crate) use local_store_writer::LocalWriterKeyrings;
 use local_store_writer::StoreOperationSigningContext;
 
 pub(crate) use operation::acknowledgements::StoreAckError;
-pub(super) use operation::membership_mutation_journal::{
-    PreparedMembershipPublication, PreparedMembershipTransition,
-};
 pub(super) use operation::prepare_partition_blob_locator;
 pub(super) use operation::StoreWriterAuthorizationError;
 pub(crate) use operation::{operations, reclaim, snapshot};
