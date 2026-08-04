@@ -503,29 +503,26 @@ pub(crate) enum PostUpload {
 /// its atomic database commit. Until that commit succeeds, every file created by
 /// the attempt remains a rollback obligation owned by this value.
 struct MakeLocalMaterialization<'operation> {
-    local: &'operation LocalBlobTransitions,
+    transitions: &'operation ConnectedBlobTransitions,
     root_table: &'operation str,
     root_id: &'operation str,
     gate_column: String,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
     records: Vec<crate::database::MaterializedLocalBlob>,
     created_files: Vec<ExactPlaintextFile>,
 }
 
 impl<'operation> MakeLocalMaterialization<'operation> {
     fn new(
-        local: &'operation LocalBlobTransitions,
+        transitions: &'operation ConnectedBlobTransitions,
         root_table: &'operation str,
         root_id: &'operation str,
         gate_column: String,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
     ) -> Self {
         Self {
-            local,
+            transitions,
             root_table,
             root_id,
             gate_column,
-            routing_encryption,
             records: Vec::new(),
             created_files: Vec::new(),
         }
@@ -554,12 +551,13 @@ impl<'operation> MakeLocalMaterialization<'operation> {
     async fn commit(self) -> Result<(), MakeLocalError> {
         let records = self.records.clone();
         match self
+            .transitions
             .local
             .commit_make_local(
                 self.root_table,
                 self.root_id,
                 &self.gate_column,
-                self.routing_encryption.clone(),
+                self.transitions.routing_encryption.clone(),
                 records,
             )
             .await
@@ -625,13 +623,8 @@ impl ConnectedBlobTransitions {
         // Any error after the first local copy is written must roll those files back, so
         // an aborted make_local leaves no partial materialization behind. The retained
         // materialization owns that cleanup obligation until the database commit succeeds.
-        let mut materialization = MakeLocalMaterialization::new(
-            &self.local,
-            root_table,
-            root_id,
-            prepared.gate_column,
-            self.routing_encryption.clone(),
-        );
+        let mut materialization =
+            MakeLocalMaterialization::new(self, root_table, root_id, prepared.gate_column);
         if let Err(error) = self
             .materialize_blobs(
                 root_table,
