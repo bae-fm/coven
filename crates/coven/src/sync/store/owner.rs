@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 mod authorized_history;
 mod authorized_store;
-mod circle_bootstrap;
 mod circles;
 pub(super) mod device_exclusion;
 pub(super) mod device_join;

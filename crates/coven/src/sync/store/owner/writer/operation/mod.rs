@@ -1563,12 +1563,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         super::device_exclusion::AuthorizedDeviceExclusion::new(self, database, storage)
     }
 
-    pub(crate) fn circle_bootstrap_verifier(
-        &self,
-    ) -> super::circle_bootstrap::CircleBootstrapVerifier {
-        super::circle_bootstrap::CircleBootstrapVerifier::new(self.storage.clone())
-    }
-
     pub(crate) fn join_operation(&mut self) -> super::device_join::AuthorizedJoin<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);

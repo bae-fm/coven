@@ -1,18 +1,12 @@
-use std::sync::Arc;
-
-use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
 
-pub(crate) struct CircleBootstrapVerifier {
-    storage: Arc<dyn SyncStorage>,
-}
+pub(super) trait CircleBootstrapBlobVerification {
+    async fn verify_stored_blob(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::storage::StorageError>;
 
-impl CircleBootstrapVerifier {
-    pub(super) fn new(storage: Arc<dyn SyncStorage>) -> Self {
-        Self { storage }
-    }
-
-    pub(super) async fn verify_snapshot_blobs(
+    async fn verify_snapshot_blobs(
         &self,
         circle_id: crate::protocol::circle::CircleId,
         snapshot: &crate::database::CreatedSnapshot,
@@ -44,8 +38,7 @@ impl CircleBootstrapVerifier {
                     "Circle bootstrap blob belongs to another audience".to_string(),
                 ));
             }
-            self.storage
-                .verify_blob_object(&previous.stored)
+            self.verify_stored_blob(&previous.stored)
                 .await
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!(

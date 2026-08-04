@@ -9,6 +9,7 @@ use crate::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use crate::KeyFingerprint;
 use tracing::warn;
 
+use super::bootstrap_blobs::CircleBootstrapBlobVerification;
 use crate::database::{verify_circle_bootstrap_image, CreatedSnapshot};
 use crate::sync::store::owner::snapshot::{coverage_dominates, SnapshotCut, SnapshotError};
 
@@ -27,6 +28,15 @@ pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
     storage: &'storage dyn SyncStorage,
     history:
         &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+}
+
+impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
+    async fn verify_stored_blob(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.storage.verify_blob_object(stored).await
+    }
 }
 
 impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
@@ -284,12 +294,11 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let root = &self.root;
         let registration_ref = self.registration_ref.clone();
         let device_signer = self.device_signer.clone();
-        let bootstrap_verifier = self.writer.circle_bootstrap_verifier();
         let publication = self.writer.snapshot_publication().await;
         publication.drain_spool_cleanup().await?;
         // The image references only already-published Circle blobs, verified exact —
         // the same closure a member-addition bootstrap image carries.
-        let blobs = bootstrap_verifier
+        let blobs = self
             .verify_snapshot_blobs(circle_id, &snapshot)
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;

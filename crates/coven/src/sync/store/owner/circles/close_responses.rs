@@ -65,11 +65,9 @@ impl<'operation, 'storage> CircleCloseCoordinator<'operation, 'storage> {
 
     fn preparer(&mut self) -> super::preparation::CircleCandidatePreparer<'_, 'storage> {
         let announcement_stream_id = self.writer.announcement_stream_id();
-        let bootstrap_verifier = self.writer.circle_bootstrap_verifier();
         let history = self.writer.circle_history();
         super::preparation::CircleCandidatePreparer::new(
             announcement_stream_id,
-            bootstrap_verifier,
             self.database.clone(),
             self.membership.clone(),
             self.root.clone(),

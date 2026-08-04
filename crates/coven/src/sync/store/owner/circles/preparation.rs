@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::bootstrap_blobs::CircleBootstrapBlobVerification;
 use super::commands::CircleOperationRequest;
 use super::{
     read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
@@ -29,7 +30,6 @@ use crate::storage::{
 
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     announcement_stream_id: crate::protocol::membership::AuthorStreamId,
-    bootstrap_verifier: super::super::circle_bootstrap::CircleBootstrapVerifier,
     database: StoreDatabase,
     membership: crate::protocol::membership::MembershipChain,
     root: crate::protocol::store_commit::StoreRootRef,
@@ -39,6 +39,15 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     device_signer: UserKeypair,
     identity: &'storage UserKeypair,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
+}
+
+impl CircleBootstrapBlobVerification for CircleCandidatePreparer<'_, '_> {
+    async fn verify_stored_blob(
+        &self,
+        stored: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.storage.verify_blob_object(stored).await
+    }
 }
 
 pub(super) fn signed_circle_commit(
@@ -1137,7 +1146,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         announcement_stream_id: crate::protocol::membership::AuthorStreamId,
-        bootstrap_verifier: super::super::circle_bootstrap::CircleBootstrapVerifier,
         database: StoreDatabase,
         membership: crate::protocol::membership::MembershipChain,
         root: crate::protocol::store_commit::StoreRootRef,
@@ -1150,7 +1158,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     ) -> Self {
         Self {
             announcement_stream_id,
-            bootstrap_verifier,
             database,
             membership,
             root,
@@ -1180,7 +1187,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         request: CircleOperationRequest,
     ) -> Result<CircleOperationJournal, CircleOperationError> {
         let announcement_stream_id = self.announcement_stream_id;
-        let bootstrap_verifier = &self.bootstrap_verifier;
         let database = self.database.clone();
         let current = self.membership.clone();
         let root = self.root.clone();
@@ -1399,7 +1405,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         &request.member_pubkey,
                         request.circle_id,
                     )?;
-                    let bootstrap_blobs = bootstrap_verifier
+                    let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
                         .await?;
                     let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
@@ -1768,7 +1774,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         db,
                         signer,
                     )?;
-                    let bootstrap_blobs = bootstrap_verifier
+                    let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
                         .await?;
                     let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);

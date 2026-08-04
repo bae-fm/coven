@@ -59,7 +59,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
 
     pub(super) fn preparer(&mut self) -> preparation::CircleCandidatePreparer<'_, 'storage> {
         let announcement_stream_id = self.writer.announcement_stream_id();
-        let bootstrap_verifier = self.writer.circle_bootstrap_verifier();
         let database = self.database.clone();
         let membership = self.membership.clone();
         let root = self.root.clone();
@@ -71,7 +70,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let history = self.writer.circle_history();
         preparation::CircleCandidatePreparer::new(
             announcement_stream_id,
-            bootstrap_verifier,
             database,
             membership,
             root,
