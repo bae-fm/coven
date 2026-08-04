@@ -244,7 +244,7 @@ impl<'operation> LocalBlobCleanup<'operation> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::{CacheFill, Provenance};
+    use crate::protocol::blob::{CacheFill, Provenance};
     use crate::protocol::store_commit::ObjectHash;
     use crate::sync::session::BlobDecl;
     use crate::sync::test_helpers::open_test_db_with_blob;
@@ -272,7 +272,7 @@ mod tests {
                      '0000000001000-0000-test', '2026-01-01'),
                     ('live-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
                      '0000000001001-0000-test', '2026-01-01');",
-                hash = crate::blob::content_hash(b"bytes"),
+                hash = crate::protocol::blob::content_hash(b"bytes"),
             ))
             .map_err(DbError::from)?;
             for (object, locator) in [

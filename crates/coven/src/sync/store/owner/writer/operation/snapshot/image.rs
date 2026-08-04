@@ -304,7 +304,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         store_dir: &'storage crate::store_dir::StoreDir,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::blob::TransferLimits,
+        transfer_limits: crate::protocol::blob::TransferLimits,
         device_id: String,
         clock: crate::clock::ClockRef,
         migrations: &[Migration],
@@ -993,8 +993,8 @@ mod tests {
                 .install(
                     &self.store_dir,
                     self.source.synced_tables().to_vec(),
-                    crate::blob::BLOB_TOMBSTONE_GRACE,
-                    crate::blob::TransferLimits::one_at_a_time(),
+                    crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                    crate::protocol::blob::TransferLimits::one_at_a_time(),
                     "joining-device".to_string(),
                     std::sync::Arc::new(crate::clock::SystemClock),
                     &crate::sync::test_helpers::test_migrations(),
@@ -1449,8 +1449,8 @@ mod tests {
             .install(
                 &store_dir,
                 target_tables,
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
                 std::sync::Arc::new(crate::clock::SystemClock),
                 &target_migrations,
@@ -1690,8 +1690,8 @@ mod tests {
                 .install(
                     &store_dir,
                     tables,
-                    crate::blob::BLOB_TOMBSTONE_GRACE,
-                    crate::blob::TransferLimits::one_at_a_time(),
+                    crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                    crate::protocol::blob::TransferLimits::one_at_a_time(),
                     "joining-device".to_string(),
                     std::sync::Arc::new(crate::clock::SystemClock),
                     &crate::sync::test_helpers::test_migrations(),
@@ -1866,8 +1866,8 @@ mod tests {
         Box::pin(async {
             let declaration = crate::sync::session::BlobDecl::new(
                 "photos",
-                crate::blob::Provenance::HostProvided,
-                crate::blob::CacheFill::CacheEager,
+                crate::protocol::blob::Provenance::HostProvided,
+                crate::protocol::blob::CacheFill::CacheEager,
             );
             let source = crate::sync::test_helpers::open_test_db_with_blob(declaration);
             let signer = UserKeypair::generate();
@@ -1892,7 +1892,7 @@ mod tests {
                  (id, note_id, kind, size, hash, _updated_at, created_at)
                  VALUES ('photo1', 'n1', 'cover', 11, '{}',
                          '0000000001000-0000-owner', '2026-01-01')",
-                    crate::blob::content_hash(b"cover-bytes"),
+                    crate::protocol::blob::content_hash(b"cover-bytes"),
                 ))
                 .await;
             let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -2022,7 +2022,7 @@ mod tests {
                 crate::protocol::store_commit::ObjectHash::digest(uploader_bytes),
             ),
         };
-        let locator = crate::blob::locator::BlobLocator::browsable(
+        let locator = crate::protocol::blob::locator::BlobLocator::browsable(
             "images",
             row_id,
             uploader,
@@ -2043,7 +2043,7 @@ mod tests {
             row_id,
             stamp,
             "id",
-            crate::blob::locator::StoredBlobRef::new(locator, object)
+            crate::protocol::blob::locator::StoredBlobRef::new(locator, object)
                 .expect("valid blob graph stored blob"),
         )
         .expect("valid blob graph row binding")

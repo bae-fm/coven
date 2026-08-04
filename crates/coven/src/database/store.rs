@@ -220,7 +220,7 @@ pub(crate) struct StoreDatabase {
     gates: std::sync::Arc<crate::database::Gates>,
     blob_decls: std::sync::Arc<crate::database::BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
-    transfer_limits: crate::blob::TransferLimits,
+    transfer_limits: crate::protocol::blob::TransferLimits,
     ids: crate::id_provider::IdRef,
     write_statuses: std::sync::Arc<
         std::sync::Mutex<
@@ -290,7 +290,7 @@ impl StoreDatabase {
         &self.synced_tables
     }
 
-    pub(crate) fn transfer_limits(&self) -> crate::blob::TransferLimits {
+    pub(crate) fn transfer_limits(&self) -> crate::protocol::blob::TransferLimits {
         self.transfer_limits
     }
 
@@ -329,7 +329,7 @@ impl StoreDatabase {
     pub(crate) fn blob_ref_from_change(
         &self,
         change: &crate::changeset::RowChange,
-    ) -> Result<Option<crate::blob::BlobRef>, crate::database::BlobDeclError> {
+    ) -> Result<Option<crate::protocol::blob::BlobRef>, crate::database::BlobDeclError> {
         self.blob_decls.ref_from_change(change)
     }
 

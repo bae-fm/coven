@@ -11,12 +11,13 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 
-use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain, BLOB_TOMBSTONE_GRACE};
-use crate::blob::{CacheFill, Provenance};
+use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
 use crate::clock::FixedClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
+use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
+use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::membership::MemberRole;
 use crate::protocol::objects::StorageError;
 use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
@@ -45,7 +46,7 @@ fn open_outbox_db() -> Database {
         std::path::Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[],
@@ -162,7 +163,7 @@ async fn tombstone_exists(storage: &TestStore, key: &str) -> bool {
 
 fn signed_store_tombstone(
     storage: &TestStore,
-    stored: crate::blob::locator::StoredBlobRef,
+    stored: crate::protocol::blob::locator::StoredBlobRef,
     deleted_at: String,
     author: &UserKeypair,
 ) -> BlobTombstoneJson {

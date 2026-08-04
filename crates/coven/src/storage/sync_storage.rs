@@ -201,7 +201,7 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// Reserve the exact provider slot for a stored blob body.
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
     ) -> Result<ObjectSlot, StorageError>;
 
@@ -209,7 +209,7 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// representation to an atomically committed, directory-synced spool file.
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
         protection: BlobSpoolProtection,
         plaintext_file: &Path,
@@ -219,16 +219,16 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// Derive an exact reference from an immutable stored blob file.
     async fn prepare_blob_object(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
         slot: ObjectSlot,
         stored_file: &Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError>;
+    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, StorageError>;
 
     /// Create the exact stored blob body from its immutable local file.
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         authority: &BlobWriteAuthority<'_>,
         stored_file: &Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
@@ -237,7 +237,7 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// Read one exact stored blob body and verify its signed size/hash reference.
     async fn verify_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError>;
 
     /// Read and verify one exact stored blob body into an unpublished sibling.
@@ -245,7 +245,7 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// no-replace semantics for user-owned destinations.
     async fn stage_exact_blob_download(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         dest: &Path,
     ) -> Result<crate::local_file::AtomicStagedFile, StorageError>;
 
@@ -254,7 +254,7 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// after its locator size and hash have also been verified.
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         dest: &Path,
     ) -> Result<crate::local_file::AtomicStagedFile, StorageError>;
@@ -266,14 +266,14 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// costs its own bytes rather than the object's.
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
     ) -> Result<crate::storage::BlobRangeReader, StorageError>;
 
     /// Delete one exact stored blob body.
     async fn delete_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError>;
 }
 
@@ -545,7 +545,7 @@ where
 
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
     ) -> Result<ObjectSlot, StorageError> {
         (**self).allocate_blob_slot(locator, authority).await
@@ -553,7 +553,7 @@ where
 
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
         protection: BlobSpoolProtection,
         plaintext_file: &Path,
@@ -566,11 +566,11 @@ where
 
     async fn prepare_blob_object(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
         slot: ObjectSlot,
         stored_file: &Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
+    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, StorageError> {
         (**self)
             .prepare_blob_object(locator, authority, slot, stored_file)
             .await
@@ -578,7 +578,7 @@ where
 
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         authority: &BlobWriteAuthority<'_>,
         stored_file: &Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
@@ -590,14 +590,14 @@ where
 
     async fn verify_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         (**self).verify_blob_object(blob).await
     }
 
     async fn stage_exact_blob_download(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         dest: &Path,
     ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
         (**self).stage_exact_blob_download(blob, dest).await
@@ -605,7 +605,7 @@ where
 
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         dest: &Path,
     ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
@@ -616,7 +616,7 @@ where
 
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
     ) -> Result<crate::storage::BlobRangeReader, StorageError> {
         (**self).open_blob_range_reader(blob, protection).await
@@ -624,7 +624,7 @@ where
 
     async fn delete_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         (**self).delete_blob_object(blob).await
     }

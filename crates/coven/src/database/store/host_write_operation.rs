@@ -1,7 +1,7 @@
 use crate::blob::local_cleanup::LocalBlobCleanupIntent;
-use crate::blob::BlobRef;
 use crate::database::DbError;
 use crate::encryption::EncryptionService;
+use crate::protocol::blob::BlobRef;
 use crate::store_dir::{PathTokenError, StoreDir};
 use crate::WriteReceipt;
 

@@ -50,7 +50,7 @@ impl Database {
         let photo_id = photo_id.to_string();
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::blob::content_hash(bytes);
+        let hash = crate::protocol::blob::content_hash(bytes);
         self.execute_test_host_write(&format!(
             "INSERT INTO note_photos
              (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
@@ -75,7 +75,7 @@ impl Database {
                 (
                     id.to_string(),
                     i64::try_from(bytes.len()).expect("test blob size fits SQLite"),
-                    crate::blob::content_hash(bytes),
+                    crate::protocol::blob::content_hash(bytes),
                 )
             })
             .collect::<Vec<_>>();
@@ -107,7 +107,7 @@ impl Database {
         &self,
         created_at: &str,
     ) -> Result<(), DbError> {
-        let hash = crate::blob::content_hash(b"x");
+        let hash = crate::protocol::blob::content_hash(b"x");
         self.execute_test_sql(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('pending-root', 'Pending', NULL, 0, \
@@ -222,7 +222,7 @@ impl Database {
             blob_id,
             remote,
             bytes.len() as u64,
-            Some(&crate::blob::content_hash(bytes)),
+            Some(&crate::protocol::blob::content_hash(bytes)),
         )
         .await;
     }
@@ -479,7 +479,7 @@ impl Database {
 
     pub(crate) async fn enqueue_blob_delete_for_test(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         created_at: &str,
     ) -> Result<(), DbError> {
         let stored = stored.clone();
@@ -625,7 +625,7 @@ impl Database {
         let file_id = file_id.to_string();
         let audience = audience.map(|circle_id| circle_id.to_string());
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::blob::content_hash(bytes);
+        let hash = crate::protocol::blob::content_hash(bytes);
         let stamp = stamp.to_string();
         let receipt = crate::database::StoreDatabase::new(self)
             .run_host_store_write_for_test(Some(routing), None, move |transaction| {
@@ -686,7 +686,7 @@ impl Database {
         let blob_id = blob_id.to_string();
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::blob::content_hash(bytes);
+        let hash = crate::protocol::blob::content_hash(bytes);
         self.test_sql(move |database| {
             database
                 .execute(
@@ -711,7 +711,7 @@ impl Database {
 
     pub(crate) async fn bind_stored_blob_to_row_for_test(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         table: &str,
         id: &str,
         owner: crate::protocol::store_commit::StoreBatchCommitRef,

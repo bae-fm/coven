@@ -180,7 +180,7 @@ impl DatabaseCore {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::blob::TransferLimits,
+        transfer_limits: crate::protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
@@ -309,7 +309,7 @@ impl DatabaseCore {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::blob::TransferLimits,
+        transfer_limits: crate::protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState), OpenError> {

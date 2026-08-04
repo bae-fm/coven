@@ -344,8 +344,8 @@ pub async fn restore_from_cloud(
             .install(
                 &store_dir,
                 synced_tables.to_vec(),
-                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 device_id.clone(),
                 clock.clone(),
                 migrations,

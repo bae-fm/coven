@@ -1,4 +1,5 @@
 pub(crate) mod audience_package;
+pub(crate) mod blob;
 pub(crate) mod causal_grants;
 pub(crate) mod circle;
 pub(crate) mod circle_control;

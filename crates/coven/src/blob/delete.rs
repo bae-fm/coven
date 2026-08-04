@@ -41,25 +41,12 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::blob::locator::StoredBlobRef;
 use crate::database::{OutboxEntry, OutboxOperation};
 use crate::keys::{self, UserKeypair};
+use crate::protocol::blob::locator::StoredBlobRef;
 use crate::protocol::objects::StorageError;
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipherAccess, CloudRotationAccess};
-
-/// The default convergence window a host gets if it configures none: how long a
-/// deleted blob is kept after its tombstone is written, before a GC pass reclaims
-/// it. The host overrides it on the coven builder; the writer's tombstone collection evaluates
-/// whatever grace it is handed against the tombstone's `deleted_at`.
-///
-/// A device offline for less than the grace is never stranded by a deletion — when
-/// it reconnects it pulls the removal of the row that referenced the blob, and the
-/// blob is still present until then. The window is human-scale (days, not the
-/// sub-second commit window the snapshot sweep's grace covers) because the device
-/// it protects is a person's offline laptop or phone, not a concurrent writer
-/// mid-publish.
-pub(crate) const BLOB_TOMBSTONE_GRACE: chrono::Duration = chrono::Duration::days(7);
 
 /// The cloud key-prefix under which tombstones live. The suffix after this prefix
 /// is the hash of the exact immutable provider object reference.

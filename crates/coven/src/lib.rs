@@ -52,11 +52,7 @@ mod blob_facade_tests;
 pub use database::rusqlite;
 
 pub use atomic_file::{write_atomic, WriteError};
-pub use blob::{
-    content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    ContentHasher, DrainOutcome, MakeLocalError, MakeRemoteError, Provenance, RowBlobAuthority,
-    RowBlobRef, UploadFailure, UploadFailureCause, UploadFailures,
-};
+pub use blob::{MakeLocalError, MakeRemoteError};
 pub use changeset::{ChangeOp, RowChange};
 pub use circles::{CircleError, Circles};
 pub use clock::{Clock, ClockRef, SystemClock};
@@ -109,6 +105,11 @@ pub use oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{AuthorizeRequest, OAuthClientCreds, OAuthClientCredsError};
 pub use oauth::{OAuthClients, OAuthTokens};
+pub use protocol::blob::{
+    content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
+    ContentHasher, DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure,
+    UploadFailureCause, UploadFailures,
+};
 pub use protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
 pub use protocol::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,

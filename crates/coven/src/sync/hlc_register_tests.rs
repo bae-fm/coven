@@ -440,8 +440,8 @@ async fn register_seeds_from_persisted_high_water() {
     let before_restart = crate::database::Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "dev-a".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
@@ -456,8 +456,8 @@ async fn register_seeds_from_persisted_high_water() {
     let db = crate::database::Database::open_with_hlc(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         Arc::new(Hlc::new(
             "dev-a".into(),
             std::sync::Arc::new(crate::clock::SystemClock),
@@ -738,8 +738,8 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let db = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "dev-self".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,

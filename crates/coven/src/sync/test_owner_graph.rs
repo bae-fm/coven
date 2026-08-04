@@ -167,7 +167,7 @@ impl TestOwnerGraph {
         &self,
         storage: Arc<dyn SyncStorage>,
         routing_encryption: Option<crate::encryption::EncryptionService>,
-        observer: Option<Arc<dyn crate::blob::BlobTransitionObserver>>,
+        observer: Option<Arc<dyn crate::protocol::blob::BlobTransitionObserver>>,
         root_table: &str,
         root_id: &str,
         dest: &std::collections::HashMap<String, std::path::PathBuf>,
@@ -188,7 +188,7 @@ impl TestOwnerGraph {
     pub(crate) async fn read_blob(
         &self,
         storage: Option<Arc<dyn SyncStorage>>,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
         match storage {
             Some(storage) => self.remote_blob_access(storage).read(reference).await,
@@ -199,7 +199,7 @@ impl TestOwnerGraph {
     pub(crate) async fn open_blob_stream(
         &self,
         storage: Option<Arc<dyn SyncStorage>>,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<crate::sync::BlobStream, crate::sync::BlobCacheError> {
         match storage {
             Some(storage) => {
@@ -214,7 +214,7 @@ impl TestOwnerGraph {
     pub(crate) async fn read_blob_range(
         &self,
         storage: Option<Arc<dyn SyncStorage>>,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
@@ -227,7 +227,7 @@ impl TestOwnerGraph {
     pub(crate) async fn materialize_blob(
         &self,
         storage: Option<Arc<dyn SyncStorage>>,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<(), crate::sync::BlobCacheError> {
         match storage {
             Some(storage) => {
@@ -242,7 +242,7 @@ impl TestOwnerGraph {
     pub(crate) async fn pin_blobs(
         &self,
         storage: Option<Arc<dyn SyncStorage>>,
-        references: &[crate::blob::RowBlobRef],
+        references: &[crate::protocol::blob::RowBlobRef],
     ) -> Result<(), crate::sync::BlobCacheError> {
         match storage {
             Some(storage) => self.remote_blob_access(storage).pin(references).await,
@@ -254,7 +254,7 @@ impl TestOwnerGraph {
         &self,
         storage: Arc<dyn SyncStorage>,
         routing_encryption: Option<crate::encryption::EncryptionService>,
-        observer: Option<Arc<dyn crate::blob::BlobTransitionObserver>>,
+        observer: Option<Arc<dyn crate::protocol::blob::BlobTransitionObserver>>,
     ) -> ConnectedBlobTransitions {
         ConnectedBlobTransitions::new(
             self.local_transitions.clone(),

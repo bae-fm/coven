@@ -55,7 +55,7 @@ pub(crate) fn install_circle_bootstrap_image_on(
             DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
         })?;
         let object_id = remote_object::remote_object_id(stored.object());
-        let crate::blob::RowBlobAuthority::Remote(authority) = binding.authority() else {
+        let crate::protocol::blob::RowBlobAuthority::Remote(authority) = binding.authority() else {
             return Err(DbError::Message(
                 "Circle bootstrap row blob lacks remote package authority".to_string(),
             ));

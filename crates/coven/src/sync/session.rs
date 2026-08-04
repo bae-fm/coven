@@ -314,7 +314,7 @@ pub struct BlobDecl {
     /// The column holding the blob's plaintext length in bytes.
     pub size_column: String,
     /// The column holding the blob's content hash — the lowercase-hex SHA-256 of
-    /// its plaintext, computed at import (see [`crate::blob::content_hash`]). The
+    /// its plaintext, computed at import (see [`crate::protocol::blob::content_hash`]). The
     /// row carries it in a signed changeset, so it is signed by the row's author;
     /// on download coven hashes the decrypted plaintext and requires equality with
     /// this value, so the bytes are pinned by the author, not by where they were
@@ -326,33 +326,33 @@ pub struct BlobDecl {
     /// object key under the plain (browsable) blob-path scheme. `None` means the
     /// blob is keyed only by its hashed id (the default obfuscated scheme).
     pub cloud_path_column: Option<String>,
-    /// How the blob is scoped for encryption (see [`crate::blob::BlobScope`]).
-    pub scope: crate::blob::BlobScope,
-    /// The blob's **Local story**: [`crate::blob::Provenance::UserProvided`] (the
-    /// user's file at a path) or [`crate::blob::Provenance::HostProvided`] (coven's
+    /// How the blob is scoped for encryption (see [`crate::protocol::blob::BlobScope`]).
+    pub scope: crate::protocol::blob::BlobScope,
+    /// The blob's **Local story**: [`crate::protocol::blob::Provenance::UserProvided`] (the
+    /// user's file at a path) or [`crate::protocol::blob::Provenance::HostProvided`] (coven's
     /// own copy in the local store).
-    pub provenance: crate::blob::Provenance,
-    /// The blob's **Remote story**: [`crate::blob::CacheFill::CacheEager`] (fetched
-    /// into the cache on every pull) or [`crate::blob::CacheFill::CacheLazy`]
+    pub provenance: crate::protocol::blob::Provenance,
+    /// The blob's **Remote story**: [`crate::protocol::blob::CacheFill::CacheEager`] (fetched
+    /// into the cache on every pull) or [`crate::protocol::blob::CacheFill::CacheLazy`]
     /// (fetched into the cache on first read).
-    pub fill: crate::blob::CacheFill,
+    pub fill: crate::protocol::blob::CacheFill,
     /// The blob's **replacement story**: whether this row may be repointed at a
-    /// different blob ([`crate::blob::BlobReplacement`]). Decides what coven requires of
+    /// different blob ([`crate::protocol::blob::BlobReplacement`]). Decides what coven requires of
     /// the blob's cloud key so that a cloud object is never rewritten with different
-    /// bytes. Defaults to [`crate::blob::BlobReplacement::Replaceable`].
-    pub replacement: crate::blob::BlobReplacement,
+    /// bytes. Defaults to [`crate::protocol::blob::BlobReplacement::Replaceable`].
+    pub replacement: crate::protocol::blob::BlobReplacement,
 }
 
 impl BlobDecl {
     /// A blob declaration in `namespace` with the given `provenance` (its Local
     /// story) and cache `fill` (its Remote story), the blob id taken from the
     /// primary key (`id`), no readable cloud path, master-scoped, and
-    /// [`Replaceable`](crate::blob::BlobReplacement::Replaceable). Refine with the
+    /// [`Replaceable`](crate::protocol::blob::BlobReplacement::Replaceable). Refine with the
     /// `with_*` builders.
     pub fn new(
         namespace: impl Into<String>,
-        provenance: crate::blob::Provenance,
-        fill: crate::blob::CacheFill,
+        provenance: crate::protocol::blob::Provenance,
+        fill: crate::protocol::blob::CacheFill,
     ) -> Self {
         BlobDecl {
             id_column: "id".to_string(),
@@ -360,21 +360,21 @@ impl BlobDecl {
             hash_column: "hash".to_string(),
             namespace: namespace.into(),
             cloud_path_column: None,
-            scope: crate::blob::BlobScope::Master,
+            scope: crate::protocol::blob::BlobScope::Master,
             provenance,
             fill,
-            replacement: crate::blob::BlobReplacement::Replaceable,
+            replacement: crate::protocol::blob::BlobReplacement::Replaceable,
         }
     }
 
     /// Declare that this table's row is never repointed at a different blob
-    /// ([`crate::blob::BlobReplacement::WriteOnce`]), which frees its readable
+    /// ([`crate::protocol::blob::BlobReplacement::WriteOnce`]), which frees its readable
     /// `cloud_path` to be a stable, fully human-readable name. coven refuses a
     /// repointing. Read that variant's docs before reaching for this: it is a weaker
     /// contract than the default, and it asks the consumer to guarantee the part coven
     /// cannot see — that a path is never reused by a different blob.
     pub fn write_once(mut self) -> Self {
-        self.replacement = crate::blob::BlobReplacement::WriteOnce;
+        self.replacement = crate::protocol::blob::BlobReplacement::WriteOnce;
         self
     }
 
@@ -402,8 +402,8 @@ impl BlobDecl {
         self
     }
 
-    /// Scope the blob's encryption (defaults to [`crate::blob::BlobScope::Master`]).
-    pub fn with_scope(mut self, scope: crate::blob::BlobScope) -> Self {
+    /// Scope the blob's encryption (defaults to [`crate::protocol::blob::BlobScope::Master`]).
+    pub fn with_scope(mut self, scope: crate::protocol::blob::BlobScope) -> Self {
         self.scope = scope;
         self
     }

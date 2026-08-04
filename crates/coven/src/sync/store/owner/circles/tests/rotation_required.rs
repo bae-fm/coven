@@ -41,8 +41,8 @@ fn circle_routing_tables() -> Vec<crate::sync::session::SyncedTable> {
         .inherits_audience_through("document_id")
         .carries_blob(crate::sync::session::BlobDecl::new(
             "files",
-            crate::blob::Provenance::HostProvided,
-            crate::blob::CacheFill::CacheEager,
+            crate::protocol::blob::Provenance::HostProvided,
+            crate::protocol::blob::CacheFill::CacheEager,
         )),
     ]
 }
@@ -347,7 +347,7 @@ impl RotationFixture {
             .expect("move the document to another audience");
     }
 
-    async fn stored_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
+    async fn stored_blobs(&self) -> Vec<crate::protocol::blob::locator::StoredBlobRef> {
         StoreDatabase::new(&self.db)
             .stored_blob_reclaim_candidates_for_test()
             .await
@@ -1414,8 +1414,8 @@ async fn restore_reports_a_circle_with_no_coverage_image() {
         .install(
             &restore_store_dir,
             db.synced_tables().to_vec(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "no-image-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
@@ -1496,8 +1496,8 @@ async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
         .install(
             &restore_store_dir,
             db.synced_tables().to_vec(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "sabotaged-restore-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
@@ -1555,8 +1555,8 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
         .install(
             &restore_store_dir,
             db.synced_tables().to_vec(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "crash-restore-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
@@ -1744,8 +1744,8 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .install(
             &restore_store_dir,
             db.synced_tables().to_vec(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "restored-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
@@ -1801,8 +1801,8 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .install(
             &removed_store_dir,
             db.synced_tables().to_vec(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "removed-member-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
@@ -2030,8 +2030,8 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .install(
             &restore_store_dir,
             db.synced_tables().to_vec(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "standalone-restore-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &circle_routing_migrations(),
@@ -2728,7 +2728,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     );
 
     let past = crate::clock::FixedClock(
-        deleted_at + crate::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
+        deleted_at + crate::protocol::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
     );
     let collected = writer
         .gc_tombstones(&cipher, &past)

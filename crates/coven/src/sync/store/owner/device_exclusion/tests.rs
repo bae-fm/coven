@@ -20,8 +20,8 @@ fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
@@ -539,8 +539,8 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             .install(
                 &store_dir,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "post-snapshot-joining-device".to_string(),
                 std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
@@ -885,11 +885,11 @@ fn indexed_shared_blob(
     activated: std::collections::BTreeSet<crate::protocol::remote_object::SharedObjectOwner>,
 ) -> crate::protocol::remote_object::RemoteObjectRecord {
     let stored_bytes = format!("stored excluded-author blob {label}").into_bytes();
-    let locator = crate::blob::locator::BlobLocator::opaque(
+    let locator = crate::protocol::blob::locator::BlobLocator::opaque(
         "excluded-author-test",
         label,
         uploader.clone(),
-        crate::blob::locator::RemoteAudience::Store,
+        crate::protocol::blob::locator::RemoteAudience::Store,
         crate::BlobScope::Master,
         crate::KeyFingerprint::from_bytes([17; 32]),
         1,
@@ -1990,8 +1990,8 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
             .install(
                 store_dir,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 device_id,
                 std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),

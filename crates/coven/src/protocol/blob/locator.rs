@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::blob::BlobScope;
+use super::BlobScope;
 use crate::encryption::KeyFingerprint;
 use crate::protocol::circle::{Audience, CircleId};
 use crate::protocol::objects::ExactObjectRef;
@@ -405,12 +405,13 @@ pub enum BlobLocatorError {
 
 #[cfg(test)]
 mod tests {
+    use super::BlobScope;
     use super::*;
     use crate::protocol::circle::{Audience, CircleId};
     use crate::protocol::objects::ExactObjectRef;
     use crate::protocol::objects::ObjectSlot;
     use crate::protocol::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
-    use crate::{BlobScope, KeyFingerprint};
+    use crate::KeyFingerprint;
 
     fn hash(bytes: &[u8]) -> ObjectHash {
         ObjectHash::digest(bytes)

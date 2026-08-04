@@ -40,7 +40,7 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
 impl CircleBootstrapBlobVerification for CircleCandidatePreparer<'_, '_> {
     async fn verify_stored_blob(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }

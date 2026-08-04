@@ -5,7 +5,6 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::blob::BlobTransitionObserver;
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
@@ -13,6 +12,7 @@ use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
 use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
+use crate::protocol::blob::BlobTransitionObserver;
 use crate::store_dir::StoreOpenGuard;
 use crate::store_dir::{LocalBlobStoreError, PathTokenError};
 use crate::store_sync::ConfigProvider;
@@ -124,7 +124,7 @@ impl Coven {
             config,
             synced_tables: None,
             migrations: None,
-            blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            blob_tombstone_grace: crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             blob_chunking: crate::storage::BlobChunking::DEFAULT,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
@@ -176,7 +176,7 @@ impl CovenBuilder {
 
     /// How long a deleted blob is kept after its tombstone is written before the
     /// tombstone GC erases it: the cross-device convergence window. Defaults to
-    /// [`crate::blob::delete::BLOB_TOMBSTONE_GRACE`]. Must be positive — a
+    /// [`crate::protocol::blob::BLOB_TOMBSTONE_GRACE`]. Must be positive — a
     /// zero-or-negative grace is refused at [`open`](Self::open), since it would
     /// let the GC erase a blob a lagging peer still references.
     pub fn blob_tombstone_grace(mut self, grace: chrono::Duration) -> Self {
@@ -288,7 +288,7 @@ impl CovenBuilder {
         let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
         let store_dir = config.store_dir.clone();
-        let transfer_limits = crate::blob::TransferLimits {
+        let transfer_limits = crate::protocol::blob::TransferLimits {
             uploads: self.max_concurrent_uploads,
             downloads: self.max_concurrent_downloads,
         };
@@ -372,7 +372,7 @@ impl CovenBuilder {
             &db_path,
             tables,
             self.blob_tombstone_grace,
-            crate::blob::TransferLimits {
+            crate::protocol::blob::TransferLimits {
                 uploads: self.max_concurrent_uploads,
                 downloads: self.max_concurrent_downloads,
             },
@@ -416,9 +416,9 @@ fn validate_storage_scope(config: &Config, tables: &[SyncedTable]) -> CovenResul
 mod tests {
     use super::*;
 
-    use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
     use crate::config::Config;
     use crate::keys::test_keyring;
+    use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
     use crate::protocol::objects::ObjectSlot;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
@@ -1390,7 +1390,7 @@ mod tests {
         let (tmp, handle) = open_files_handle();
         let dir = StoreDir::new(tmp.path());
         let bytes = b"piece-bytes".to_vec();
-        let hash = crate::blob::content_hash(&bytes);
+        let hash = crate::protocol::blob::content_hash(&bytes);
         handle
             .write(
                 {
@@ -1445,7 +1445,7 @@ mod tests {
                             "file-orphan",
                             "orphaaaa",
                             15i64,
-                            crate::blob::content_hash(b"committed bytes"),
+                            crate::protocol::blob::content_hash(b"committed bytes"),
                             sql.stamp()
                         ],
                     )?;
@@ -1479,7 +1479,7 @@ mod tests {
                             "file-original",
                             "dupeaaaa",
                             8i64,
-                            crate::blob::content_hash(b"original"),
+                            crate::protocol::blob::content_hash(b"original"),
                             sql.stamp()
                         ],
                     )?;
@@ -1503,7 +1503,7 @@ mod tests {
                             "file-replacement",
                             "dupeaaaa",
                             11i64,
-                            crate::blob::content_hash(b"replacement"),
+                            crate::protocol::blob::content_hash(b"replacement"),
                             sql.stamp()
                         ],
                     )?;
@@ -1543,7 +1543,7 @@ mod tests {
         let (_tmp, handle) = open_remote_root_files_handle();
         let expected = b"remote-root-host-provided-staging-bytes".to_vec();
         let bytes = expected.clone();
-        let hash = crate::blob::content_hash(&bytes);
+        let hash = crate::protocol::blob::content_hash(&bytes);
 
         handle
             .write(
@@ -1637,7 +1637,7 @@ mod tests {
                 .expect("install Circle authority");
 
             let bytes = b"remote-only-circle-blob".to_vec();
-            let hash = crate::blob::content_hash(&bytes);
+            let hash = crate::protocol::blob::content_hash(&bytes);
             handle
                 .write(
                     {
@@ -1963,7 +1963,7 @@ mod tests {
                 .await
                 .expect("load blob after failed Local move")
                 .authority(),
-            crate::blob::RowBlobAuthority::Remote(_)
+            crate::protocol::blob::RowBlobAuthority::Remote(_)
         ));
 
         fixture
@@ -2115,7 +2115,7 @@ mod tests {
 
                     let expected = b"public materialized blob".to_vec();
                     let bytes = expected.clone();
-                    let hash = crate::blob::content_hash(&bytes);
+                    let hash = crate::protocol::blob::content_hash(&bytes);
                     let receipt = handle
                         .write(
                             {
@@ -2266,7 +2266,7 @@ mod tests {
                     params![
                         "file-1",
                         "oldaaaa",
-                        crate::blob::content_hash(b"old"),
+                        crate::protocol::blob::content_hash(b"old"),
                         sql.stamp()
                     ],
                 )?;
@@ -2297,7 +2297,11 @@ mod tests {
                     sql.execute(
                         "UPDATE files SET blob_id = ?1, size = 3, hash = ?2, \
                          _updated_at = ?3 WHERE id = 'file-1'",
-                        params!["newaaaa", crate::blob::content_hash(b"new"), sql.stamp()],
+                        params![
+                            "newaaaa",
+                            crate::protocol::blob::content_hash(b"new"),
+                            sql.stamp()
+                        ],
                     )?;
                     Ok(())
                 },
@@ -2332,7 +2336,7 @@ mod tests {
                         sql.execute(
                             "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                          VALUES ('owned-file', 'ownedaaa', 5, ?1, ?2)",
-                            params![crate::blob::content_hash(b"first"), sql.stamp()],
+                            params![crate::protocol::blob::content_hash(b"first"), sql.stamp()],
                         )?;
                         Ok(())
                     },
@@ -2362,7 +2366,7 @@ mod tests {
                             "UPDATE files SET blob_id = 'ownedbbb', size = 6, hash = ?1, \
                          _updated_at = ?2 \
                          WHERE id = 'owned-file'",
-                            params![crate::blob::content_hash(b"second"), sql.stamp()],
+                            params![crate::protocol::blob::content_hash(b"second"), sql.stamp()],
                         )?;
                         Ok(())
                     },
@@ -2457,7 +2461,10 @@ mod tests {
                                 sql.execute(
                                     "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                          VALUES ('overwrite', 'ownedaaa', 11, ?1, ?2)",
-                                    params![crate::blob::content_hash(b"overwritten"), sql.stamp()],
+                                    params![
+                                        crate::protocol::blob::content_hash(b"overwritten"),
+                                        sql.stamp()
+                                    ],
                                 )?;
                                 Ok(())
                             },
@@ -2520,7 +2527,7 @@ mod tests {
                     params![
                         "file-1",
                         "oldcccc",
-                        crate::blob::content_hash(b"old"),
+                        crate::protocol::blob::content_hash(b"old"),
                         sql.stamp()
                     ],
                 )?;
@@ -2603,7 +2610,7 @@ mod tests {
                     params![
                         "file-1",
                         "oldddddd",
-                        crate::blob::content_hash(b"old"),
+                        crate::protocol::blob::content_hash(b"old"),
                         sql.stamp()
                     ],
                 )?;
@@ -2703,7 +2710,7 @@ mod tests {
         let blob_id = "shared01";
         handle
             .sql(move |sql| {
-                let hash = crate::blob::content_hash(b"live");
+                let hash = crate::protocol::blob::content_hash(b"live");
                 for id in ["remote-deletes", "still-live"] {
                     sql.execute(
                         "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
@@ -2745,7 +2752,7 @@ mod tests {
                     sql.execute(
                         "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                          VALUES ('remote-deletes', 'shared01', 4, ?1, ?2)",
-                        params![crate::blob::content_hash(b"live"), sql.stamp()],
+                        params![crate::protocol::blob::content_hash(b"live"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -2863,7 +2870,7 @@ mod tests {
                     params![
                         "file-1",
                         "oldbbbb",
-                        crate::blob::content_hash(b"old"),
+                        crate::protocol::blob::content_hash(b"old"),
                         sql.stamp()
                     ],
                 )?;
@@ -2987,7 +2994,7 @@ mod tests {
                                 "winner",
                                 "raceblob",
                                 9i64,
-                                crate::blob::content_hash(b"committed"),
+                                crate::protocol::blob::content_hash(b"committed"),
                                 sql.stamp()
                             ],
                         )?;
@@ -3466,7 +3473,7 @@ mod tests {
             .expect("open writer");
 
         let bytes = b"read-only-handle-serves-these-blob-bytes".to_vec();
-        let hash = crate::blob::content_hash(&bytes);
+        let hash = crate::protocol::blob::content_hash(&bytes);
         writer
             .write(
                 {

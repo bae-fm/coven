@@ -258,20 +258,26 @@ fn canonical_table(
         namespace: blob.namespace.clone(),
         cloud_path_column: blob.cloud_path_column.clone(),
         scope: match &blob.scope {
-            crate::blob::BlobScope::Master => CanonicalBlobScope::Master,
-            crate::blob::BlobScope::Derived(name) => CanonicalBlobScope::Derived(name.clone()),
+            crate::protocol::blob::BlobScope::Master => CanonicalBlobScope::Master,
+            crate::protocol::blob::BlobScope::Derived(name) => {
+                CanonicalBlobScope::Derived(name.clone())
+            }
         },
         provenance: match blob.provenance {
-            crate::blob::Provenance::UserProvided => CanonicalProvenance::UserProvided,
-            crate::blob::Provenance::HostProvided => CanonicalProvenance::HostProvided,
+            crate::protocol::blob::Provenance::UserProvided => CanonicalProvenance::UserProvided,
+            crate::protocol::blob::Provenance::HostProvided => CanonicalProvenance::HostProvided,
         },
         fill: match blob.fill {
-            crate::blob::CacheFill::CacheEager => CanonicalCacheFill::CacheEager,
-            crate::blob::CacheFill::CacheLazy => CanonicalCacheFill::CacheLazy,
+            crate::protocol::blob::CacheFill::CacheEager => CanonicalCacheFill::CacheEager,
+            crate::protocol::blob::CacheFill::CacheLazy => CanonicalCacheFill::CacheLazy,
         },
         replacement: match blob.replacement {
-            crate::blob::BlobReplacement::Replaceable => CanonicalBlobReplacement::Replaceable,
-            crate::blob::BlobReplacement::WriteOnce => CanonicalBlobReplacement::WriteOnce,
+            crate::protocol::blob::BlobReplacement::Replaceable => {
+                CanonicalBlobReplacement::Replaceable
+            }
+            crate::protocol::blob::BlobReplacement::WriteOnce => {
+                CanonicalBlobReplacement::WriteOnce
+            }
         },
     });
     let mut required_names = BTreeSet::from(["id".to_string(), "_updated_at".to_string()]);

@@ -2,7 +2,7 @@
 
 use futures_util::stream::TryStreamExt;
 
-use crate::blob::{RowBlobAuthority, RowBlobRef};
+use crate::protocol::blob::{RowBlobAuthority, RowBlobRef};
 use crate::protocol::objects::{BlobSpoolProtection, StorageError};
 use crate::protocol::store_commit::StoreRootRef;
 use crate::storage::SyncStorage;
@@ -39,17 +39,17 @@ impl std::fmt::Display for BlobDownloadFailureCause {
 
 fn blob_opening_authority<'a>(
     authority: &'a RowBlobAuthority,
-    stored: &crate::blob::locator::StoredBlobRef,
-) -> Result<crate::blob::BlobOpeningAuthority<'a>, BlobCacheError> {
+    stored: &crate::protocol::blob::locator::StoredBlobRef,
+) -> Result<crate::protocol::blob::BlobOpeningAuthority<'a>, BlobCacheError> {
     authority
         .opening_authority(stored)
         .map_err(|error| match error {
-            crate::blob::BlobOpeningAuthorityError::LocalityUnresolved { id } => {
+            crate::protocol::blob::BlobOpeningAuthorityError::LocalityUnresolved { id } => {
                 BlobCacheError::LocalityUnresolved { id }
             }
-            error @ crate::blob::BlobOpeningAuthorityError::CircleAuthorityMismatch { .. } => {
-                BlobCacheError::Storage(StorageError::InvalidContent(error.to_string()))
-            }
+            error @ crate::protocol::blob::BlobOpeningAuthorityError::CircleAuthorityMismatch {
+                ..
+            } => BlobCacheError::Storage(StorageError::InvalidContent(error.to_string())),
         })
 }
 
@@ -64,8 +64,8 @@ fn blob_source(reference: &RowBlobRef) -> Result<BlobSource, BlobCacheError> {
         RowBlobAuthority::Remote(_) => Ok(BlobSource::Cache),
         RowBlobAuthority::Local | RowBlobAuthority::PendingRemote(_) => {
             Ok(match reference.blob().provenance {
-                crate::blob::Provenance::UserProvided => BlobSource::External,
-                crate::blob::Provenance::HostProvided => BlobSource::LocalStore,
+                crate::protocol::blob::Provenance::UserProvided => BlobSource::External,
+                crate::protocol::blob::Provenance::HostProvided => BlobSource::LocalStore,
             })
         }
     }
@@ -73,7 +73,7 @@ fn blob_source(reference: &RowBlobRef) -> Result<BlobSource, BlobCacheError> {
 
 fn remote_stored_ref(
     reference: &RowBlobRef,
-) -> Result<&crate::blob::locator::StoredBlobRef, BlobCacheError> {
+) -> Result<&crate::protocol::blob::locator::StoredBlobRef, BlobCacheError> {
     reference
         .stored()
         .ok_or_else(|| BlobCacheError::LocalityUnresolved {
@@ -477,7 +477,7 @@ impl CurrentRemoteBlobSource {
     async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
@@ -513,7 +513,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     pub(super) async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
@@ -525,7 +525,7 @@ impl<'storage> RemoteBlobSource<'storage> {
         &self,
         cache: &StoreBlobCache,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
         self.inner
@@ -536,7 +536,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     pub(super) async fn verify_plaintext_with_protection(
         &self,
         cache_owner: &StoreBlobCache,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
@@ -549,7 +549,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     pub(super) async fn protection_for_test(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, BlobCacheError> {
         self.inner.protection(authority, stored).await
     }
@@ -580,15 +580,15 @@ impl RemoteBlobSourceInner<'_> {
     async fn protection(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, BlobCacheError> {
         match blob_opening_authority(authority, stored)? {
-            crate::blob::BlobOpeningAuthority::Store => self
+            crate::protocol::blob::BlobOpeningAuthority::Store => self
                 .storage
                 .as_ref()
                 .store_blob_protection()
                 .map_err(BlobCacheError::Storage),
-            crate::blob::BlobOpeningAuthority::Circle {
+            crate::protocol::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
                 key_fingerprint,
@@ -612,7 +612,7 @@ impl RemoteBlobSourceInner<'_> {
     pub(super) async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         let protection = self.protection(authority, stored).await?;
@@ -627,7 +627,7 @@ impl RemoteBlobSourceInner<'_> {
         &self,
         cache: &StoreBlobCache,
         authority: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
         let protection = self
@@ -641,7 +641,7 @@ impl RemoteBlobSourceInner<'_> {
     pub(super) async fn verify_plaintext_with_protection(
         &self,
         cache_owner: &StoreBlobCache,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
@@ -894,7 +894,7 @@ impl StoreBlobCache {
     async fn verify_remote_plaintext(
         &self,
         remote: &ExactRemoteBlobAccess<'_>,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
         let locator = stored.locator();

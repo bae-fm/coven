@@ -258,14 +258,14 @@ impl AuthorizedReclaim<'_, '_> {
 /// package per audience, so the audience selects the package outright.
 fn audience_blob_binding_package(
     commit: &crate::protocol::store_commit::StoreBatchCommit,
-    audience: crate::blob::locator::RemoteAudience,
+    audience: crate::protocol::blob::locator::RemoteAudience,
 ) -> Option<AudienceBlobBindingPackage> {
     match audience {
-        crate::blob::locator::RemoteAudience::Store => commit
+        crate::protocol::blob::locator::RemoteAudience::Store => commit
             .store_package()
             .cloned()
             .map(AudienceBlobBindingPackage::Store),
-        crate::blob::locator::RemoteAudience::Circle(circle_id) => commit
+        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id) => commit
             .circle_packages()
             .iter()
             .find(|package| package.circle_id == circle_id)

@@ -79,12 +79,12 @@ pub(crate) enum StoreInitializationError {
 }
 
 struct BlobDownload {
-    authority: crate::blob::RowBlobAuthority,
-    stored: crate::blob::locator::StoredBlobRef,
+    authority: crate::protocol::blob::RowBlobAuthority,
+    stored: crate::protocol::blob::locator::StoredBlobRef,
 }
 
 impl BlobDownload {
-    fn from_row(reference: crate::blob::RowBlobRef) -> Result<Self, String> {
+    fn from_row(reference: crate::protocol::blob::RowBlobRef) -> Result<Self, String> {
         let stored = reference
             .stored()
             .cloned()
@@ -637,8 +637,8 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn blob_protection_for_test(
         &self,
-        authority: &crate::blob::RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::protocol::blob::RowBlobAuthority,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
         self.authorize_history()
             .await

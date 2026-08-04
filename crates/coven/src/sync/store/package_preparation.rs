@@ -14,8 +14,8 @@ pub(crate) struct PreparedPartitionPackage {
 }
 
 pub(crate) struct PreparedPartitionBlob {
-    pub(crate) audience: crate::blob::locator::RemoteAudience,
-    pub(crate) stored: crate::blob::locator::StoredBlobRef,
+    pub(crate) audience: crate::protocol::blob::locator::RemoteAudience,
+    pub(crate) stored: crate::protocol::blob::locator::StoredBlobRef,
     pub(crate) spool_path: Option<std::path::PathBuf>,
     pub(crate) uploaded_verified: bool,
 }

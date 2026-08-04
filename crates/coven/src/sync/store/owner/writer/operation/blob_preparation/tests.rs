@@ -21,7 +21,7 @@ fn exact_partition_blob(
             ObjectHash::digest(uploader_bytes),
         ),
     };
-    let locator = crate::blob::locator::BlobLocator::browsable(
+    let locator = crate::protocol::blob::locator::BlobLocator::browsable(
         "images",
         "shared-blob",
         uploader,
@@ -41,8 +41,8 @@ fn exact_partition_blob(
         ObjectHash::digest(stored_bytes),
     );
     PreparedPartitionBlob {
-        audience: crate::blob::locator::RemoteAudience::Store,
-        stored: crate::blob::locator::StoredBlobRef::new(locator, object)
+        audience: crate::protocol::blob::locator::RemoteAudience::Store,
+        stored: crate::protocol::blob::locator::StoredBlobRef::new(locator, object)
             .expect("valid exact stored blob"),
         spool_path: spool_path.map(std::path::PathBuf::from),
         uploaded_verified,
@@ -166,13 +166,13 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         row_id: "photo-1".to_string(),
         row_stamp: "0000000001000-0000-A".to_string(),
         column: "id".to_string(),
-        blob: crate::blob::BlobRef {
+        blob: crate::protocol::blob::BlobRef {
             namespace: "photos".to_string(),
             id: "photo-1".to_string(),
-            scope: crate::blob::BlobScope::Master,
+            scope: crate::protocol::blob::BlobScope::Master,
             cloud_path: None,
-            provenance: crate::blob::Provenance::UserProvided,
-            fill: crate::blob::CacheFill::CacheLazy,
+            provenance: crate::protocol::blob::Provenance::UserProvided,
+            fill: crate::protocol::blob::CacheFill::CacheLazy,
         },
         plaintext_size: plaintext.len() as u64,
         plaintext_hash: ObjectHash::digest(plaintext),
@@ -180,7 +180,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         previous: None,
         audience_move: None,
     };
-    let audience = crate::blob::locator::RemoteAudience::Store;
+    let audience = crate::protocol::blob::locator::RemoteAudience::Store;
     let locator = prepare_partition_blob_locator(&fact, audience.clone(), &protection, &authority)
         .expect("prepare exact blob locator");
     let spool = store_dir.outbound_blob_spool_path(locator.locator_hash());
@@ -227,7 +227,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let error = match writer
         .prepare_partition_blob(
             &fact,
-            crate::blob::locator::RemoteAudience::Store,
+            crate::protocol::blob::locator::RemoteAudience::Store,
             store
                 .store_blob_protection()
                 .expect("reload Store blob protection"),

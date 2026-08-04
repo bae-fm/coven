@@ -1,7 +1,7 @@
-use crate::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::database::*;
 use crate::database::{RetainedReplayAuthority, RetainedReplayBaseline};
 use crate::protocol::audience_package::AudiencePackage;
+use crate::protocol::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::protocol::membership::{AuthorHead, MembershipEntry};
 use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::remote_object::{

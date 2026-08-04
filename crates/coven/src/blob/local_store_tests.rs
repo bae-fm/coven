@@ -2,8 +2,8 @@
 //! host-provided Local blob. Driven over a real temp store directory so the
 //! files-on-disk model is exercised directly.
 
-use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::StoreDatabase;
+use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::sync::store::blob::StoreBlobCache;
 use crate::sync::test_helpers::{open_test_db, temp_store_dir};
 

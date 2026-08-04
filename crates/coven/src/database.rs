@@ -67,10 +67,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use crate::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::encryption::EncryptionService;
 use crate::protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
+use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use crate::protocol::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
 use crate::protocol::circle::Audience;
 use crate::protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
@@ -426,7 +426,7 @@ struct DatabaseState {
     /// How many blob transfers each transfer loop runs at once, read by the upload
     /// drain and the pin loop (both hold `&Database`). Open-time host config carried
     /// here for the same single-owner reason as `blob_tombstone_grace`.
-    transfer_limits: crate::blob::TransferLimits,
+    transfer_limits: crate::protocol::blob::TransferLimits,
     store_runtime: crate::database::StoreDatabaseRuntime,
     ids: crate::id_provider::IdRef,
     write_statuses:
@@ -629,7 +629,7 @@ struct DatabaseCore {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
-    transfer_limits: crate::blob::TransferLimits,
+    transfer_limits: crate::protocol::blob::TransferLimits,
 }
 
 /// One Circle's staged restore outcome, decided by selection against the

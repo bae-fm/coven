@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::upload::DrainOutcome;
-use crate::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::clock::{Clock, FixedClock};
 use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::protocol::blob::DrainOutcome;
+use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::protocol::objects::ObjectSlot;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
@@ -273,7 +273,7 @@ impl UploadFixture {
     }
 
     async fn with_home(uploads: usize, home: Arc<InstrumentedHome>) -> Self {
-        let limits = crate::blob::TransferLimits {
+        let limits = crate::protocol::blob::TransferLimits {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
         };
@@ -284,7 +284,7 @@ impl UploadFixture {
                 Provenance::UserProvided,
                 CacheFill::CacheLazy,
             )),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             limits,
             "test-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
@@ -439,7 +439,9 @@ fn created_slot(entry: &crate::database::OutboxEntry) -> &ObjectSlot {
     }
 }
 
-fn created_stored(entry: &crate::database::OutboxEntry) -> &crate::blob::locator::StoredBlobRef {
+fn created_stored(
+    entry: &crate::database::OutboxEntry,
+) -> &crate::protocol::blob::locator::StoredBlobRef {
     match &entry.operation {
         crate::database::OutboxOperation::Upload {
             state: crate::database::OutboxUploadState::Created { stored, .. },
@@ -636,7 +638,7 @@ async fn bad_item_does_not_block_good_later_item() {
     assert_eq!(outcome.failures().failures().len(), 1);
     assert!(matches!(
         outcome.failures().failures()[0].cause,
-        super::upload::UploadFailureCause::Storage(_)
+        crate::protocol::blob::UploadFailureCause::Storage(_)
     ));
     assert_eq!(fixture.journal_attempt("bad00001").await.0, 1);
     assert!(is_created(&fixture.journal("good0001").await));

@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::blob::{CacheFill, Provenance};
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::protocol::store_commit::StoreDeviceHead;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -34,7 +34,7 @@ use crate::sync::test_helpers::*;
 
 fn exact_cache_path(
     store_dir: &crate::store_dir::StoreDir,
-    reference: &crate::blob::RowBlobRef,
+    reference: &crate::protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
     store_dir
@@ -47,7 +47,7 @@ fn exact_cache_path(
 
 fn exact_pinned_path(
     store_dir: &crate::store_dir::StoreDir,
-    reference: &crate::blob::RowBlobRef,
+    reference: &crate::protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
     store_dir
@@ -59,7 +59,11 @@ fn exact_pinned_path(
 }
 
 trait PullTestDatabaseOps {
-    async fn exact_row_blob_ref(&self, table: &str, row_id: &str) -> crate::blob::RowBlobRef;
+    async fn exact_row_blob_ref(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> crate::protocol::blob::RowBlobRef;
     async fn stored_remote_object(
         &self,
         object: &crate::protocol::objects::ExactObjectRef,
@@ -89,7 +93,11 @@ trait PullTestDatabaseOps {
 }
 
 impl PullTestDatabaseOps for crate::database::Database {
-    async fn exact_row_blob_ref(&self, table: &str, row_id: &str) -> crate::blob::RowBlobRef {
+    async fn exact_row_blob_ref(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> crate::protocol::blob::RowBlobRef {
         self.row_blob_ref(table, row_id)
             .await
             .expect("load exact row blob reference")
@@ -397,7 +405,10 @@ trait PullTestStoreOps {
         root_id: &str,
     );
 
-    async fn read_exact_blob(&self, blob: &crate::blob::locator::StoredBlobRef) -> Vec<u8>;
+    async fn read_exact_blob(
+        &self,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
+    ) -> Vec<u8>;
 
     async fn author_scoped_write(&self, db: &crate::database::Database, sql: String);
 
@@ -445,18 +456,21 @@ impl PullTestStoreOps for TestStore {
             .expect("publish exact blob fixture"));
     }
 
-    async fn read_exact_blob(&self, blob: &crate::blob::locator::StoredBlobRef) -> Vec<u8> {
+    async fn read_exact_blob(
+        &self,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
+    ) -> Vec<u8> {
         let temp = tempfile::tempdir().expect("create exact blob read directory");
         let staged = self
             .stage_verified_blob_plaintext(
                 blob,
                 match blob.locator() {
-                    crate::blob::locator::BlobLocator::Opaque { .. } => {
+                    crate::protocol::blob::locator::BlobLocator::Opaque { .. } => {
                         crate::protocol::objects::BlobSpoolProtection::Opaque(
                             EncryptionService::from_key([42; 32]),
                         )
                     }
-                    crate::blob::locator::BlobLocator::Browsable { .. } => {
+                    crate::protocol::blob::locator::BlobLocator::Browsable { .. } => {
                         crate::protocol::objects::BlobSpoolProtection::Browsable
                     }
                 },
@@ -632,8 +646,8 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
     crate::database::Database::open(
         path,
         test_synced_tables_with_blob(decl),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "restart-test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -1793,8 +1807,8 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         Database::open(
             &target_path,
             test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "test-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
@@ -2147,8 +2161,8 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let target = crate::database::Database::open(
         &target_path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -2985,7 +2999,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('ph1', 'n1', 'attach', 11, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(b"PHOTO-BYTES"),
+            crate::protocol::blob::content_hash(b"PHOTO-BYTES"),
         ),
     ])
     .await;
@@ -3525,7 +3539,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('p1ab', 'n1', 'cover', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::blob::content_hash(b"PHOTOBYTES"),
+            crate::protocol::blob::content_hash(b"PHOTOBYTES"),
         ),
     ])
     .await;
@@ -3606,7 +3620,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"AUDIO-PAYLOAD"),
+                crate::protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
             ),
         ],
     )
@@ -4073,7 +4087,7 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
          INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        crate::blob::content_hash(b"local audio"),
+        crate::protocol::blob::content_hash(b"local audio"),
     ))
     .await;
     let reference = db
@@ -4121,7 +4135,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"AUDIO-PAYLOAD"),
+                crate::protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
             ),
         ],
     )
@@ -4166,7 +4180,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"AUDIO-PAYLOAD"),
+                crate::protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
             ),
         ],
     )
@@ -4246,7 +4260,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
          (id, note_id, kind, size, hash, _updated_at, created_at) \
          VALUES ('p1ab', 'n1', 'cover', 7, '{}', \
                  '0000000001000-0000-dev1', '2026-01-01')",
-        crate::blob::content_hash(b"missing"),
+        crate::protocol::blob::content_hash(b"missing"),
     );
     let outgoing = db1
         .capture_test_changeset(&[
@@ -4325,7 +4339,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
              VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
              '0000000001000-0000-dev1', '2026-01-01')",
             bytes.len(),
-            crate::blob::content_hash(bytes),
+            crate::protocol::blob::content_hash(bytes),
         ),
     ];
     let outgoing = db.capture_test_changeset(&rows).await;
@@ -4403,7 +4417,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('p1cover', 'n1', 'cover', 8, '{}', 'n1/cover-p1cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(plaintext),
+                crate::protocol::blob::content_hash(plaintext),
             ),
         ],
     )
@@ -4502,7 +4516,7 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 bytes.len(),
-                crate::blob::content_hash(bytes),
+                crate::protocol::blob::content_hash(bytes),
             ),
         ])
         .await;
@@ -4555,7 +4569,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                     old_bytes.len(),
-                    crate::blob::content_hash(old_bytes),
+                    crate::protocol::blob::content_hash(old_bytes),
                 ),
             ])
             .await;
@@ -4585,7 +4599,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
                 new_bytes.len(),
-                crate::blob::content_hash(new_bytes),
+                crate::protocol::blob::content_hash(new_bytes),
             )])
             .await;
         storage
@@ -4663,7 +4677,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p0cover.jpg', 'p0cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                     original.len(),
-                    crate::blob::content_hash(original),
+                    crate::protocol::blob::content_hash(original),
                 ),
             ])
             .await;
@@ -4678,7 +4692,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                 "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
                 from_a.len(),
-                crate::blob::content_hash(from_a),
+                crate::protocol::blob::content_hash(from_a),
             )])
             .await;
         storage
@@ -4692,7 +4706,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                 "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000003000-0000-dev2' WHERE id = 'ph1'",
                 from_b.len(),
-                crate::blob::content_hash(from_b),
+                crate::protocol::blob::content_hash(from_b),
             )])
             .await;
         storage
@@ -4787,7 +4801,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 old_bytes.len(),
-                crate::blob::content_hash(old_bytes),
+                crate::protocol::blob::content_hash(old_bytes),
             ),
         ])
         .await;
@@ -4804,7 +4818,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
             new_bytes.len(),
-            crate::blob::content_hash(new_bytes),
+            crate::protocol::blob::content_hash(new_bytes),
         )])
         .await;
     storage
@@ -4882,7 +4896,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
                  VALUES ('ph1', 'n1', 'audio', {}, '{}', 'n1/Sonata No. 3.flac', 'f1audio', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 bytes.len(),
-                crate::blob::content_hash(bytes),
+                crate::protocol::blob::content_hash(bytes),
             ),
         ])
         .await;
@@ -4951,7 +4965,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
                  VALUES ('ph1', 'n1', 'audio', {}, '{}', 'n1/Sonata No. 3.flac', 'f1audio', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 first.len(),
-                crate::blob::content_hash(first),
+                crate::protocol::blob::content_hash(first),
             ),
         ])
         .await;
@@ -4968,7 +4982,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
             "UPDATE note_photos SET blob_id = 'f2audio', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             second.len(),
-            crate::blob::content_hash(second),
+            crate::protocol::blob::content_hash(second),
         )])
         .await;
     let err = storage
@@ -5037,7 +5051,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', 'p1cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                     old_bytes.len(),
-                    crate::blob::content_hash(old_bytes),
+                    crate::protocol::blob::content_hash(old_bytes),
                 ),
             ])
             .await;
@@ -5071,7 +5085,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
                 "UPDATE note_photos SET blob_id = 'p2cover', cloud_path = 'n1/cover-p2cover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
                 new_bytes.len(),
-                crate::blob::content_hash(new_bytes),
+                crate::protocol::blob::content_hash(new_bytes),
             )])
             .await;
         storage
@@ -5154,7 +5168,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', 'p1cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 old_bytes.len(),
-                crate::blob::content_hash(old_bytes),
+                crate::protocol::blob::content_hash(old_bytes),
             ),
         ])
         .await;
@@ -5171,7 +5185,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
             "UPDATE note_photos SET blob_id = 'p2cover', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             new_bytes.len(),
-            crate::blob::content_hash(new_bytes),
+            crate::protocol::blob::content_hash(new_bytes),
         )])
         .await;
     let err = storage
@@ -5214,8 +5228,9 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // Device A: a note and its cover photo, scoped to a per-store derived key.
     let plaintext = b"COVER-ART-BYTES";
     let decl = || {
-        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
-            .with_scope(crate::blob::BlobScope::Derived("covers".to_string()))
+        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager).with_scope(
+            crate::protocol::blob::BlobScope::Derived("covers".to_string()),
+        )
     };
 
     let db1 = open_test_db_with_blob(decl());
@@ -5228,7 +5243,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('p1cover', 'n1', 'cover', 15, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(plaintext),
+                crate::protocol::blob::content_hash(plaintext),
             ),
         ],
     )
@@ -5343,13 +5358,13 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     db1.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('peager01', 'n1', 'cover', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        crate::blob::content_hash(b"EAGER-BYTES"),
+        crate::protocol::blob::content_hash(b"EAGER-BYTES"),
     ))
     .await;
     db1.execute_test_sql(&format!(
         "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
              VALUES ('clazy001', 'n1', 10, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-        crate::blob::content_hash(b"LAZY-BYTES"),
+        crate::protocol::blob::content_hash(b"LAZY-BYTES"),
     ))
     .await;
     // The host stores both blobs in the local store (their Local home) before the
@@ -5398,7 +5413,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('pdel1234', 'n1', 'cover', {}, '{}', '0000000001000-0000-dev1', '2026-01-01')",
                 b"COVERBYTES".len(),
-                crate::blob::content_hash(b"COVERBYTES"),
+                crate::protocol::blob::content_hash(b"COVERBYTES"),
             ),
         ],
     )
@@ -5460,7 +5475,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
                  (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('cleanup01', 'n1', 'cover', 7, '{}', \
                          '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"cleanup"),
+                crate::protocol::blob::content_hash(b"cleanup"),
             ),
         ])
         .await;
@@ -5765,12 +5780,12 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('photo-a', 'n1', 'cover', 12, '{h}', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
-                h = crate::blob::content_hash(b"SHARED-BYTES"),
+                h = crate::protocol::blob::content_hash(b"SHARED-BYTES"),
             ),
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('photo-b', 'n1', 'cover', 12, '{h}', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
-                h = crate::blob::content_hash(b"SHARED-BYTES"),
+                h = crate::protocol::blob::content_hash(b"SHARED-BYTES"),
             ),
         ],
     )
@@ -5800,7 +5815,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
             "UPDATE note_photos \
              SET cloud_path = 'newblob', size = 9, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'photo-a'",
-            crate::blob::content_hash(b"NEW-BYTES"),
+            crate::protocol::blob::content_hash(b"NEW-BYTES"),
         )])
         .await;
     storage
@@ -7652,7 +7667,7 @@ mod blob_path_traversal {
                 &format!(
                     "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('x/../../../PWNED', 'n1', 'cover', 5, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                    crate::blob::content_hash(b"PWNED"),
+                    crate::protocol::blob::content_hash(b"PWNED"),
                 ),
             ],
         )
@@ -7690,7 +7705,7 @@ mod blob_path_traversal {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('a', 'n1', 'cover', 1, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::blob::content_hash(b"A"),
+                crate::protocol::blob::content_hash(b"A"),
             ),
         ])
         .await;
@@ -7722,7 +7737,7 @@ mod blob_path_traversal {
                 &format!(
                     "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('p1ab', 'n1', 'attach', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                    crate::blob::content_hash(b"PHOTOBYTES"),
+                    crate::protocol::blob::content_hash(b"PHOTOBYTES"),
                 ),
             ],
         )

@@ -1,6 +1,6 @@
-use crate::blob::BLOB_TOMBSTONE_GRACE;
 use crate::database::StoreDatabase;
 use crate::database::*;
+use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
 
 #[tokio::test]
 async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
@@ -8,7 +8,7 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[],
@@ -74,7 +74,7 @@ async fn capture_scoped_write_then_reopen(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
@@ -154,7 +154,7 @@ async fn capture_scoped_write_then_reopen(
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
@@ -307,7 +307,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "circle-only-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[Migration::sql(
@@ -432,7 +432,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "move-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[Migration::sql(
@@ -558,7 +558,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "foreign-key-move-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[Migration::sql(

@@ -32,7 +32,7 @@ pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
 impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
     async fn verify_stored_blob(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }

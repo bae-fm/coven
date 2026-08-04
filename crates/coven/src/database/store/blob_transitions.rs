@@ -1,14 +1,14 @@
 use super::*;
 
 use crate::blob::transition::PostUpload;
-use crate::blob::{Provenance, RowBlobRef};
 use crate::database::{CloudOutboxRecords, ExternalBlobRecords, MakeRemoteIntentState};
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
+use crate::protocol::blob::{Provenance, RowBlobRef};
 
 #[derive(Clone)]
 pub(crate) struct MaterializedLocalBlob {
     pub(crate) remote: RowBlobRef,
-    pub(crate) stored: crate::blob::locator::StoredBlobRef,
+    pub(crate) stored: crate::protocol::blob::locator::StoredBlobRef,
     pub(crate) destination: Option<std::path::PathBuf>,
 }
 
@@ -420,7 +420,7 @@ impl StoreDatabase {
                                     != materialized.remote.plaintext_size()
                                 || local.plaintext_hash()
                                     != materialized.remote.plaintext_hash()
-                                || local.authority() != &crate::blob::RowBlobAuthority::Local
+                                || local.authority() != &crate::protocol::blob::RowBlobAuthority::Local
                                 || local.stored().is_some()
                             {
                                 return Err(DbError::Message(format!(

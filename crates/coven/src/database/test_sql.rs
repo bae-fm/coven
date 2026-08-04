@@ -1064,7 +1064,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn register_external_blob(
         &self,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
         path: &std::path::Path,
     ) -> Result<(), DbError> {
         ExternalBlobRecords::new(self.connection).register(reference, path)
@@ -1072,7 +1072,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn clear_external_blob(
         &self,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<(), DbError> {
         ExternalBlobRecords::new(self.connection).clear(reference)
     }
@@ -1098,7 +1098,7 @@ impl DatabaseTestSql<'_> {
         &self,
         root_table: &str,
         root_id: &str,
-        row: &crate::blob::RowBlobRef,
+        row: &crate::protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         retain_pinned: bool,
         created_at: &str,
@@ -1115,7 +1115,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn enqueue_blob_delete(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         created_at: &str,
     ) -> Result<(), DbError> {
         crate::database::CloudOutboxRecords::new(self.connection).enqueue_delete(stored, created_at)

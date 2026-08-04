@@ -286,8 +286,8 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
     Database::open(
         path,
         tables,
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "scoped-replay-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,

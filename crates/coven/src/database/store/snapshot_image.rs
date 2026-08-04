@@ -492,7 +492,7 @@ impl SnapshotDatabaseImage {
                 ))
             })?;
             let external_path =
-                if publication.blob.provenance == crate::blob::Provenance::UserProvided {
+                if publication.blob.provenance == crate::protocol::blob::Provenance::UserProvided {
                     live.query_row(
                         "SELECT path FROM local_blob_refs
                          WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
@@ -976,7 +976,7 @@ pub(crate) fn verify_circle_bootstrap_image(
             || row.plaintext_hash != binding.plaintext_hash().to_string()
             || !matches!(
                 binding.authority(),
-                crate::blob::RowBlobAuthority::Remote(
+                crate::protocol::blob::RowBlobAuthority::Remote(
                     crate::protocol::audience_package::PackageAudience::Circle {
                         circle_id: binding_circle,
                         ..

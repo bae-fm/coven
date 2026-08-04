@@ -11,13 +11,13 @@ use std::time::Duration;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::warn;
 
-use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use crate::blob::{
-    BlobTransitionObserver, DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
-};
 use crate::database::DbError;
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use crate::encryption::EncryptionService;
+use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use crate::protocol::blob::{
+    BlobTransitionObserver, DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
+};
 
 use super::AuthorizedWriterOperation;
 

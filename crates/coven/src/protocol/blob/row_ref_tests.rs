@@ -1,5 +1,5 @@
 use super::*;
-use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::protocol::circle::CircleId;
 use crate::protocol::circle_control::CircleControlCoord;
 use crate::protocol::objects::ExactObjectRef;

@@ -33,8 +33,8 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
     Database::open(
         path,
         tables,
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
@@ -176,8 +176,8 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
     let db = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -198,8 +198,8 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
     let reopened = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -246,8 +246,8 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     let db = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -310,8 +310,8 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     let reopened = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -367,8 +367,8 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     let db = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -423,8 +423,8 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     let reopened = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -475,8 +475,8 @@ async fn a_forged_deletion_control_is_held_invalid() {
     let db = Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &test_migrations(),
@@ -556,8 +556,8 @@ async fn a_forged_deletion_control_is_held_invalid() {
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let blob_decl = crate::sync::session::BlobDecl::new(
         "files",
-        crate::blob::Provenance::HostProvided,
-        crate::blob::CacheFill::CacheEager,
+        crate::protocol::blob::Provenance::HostProvided,
+        crate::protocol::blob::CacheFill::CacheEager,
     );
     let db = crate::sync::test_helpers::open_test_db_schema(
         vec![crate::sync::session::SyncedTable::new(
@@ -610,8 +610,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .scoped_by("audience")
         .carries_blob(crate::sync::session::BlobDecl::new(
             "files",
-            crate::blob::Provenance::HostProvided,
-            crate::blob::CacheFill::CacheEager,
+            crate::protocol::blob::Provenance::HostProvided,
+            crate::protocol::blob::CacheFill::CacheEager,
         ))],
         vec![crate::Migration::sql(
             1,
@@ -636,7 +636,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "INSERT INTO documents (id, audience, size, hash, _updated_at)
          VALUES ('{blob_id}', '{circle_id}', {}, '{}', '0000000001500-0000-owner')",
         blob_bytes.len(),
-        crate::blob::content_hash(blob_bytes),
+        crate::protocol::blob::content_hash(blob_bytes),
     );
     let routing = EncryptionService::from_key([42; 32]);
     let write_id = crate::database::StoreDatabase::new(&db)
@@ -715,8 +715,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .scoped_by("audience")
         .carries_blob(crate::sync::session::BlobDecl::new(
             "files",
-            crate::blob::Provenance::HostProvided,
-            crate::blob::CacheFill::CacheEager,
+            crate::protocol::blob::Provenance::HostProvided,
+            crate::protocol::blob::CacheFill::CacheEager,
         ))],
         vec![crate::Migration::sql(
             1,
@@ -766,7 +766,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "INSERT INTO documents (id, audience, size, hash, _updated_at)
          VALUES ('{late_id}', '{circle_id}', {}, '{}', '0000000001600-0000-concurrent')",
         late_bytes.len(),
-        crate::blob::content_hash(late_bytes),
+        crate::protocol::blob::content_hash(late_bytes),
     );
     let late_write_id = crate::database::StoreDatabase::new(&concurrent_db)
         .run_host_store_write_for_test(
@@ -942,7 +942,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         (
             circle_id.to_string(),
             blob_bytes.len() as i64,
-            crate::blob::content_hash(blob_bytes),
+            crate::protocol::blob::content_hash(blob_bytes),
             "0000000001500-0000-owner".to_string(),
         )
     );
@@ -974,7 +974,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         (
             circle_id.to_string(),
             late_bytes.len() as i64,
-            crate::blob::content_hash(late_bytes),
+            crate::protocol::blob::content_hash(late_bytes),
             "0000000001600-0000-concurrent".to_string(),
         )
     );
@@ -1065,7 +1065,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("read opened founder blob"),
         blob_bytes,
     );
-    let substituted = crate::blob::RowBlobRef::new(
+    let substituted = crate::protocol::blob::RowBlobRef::new(
         historical_blob.table().to_string(),
         historical_blob.row_id().to_string(),
         historical_blob.row_stamp().to_string(),
@@ -1073,7 +1073,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         historical_blob.blob().clone(),
         historical_blob.plaintext_size(),
         historical_blob.plaintext_hash(),
-        crate::blob::RowBlobAuthority::Remote(
+        crate::protocol::blob::RowBlobAuthority::Remote(
             crate::protocol::audience_package::PackageAudience::Circle {
                 circle_id,
                 control: current.control.coord.clone(),
@@ -1112,7 +1112,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("Circle bootstrap row blob has an exact locator")
             .locator()
             .audience(),
-        crate::blob::locator::RemoteAudience::Circle(circle_id)
+        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id)
     );
     let blob = blob.clone();
     assert_eq!(
@@ -1316,18 +1316,18 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("load pre-close Circle package commit");
     let package_author = package_commit.author().clone();
     assert_eq!(package_commit.circle_packages().len(), 1);
-    let historical_locator = crate::blob::locator::BlobLocator::opaque(
+    let historical_locator = crate::protocol::blob::locator::BlobLocator::opaque(
         "files",
         "old-epoch-blob",
         package_commit.author_registration.clone(),
-        crate::blob::locator::RemoteAudience::Circle(circle_id),
-        crate::blob::BlobScope::Master,
+        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id),
+        crate::protocol::blob::BlobScope::Master,
         prior_fingerprint,
         1,
         ObjectHash::digest(b"x"),
     )
     .expect("construct old-epoch Circle blob locator");
-    let historical_stored = crate::blob::locator::StoredBlobRef::new(
+    let historical_stored = crate::protocol::blob::locator::StoredBlobRef::new(
         historical_locator.clone(),
         ExactObjectRef::new(
             crate::protocol::objects::ObjectSlot::logical(historical_locator.semantic_key())
@@ -1337,7 +1337,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         ),
     )
     .expect("construct exact old-epoch stored blob");
-    let historical_authority = crate::blob::RowBlobAuthority::Remote(
+    let historical_authority = crate::protocol::blob::RowBlobAuthority::Remote(
         crate::protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: prior_control.clone(),
@@ -1547,7 +1547,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         historical_encryption.seal_key_fingerprint(),
         prior_fingerprint
     );
-    let successor_substitution = crate::blob::RowBlobAuthority::Remote(
+    let successor_substitution = crate::protocol::blob::RowBlobAuthority::Remote(
         crate::protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: successor.control.coord.clone(),
@@ -1565,7 +1565,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     );
     let mut absent_control = prior_control.clone();
     absent_control.control_hash = ObjectHash::digest(b"absent Circle control");
-    let absent_authority = crate::blob::RowBlobAuthority::Remote(
+    let absent_authority = crate::protocol::blob::RowBlobAuthority::Remote(
         crate::protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: absent_control,
@@ -1581,7 +1581,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .contains("has no retained authority"),
         "{absent_error}"
     );
-    let wrong_circle_authority = crate::blob::RowBlobAuthority::Remote(
+    let wrong_circle_authority = crate::protocol::blob::RowBlobAuthority::Remote(
         crate::protocol::audience_package::PackageAudience::Circle {
             circle_id: CircleId::from_bytes([0x77; 16]),
             control: successor.control.coord.clone(),
@@ -1597,7 +1597,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .contains("key differs from its exact activated authority"),
         "{wrong_circle_error}"
     );
-    let wrong_fingerprint_authority = crate::blob::RowBlobAuthority::Remote(
+    let wrong_fingerprint_authority = crate::protocol::blob::RowBlobAuthority::Remote(
         crate::protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: successor.control.coord.clone(),
@@ -1973,8 +1973,8 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
         let db = Database::open(
             &path,
             test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
@@ -2017,8 +2017,8 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
         let reopened = Database::open(
             &path,
             test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "creator".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),

@@ -212,7 +212,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<
         Vec<(
-            crate::blob::locator::StoredBlobRef,
+            crate::protocol::blob::locator::StoredBlobRef,
             Vec<StoreBatchCommitRef>,
         )>,
         DbError,
@@ -237,19 +237,19 @@ impl StoreDatabase {
                     if !remote.is_activated_stored_blob() {
                         continue;
                     }
-                    let locator = crate::blob::locator::BlobLocator::parse(
+                    let locator = crate::protocol::blob::locator::BlobLocator::parse(
                         remote.bytes().canonical_semantic_bytes(),
                     )
                     .map_err(|error| {
                         DbError::Message(format!("stored blob {object_id} locator: {error}"))
                     })?;
-                    let stored =
-                        crate::blob::locator::StoredBlobRef::new(locator, remote.object().clone())
-                            .map_err(|error| {
-                                DbError::Message(format!(
-                                    "stored blob {object_id} reference: {error}"
-                                ))
-                            })?;
+                    let stored = crate::protocol::blob::locator::StoredBlobRef::new(
+                        locator,
+                        remote.object().clone(),
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("stored blob {object_id} reference: {error}"))
+                    })?;
                     candidates.push((stored, remote.stored_blob_commit_owners()));
                 }
                 Ok(candidates)
@@ -262,7 +262,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn stored_blob_has_snapshot_owner_for_test(
         &self,
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {
@@ -278,7 +278,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<
         Vec<(
-            crate::blob::locator::StoredBlobRef,
+            crate::protocol::blob::locator::StoredBlobRef,
             Vec<StoreBatchCommitRef>,
         )>,
         DbError,
@@ -293,7 +293,7 @@ impl StoreDatabase {
     /// than counting as an orphan.
     pub(crate) async fn stored_blob_is_row_orphaned(
         &self,
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         let gates = self.gates();
         let tables = self.synced_tables().to_vec();
@@ -327,7 +327,7 @@ impl StoreDatabase {
     /// a restore now needs.
     pub(crate) async fn audience_blob_is_retained_for_replay(
         &self,
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {

@@ -295,7 +295,7 @@ impl RemoteObjectRecord {
     }
 
     pub(crate) fn snapshot_activated_blob(
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         owner: SnapshotObjectOwner,
     ) -> Result<Self, RemoteObjectRecordError> {
         let locator_bytes = stored.locator().to_bytes();
@@ -377,7 +377,7 @@ impl RemoteObjectRecord {
     }
 
     pub(crate) fn activated_blob(
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         owner: StoreBatchCommitRef,
     ) -> Result<Self, RemoteObjectRecordError> {
         let locator_bytes = stored.locator().to_bytes();
@@ -401,7 +401,7 @@ impl RemoteObjectRecord {
     }
 
     pub(crate) fn candidate_owned_blob(
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         owner: StoreBatchCommitRef,
         uploaded_verified: bool,
     ) -> Result<Self, RemoteObjectRecordError> {
@@ -436,7 +436,7 @@ impl RemoteObjectRecord {
 
     pub(crate) fn merge_blob_activation(
         &mut self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         owner: &StoreBatchCommitRef,
     ) -> Result<(), RemoteObjectRecordError> {
         let Self::SharedLiveSet(record) = self else {
@@ -699,7 +699,7 @@ impl RemoteObjectRecord {
 
     pub(crate) fn merge_snapshot_owner(
         &mut self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         owner: SnapshotObjectOwner,
     ) -> Result<(), RemoteObjectRecordError> {
         let Self::SharedLiveSet(record) = self else {
@@ -970,7 +970,7 @@ impl RemoteObjectRecord {
     /// still needs it is, and the reclaim verified that before reaching closure.
     pub(crate) fn validate_reclaimable_stored_blob(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), RemoteObjectRecordError> {
         self.validate()?;
         let Self::SharedLiveSet(record) = self else {
@@ -1134,13 +1134,13 @@ impl RemoteObjectRecord {
                     .validate_semantic(record.bytes.canonical_semantic_bytes())?;
                 match &record.identity.domain {
                     SharedLiveSetObjectDomain::StoredBlob => {
-                        let locator = crate::blob::locator::BlobLocator::parse(
+                        let locator = crate::protocol::blob::locator::BlobLocator::parse(
                             record.bytes.canonical_semantic_bytes(),
                         )
                         .map_err(|error| {
                             RemoteObjectRecordError::InvalidDomain(error.to_string())
                         })?;
-                        crate::blob::locator::StoredBlobRef::new(
+                        crate::protocol::blob::locator::StoredBlobRef::new(
                             locator,
                             record.identity.object.clone(),
                         )
@@ -4228,7 +4228,7 @@ pub(crate) enum RemoteObjectRecordError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::locator::{BlobLocator, RemoteAudience};
+    use crate::protocol::blob::locator::{BlobLocator, RemoteAudience};
     use crate::protocol::objects::ObjectSlot;
     use crate::protocol::{audience_package, membership, store_commit};
     use crate::{BlobScope, KeyFingerprint, WriteId};
@@ -4288,7 +4288,7 @@ mod tests {
         (reference, package)
     }
 
-    fn test_stored_blob(label: &str) -> crate::blob::locator::StoredBlobRef {
+    fn test_stored_blob(label: &str) -> crate::protocol::blob::locator::StoredBlobRef {
         let uploader_bytes = b"uploader registration";
         let uploader = store_commit::StoreDeviceRegistrationRef {
             device_id: "11".repeat(32).parse().expect("valid test device id"),
@@ -4313,7 +4313,7 @@ mod tests {
         .expect("valid locator");
         let stored = format!("stored {label}");
         let semantic_key = locator.semantic_key();
-        crate::blob::locator::StoredBlobRef::new(
+        crate::protocol::blob::locator::StoredBlobRef::new(
             locator,
             ExactObjectRef::new(
                 ObjectSlot::opaque(semantic_key, format!("physical-{label}"))

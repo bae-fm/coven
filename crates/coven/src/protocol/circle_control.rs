@@ -454,7 +454,7 @@ pub struct CircleBootstrapRef {
     pub schema_version: u32,
     pub sync_routing_hash: ObjectHash,
     pub image: SnapshotImageRef,
-    pub blobs: Vec<crate::blob::RowBlobRef>,
+    pub blobs: Vec<crate::protocol::blob::RowBlobRef>,
 }
 
 impl CircleBootstrapRef {
@@ -471,7 +471,7 @@ impl CircleBootstrapRef {
             || self.blobs.iter().any(|blob| {
                 !matches!(
                     blob.authority(),
-                    crate::blob::RowBlobAuthority::Remote(
+                    crate::protocol::blob::RowBlobAuthority::Remote(
                         super::audience_package::PackageAudience::Circle {
                             circle_id,
                             ..
@@ -479,7 +479,7 @@ impl CircleBootstrapRef {
                     ) if *circle_id == access.circle_id
                 ) || blob.stored().is_none_or(|stored| {
                     stored.locator().audience()
-                        != crate::blob::locator::RemoteAudience::Circle(access.circle_id)
+                        != crate::protocol::blob::locator::RemoteAudience::Circle(access.circle_id)
                 })
             })
         {

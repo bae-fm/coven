@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::{with_coven_sql_authority, DbError};
-use crate::blob::{RowBlobAuthority, RowBlobRef};
+use crate::protocol::blob::{RowBlobAuthority, RowBlobRef};
 
 /// An external user-owned file a blob id resolves to, read back from a
 /// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file

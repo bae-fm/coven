@@ -272,8 +272,8 @@ pub fn exercise_exact_outbound_blob_graph(
     include_locator: bool,
     include_binding: bool,
 ) -> Result<(), String> {
-    use crate::blob::BlobScope;
     use crate::protocol::audience_package::RowBlobLocatorBinding;
+    use crate::protocol::blob::BlobScope;
     use crate::protocol::causal_grants::AuthorStreamId;
     use crate::protocol::circle::CircleId;
     use crate::protocol::circle_control::CircleControlCoord;

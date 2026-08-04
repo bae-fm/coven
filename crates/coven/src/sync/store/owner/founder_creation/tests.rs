@@ -137,8 +137,8 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
         Database::open(
             &path,
             test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "founder-rollback-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),

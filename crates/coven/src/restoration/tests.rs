@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::blob::{CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::config::HomeStorage;
 use crate::database::Database;
@@ -21,6 +20,7 @@ use crate::id_provider::SequentialIdProvider;
 use crate::joining::BootstrapError;
 use crate::joining::MembershipFloor;
 use crate::keys::{StoreKeys, UserKeypair};
+use crate::protocol::blob::{CacheFill, Provenance};
 use crate::restoration::restore_from_code;
 use crate::restoration::{
     decode_restore_code, encode_restore_code, OwnerRecoveryAuthority, RestoreAuthority,
@@ -1048,8 +1048,8 @@ impl OwnerRecoveryRestoreFixture {
         let restored = Database::open(
             &config.store_dir.db_path(),
             tables,
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &migrations,
@@ -1310,8 +1310,8 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         let db_b = Database::open(
             &lib_b.db_path(),
             tables.clone(),
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
@@ -1536,7 +1536,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
-                crate::blob::content_hash(b"cover-bytes"),
+                crate::protocol::blob::content_hash(b"cover-bytes"),
             ))
             .await;
         let (owner_tmp, owner_dir) = temp_store_dir();
@@ -1686,8 +1686,8 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let restored = Database::open(
             &lib_b.db_path(),
             tables,
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id,
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),

@@ -26,14 +26,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
-use crate::blob::upload::DrainOutcome;
-use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::clock::ClockRef;
 use crate::database::{Database, DbError, StoreDatabase};
 use crate::encryption::SealError;
 use crate::keys::{
     DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
 };
+use crate::protocol::blob::DrainOutcome;
+use crate::protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::protocol::membership::MemberInfo;
 use crate::protocol::membership::MemberRole;
 use crate::protocol::objects::StorageError;
@@ -1256,11 +1256,11 @@ impl CovenHandle {
 mod tests {
     use super::*;
 
-    use crate::blob::{CacheFill, Provenance};
     use crate::clock::SystemClock;
     use crate::config::{CloudProvider, Config, HomeStorage};
     use crate::encryption::EncryptionService;
     use crate::keys::{test_keyring, StoreKeys};
+    use crate::protocol::blob::{CacheFill, Provenance};
     use crate::storage::cloud::cloudkit::{
         CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps,
         CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
@@ -1348,7 +1348,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::blob::BlobTransitionObserver for PausedUploadDrain {
+    impl crate::protocol::blob::BlobTransitionObserver for PausedUploadDrain {
         async fn on_blob_upload_started(&self, _blob_id: &str) {}
 
         async fn on_blob_uploaded(&self, _blob_id: &str) {}
@@ -1395,7 +1395,7 @@ mod tests {
             let cloud_path = cloud_path.to_string();
             let bytes = bytes.to_vec();
             let size = bytes.len() as i64;
-            let hash = crate::blob::content_hash(&bytes);
+            let hash = crate::protocol::blob::content_hash(&bytes);
             let write = self
                 .write(
                     {
@@ -1905,7 +1905,10 @@ mod tests {
                     .await
                     .expect("capture Local row while upload is paused");
                 assert!(
-                    matches!(local.authority(), crate::blob::RowBlobAuthority::Local),
+                    matches!(
+                        local.authority(),
+                        crate::protocol::blob::RowBlobAuthority::Local
+                    ),
                     "the row stays Local until the exact upload completes",
                 );
                 assert!(local.stored().is_none());
@@ -2054,7 +2057,7 @@ mod tests {
                     .expect("capture Local row before the drain");
                 assert!(matches!(
                     local.authority(),
-                    crate::blob::RowBlobAuthority::Local
+                    crate::protocol::blob::RowBlobAuthority::Local
                 ));
 
                 let outcome = handle

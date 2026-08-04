@@ -77,8 +77,8 @@ pub(crate) struct StoreWriteRemoteBlob {
 pub(crate) enum StoreWriteBlobMoveDestination {
     Local,
     Remote {
-        audience: crate::blob::locator::RemoteAudience,
-        locator: crate::blob::locator::BlobLocator,
+        audience: crate::protocol::blob::locator::RemoteAudience,
+        locator: crate::protocol::blob::locator::BlobLocator,
         spool_path: PathBuf,
     },
 }

@@ -34,7 +34,7 @@ impl StoreDatabase {
         let photo_id = photo_id.to_string();
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::blob::content_hash(bytes);
+        let hash = crate::protocol::blob::content_hash(bytes);
         self.connection
             .call(move |connection| {
                 connection
@@ -83,7 +83,7 @@ impl StoreDatabase {
         &self,
         root_table: &str,
         root_id: &str,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         created_at: &str,
     ) -> Result<(), DbError> {

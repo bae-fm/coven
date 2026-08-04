@@ -596,8 +596,8 @@ impl DeviceJoinClient {
             .install(
                 &store_dir,
                 self.synced_tables.clone(),
-                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 device_id,
                 self.clock.clone(),
                 &self.migrations,
@@ -660,8 +660,8 @@ impl DeviceJoinClient {
         let db = Database::open(
             &db_path,
             self.synced_tables.clone(),
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             device_id.clone(),
             self.clock.clone(),
             &self.migrations,

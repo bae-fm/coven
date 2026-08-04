@@ -161,8 +161,8 @@ pub(crate) fn open_test_db_with_blob(decl: BlobDecl) -> Database {
 pub(crate) fn read_test_db(namespace: &str) -> Database {
     open_test_db_with_blob(BlobDecl::new(
         namespace,
-        crate::blob::Provenance::UserProvided,
-        crate::blob::CacheFill::CacheLazy,
+        crate::protocol::blob::Provenance::UserProvided,
+        crate::protocol::blob::CacheFill::CacheLazy,
     ))
 }
 
@@ -171,17 +171,17 @@ pub(crate) fn read_test_db(namespace: &str) -> Database {
 pub(crate) fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Database {
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         namespace,
-        crate::blob::Provenance::UserProvided,
-        crate::blob::CacheFill::CacheLazy,
+        crate::protocol::blob::Provenance::UserProvided,
+        crate::protocol::blob::CacheFill::CacheLazy,
     ));
-    let limits = crate::blob::TransferLimits {
+    let limits = crate::protocol::blob::TransferLimits {
         uploads: std::num::NonZeroUsize::MIN,
         downloads: std::num::NonZeroUsize::new(downloads).expect("downloads limit is nonzero"),
     };
     Database::open(
         std::path::Path::new(":memory:"),
         tables,
-        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         limits,
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
@@ -272,7 +272,11 @@ pub(crate) fn open_test_db_schema(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
 ) -> Database {
-    open_test_db_schema_with_tombstone_grace(tables, migrations, crate::blob::BLOB_TOMBSTONE_GRACE)
+    open_test_db_schema_with_tombstone_grace(
+        tables,
+        migrations,
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+    )
 }
 
 fn open_test_db_schema_with_tombstone_grace(
@@ -285,7 +289,7 @@ fn open_test_db_schema_with_tombstone_grace(
         std::path::Path::new(":memory:"),
         tables,
         grace,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &migrations,
@@ -313,8 +317,8 @@ pub(crate) fn open_test_db_with_hlc(
     Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::blob::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         hlc,
         &migrations,
     )
@@ -712,7 +716,7 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
         self.storage.allocate_blob_slot(locator, authority).await
@@ -720,7 +724,7 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         protection: crate::protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
@@ -734,11 +738,12 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn prepare_blob_object(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         slot: crate::protocol::objects::ObjectSlot,
         stored_file: &std::path::Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError> {
+    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError>
+    {
         self.storage
             .prepare_blob_object(locator, authority, slot, stored_file)
             .await
@@ -746,7 +751,7 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
@@ -758,14 +763,14 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn verify_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.verify_blob_object(blob).await
     }
 
     async fn stage_exact_blob_download(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         dest: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
         self.storage.stage_exact_blob_download(blob, dest).await
@@ -773,7 +778,7 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
@@ -784,7 +789,7 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Result<crate::storage::BlobRangeReader, crate::protocol::objects::StorageError> {
         self.storage.open_blob_range_reader(blob, protection).await
@@ -792,7 +797,7 @@ impl crate::storage::SyncStorage for TestStore {
 
     async fn delete_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.storage.delete_blob_object(blob).await
     }
@@ -1204,8 +1209,8 @@ mod test_device {
 
         pub(crate) async fn blob_protection_for_test(
             &self,
-            authority: &crate::blob::RowBlobAuthority,
-            stored: &crate::blob::locator::StoredBlobRef,
+            authority: &crate::protocol::blob::RowBlobAuthority,
+            stored: &crate::protocol::blob::locator::StoredBlobRef,
         ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
             self.store.blob_protection_for_test(authority, stored).await
         }
@@ -1887,8 +1892,8 @@ mod test_device {
             store_dir: &StoreDir,
             clock: &dyn crate::clock::Clock,
             routing_encryption: Option<&crate::encryption::EncryptionService>,
-            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
-        ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+        ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
             self.store
                 .with_test_store_dir(store_dir.clone())
                 .authorize_writer()
@@ -1957,7 +1962,7 @@ mod test_device {
             root_id: &str,
             row_id: &str,
             bytes: &[u8],
-        ) -> crate::blob::locator::StoredBlobRef {
+        ) -> crate::protocol::blob::locator::StoredBlobRef {
             let local = self
                 .db
                 .row_blob_ref("note_photos", row_id)
@@ -2141,7 +2146,7 @@ mod test_device {
             namespace: &str,
             id: &str,
             bytes: &[u8],
-        ) -> crate::blob::locator::StoredBlobRef {
+        ) -> crate::protocol::blob::locator::StoredBlobRef {
             let registration = self
                 .db
                 .local_blob_write_authority()
@@ -2149,12 +2154,12 @@ mod test_device {
                 .expect("load exact blob write authority");
             let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
             let protection = crate::encryption::EncryptionService::from_key([42; 32]);
-            let locator = crate::blob::locator::BlobLocator::opaque(
+            let locator = crate::protocol::blob::locator::BlobLocator::opaque(
                 namespace,
                 id,
                 authority.reference.clone(),
-                crate::blob::locator::RemoteAudience::Store,
-                crate::blob::BlobScope::Master,
+                crate::protocol::blob::locator::RemoteAudience::Store,
+                crate::protocol::blob::BlobScope::Master,
                 protection.seal_key_fingerprint(),
                 bytes.len() as u64,
                 crate::protocol::store_commit::ObjectHash::digest(bytes),
@@ -2204,14 +2209,14 @@ mod test_device {
             id: &str,
             cloud_path: &str,
             bytes: &[u8],
-        ) -> crate::blob::locator::StoredBlobRef {
+        ) -> crate::protocol::blob::locator::StoredBlobRef {
             let registration = self
                 .db
                 .local_blob_write_authority()
                 .await
                 .expect("load browsable blob write authority");
             let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
-            let locator = crate::blob::locator::BlobLocator::browsable(
+            let locator = crate::protocol::blob::locator::BlobLocator::browsable(
                 namespace,
                 id,
                 authority.reference.clone(),
@@ -2261,7 +2266,7 @@ mod test_device {
         pub(crate) async fn run_cycle(
             &self,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
             self.run_cycle_with(&crate::clock::SystemClock, None, store_dir, observer)
@@ -2273,7 +2278,7 @@ mod test_device {
             clock: &dyn crate::clock::Clock,
             security: Option<&crate::store_security::StoreSecurity>,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
             self.run_cycle_with_storage(
@@ -2292,7 +2297,7 @@ mod test_device {
             clock: &dyn crate::clock::Clock,
             security: Option<&crate::store_security::StoreSecurity>,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
             interceptor: I,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         where
@@ -2315,7 +2320,7 @@ mod test_device {
             clock: &dyn crate::clock::Clock,
             security: Option<&crate::store_security::StoreSecurity>,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         where
             S: crate::sync::cycle::SyncCycleStorage + 'static,
@@ -2780,8 +2785,8 @@ mod test_device {
 
         pub(crate) async fn circle_blob_opening_error(
             &self,
-            authority: &crate::blob::RowBlobAuthority,
-            stored: &crate::blob::locator::StoredBlobRef,
+            authority: &crate::protocol::blob::RowBlobAuthority,
+            stored: &crate::protocol::blob::locator::StoredBlobRef,
         ) -> String {
             match self.store.blob_protection_for_test(authority, stored).await {
                 Ok(_) => panic!("invalid Circle blob authority must fail"),
@@ -3426,7 +3431,7 @@ impl TestStore {
     pub(crate) async fn run_founder_cycle(
         &self,
         store_dir: &StoreDir,
-        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+        observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
     ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure> {
         self.founder.run_cycle(store_dir, observer).await
     }
@@ -3446,7 +3451,7 @@ impl TestStore {
         namespace: &str,
         id: &str,
         bytes: &[u8],
-    ) -> crate::blob::locator::StoredBlobRef {
+    ) -> crate::protocol::blob::locator::StoredBlobRef {
         self.founder
             .create_exact_opaque_blob(namespace, id, bytes)
             .await
@@ -3458,7 +3463,7 @@ impl TestStore {
         id: &str,
         cloud_path: &str,
         bytes: &[u8],
-    ) -> crate::blob::locator::StoredBlobRef {
+    ) -> crate::protocol::blob::locator::StoredBlobRef {
         self.founder
             .create_exact_browsable_blob(namespace, id, cloud_path, bytes)
             .await
@@ -3470,7 +3475,7 @@ impl TestStore {
         root_id: &str,
         row_id: &str,
         bytes: &[u8],
-    ) -> crate::blob::locator::StoredBlobRef {
+    ) -> crate::protocol::blob::locator::StoredBlobRef {
         self.founder
             .publish_exact_remote_blob_binding(store_dir, root_id, row_id, bytes)
             .await
@@ -3738,7 +3743,10 @@ impl TestStore {
             .await
     }
 
-    pub(crate) async fn contains_blob_object(&self, reference: &crate::blob::RowBlobRef) -> bool {
+    pub(crate) async fn contains_blob_object(
+        &self,
+        reference: &crate::protocol::blob::RowBlobRef,
+    ) -> bool {
         match reference.stored() {
             Some(stored) => self
                 .contains_stored_blob_object(stored)
@@ -3750,7 +3758,7 @@ impl TestStore {
 
     pub(crate) async fn contains_stored_blob_object(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, crate::protocol::objects::StorageError> {
         match self.storage.verify_blob_object(stored).await {
             Ok(()) => Ok(true),
@@ -3761,7 +3769,7 @@ impl TestStore {
 
     pub(crate) async fn contains_blob_tombstone(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, crate::storage::cloud::CloudHomeError> {
         let key =
             crate::blob::delete::tombstone_key_for_test(stored, &self.storage.cipher_snapshot());
@@ -4416,8 +4424,8 @@ impl TestStore {
         store_dir: &crate::store_dir::StoreDir,
         clock: &dyn crate::clock::Clock,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
-        observer: Option<&dyn crate::blob::BlobTransitionObserver>,
-    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+        observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+    ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
         let store = self
             .bind_store_device(database, &self.signer)
             .await
@@ -4795,8 +4803,8 @@ pub(crate) fn plaintext_cipher() -> std::sync::RwLock<crate::storage::CloudCiphe
 pub(crate) fn photo_decl() -> BlobDecl {
     BlobDecl::new(
         "photos",
-        crate::blob::Provenance::HostProvided,
-        crate::blob::CacheFill::CacheEager,
+        crate::protocol::blob::Provenance::HostProvided,
+        crate::protocol::blob::CacheFill::CacheEager,
     )
 }
 
@@ -4816,7 +4824,9 @@ pub(crate) fn remote_root_db(decl: BlobDecl) -> Database {
 
 /// The cloud key a tombstone for `stored` is written under.
 #[cfg(test)]
-pub(crate) fn exact_tombstone_key(stored: &crate::blob::locator::StoredBlobRef) -> String {
+pub(crate) fn exact_tombstone_key(
+    stored: &crate::protocol::blob::locator::StoredBlobRef,
+) -> String {
     crate::blob::delete::tombstone_key_for_test(stored, &crate::storage::CloudCipher::Plaintext)
 }
 
@@ -4870,7 +4880,7 @@ pub(crate) trait StorageInterceptor: Send + Sync {
 
     async fn before_blob_create(
         &self,
-        _blob: &crate::blob::locator::StoredBlobRef,
+        _blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
@@ -4939,7 +4949,7 @@ where
 
     async fn before_blob_create(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         (**self).before_blob_create(blob).await
     }
@@ -5419,7 +5429,7 @@ where
 
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_allocate().await?;
@@ -5428,7 +5438,7 @@ where
 
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         protection: crate::protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
@@ -5442,11 +5452,12 @@ where
 
     async fn prepare_blob_object(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         slot: crate::protocol::objects::ObjectSlot,
         stored_file: &std::path::Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError> {
+    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError>
+    {
         self.interceptor.before_blob_prepare().await?;
         self.inner
             .prepare_blob_object(locator, authority, slot, stored_file)
@@ -5455,7 +5466,7 @@ where
 
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
@@ -5468,14 +5479,14 @@ where
 
     async fn verify_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.verify_blob_object(blob).await
     }
 
     async fn stage_exact_blob_download(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         dest: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
         self.interceptor.before_blob_stage().await?;
@@ -5484,7 +5495,7 @@ where
 
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
@@ -5496,7 +5507,7 @@ where
 
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Result<crate::storage::BlobRangeReader, crate::protocol::objects::StorageError> {
         self.inner.open_blob_range_reader(blob, protection).await
@@ -5504,7 +5515,7 @@ where
 
     async fn delete_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.delete_blob_object(blob).await
     }

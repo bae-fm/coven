@@ -379,8 +379,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn stage_verified_blob_plaintext(
         &self,
-        authority: &crate::blob::RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::protocol::blob::RowBlobAuthority,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.history
@@ -3095,7 +3095,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     }
                 }
                 crate::protocol::remote_object::RemoteStoredRepresentation::Blob { object } => {
-                    let locator = crate::blob::locator::BlobLocator::parse(
+                    let locator = crate::protocol::blob::locator::BlobLocator::parse(
                         remote.bytes().canonical_semantic_bytes(),
                     )
                     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -3104,8 +3104,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .activated_store_device_registration(uploader.clone())
                         .await?;
                     let authority = BlobWriteAuthority::new(&registration);
-                    let blob = crate::blob::locator::StoredBlobRef::new(locator, object.clone())
-                        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                    let blob =
+                        crate::protocol::blob::locator::StoredBlobRef::new(locator, object.clone())
+                            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                     if prepared_state {
                         let path = prepared.spool_path.as_deref().ok_or_else(|| {
                             StoreError::InvalidOutbound(format!(

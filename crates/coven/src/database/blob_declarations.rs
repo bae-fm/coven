@@ -30,11 +30,11 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::blob::{
-    cloud_path_names_blob, BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance,
-};
 use crate::changeset::{ChangeOp, RowChange};
 use crate::database::{quote_ident, table_columns as session_table_columns};
+use crate::protocol::blob::{
+    cloud_path_names_blob, BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance,
+};
 use crate::sync::session::SyncedTable;
 
 /// Why building the blob-declaration model failed.

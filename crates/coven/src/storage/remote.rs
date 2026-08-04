@@ -446,7 +446,11 @@ impl CloudCipher {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
         // maps `Master` to the store key itself.
-        self.seal_scoped(crate::blob::BlobScope::Master, plaintext, aad_context)
+        self.seal_scoped(
+            crate::protocol::blob::BlobScope::Master,
+            plaintext,
+            aad_context,
+        )
     }
 
     /// Recover a control object read from storage. Inverse of [`Self::seal`].
@@ -455,7 +459,11 @@ impl CloudCipher {
         stored: Vec<u8>,
         aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
-        self.open_scoped(crate::blob::BlobScope::Master, stored, aad_context)
+        self.open_scoped(
+            crate::protocol::blob::BlobScope::Master,
+            stored,
+            aad_context,
+        )
     }
 
     /// Protect a blob under its scope. Encrypted blobs carry the current
@@ -463,7 +471,7 @@ impl CloudCipher {
     /// generation to open with.
     pub(crate) fn seal_scoped(
         &self,
-        scope: crate::blob::BlobScope,
+        scope: crate::protocol::blob::BlobScope,
         plaintext: Vec<u8>,
         aad_context: &[u8],
     ) -> Vec<u8> {
@@ -478,7 +486,7 @@ impl CloudCipher {
     /// Recover a blob under its resolved scope. Inverse of [`Self::seal_scoped`].
     pub(crate) fn open_scoped(
         &self,
-        scope: crate::blob::BlobScope,
+        scope: crate::protocol::blob::BlobScope,
         stored: Vec<u8>,
         aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
@@ -521,7 +529,7 @@ impl CloudCipher {
     /// used by the upload drain.
     pub(crate) async fn open_body(
         &self,
-        scope: crate::blob::BlobScope,
+        scope: crate::protocol::blob::BlobScope,
         file_path: &std::path::Path,
         aad_context: &[u8],
         chunk_size: std::num::NonZeroU32,
@@ -739,16 +747,16 @@ impl CloudSyncStorage {
 
     fn validate_blob_locator_home(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
     ) -> Result<(), StorageError> {
         let valid = matches!(
             (locator, self.blob_paths, self.cipher.is_plaintext()),
             (
-                crate::blob::locator::BlobLocator::Opaque { .. },
+                crate::protocol::blob::locator::BlobLocator::Opaque { .. },
                 BlobPathScheme::Hashed,
                 false
             ) | (
-                crate::blob::locator::BlobLocator::Browsable { .. },
+                crate::protocol::blob::locator::BlobLocator::Browsable { .. },
                 BlobPathScheme::Plain,
                 true
             )
@@ -764,7 +772,7 @@ impl CloudSyncStorage {
 
     async fn validate_blob_append_authority(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<(), StorageError> {
         authority
@@ -956,7 +964,7 @@ impl CloudSyncStorage {
     ///
     /// **A cloud object is never rewritten with different bytes, so no two blobs ever
     /// share a key.** `Hashed` gets that from the key itself; `Plain` gets it from the
-    /// blob's declared [`BlobReplacement`](crate::blob::BlobReplacement), which coven
+    /// blob's declared [`BlobReplacement`](crate::protocol::blob::BlobReplacement), which coven
     /// enforces where a blob is derived from its row ([`crate::database::BlobDecls`]) —
     /// a replaceable blob's readable path must name it, and a write-once blob's row can
     /// never be repointed. Either way, an object's *presence* at a blob's key is proof of
@@ -1060,17 +1068,17 @@ impl CloudRotationAccess for CloudSyncStorage {
 
 /// The `EncryptionService` a blob's `scope` selects, against `master`: the
 /// store master itself, or a per-scope key derived from it. The blob storage
-/// methods and the outbox drain both turn a [`crate::blob::BlobScope`] into a
+/// methods and the outbox drain both turn a [`crate::protocol::blob::BlobScope`] into a
 /// key the same way, so they share this one mapping. Only an encrypted home has
 /// per-scope keys, so this is reached only from the [`CloudCipher::Encrypted`]
 /// branches.
 pub(crate) fn encryption_for_scope(
-    scope: crate::blob::BlobScope,
+    scope: crate::protocol::blob::BlobScope,
     master: &EncryptionService,
 ) -> EncryptionService {
     match scope {
-        crate::blob::BlobScope::Master => master.clone(),
-        crate::blob::BlobScope::Derived(s) => master.derive_scoped(&s),
+        crate::protocol::blob::BlobScope::Master => master.clone(),
+        crate::protocol::blob::BlobScope::Derived(s) => master.derive_scoped(&s),
     }
 }
 
@@ -1145,7 +1153,7 @@ struct ScopedBlobSealing {
 }
 
 impl ScopedBlobSealing {
-    fn new(scope: crate::blob::BlobScope, master: &EncryptionService) -> Self {
+    fn new(scope: crate::protocol::blob::BlobScope, master: &EncryptionService) -> Self {
         Self {
             encryption: encryption_for_scope(scope, master),
             key_tag: key_tag(&master.seal_fingerprint()),
@@ -1176,20 +1184,20 @@ impl ScopedBlobSealing {
 }
 
 fn opening_encryption_for_scope(
-    scope: crate::blob::BlobScope,
+    scope: crate::protocol::blob::BlobScope,
     master: &EncryptionService,
     fingerprint: &[u8; KEY_FINGERPRINT_LEN],
 ) -> Result<EncryptionService, EncryptionError> {
     match scope {
-        crate::blob::BlobScope::Master => master.service_for_fingerprint(fingerprint),
-        crate::blob::BlobScope::Derived(scope_id) => {
+        crate::protocol::blob::BlobScope::Master => master.service_for_fingerprint(fingerprint),
+        crate::protocol::blob::BlobScope::Derived(scope_id) => {
             master.derive_scoped_for_fingerprint(fingerprint, &scope_id)
         }
     }
 }
 
 fn open_scoped_encrypted(
-    scope: crate::blob::BlobScope,
+    scope: crate::protocol::blob::BlobScope,
     master: &EncryptionService,
     stored: &[u8],
     aad_context: &[u8],
@@ -1212,7 +1220,7 @@ struct ExactBlobPlaintextReader {
     source: crate::storage::local_file::PlaintextReader,
     opening: ExactBlobOpening,
     remaining: u64,
-    hasher: Option<crate::blob::ContentHasher>,
+    hasher: Option<crate::protocol::blob::ContentHasher>,
     expected_hash: ObjectHash,
     locator_hash: ObjectHash,
     pending: Vec<u8>,
@@ -1223,7 +1231,7 @@ impl ExactBlobPlaintextReader {
     async fn new(
         stored_file: &Path,
         store_id: &str,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Result<Self, StorageError> {
         let locator = blob.locator();
@@ -1233,7 +1241,7 @@ impl ExactBlobPlaintextReader {
 
         let opening = match (locator, protection) {
             (
-                crate::blob::locator::BlobLocator::Opaque {
+                crate::protocol::blob::locator::BlobLocator::Opaque {
                     scope,
                     key_fingerprint,
                     ..
@@ -1260,18 +1268,18 @@ impl ExactBlobPlaintextReader {
                 }
             }
             (
-                crate::blob::locator::BlobLocator::Browsable { .. },
+                crate::protocol::blob::locator::BlobLocator::Browsable { .. },
                 crate::protocol::objects::BlobSpoolProtection::Browsable,
             ) => {
                 check_stored_blob_length(blob, locator.plaintext_size())?;
                 ExactBlobOpening::Browsable
             }
-            (crate::blob::locator::BlobLocator::Opaque { .. }, _) => {
+            (crate::protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "opaque blob locator requires audience encryption".to_string(),
                 ));
             }
-            (crate::blob::locator::BlobLocator::Browsable { .. }, _) => {
+            (crate::protocol::blob::locator::BlobLocator::Browsable { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "browsable blob locator cannot use audience encryption".to_string(),
                 ));
@@ -1287,7 +1295,9 @@ impl ExactBlobPlaintextReader {
             // provider's bytes — the two homes verify by different means, not by
             // one mechanism plus a spare.
             hasher: match opening {
-                ExactBlobOpening::Browsable => Some(crate::blob::ContentHasher::default()),
+                ExactBlobOpening::Browsable => {
+                    Some(crate::protocol::blob::ContentHasher::default())
+                }
                 ExactBlobOpening::Opaque { .. } => None,
             },
             source,
@@ -1356,9 +1366,9 @@ pub(crate) fn split_sealed_blob(
 /// whatever it decrypts to.
 fn verified_sealed_blob_opener(
     prefix: &[u8],
-    blob: &crate::blob::locator::StoredBlobRef,
+    blob: &crate::protocol::blob::locator::StoredBlobRef,
     key_fingerprint: &crate::encryption::KeyFingerprint,
-    scope: &crate::blob::BlobScope,
+    scope: &crate::protocol::blob::BlobScope,
     master: &EncryptionService,
     aad_context: &[u8],
 ) -> Result<crate::encryption::SealedBlobOpener, StorageError> {
@@ -1395,7 +1405,7 @@ fn verified_sealed_blob_opener(
 /// pins the stored object's exact size, so a length the framing cannot produce
 /// means the object is not the one the row names.
 fn check_stored_blob_length(
-    blob: &crate::blob::locator::StoredBlobRef,
+    blob: &crate::protocol::blob::locator::StoredBlobRef,
     expected: u64,
 ) -> Result<(), StorageError> {
     if blob.object().stored_size() != expected {
@@ -1918,7 +1928,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<ObjectSlot, StorageError> {
         self.validate_blob_locator_home(locator)?;
@@ -1929,7 +1939,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         protection: crate::protocol::objects::BlobSpoolProtection,
         plaintext_file: &Path,
@@ -1968,8 +1978,9 @@ impl SyncStorage for CloudSyncStorage {
                     stored_size,
                     stored_hash,
                 );
-                let blob = crate::blob::locator::StoredBlobRef::new(locator.clone(), object)
-                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                let blob =
+                    crate::protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
+                        .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                 let mut reader =
                     ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
                         .await?;
@@ -1996,7 +2007,7 @@ impl SyncStorage for CloudSyncStorage {
         let retry_protection = protection.clone();
         let body = match (locator, protection) {
             (
-                crate::blob::locator::BlobLocator::Opaque {
+                crate::protocol::blob::locator::BlobLocator::Opaque {
                     scope,
                     key_fingerprint,
                     ..
@@ -2021,17 +2032,17 @@ impl SyncStorage for CloudSyncStorage {
                     .map_err(StorageError::LocalFilesystem)?
             }
             (
-                crate::blob::locator::BlobLocator::Browsable { .. },
+                crate::protocol::blob::locator::BlobLocator::Browsable { .. },
                 crate::protocol::objects::BlobSpoolProtection::Browsable,
             ) => BlobBody::from_file(plaintext_file)
                 .await
                 .map_err(StorageError::LocalFilesystem)?,
-            (crate::blob::locator::BlobLocator::Opaque { .. }, _) => {
+            (crate::protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "opaque blob locator requires audience encryption".to_string(),
                 ));
             }
-            (crate::blob::locator::BlobLocator::Browsable { .. }, _) => {
+            (crate::protocol::blob::locator::BlobLocator::Browsable { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "browsable blob locator cannot use audience encryption".to_string(),
                 ));
@@ -2081,8 +2092,9 @@ impl SyncStorage for CloudSyncStorage {
                     stored_size,
                     stored_hash,
                 );
-                let blob = crate::blob::locator::StoredBlobRef::new(locator.clone(), object)
-                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                let blob =
+                    crate::protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
+                        .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                 let mut reader = ExactBlobPlaintextReader::new(
                     spool_file,
                     &self.store_id,
@@ -2107,11 +2119,11 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn prepare_blob_object(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
+        locator: &crate::protocol::blob::locator::BlobLocator,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         slot: ObjectSlot,
         stored_file: &Path,
-    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
+    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
@@ -2125,7 +2137,7 @@ impl SyncStorage for CloudSyncStorage {
         let (stored_size, stored_hash) = crate::storage::local_file::exact_file_facts(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
-        crate::blob::locator::StoredBlobRef::new(
+        crate::protocol::blob::locator::StoredBlobRef::new(
             locator.clone(),
             ExactObjectRef::new(slot, stored_size, stored_hash),
         )
@@ -2134,7 +2146,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
@@ -2155,13 +2167,11 @@ impl SyncStorage for CloudSyncStorage {
             let (size, digest) = crate::local_file::file_facts(stored_file)
                 .await
                 .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
-            object
-                .verify_stored_facts(
-                    stored_file,
-                    size,
-                    crate::protocol::store_commit::ObjectHash::from_digest(digest),
-                )
-                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+            object.verify_stored_facts(
+                stored_file,
+                size,
+                crate::protocol::store_commit::ObjectHash::from_digest(digest),
+            )?;
         }
         let body = BlobBody::from_file(stored_file)
             .await
@@ -2199,7 +2209,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn verify_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         self.validate_blob_locator_home(blob.locator())?;
         let expected = blob.locator().semantic_key();
@@ -2215,7 +2225,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn stage_exact_blob_download(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         dest: &Path,
     ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
@@ -2248,20 +2258,18 @@ impl SyncStorage for CloudSyncStorage {
             let (size, digest) = crate::local_file::file_facts(staged.path())
                 .await
                 .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
-            object
-                .verify_stored_facts(
-                    staged.path(),
-                    size,
-                    crate::protocol::store_commit::ObjectHash::from_digest(digest),
-                )
-                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+            object.verify_stored_facts(
+                staged.path(),
+                size,
+                crate::protocol::store_commit::ObjectHash::from_digest(digest),
+            )?;
         }
         Ok(staged)
     }
 
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &Path,
     ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
@@ -2304,14 +2312,14 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
     ) -> Result<BlobRangeReader, StorageError> {
         let locator = blob.locator();
         self.validate_blob_locator_home(locator)?;
         let slot = blob.object().slot().clone();
         let (scope, key_fingerprint) = match locator {
-            crate::blob::locator::BlobLocator::Opaque {
+            crate::protocol::blob::locator::BlobLocator::Opaque {
                 scope,
                 key_fingerprint,
                 ..
@@ -2321,7 +2329,7 @@ impl SyncStorage for CloudSyncStorage {
             // answer against. Ranged reading is refused rather than served
             // unverified; the caller materializes the whole blob, where the row's
             // content hash can refuse it.
-            crate::blob::locator::BlobLocator::Browsable { .. } => {
+            crate::protocol::blob::locator::BlobLocator::Browsable { .. } => {
                 return Err(StorageError::Configuration(format!(
                     "blob {} is stored in the clear, which has no per-range verification",
                     locator.locator_hash()
@@ -2360,7 +2368,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn delete_blob_object(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         let locator = blob.locator();
         let object = blob.object();
@@ -2380,8 +2388,8 @@ impl SyncStorage for CloudSyncStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::locator::{BlobLocator, RemoteAudience};
-    use crate::blob::BlobScope;
+    use crate::protocol::blob::locator::{BlobLocator, RemoteAudience};
+    use crate::protocol::blob::BlobScope;
     use crate::protocol::objects::BlobWriteAuthority;
     use crate::protocol::objects::{LocalRotation, RotationPendingState};
     use crate::protocol::store_commit::ObjectHash;
@@ -2524,7 +2532,7 @@ mod tests {
         chunking: BlobChunking,
     ) -> (
         CloudSyncStorage,
-        crate::blob::locator::StoredBlobRef,
+        crate::protocol::blob::locator::StoredBlobRef,
         EncryptionService,
         tempfile::TempDir,
     ) {
@@ -3724,8 +3732,8 @@ mod tests {
             crate::database::Database::open(
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "pending-rotation-reopen-device".to_string(),
                 std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),

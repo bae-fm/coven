@@ -1,7 +1,7 @@
 use crate::database::remote_object_records::merge_prepared_remote_object;
 
-use crate::blob::BLOB_TOMBSTONE_GRACE;
 use crate::database::*;
+use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
 use crate::protocol::store_commit::commit_semantic_prefix;
 
 use super::fixtures::*;
@@ -12,7 +12,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         "prepared-audience-objects".to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[],

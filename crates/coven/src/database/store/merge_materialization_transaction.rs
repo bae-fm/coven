@@ -24,7 +24,6 @@ use super::{
     RetainedMergeMaterializationCache, StoreDatabase,
 };
 use crate::blob::local_cleanup::intents_from_changes as local_blob_cleanup_intents;
-use crate::blob::locator::RemoteAudience;
 use crate::changeset::RowChange;
 use crate::database::blob_records::{
     live_blob_row, validate_live_blob_row, validate_stored_locator_on,
@@ -44,6 +43,7 @@ use crate::database::{
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
+use crate::protocol::blob::locator::RemoteAudience;
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
 use crate::protocol::store_commit::{

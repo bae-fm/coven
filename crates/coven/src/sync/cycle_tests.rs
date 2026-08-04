@@ -13,12 +13,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::blob::{CacheFill, Provenance};
 use crate::clock::{FixedClock, SystemClock};
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::store_commit::SnapshotMeta;
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::storage::SyncStorage;
@@ -160,7 +160,7 @@ trait CycleTestDatabaseOps {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Option<crate::blob::locator::StoredBlobRef>;
+    ) -> Option<crate::protocol::blob::locator::StoredBlobRef>;
     async fn make_remote_intent_present(&self, root_table: &str, root_id: &str) -> bool;
     async fn pending_write_count(&self) -> i64;
 }
@@ -199,7 +199,7 @@ impl CycleTestDatabaseOps for Database {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Option<crate::blob::locator::StoredBlobRef> {
+    ) -> Option<crate::protocol::blob::locator::StoredBlobRef> {
         self.row_blob_ref(table, row_id)
             .await
             .expect("resolve exact blob row")
@@ -1254,7 +1254,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
@@ -1307,7 +1307,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     db.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
@@ -1402,7 +1402,9 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .expect("live row remains pending its own remote locator");
     assert!(matches!(
         live.authority(),
-        crate::blob::RowBlobAuthority::PendingRemote(crate::blob::locator::RemoteAudience::Store)
+        crate::protocol::blob::RowBlobAuthority::PendingRemote(
+            crate::protocol::blob::locator::RemoteAudience::Store
+        )
     ));
     assert!(live.stored().is_none());
     storage
@@ -1435,8 +1437,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .install(
             &restore_dir,
             tables.clone(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "restored-snapshot-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
@@ -1484,7 +1486,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
     db.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at)
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
@@ -1552,8 +1554,8 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         Database::open(
             &database_path,
             tables.clone(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "snapshot-cleanup-device".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &test_migrations(),
@@ -1573,7 +1575,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     db.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at)
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
@@ -1660,7 +1662,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
     let (_temp, store_dir) = temp_store_dir();
-    let hash = crate::blob::content_hash(b"shared");
+    let hash = crate::protocol::blob::content_hash(b"shared");
     db.execute_test_sql(&format!(
         "INSERT INTO assets (id, blob_id, size, hash, _updated_at) VALUES
              ('row-a', 'blob-shared', 6, '{hash}', '0000000001000-0000-M'),
@@ -1724,7 +1726,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
              (id, note_id, kind, size, hash, _updated_at, created_at)
              VALUES ('audio1', 'n1', 'audio', 5, '{}',
                      '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"AUDIO"),
+        crate::protocol::blob::content_hash(b"AUDIO"),
     ))
     .await;
     crate::database::StoreDatabase::new(&db)
@@ -2480,7 +2482,7 @@ enum CycleStorageInterception {
         allocate_calls: AtomicUsize,
         prepare_calls: AtomicUsize,
         create_calls: AtomicUsize,
-        attempted: std::sync::Mutex<Vec<crate::blob::locator::StoredBlobRef>>,
+        attempted: std::sync::Mutex<Vec<crate::protocol::blob::locator::StoredBlobRef>>,
         protocol_read_calls: AtomicUsize,
     },
 }
@@ -2558,7 +2560,7 @@ impl CycleStorageInterceptor {
         }
     }
 
-    fn rejected_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
+    fn rejected_blobs(&self) -> Vec<crate::protocol::blob::locator::StoredBlobRef> {
         self.interceptor.rejected_blobs()
     }
 
@@ -2615,7 +2617,7 @@ impl CycleStorageInterception {
         }
     }
 
-    fn rejected_blobs(&self) -> Vec<crate::blob::locator::StoredBlobRef> {
+    fn rejected_blobs(&self) -> Vec<crate::protocol::blob::locator::StoredBlobRef> {
         let Self::RejectBlobCreate { attempted, .. } = self else {
             panic!("storage interception does not reject blob creates");
         };
@@ -2714,7 +2716,7 @@ impl crate::sync::test_helpers::StorageInterceptor for CycleStorageInterception 
 
     async fn before_blob_create(
         &self,
-        blob: &crate::blob::locator::StoredBlobRef,
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         if let Self::RejectBlobCreate {
             reject_create_call,
@@ -2977,7 +2979,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
@@ -3070,7 +3072,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
          VALUES ('photo', 'n1', 'cover', 5, '{}', 'blob-a', \
                  '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"first"),
+        crate::protocol::blob::content_hash(b"first"),
     ))
     .await;
     db.execute_test_host_write(&format!(
@@ -3078,7 +3080,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
              SET blob_id = 'blob-b', size = 6, hash = '{}', \
                  _updated_at = '0000000002000-0000-M' \
              WHERE id = 'photo'",
-        crate::blob::content_hash(b"second"),
+        crate::protocol::blob::content_hash(b"second"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-a", b"first")
@@ -3169,7 +3171,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
@@ -3321,7 +3323,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
@@ -3409,7 +3411,7 @@ async fn ready_make_remote_provider_transport_is_offline() {
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('transport-blob', 'transport-root', 'cover', 5, '{}', \
                      '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"cover"),
+        crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "transport-blob", b"cover")
@@ -3466,8 +3468,8 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
              VALUES ('firstblob', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('secondblob', 'n1', 'cover', 6, '{}', '0000000001001-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"first"),
-        crate::blob::content_hash(b"second"),
+        crate::protocol::blob::content_hash(b"first"),
+        crate::protocol::blob::content_hash(b"second"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "firstblob", b"first")
@@ -3583,7 +3585,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('remoteonly', 'n1', 'cover', 15, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"already durable"),
+        crate::protocol::blob::content_hash(b"already durable"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "remoteonly", b"already durable")
@@ -3679,7 +3681,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('lazyblob', 'n1', 'cover', 4, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"lazy"),
+        crate::protocol::blob::content_hash(b"lazy"),
     ))
     .await;
     crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "lazyblob", b"lazy")
@@ -4149,7 +4151,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
              (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('audio1', 'n1', 'audio', 5, '{}', \
                      '0000000001000-0000-M', '2026-01-01')",
-        crate::blob::content_hash(b"AUDIO"),
+        crate::protocol::blob::content_hash(b"AUDIO"),
     ))
     .await;
 

@@ -3,8 +3,8 @@
 //! and slots, and provider rollback at the correct slot fails the stored hash
 //! check before any plaintext is published locally.
 
-use crate::blob::locator::{BlobLocatorError, StoredBlobRef};
 use crate::encryption::EncryptionService;
+use crate::protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
 use crate::protocol::objects::{BlobSpoolProtection, StorageError};
 use crate::storage::cloud::ExactSlotStorage;
 use crate::storage::SyncStorage;

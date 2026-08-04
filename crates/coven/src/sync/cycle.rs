@@ -10,10 +10,10 @@
 
 use tracing::{debug, info, warn};
 
-use crate::blob::upload::DrainOutcome;
-use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::database::DbError;
+use crate::protocol::blob::BlobTransitionObserver;
+use crate::protocol::blob::DrainOutcome;
 use crate::store_dir::StoreDir;
 
 use super::status::DeviceActivity;
@@ -1023,7 +1023,7 @@ impl SyncComponents {
         &self,
         clock: &dyn crate::clock::Clock,
         observer: Option<&dyn BlobTransitionObserver>,
-    ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
+    ) -> Result<crate::protocol::blob::DrainOutcome, DbError> {
         self.store
             .authorize_writer()
             .await

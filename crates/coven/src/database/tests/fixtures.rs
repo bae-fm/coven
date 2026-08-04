@@ -1,5 +1,5 @@
-use crate::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
 use crate::database::*;
+use crate::protocol::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
 use crate::protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
 
 pub(super) fn reclaim_test_object(path: &str) -> ExactObjectRef {
@@ -142,10 +142,10 @@ pub(super) fn local_row_blob(row_id: &str, stamp: &str, bytes: &[u8]) -> RowBlob
         BlobRef {
             namespace: locator.namespace().to_string(),
             id: locator.blob_id().to_string(),
-            scope: crate::blob::BlobScope::Master,
+            scope: crate::protocol::blob::BlobScope::Master,
             cloud_path: locator.cloud_path().map(str::to_string),
             provenance: Provenance::HostProvided,
-            fill: crate::blob::CacheFill::CacheLazy,
+            fill: crate::protocol::blob::CacheFill::CacheLazy,
         },
         locator.plaintext_size(),
         locator.plaintext_hash(),
@@ -160,7 +160,7 @@ pub(super) fn open_outbox_database(device_id: &str) -> Database {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::one_at_a_time(),
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(crate::clock::SystemClock),
         &[],
@@ -207,7 +207,7 @@ pub(super) fn blob_binding_table() -> SyncedTable {
         crate::sync::session::BlobDecl::new(
             "images",
             Provenance::HostProvided,
-            crate::blob::CacheFill::CacheLazy,
+            crate::protocol::blob::CacheFill::CacheLazy,
         )
         .with_cloud_path_column("cloud_path"),
     )

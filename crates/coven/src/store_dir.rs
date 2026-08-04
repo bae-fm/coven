@@ -598,7 +598,7 @@ impl StoreDir {
 
     pub(crate) fn remote_blob_paths(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(PathBuf, PathBuf), PathTokenError> {
         let locator = stored.locator();
         Ok((

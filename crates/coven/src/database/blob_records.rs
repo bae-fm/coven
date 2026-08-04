@@ -304,7 +304,12 @@ pub(crate) fn previous_row_blob_for_write_on(
         CloudOutboxRecords::new(conn).created_upload_handoff(table, row_id, column, row_stamp)?
     {
         let locator = handoff.stored.locator();
-        if !crate::blob::locator_describes_row(locator, blob, plaintext_size, plaintext_hash) {
+        if !crate::protocol::blob::locator_describes_row(
+            locator,
+            blob,
+            plaintext_size,
+            plaintext_hash,
+        ) {
             return Err(DbError::Message(format!(
                 "created upload {table}/{row_id}/{column} at {row_stamp} differs from its captured row"
             )));
@@ -340,7 +345,8 @@ pub(crate) fn previous_row_blob_for_write_on(
     }
     let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
         .map_err(|error| DbError::Message(format!("prior row blob locator: {error}")))?;
-    if !crate::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash) {
+    if !crate::protocol::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash)
+    {
         return Ok(None);
     }
     if locator.audience() != authority.remote_audience() {

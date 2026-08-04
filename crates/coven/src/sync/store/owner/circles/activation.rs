@@ -1395,7 +1395,7 @@ impl CircleActivationVerifier<'_, '_> {
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         for binding in &bootstrap.blobs {
-            let crate::blob::RowBlobAuthority::Remote(
+            let crate::protocol::blob::RowBlobAuthority::Remote(
                 crate::protocol::audience_package::PackageAudience::Circle {
                     circle_id,
                     control: blob_control,

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::encryption::KeyFingerprint;
+use crate::protocol::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::protocol::circle::CircleId;
 use crate::protocol::circle_control::CircleControlCoord;
 use crate::protocol::store_commit::{
@@ -384,7 +384,7 @@ pub(crate) enum AudiencePackageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+    use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
     use crate::protocol::circle::CircleId;
     use crate::protocol::circle_control::CircleControlCoord;
     use crate::protocol::membership::AuthorStreamId;

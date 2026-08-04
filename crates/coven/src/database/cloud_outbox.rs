@@ -17,7 +17,7 @@ impl Database {
     async fn swap_upload_state(
         &self,
         id: i64,
-        row: &crate::blob::RowBlobRef,
+        row: &crate::protocol::blob::RowBlobRef,
         from: String,
         to: String,
         context: &'static str,
@@ -64,7 +64,7 @@ impl Database {
             ));
         }
         let locator = stored.locator();
-        if !crate::blob::locator_describes_row(
+        if !crate::protocol::blob::locator_describes_row(
             locator,
             row.blob(),
             row.plaintext_size(),

@@ -14,13 +14,13 @@ pub(crate) enum OutboxOperation {
     Upload {
         root_table: String,
         root_id: String,
-        row: crate::blob::RowBlobRef,
+        row: crate::protocol::blob::RowBlobRef,
         source_path: std::path::PathBuf,
         retain_pinned: bool,
         state: OutboxUploadState,
     },
     Delete {
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
     },
 }
 
@@ -30,12 +30,12 @@ pub(crate) enum OutboxUploadState {
     Pending,
     Prepared {
         authority: crate::protocol::audience_package::PackageAudience,
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
         spool_path: std::path::PathBuf,
     },
     Created {
         authority: crate::protocol::audience_package::PackageAudience,
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
         spool_path: std::path::PathBuf,
     },
 }
@@ -412,7 +412,7 @@ impl StoreDatabase {
         &self,
         entry: &OutboxEntry,
         authority: crate::protocol::audience_package::PackageAudience,
-        stored: crate::blob::locator::StoredBlobRef,
+        stored: crate::protocol::blob::locator::StoredBlobRef,
         spool_path: std::path::PathBuf,
     ) -> Result<(), DbError> {
         let OutboxOperation::Upload { row, state, .. } = &entry.operation else {
@@ -426,7 +426,7 @@ impl StoreDatabase {
             ));
         }
         let locator = stored.locator();
-        if !crate::blob::locator_describes_row(
+        if !crate::protocol::blob::locator_describes_row(
             locator,
             row.blob(),
             row.plaintext_size(),
@@ -553,7 +553,7 @@ impl StoreDatabase {
     async fn swap_blob_upload_state(
         &self,
         id: i64,
-        row: &crate::blob::RowBlobRef,
+        row: &crate::protocol::blob::RowBlobRef,
         from: String,
         to: String,
         context: &'static str,
@@ -638,7 +638,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         )
     };
     let encoded: String = row.get(0)?;
-    let reference: crate::blob::RowBlobRef =
+    let reference: crate::protocol::blob::RowBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
     let attempt_count: i64 = row.get(4)?;
     Ok(QueuedUpload {
@@ -666,7 +666,7 @@ fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDelet
         )
     };
     let encoded: String = row.get(0)?;
-    let stored: crate::blob::locator::StoredBlobRef =
+    let stored: crate::protocol::blob::locator::StoredBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
     let attempt_count: i64 = row.get(1)?;
     Ok(QueuedDelete {

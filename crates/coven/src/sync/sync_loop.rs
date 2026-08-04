@@ -15,9 +15,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info};
 
-use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
+use crate::protocol::blob::BlobTransitionObserver;
 #[cfg(test)]
 use crate::store_dir::StoreDir;
 use crate::store_dir::StoreOpenGuard;
@@ -766,7 +766,7 @@ impl SyncLoopHandle {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+    ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
         self.inner
             .components
             .drain_uploads(self.inner.clock.as_ref(), self.inner.observer.as_deref())
@@ -1130,7 +1130,7 @@ mod tests {
             std::path::Path::new(":memory:"),
             Vec::new(),
             chrono::Duration::days(30),
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "status-test".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &[],

@@ -70,7 +70,7 @@ impl AuthorizedWriterOperation<'_> {
                 if matches!(
                     fact.audience_move,
                     Some(crate::database::StoreWriteBlobMoveDestination::Local)
-                ) || fact.blob.provenance != crate::blob::Provenance::HostProvided
+                ) || fact.blob.provenance != crate::protocol::blob::Provenance::HostProvided
                 {
                     continue;
                 }
@@ -91,10 +91,10 @@ impl AuthorizedWriterOperation<'_> {
                     continue;
                 }
                 let disposition = match fact.blob.fill {
-                    crate::blob::CacheFill::CacheEager => {
+                    crate::protocol::blob::CacheFill::CacheEager => {
                         crate::sync::cycle::DeferredLocalBlobDisposition::Cache
                     }
-                    crate::blob::CacheFill::CacheLazy => {
+                    crate::protocol::blob::CacheFill::CacheLazy => {
                         crate::sync::cycle::DeferredLocalBlobDisposition::Drop
                     }
                 };

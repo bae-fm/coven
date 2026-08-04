@@ -475,11 +475,11 @@ impl AudienceBlobBindingPackage {
         }
     }
 
-    pub(crate) fn remote_audience(&self) -> crate::blob::locator::RemoteAudience {
+    pub(crate) fn remote_audience(&self) -> crate::protocol::blob::locator::RemoteAudience {
         match self {
-            Self::Store(_) => crate::blob::locator::RemoteAudience::Store,
+            Self::Store(_) => crate::protocol::blob::locator::RemoteAudience::Store,
             Self::Circle(package) => {
-                crate::blob::locator::RemoteAudience::Circle(package.circle_id)
+                crate::protocol::blob::locator::RemoteAudience::Circle(package.circle_id)
             }
         }
     }
@@ -496,7 +496,7 @@ impl AudienceBlobBindingPackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudienceBlobReclaimTarget {
-    pub blob: crate::blob::locator::StoredBlobRef,
+    pub blob: crate::protocol::blob::locator::StoredBlobRef,
     pub package: AudienceBlobBindingPackage,
     pub activation: StoreBatchCommitRef,
 }

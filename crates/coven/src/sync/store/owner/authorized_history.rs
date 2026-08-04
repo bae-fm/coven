@@ -362,7 +362,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             let Some(blob) = blob else {
                 continue;
             };
-            if blob.fill != crate::blob::CacheFill::CacheEager {
+            if blob.fill != crate::protocol::blob::CacheFill::CacheEager {
                 continue;
             }
             let row_id = match change.pk() {
@@ -766,8 +766,8 @@ enum TerminalNonactivationCandidate {
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(super) async fn stage_verified_blob_plaintext(
         &self,
-        authority: &crate::blob::RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::protocol::blob::RowBlobAuthority,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.blob_source
@@ -777,8 +777,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(super) async fn verify_blob_plaintext(
         &self,
-        authority: &crate::blob::RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::protocol::blob::RowBlobAuthority,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
         self.blob_source
@@ -789,8 +789,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(super) async fn blob_protection_for_test(
         &self,
-        authority: &crate::blob::RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::protocol::blob::RowBlobAuthority,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::sync::BlobCacheError> {
         self.blob_source
             .protection_for_test(authority, stored)

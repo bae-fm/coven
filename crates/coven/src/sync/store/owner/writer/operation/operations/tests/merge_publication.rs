@@ -625,8 +625,8 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             Database::open(
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::blob::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::one_at_a_time(),
+                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+                crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "dev-writer".to_string(),
                 std::sync::Arc::new(crate::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),

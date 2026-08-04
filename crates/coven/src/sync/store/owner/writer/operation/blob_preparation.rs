@@ -52,7 +52,7 @@ impl AuthorizedWriterOperation<'_> {
         let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
         let (remote_audience, protection) = match partition.audience {
             circle::Audience::Store => (
-                crate::blob::locator::RemoteAudience::Store,
+                crate::protocol::blob::locator::RemoteAudience::Store,
                 storage
                     .store_blob_protection()
                     .map_err(|source| StoreError::BlobStorage {
@@ -71,7 +71,7 @@ impl AuthorizedWriterOperation<'_> {
                     .circle_publication_context(circle_id, control.coordinate().clone())
                     .await?;
                 (
-                    crate::blob::locator::RemoteAudience::Circle(circle_id),
+                    crate::protocol::blob::locator::RemoteAudience::Circle(circle_id),
                     access.blob_protection(),
                 )
             }
@@ -230,7 +230,7 @@ impl AuthorizedWriterOperation<'_> {
     pub(super) async fn prepare_partition_blob(
         &self,
         fact: &StoreWriteBlobFact,
-        audience: crate::blob::locator::RemoteAudience,
+        audience: crate::protocol::blob::locator::RemoteAudience,
         protection: crate::protocol::objects::BlobSpoolProtection,
         authority: &BlobWriteAuthority<'_>,
     ) -> Result<
@@ -329,15 +329,15 @@ impl AuthorizedWriterOperation<'_> {
             }
         }
         let host_path = match fact.blob.provenance {
-            crate::blob::Provenance::HostProvided => Some(
+            crate::protocol::blob::Provenance::HostProvided => Some(
                 self.store_dir
                     .local_blob_path(&fact.blob.namespace, &fact.blob.id)
                     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             ),
-            crate::blob::Provenance::UserProvided => None,
+            crate::protocol::blob::Provenance::UserProvided => None,
         };
         let source = if let Some(path) = &fact.external_path {
-            if fact.blob.provenance != crate::blob::Provenance::UserProvided {
+            if fact.blob.provenance != crate::protocol::blob::Provenance::UserProvided {
                 return Err(StoreError::InvalidOutbound(format!(
                     "host-provided blob {}/{} carries an external path",
                     fact.blob.namespace, fact.blob.id
@@ -446,7 +446,7 @@ impl AuthorizedWriterOperation<'_> {
                 namespace: fact.blob.namespace.clone(),
                 id: fact.blob.id.clone(),
             })?;
-        let authority = crate::blob::RowBlobAuthority::Remote(previous.authority.clone());
+        let authority = crate::protocol::blob::RowBlobAuthority::Remote(previous.authority.clone());
         let destination = self
             .store_dir
             .storage_dir()
@@ -556,13 +556,13 @@ async fn remove_durable_file(path: &std::path::Path, require_present: bool) -> R
 
 pub(crate) fn prepare_partition_blob_locator(
     fact: &StoreWriteBlobFact,
-    audience: crate::blob::locator::RemoteAudience,
+    audience: crate::protocol::blob::locator::RemoteAudience,
     protection: &crate::protocol::objects::BlobSpoolProtection,
     authority: &BlobWriteAuthority<'_>,
-) -> Result<crate::blob::locator::BlobLocator, StoreError> {
+) -> Result<crate::protocol::blob::locator::BlobLocator, StoreError> {
     match protection {
         crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
-            crate::blob::locator::BlobLocator::opaque(
+            crate::protocol::blob::locator::BlobLocator::opaque(
                 fact.blob.namespace.clone(),
                 fact.blob.id.clone(),
                 authority.reference.clone(),
@@ -574,12 +574,12 @@ pub(crate) fn prepare_partition_blob_locator(
             )
         }
         crate::protocol::objects::BlobSpoolProtection::Browsable => {
-            if audience != crate::blob::locator::RemoteAudience::Store {
+            if audience != crate::protocol::blob::locator::RemoteAudience::Store {
                 return Err(StoreError::InvalidOutbound(
                     "Circle blob cannot use Browsable storage".to_string(),
                 ));
             }
-            crate::blob::locator::BlobLocator::browsable(
+            crate::protocol::blob::locator::BlobLocator::browsable(
                 fact.blob.namespace.clone(),
                 fact.blob.id.clone(),
                 authority.reference.clone(),
@@ -656,7 +656,7 @@ pub(super) fn close_prepared_blobs(
 > {
     let mut exact_blobs = std::collections::BTreeMap::<
         (
-            crate::blob::locator::RemoteAudience,
+            crate::protocol::blob::locator::RemoteAudience,
             crate::protocol::store_commit::ObjectHash,
         ),
         PreparedPartitionBlob,

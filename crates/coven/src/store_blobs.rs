@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::blob::RowBlobRef;
 use crate::config::Config;
 use crate::database::StoreDatabase;
+use crate::protocol::blob::RowBlobRef;
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::{ConfigProvider, StoreSync};
@@ -322,7 +322,7 @@ impl StoreBlobs {
 
     pub(crate) fn cloud_key(
         &self,
-        blob: &crate::blob::BlobRef,
+        blob: &crate::protocol::blob::BlobRef,
     ) -> Result<String, crate::protocol::objects::StorageError> {
         self.sync.blob_cloud_key(blob)
     }
@@ -398,7 +398,7 @@ impl StoreBlobs {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<crate::blob::upload::DrainOutcome, crate::store_sync::SyncError> {
+    ) -> Result<crate::protocol::blob::DrainOutcome, crate::store_sync::SyncError> {
         self.sync.drain_uploads().await
     }
 

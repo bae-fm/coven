@@ -122,7 +122,7 @@ impl<'a> RemoteBlobAccess<'a> {
 
     pub(super) async fn stage_verified_plaintext(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
         self.storage
@@ -133,7 +133,7 @@ impl<'a> RemoteBlobAccess<'a> {
 
     pub(super) async fn open_range_reader(
         &self,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::storage::BlobRangeReader, BlobCacheError> {
         self.storage
             .open_blob_range_reader(stored, self.protection.clone())
@@ -366,7 +366,7 @@ impl From<crate::store_dir::LocalBlobStoreError> for BlobCacheError {
 /// file the user owns and edits; coven's own copies are published by rename or
 /// hard link and never written in place.
 pub struct BlobStream {
-    blob: crate::blob::BlobRef,
+    blob: crate::protocol::blob::BlobRef,
     source: BlobStreamSource,
 }
 
@@ -381,7 +381,10 @@ pub(super) enum BlobStreamSource {
 }
 
 impl BlobStream {
-    pub(super) fn from_source(blob: crate::blob::BlobRef, source: BlobStreamSource) -> Self {
+    pub(super) fn from_source(
+        blob: crate::protocol::blob::BlobRef,
+        source: BlobStreamSource,
+    ) -> Self {
         Self { blob, source }
     }
 

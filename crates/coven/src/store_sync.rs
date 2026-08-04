@@ -6,12 +6,12 @@ use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
-use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::{DbError, StoreDatabase};
 use crate::encryption::EncryptionService;
 use crate::keys::KeyError;
+use crate::protocol::blob::{BlobRef, BlobTransitionObserver};
 use crate::protocol::objects::StorageError;
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 #[cfg(any(test, feature = "test-utils"))]
@@ -188,49 +188,49 @@ impl StoreSync {
 
     pub(crate) async fn read_blob(
         &self,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<Vec<u8>, BlobCacheError> {
         self.blob_access.read(reference).await
     }
 
     pub(crate) async fn materialize_blob(
         &self,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<(), BlobCacheError> {
         self.blob_access.materialize(reference).await
     }
 
     pub(crate) async fn open_blob_stream(
         &self,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<crate::sync::BlobStream, BlobCacheError> {
         self.blob_access.open_stream(reference).await
     }
 
     pub(crate) async fn pin_blobs(
         &self,
-        references: &[crate::blob::RowBlobRef],
+        references: &[crate::protocol::blob::RowBlobRef],
     ) -> Result<(), BlobCacheError> {
         self.blob_access.pin(references).await
     }
 
     pub(crate) async fn unpin_blobs(
         &self,
-        references: &[crate::blob::RowBlobRef],
+        references: &[crate::protocol::blob::RowBlobRef],
     ) -> Result<(), BlobCacheError> {
         self.local_blob_access.unpin(references).await
     }
 
     pub(crate) async fn all_blobs_pinned(
         &self,
-        references: &[crate::blob::RowBlobRef],
+        references: &[crate::protocol::blob::RowBlobRef],
     ) -> Result<bool, BlobCacheError> {
         self.local_blob_access.all_pinned(references).await
     }
 
     pub(crate) async fn evict_blob(
         &self,
-        reference: &crate::blob::RowBlobRef,
+        reference: &crate::protocol::blob::RowBlobRef,
     ) -> Result<(), BlobCacheError> {
         self.local_blob_access.evict(reference).await
     }
@@ -466,7 +466,7 @@ impl ActiveSyncOperation {
             .await
     }
 
-    async fn drain_uploads(&self) -> Result<crate::blob::upload::DrainOutcome, DbError> {
+    async fn drain_uploads(&self) -> Result<crate::protocol::blob::DrainOutcome, DbError> {
         self.loop_handle.drain_uploads().await
     }
 
@@ -1034,7 +1034,7 @@ impl StoreSync {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<crate::blob::upload::DrainOutcome, SyncError> {
+    ) -> Result<crate::protocol::blob::DrainOutcome, SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .drain_uploads()

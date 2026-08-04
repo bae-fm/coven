@@ -43,13 +43,13 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{Provenance, RowBlobRef};
 use crate::database::DbError;
 use crate::database::StoreDatabase;
+use crate::protocol::blob::{Provenance, RowBlobRef};
 use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
-use crate::blob::BlobTransitionObserver;
+use crate::protocol::blob::BlobTransitionObserver;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -266,7 +266,7 @@ impl LocalBlobTransitions {
 
         let mut uploads = Vec::with_capacity(refs.len());
         for reference in refs {
-            if reference.authority() != &crate::blob::RowBlobAuthority::Local
+            if reference.authority() != &crate::protocol::blob::RowBlobAuthority::Local
                 || reference.stored().is_some()
             {
                 return Err(MakeRemoteError::AlreadyRemote(
@@ -378,7 +378,7 @@ impl LocalBlobTransitions {
         for reference in &references {
             if !matches!(
                 reference.authority(),
-                crate::blob::RowBlobAuthority::Remote(_)
+                crate::protocol::blob::RowBlobAuthority::Remote(_)
             ) || reference.stored().is_none()
             {
                 return Err(MakeLocalError::UnresolvedLocality(

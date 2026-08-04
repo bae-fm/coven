@@ -21,13 +21,13 @@
 
 use std::sync::Arc;
 
-use crate::blob::RowBlobRef;
 use crate::clock::ClockRef;
 use crate::coven::CovenResult;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
+use crate::protocol::blob::RowBlobRef;
 use crate::read_store_rows::ReadStoreRows;
 use crate::store_blobs::{ReadStoreBlobs, StoreBlobAccess};
 use crate::store_cloud_storage::StoreCloudStorage;

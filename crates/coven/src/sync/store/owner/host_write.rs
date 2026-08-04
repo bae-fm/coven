@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::blob::locator::RemoteAudience;
-use crate::blob::{Provenance, RowBlobAuthority};
 use crate::database::{AudienceMove, AudiencePartition};
 use crate::database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWriteBlobMoveDestination,
 };
+use crate::protocol::blob::locator::RemoteAudience;
+use crate::protocol::blob::{Provenance, RowBlobAuthority};
 use crate::protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
 use crate::storage::SyncStorage;
 use crate::store_dir::StoreDir;
@@ -219,17 +219,17 @@ impl HostWriteBlobStaging {
         transaction: &HostWriteBlobTransaction<'_, '_>,
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
-        stored: &crate::blob::locator::StoredBlobRef,
+        stored: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, DbError> {
         match source
             .opening_authority(stored)
             .map_err(|error| move_materialization_error(fact, error))?
         {
-            crate::blob::BlobOpeningAuthority::Store => self
+            crate::protocol::blob::BlobOpeningAuthority::Store => self
                 .storage
                 .store_blob_protection()
                 .map_err(|error| move_materialization_error(fact, error)),
-            crate::blob::BlobOpeningAuthority::Circle {
+            crate::protocol::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
                 key_fingerprint,

@@ -415,7 +415,7 @@ impl super::AuthorizedWriterOperation<'_> {
     for captured in blobs {
         let (audience, protection, package_authority) = match captured.audience {
             SnapshotBlobAudience::Store => (
-                crate::blob::locator::RemoteAudience::Store,
+                crate::protocol::blob::locator::RemoteAudience::Store,
                 storage.store_blob_protection().map_err(SnapshotError::Bucket)?,
                 crate::protocol::audience_package::PackageAudience::Store,
             ),
@@ -426,7 +426,7 @@ impl super::AuthorizedWriterOperation<'_> {
                     .map_err(SnapshotError::from)?;
                 let key_fingerprint = access.key_fingerprint();
                 (
-                    crate::blob::locator::RemoteAudience::Circle(circle_id),
+                    crate::protocol::blob::locator::RemoteAudience::Circle(circle_id),
                     access.blob_protection(),
                     crate::protocol::audience_package::PackageAudience::Circle {
                         circle_id,
@@ -436,7 +436,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 )
             }
         };
-        if captured.fact.blob.provenance == crate::blob::Provenance::UserProvided
+        if captured.fact.blob.provenance == crate::protocol::blob::Provenance::UserProvided
             && captured.fact.previous.is_none()
         {
             return Err(SnapshotError::PublishBlobs(format!(
@@ -444,7 +444,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 captured.fact.blob.namespace, captured.fact.blob.id
             )));
         }
-        if captured.fact.blob.provenance == crate::blob::Provenance::UserProvided {
+        if captured.fact.blob.provenance == crate::protocol::blob::Provenance::UserProvided {
             let locator = super::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
@@ -496,7 +496,7 @@ impl super::AuthorizedWriterOperation<'_> {
             )
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
-        if captured.fact.blob.provenance == crate::blob::Provenance::UserProvided
+        if captured.fact.blob.provenance == crate::protocol::blob::Provenance::UserProvided
             && !blob.uploaded_verified
         {
             return Err(SnapshotError::PublishBlobs(format!(
@@ -658,8 +658,8 @@ mod tests {
         Database::open(
             path,
             crate::sync::test_helpers::test_synced_tables(),
-            crate::blob::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &crate::sync::test_helpers::test_migrations(),

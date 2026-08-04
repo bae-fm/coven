@@ -137,7 +137,7 @@ impl ConnectionWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::BLOB_TOMBSTONE_GRACE;
+    use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
 
     /// A SQL closure that blocks for a while must not stall other tasks on the
     /// same runtime, because jobs run on the dedicated connection thread rather
@@ -150,7 +150,7 @@ mod tests {
             Path::new(":memory:"),
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "liveness".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &[],
@@ -199,7 +199,7 @@ mod tests {
             &db_path,
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::one_at_a_time(),
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
             "drop-async".to_string(),
             std::sync::Arc::new(crate::clock::SystemClock),
             &[],
