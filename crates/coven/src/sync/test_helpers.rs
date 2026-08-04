@@ -1087,7 +1087,8 @@ mod test_device {
 
         pub(crate) fn device_join_transport(
             &self,
-        ) -> crate::sync::store::device_join_transport::StoreDeviceJoinTransport<'_> {
+        ) -> crate::sync::store::owner::device_join_transport::StoreDeviceJoinTransport<'_>
+        {
             self.store.device_join_transport()
         }
 

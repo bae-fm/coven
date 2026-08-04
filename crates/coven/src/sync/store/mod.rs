@@ -10,7 +10,6 @@ use crate::storage::{BlobPathScheme, CloudCipherAccess};
 #[doc(hidden)]
 pub(crate) mod blob;
 mod circle_controls;
-pub(crate) mod device_join_transport;
 mod error;
 mod membership;
 pub(crate) mod owner;
@@ -35,12 +34,6 @@ pub(crate) use circle_controls::{
 };
 #[cfg(test)]
 pub(crate) use circle_controls::{VerifiedCircleAccess, VerifiedCircleActive};
-pub use device_join_transport::{
-    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming,
-};
-pub(crate) use device_join_transport::{DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport};
 pub(crate) use error::StoreError;
 pub(crate) use error::StorePreparationError;
 #[cfg(test)]
@@ -70,6 +63,14 @@ pub(crate) use owner::device_join::{
     DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef, DeviceProviderAdmissionChallenge,
     DeviceProviderResponseReservation, JoiningStore, PendingDeviceJoinAuthority,
     PendingDeviceJoinObservation,
+};
+pub use owner::device_join_transport::{
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,
+    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    DeviceJoinTransportTiming,
+};
+pub(crate) use owner::device_join_transport::{
+    DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport,
 };
 #[cfg(test)]
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;

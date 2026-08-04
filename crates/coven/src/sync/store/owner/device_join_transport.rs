@@ -674,21 +674,11 @@ pub enum DeviceJoinApproval {
 
 pub(crate) struct StoreDeviceJoinTransport<'store> {
     store: &'store Store,
-    database: crate::database::StoreDatabase,
-    storage: &'store dyn SyncStorage,
 }
 
 impl<'store> StoreDeviceJoinTransport<'store> {
-    pub(super) fn new(
-        store: &'store Store,
-        database: crate::database::StoreDatabase,
-        storage: &'store dyn SyncStorage,
-    ) -> Self {
-        Self {
-            store,
-            database,
-            storage,
-        }
+    pub(super) fn new(store: &'store Store) -> Self {
+        Self { store }
     }
 
     pub(crate) async fn allocate_bundle(
@@ -700,6 +690,7 @@ impl<'store> StoreDeviceJoinTransport<'store> {
         let mut slots = BTreeMap::new();
         for kind in DeviceJoinTransportKind::ALL {
             let slot = self
+                .store
                 .storage
                 .allocate_protocol_slot(
                     &context,
@@ -806,7 +797,7 @@ impl StoreDeviceJoinTransport<'_> {
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         let roles = self.roles(&bundle.offer).await?;
-        let transport = DeviceJoinTransport::open(self.storage, bundle, roles)?;
+        let transport = DeviceJoinTransport::open(self.store.storage.as_ref(), bundle, roles)?;
         let attempt_id = bundle.offer.attempt_id;
 
         // An abandoned attempt has no further step to drive. Publishing it here is
@@ -978,7 +969,7 @@ impl StoreDeviceJoinTransport<'_> {
         bundle: &DeviceJoinOfferBundle,
     ) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
         let roles = self.roles(&bundle.offer).await?;
-        let transport = DeviceJoinTransport::open(self.storage, bundle, roles)?;
+        let transport = DeviceJoinTransport::open(self.store.storage.as_ref(), bundle, roles)?;
         let abandonment = self.store.abandon_device_join(bundle.offer.clone()).await?;
         transport
             .publish(&DeviceJoinAction::TransferAbandonment(abandonment.clone()))
@@ -991,6 +982,7 @@ impl StoreDeviceJoinTransport<'_> {
         attempt_id: DeviceJoinAttemptId,
     ) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
         Ok(self
+            .store
             .database
             .device_join_status(attempt_id, DeviceJoinRole::ProviderAdministrator)
             .await?)
@@ -1001,6 +993,7 @@ impl StoreDeviceJoinTransport<'_> {
         attempt_id: DeviceJoinAttemptId,
     ) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
         Ok(self
+            .store
             .database
             .device_join_status(attempt_id, DeviceJoinRole::Owner)
             .await?)
@@ -1034,7 +1027,7 @@ impl StoreDeviceJoinTransport<'_> {
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
         let roles = self.roles(&bundle.offer).await?;
-        let transport = DeviceJoinTransport::open(self.storage, bundle, roles)?;
+        let transport = DeviceJoinTransport::open(self.store.storage.as_ref(), bundle, roles)?;
         let attempt_id = bundle.offer.attempt_id;
 
         let receipt = match self.owner_status(attempt_id).await? {
@@ -1133,6 +1126,7 @@ impl StoreDeviceJoinTransport<'_> {
         offer: &DeviceJoinOffer,
     ) -> Result<DeviceJoinRoles, DeviceJoinTransportError> {
         let local = self
+            .store
             .database
             .local_activated_registration_ref()
             .await
@@ -1188,6 +1182,7 @@ impl StoreDeviceJoinTransport<'_> {
             return Ok(false);
         }
         Ok(self
+            .store
             .database
             .device_join_status(offer.attempt_id, DeviceJoinRole::Owner)
             .await?

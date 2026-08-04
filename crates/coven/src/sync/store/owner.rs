@@ -8,6 +8,7 @@ mod authorized_store;
 mod circles;
 pub(super) mod device_exclusion;
 pub(super) mod device_join;
+pub(crate) mod device_join_transport;
 mod founder_creation;
 pub(super) mod history;
 mod history_construction;
@@ -122,12 +123,8 @@ impl Store {
 
     pub(crate) fn device_join_transport(
         &self,
-    ) -> super::device_join_transport::StoreDeviceJoinTransport<'_> {
-        super::device_join_transport::StoreDeviceJoinTransport::new(
-            self,
-            self.database.clone(),
-            self.storage.as_ref(),
-        )
+    ) -> device_join_transport::StoreDeviceJoinTransport<'_> {
+        device_join_transport::StoreDeviceJoinTransport::new(self)
     }
 
     pub(crate) fn circles(&self) -> StoreCircleCommands<'_> {
