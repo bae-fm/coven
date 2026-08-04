@@ -1443,7 +1443,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn export_activated_device_continuation_for_test(
         &self,
-    ) -> Result<crate::restoration::ActivatedContinuation, crate::database::DbError> {
+    ) -> Result<crate::restore_code::ActivatedContinuation, crate::database::DbError> {
         self.database
             .export_activated_device_continuation(&self.identity)
             .await

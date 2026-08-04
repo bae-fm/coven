@@ -194,7 +194,7 @@ pub async fn restore_from_cloud(
     source: RestoreSource,
     membership_floor: &crate::protocol::membership::MembershipFloor,
     keypair: &UserKeypair,
-    authority: &crate::restoration::RestoreAuthority,
+    authority: &crate::restore_code::RestoreAuthority,
     continuation_device_signer: Option<&UserKeypair>,
     layout: &StoreLayout,
     clock: crate::clock::ClockRef,
@@ -282,25 +282,25 @@ pub async fn restore_from_cloud(
         // checked up front, so this create and the failure-cleanup below own
         // it entirely).
         let device_id = match authority {
-            crate::restoration::RestoreAuthority::ActivatedContinuation(continuation) => {
+            crate::restore_code::RestoreAuthority::ActivatedContinuation(continuation) => {
                 continuation.registration.device_id.to_string()
             }
-            crate::restoration::RestoreAuthority::OwnerRecovery(_) => ids.new_id(),
+            crate::restore_code::RestoreAuthority::OwnerRecovery(_) => ids.new_id(),
         };
         store_dir.ensure_created()?;
 
         let continuation = match (authority, continuation_device_signer) {
             (
-                crate::restoration::RestoreAuthority::ActivatedContinuation(continuation),
+                crate::restore_code::RestoreAuthority::ActivatedContinuation(continuation),
                 Some(_),
             ) => Some(continuation),
-            (crate::restoration::RestoreAuthority::ActivatedContinuation(_), None) => {
+            (crate::restore_code::RestoreAuthority::ActivatedContinuation(_), None) => {
                 return Err(BootstrapError::InvalidSigningKey(
                     "activated continuation has no device signing key".to_string(),
                 ));
             }
-            (crate::restoration::RestoreAuthority::OwnerRecovery(_), None) => None,
-            (crate::restoration::RestoreAuthority::OwnerRecovery(_), Some(_)) => {
+            (crate::restore_code::RestoreAuthority::OwnerRecovery(_), None) => None,
+            (crate::restore_code::RestoreAuthority::OwnerRecovery(_), Some(_)) => {
                 return Err(BootstrapError::InvalidSigningKey(
                     "Owner recovery cannot carry an activated device signer".to_string(),
                 ));
@@ -379,7 +379,7 @@ pub async fn restore_from_cloud(
                 .install_activated_device_continuation(continuation.clone())
                 .await?;
         }
-        if let crate::restoration::RestoreAuthority::OwnerRecovery(recovery) = authority {
+        if let crate::restore_code::RestoreAuthority::OwnerRecovery(recovery) = authority {
             store.recover_owner_device(recovery).await?;
         }
 
@@ -453,8 +453,8 @@ pub async fn restore_from_code(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    let parsed =
-        super::decode_restore_code(code).map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
+    let parsed = crate::restore_code::decode_restore_code(code)
+        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
     crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &parsed.provider,
         custom_s3_exact_slots,
@@ -465,10 +465,10 @@ pub async fn restore_from_code(
     // with this keypair during restore, and `restore_from_cloud` imports it into
     // custody just before saving the config.
     let identity_secret = match &parsed.authority {
-        crate::restoration::RestoreAuthority::ActivatedContinuation(continuation) => {
+        crate::restore_code::RestoreAuthority::ActivatedContinuation(continuation) => {
             &continuation.identity_signing_secret
         }
-        crate::restoration::RestoreAuthority::OwnerRecovery(recovery) => {
+        crate::restore_code::RestoreAuthority::OwnerRecovery(recovery) => {
             &recovery.owner_identity_secret
         }
     };
@@ -483,7 +483,7 @@ pub async fn restore_from_code(
         })?;
     let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(BootstrapError::Key)?;
     let continuation_device_signer = match &parsed.authority {
-        crate::restoration::RestoreAuthority::ActivatedContinuation(continuation) => {
+        crate::restore_code::RestoreAuthority::ActivatedContinuation(continuation) => {
             let bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
                 hex::decode(&continuation.device_signing_secret)
                     .map_err(|error| {
@@ -500,7 +500,7 @@ pub async fn restore_from_code(
                     })?;
             Some(UserKeypair::from_signing_key_bytes(&bytes).map_err(BootstrapError::Key)?)
         }
-        crate::restoration::RestoreAuthority::OwnerRecovery(_) => None,
+        crate::restore_code::RestoreAuthority::OwnerRecovery(_) => None,
     };
 
     // `parsed.provider` is already the shared `CloudHomeJoinInfo`; restore matches

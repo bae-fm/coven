@@ -24,7 +24,7 @@ impl StoreRecovery {
         }
         let identity = self.security.established_identity()?;
         let restore_membership = self.sync.restore_membership().await?;
-        let authority = crate::restoration::RestoreAuthority::ActivatedContinuation(
+        let authority = crate::restore_code::RestoreAuthority::ActivatedContinuation(
             identity
                 .export_activated_device_continuation(&self.database)
                 .await?,

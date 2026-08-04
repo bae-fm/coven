@@ -34,6 +34,7 @@ pub(crate) mod protocol;
 mod read_handle;
 mod read_store_rows;
 pub(crate) mod restoration;
+pub(crate) mod restore_code;
 pub(crate) mod storage;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;

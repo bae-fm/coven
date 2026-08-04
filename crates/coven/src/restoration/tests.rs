@@ -426,7 +426,7 @@ fn restore_code_with_sid(sid: &str) -> String {
     let root = store_root_ref("restore test store protocol root");
     let owner = crate::keys::UserKeypair::generate();
     let code = RestoreCode {
-        v: crate::restoration::RESTORE_CODE_VERSION,
+        v: crate::restore_code::RESTORE_CODE_VERSION,
         sid: sid.to_string(),
         ek: Some(serialized_keyring(0xaa)),
         name: "Evil".to_string(),
@@ -481,7 +481,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
     let root = store_root_ref("restore root");
     let owner = crate::keys::UserKeypair::generate();
     let code = encode_restore_code(&RestoreCode {
-        v: crate::restoration::RESTORE_CODE_VERSION,
+        v: crate::restore_code::RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
         ek: Some(serialized_keyring(0xaa)),
         name: "Blob Store".to_string(),
@@ -1129,7 +1129,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         .expect("publish recovery snapshot acknowledgement");
     let authority = owner_device.published_owner_recovery_authority(&owner);
     let code = encode_restore_code(&RestoreCode {
-        v: crate::restoration::RESTORE_CODE_VERSION,
+        v: crate::restore_code::RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
         ek: None,
         name: "Recovered Store".to_string(),
@@ -1232,7 +1232,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .expect("export exact activated continuation");
         let expected_latest_snapshot = continuation.latest_snapshot.clone();
         let restore_code = encode_restore_code(&RestoreCode {
-            v: crate::restoration::RESTORE_CODE_VERSION,
+            v: crate::restore_code::RESTORE_CODE_VERSION,
             sid: store_id.to_string(),
             ek: None,
             name: "Restored Store".to_string(),

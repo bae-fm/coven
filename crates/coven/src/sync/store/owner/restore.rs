@@ -565,7 +565,7 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(crate) async fn recover_owner_device(
         &mut self,
-        authority: &crate::restoration::OwnerRecoveryAuthority,
+        authority: &crate::restore_code::OwnerRecoveryAuthority,
     ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
         let database = self.database.clone();
         let storage = self.storage;
@@ -1363,7 +1363,7 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(crate) async fn install_activated_device_continuation(
         &self,
-        continuation: crate::restoration::ActivatedContinuation,
+        continuation: crate::restore_code::ActivatedContinuation,
     ) -> Result<(), StoreRegistrationError> {
         let registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
             &continuation.registration_bytes,

@@ -3094,7 +3094,7 @@ mod test_device {
 
         pub(crate) async fn export_activated_device_continuation(
             &self,
-        ) -> Result<crate::restoration::ActivatedContinuation, String> {
+        ) -> Result<crate::restore_code::ActivatedContinuation, String> {
             self.store
                 .export_activated_device_continuation_for_test()
                 .await
@@ -3302,7 +3302,7 @@ impl TestStore {
 
     pub(crate) async fn founder_recovery_authority(
         &self,
-    ) -> crate::restoration::OwnerRecoveryAuthority {
+    ) -> crate::restore_code::OwnerRecoveryAuthority {
         let device = self.founder_device().await.expect("load founder Store");
         let protocol_root = device.protocol_root_for_test();
         let owner_grant = protocol_root.descriptor.founder_grant.clone();
@@ -3313,7 +3313,7 @@ impl TestStore {
             &protocol_root.descriptor.founder_recovery,
         )
         .expect("derive founder recovery activation");
-        crate::restoration::OwnerRecoveryAuthority {
+        crate::restore_code::OwnerRecoveryAuthority {
             owner_identity_secret: hex::encode(self.signer.to_keypair_bytes()),
             owner_grant: owner_grant.clone(),
             recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
