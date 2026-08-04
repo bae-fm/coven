@@ -8,7 +8,7 @@ mod circle_acknowledgements;
 mod circle_controls;
 mod circle_operation_discard;
 mod circle_operations;
-use circle_operations::circle_publication_context_on;
+use circle_operations::{circle_blob_opening_protection_on, circle_publication_context_on};
 mod circle_snapshot_publication;
 mod device_continuation;
 mod device_exclusion;
