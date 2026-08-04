@@ -5,10 +5,6 @@
 //! boundary. Durable role journals store one closed progress value and advance
 //! only from the exact adjacent predecessor.
 
-use std::collections::BTreeSet;
-
-use serde::{Deserialize, Serialize};
-
 use super::pull::StorePullError;
 use super::verified_history::MergeHistoryVerifier;
 use super::{
@@ -16,25 +12,19 @@ use super::{
     RegistrationOutbox, StoreKeyrings,
 };
 use crate::database::DeviceJoinBootstrapPlan;
-use crate::keys::{self, UserKeypair};
-use crate::protocol::circle_control::StoreMembershipStateRef;
-use crate::protocol::membership::MembershipGrantId;
+use crate::keys::UserKeypair;
 use crate::protocol::objects::ObjectSlot;
-use crate::protocol::objects::{
-    ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding,
-};
+use crate::protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
 use crate::protocol::provider::{
     ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
-    CrossPrincipalProbeReceipt, CrossPrincipalProbeResponse,
-    DeviceJoinChallengePublicationAuthorization, ProviderAccessGrantId, ProviderAccessWithdrawal,
-    ProviderAdminGrantId, ProviderAdminGrantRecord, StoreMemberProviderAccessGrant,
-    StoreMemberProviderAccessGrantRef,
+    CrossPrincipalProbeResponse, DeviceJoinChallengePublicationAuthorization,
+    ProviderAccessGrantId, ProviderAccessWithdrawal, ProviderAdminGrantId,
+    ProviderAdminGrantRecord, StoreMemberProviderAccessGrantRef,
 };
 use crate::protocol::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
     DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
-    STORE_PROTOCOL_VERSION,
 };
 use crate::storage::SyncStorage;
 use crate::sync::store::{Store, StoreDatabase};
@@ -42,7 +32,6 @@ use crate::sync::store::{Store, StoreDatabase};
 mod authorized_join;
 mod cleanup;
 mod error;
-mod exchange;
 pub(super) mod history;
 mod joiner;
 mod journal;
@@ -52,9 +41,9 @@ pub(super) use authorized_join::{AuthorizedJoin, AuthorizedProviderAdministrator
 #[derive(Clone, Copy)]
 pub(super) struct PendingDeviceJoinHistoryConstruction;
 
+pub use crate::protocol::store_commit::device_join_exchange::*;
 pub use authorized_join::DeviceProviderAccessAdministrator;
 pub use cleanup::*;
 pub use error::*;
-pub use exchange::*;
 pub(crate) use joiner::*;
 pub use journal::*;

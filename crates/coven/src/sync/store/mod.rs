@@ -51,8 +51,7 @@ pub use owner::device_join::{
     ProvisionalDeviceBootstrap,
 };
 pub(crate) use owner::device_join::{
-    DeviceProviderAdmissionChallenge, DeviceProviderResponseReservation, JoiningStore,
-    PendingDeviceJoinAuthority, PendingDeviceJoinObservation,
+    JoiningStore, PendingDeviceJoinAuthority, PendingDeviceJoinObservation,
 };
 pub use owner::device_join_transport::{
     DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,

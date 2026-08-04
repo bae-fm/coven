@@ -36,8 +36,8 @@ const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WriteRevocationRequest {
-    producer: crate::sync::store::DeviceJoinProducer,
-    authority: crate::sync::store::ProviderWriteAuthorityRef,
+    producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer,
+    authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
     locator: crate::protocol::provider::ProviderAccessLocator,
     protected_slots: Vec<crate::protocol::objects::ObjectSlot>,
 }
@@ -70,8 +70,8 @@ impl ConfirmedWriteRevocation {
 impl crate::sync::store::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRevocation {
     async fn revoke_write_authority(
         &self,
-        producer: crate::sync::store::DeviceJoinProducer,
-        authority: &crate::sync::store::ProviderWriteAuthorityRef,
+        producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer,
+        authority: &crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
         locator: &crate::protocol::provider::ProviderAccessLocator,
         protected_slots: &[crate::protocol::objects::ObjectSlot],
     ) -> Result<
@@ -593,7 +593,7 @@ fn exercise_post_attempt_cancellation<'a>(
                 provisional.request.registration_slot.clone(),
                 first_ack.clone(),
             ];
-            if let crate::sync::store::DeviceProviderResponseReservation::CrossPrincipal {
+            if let crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal {
                 response_slot,
             } = &provisional.request.response
             {
@@ -602,8 +602,8 @@ fn exercise_post_attempt_cancellation<'a>(
             assert_eq!(
                 joiner_revocation.requests(),
                 vec![WriteRevocationRequest {
-                    producer: crate::sync::store::DeviceJoinProducer::Joiner,
-                    authority: crate::sync::store::ProviderWriteAuthorityRef::MemberAccess(
+                    producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer::Joiner,
+                    authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::MemberAccess(
                         provisional.request.approval.access_grant.grant_ref.clone(),
                     ),
                     locator: joiner_access_locator.clone(),
@@ -909,7 +909,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .revoke_device_provider_admission_writes(cancellation.clone(), &revocation)
             .await
             .expect("revoke absent provider-administrator writes");
-        let crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
+        let crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
             &provisional.request.approval.admission
         else {
             panic!("missing-provider test did not create a cross-principal challenge");
@@ -917,8 +917,8 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
         assert_eq!(
             revocation.requests(),
             vec![WriteRevocationRequest {
-                producer: crate::sync::store::DeviceJoinProducer::ProviderAdministrator,
-                authority: crate::sync::store::ProviderWriteAuthorityRef::ProviderAdministrator(
+                producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer::ProviderAdministrator,
+                authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::ProviderAdministrator(
                     provisional
                         .request
                         .approval
@@ -4838,7 +4838,7 @@ struct SamePrincipalApprovalFixture<'storage> {
     _pending_dir: tempfile::TempDir,
     pending_join: crate::sync::store::PendingDeviceJoinAuthority<'storage>,
     owner: TestDevice,
-    approval: crate::sync::store::DeviceProviderAdmissionApproval,
+    approval: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
 }
 
 impl<'storage> SamePrincipalApprovalFixture<'storage> {
@@ -5185,14 +5185,15 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
             invalid_access,
             valid_request.approval.admission.clone(),
         );
-    let malformed_request = crate::sync::store::DeviceRegistrationRequest::signed(
-        malformed_approval,
-        valid_request.expected_registration.clone(),
-        valid_request.registration_slot.clone(),
-        valid_request.response.clone(),
-        &member,
-    )
-    .expect("joiner signs malformed remote request fixture");
+    let malformed_request =
+        crate::protocol::store_commit::device_join_exchange::DeviceRegistrationRequest::signed(
+            malformed_approval,
+            valid_request.expected_registration.clone(),
+            valid_request.registration_slot.clone(),
+            valid_request.response.clone(),
+            &member,
+        )
+        .expect("joiner signs malformed remote request fixture");
     fixture
         .owner
         .accept_device_registration_request(malformed_request)

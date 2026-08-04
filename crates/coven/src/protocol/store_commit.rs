@@ -29,6 +29,8 @@ mod batch_commit;
 mod circle_ack;
 mod circle_snapshot;
 mod device_join;
+pub(crate) mod device_join_exchange;
+pub(crate) mod device_join_journal;
 mod device_state;
 mod heads;
 mod identifiers;

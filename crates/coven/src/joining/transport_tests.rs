@@ -482,7 +482,7 @@ async fn run_transport_carries_a_cross_principal_join() {
         Some(DeviceJoinAction::TransferProviderAdmissionApproval(approval)) => assert!(
             matches!(
                 approval.admission,
-                crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
             ),
             "separate provider accounts must admit through the cross-principal probe",
         ),

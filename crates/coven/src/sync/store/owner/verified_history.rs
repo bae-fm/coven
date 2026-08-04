@@ -1802,7 +1802,10 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn verify_device_join_cleanup_activation(
         &mut self,
         activation: LoadedDeviceJoinCleanupActivation,
-    ) -> Result<crate::sync::store::JoinerJoinTerminal, StorePullError> {
+    ) -> Result<
+        crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
+        StorePullError,
+    > {
         let membership = self
             .load_predecessor_membership(&activation.verified_commit.value().membership_state)
             .await

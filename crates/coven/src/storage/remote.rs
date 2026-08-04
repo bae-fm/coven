@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use super::provider_probe::ProviderProbeStorage;
 use super::SyncStorage;
 use crate::encryption::{
     EncryptionError, EncryptionService, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
@@ -24,7 +25,6 @@ use crate::protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
     ResolvedProviderBinding, RotationGate, RotationPending, StorageError,
 };
-use crate::protocol::provider::ProviderProbeStorage;
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::{BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage};
 

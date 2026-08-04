@@ -1,6 +1,6 @@
-use super::cleanup::require_cancelled_outcome;
 use super::journal::{database_error, provider_error};
 use super::*;
+use crate::protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 use crate::protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
 mod provider_administrator;
@@ -858,7 +858,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         administrator_terminal: ProviderAdminJoinTerminal,
         joiner_terminal: JoinerJoinTerminal,
     ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
-        super::cleanup::require_cancelled_outcome(&cancellation.outcome)?;
+        require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
         let database = self.database.clone();
         let current = database
@@ -893,7 +893,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        super::cleanup::validate_terminals(
+        crate::protocol::store_commit::device_join_exchange::validate_terminals(
             &cancellation.outcome,
             &administrator_terminal,
             &joiner_terminal,
@@ -934,7 +934,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     cancellation.outcome.clone(),
                     administrator_terminal.clone(),
                     joiner_terminal.clone(),
-                    super::cleanup::canonical_cleanup_slots(&attempt.value)?,
+                    canonical_cleanup_slots(&attempt.value)?,
                     plan.membership_state().clone(),
                     attempt
                         .value

@@ -129,7 +129,7 @@ impl Store {
 
     async fn allocate_device_join_transport_bundle(
         &self,
-        offer: crate::sync::store::DeviceJoinOffer,
+        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<
         device_join_transport::DeviceJoinOfferBundle,
         device_join_transport::DeviceJoinTransportError,
@@ -195,7 +195,7 @@ impl Store {
 
     async fn device_join_transport_roles(
         &self,
-        offer: &crate::sync::store::DeviceJoinOffer,
+        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<
         device_join_transport::DeviceJoinRoles,
         device_join_transport::DeviceJoinTransportError,
@@ -652,7 +652,10 @@ impl Store {
     pub(crate) async fn begin_device_join(
         &self,
         member_pubkey: &str,
-    ) -> Result<crate::sync::store::DeviceJoinOffer, crate::sync::store::DeviceJoinError> {
+    ) -> Result<
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        crate::sync::store::DeviceJoinError,
+    > {
         let mut writer = self
             .authorize_writer()
             .await
@@ -1387,7 +1390,7 @@ impl Store {
     pub(crate) async fn pending_device_join_observation_for_test(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
-        offer: &crate::sync::store::DeviceJoinOffer,
+        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, StorePullError> {
         if &offer.store_root != self.root.reference() {
             return Err(StorePullError::Database(
@@ -1410,7 +1413,7 @@ impl Store {
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
         identity: &UserKeypair,
-        offer: crate::sync::store::DeviceJoinOffer,
+        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, DeviceJoinError> {
         let observation = self
             .pending_device_join_observation_for_test(pending, &offer)

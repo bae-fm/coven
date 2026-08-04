@@ -203,7 +203,7 @@ device_join_artifact!(
     TransferProvisionalBootstrap
 );
 device_join_artifact!(
-    crate::sync::store::ProviderReadyDeviceBootstrap,
+    crate::protocol::store_commit::device_join_exchange::ProviderReadyDeviceBootstrap,
     ProviderReadyBootstrap,
     TransferProviderReadyBootstrap
 );
@@ -1199,6 +1199,16 @@ impl StoreDeviceJoinTransport<'_> {
             return Ok(false);
         }
         Ok(self.owner_status(offer.attempt_id).await?.is_some())
+    }
+}
+
+impl From<crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError>
+    for DeviceJoinTransportError
+{
+    fn from(
+        error: crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError,
+    ) -> Self {
+        DeviceJoinTransportError::from(super::DeviceJoinError::from(error))
     }
 }
 

@@ -17,4 +17,5 @@ cargo run --quiet -p owner-construction-check -- \
     --runtime-boundary \
     --ambient-boundary \
     --filesystem-boundary \
+    --module-dependencies \
     .

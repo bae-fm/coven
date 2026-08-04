@@ -46,7 +46,9 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .load_registration(&offer.owner_registration)
             .await?
             .value;
-        offer.verify(&owner)
+        offer
+            .verify(&owner)
+            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(super) async fn validate_store_owner(&self) -> Result<(), crate::database::DbError> {
@@ -73,6 +75,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         self.database
             .load_device_join(attempt_id, DeviceJoinRole::Joiner)
             .await
+            .map_err(DeviceJoinError::from)
     }
 
     pub(super) async fn complete_join(

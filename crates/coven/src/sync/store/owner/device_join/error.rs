@@ -57,3 +57,40 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
 }
+
+impl From<crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError>
+    for DeviceJoinError
+{
+    fn from(
+        error: crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
+    ) -> Self {
+        use crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError as E;
+        match error {
+            E::InvalidSignature => DeviceJoinError::InvalidSignature,
+            E::OfferMismatch => DeviceJoinError::OfferMismatch,
+            E::ApprovalMismatch => DeviceJoinError::ApprovalMismatch,
+            E::RegistrationRequestMismatch => DeviceJoinError::RegistrationRequestMismatch,
+            E::AttemptMismatch => DeviceJoinError::AttemptMismatch,
+            E::CleanupMismatch => DeviceJoinError::CleanupMismatch,
+            E::DuplicateReservedSlot => DeviceJoinError::DuplicateReservedSlot,
+            E::Provider(message) => DeviceJoinError::Provider(message),
+            E::Storage(error) => DeviceJoinError::Storage(error),
+            E::Protocol(error) => DeviceJoinError::Store(error.to_string()),
+        }
+    }
+}
+
+impl From<crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError>
+    for DeviceJoinError
+{
+    fn from(
+        error: crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError,
+    ) -> Self {
+        use crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError as E;
+        match error {
+            E::NonAdjacentJournalTransition => DeviceJoinError::NonAdjacentJournalTransition,
+            E::JournalConflict => DeviceJoinError::JournalConflict,
+            E::Journal(message) => DeviceJoinError::Store(message),
+        }
+    }
+}

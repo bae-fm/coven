@@ -550,7 +550,10 @@ impl DeviceJoinClient {
         bootstrap: crate::ProviderReadyDeviceBootstrap,
         on_status: impl Fn(&str),
         cancel: &watch::Receiver<bool>,
-    ) -> Result<crate::sync::store::DeviceJoinReadiness, BootstrapError> {
+    ) -> Result<
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
+        BootstrapError,
+    > {
         let offer = &bootstrap.bootstrap.request.approval.request.offer;
         self.require_offer(offer)?;
         let attempt = &bootstrap.bootstrap.publication_authorization.attempt;

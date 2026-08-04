@@ -1,6 +1,6 @@
-use super::cleanup::require_cancelled_outcome;
 use super::journal::{database_error, provider_error};
 use super::*;
+use crate::protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 
 #[doc(hidden)]
 pub(crate) struct PendingDeviceJoinAuthority<'storage> {
@@ -343,7 +343,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .load_registration(&offer.owner_registration)
             .await?
             .value;
-        offer.verify(&owner)
+        offer.verify(&owner).map_err(DeviceJoinError::from)
     }
 
     pub(crate) fn authorize_closure(

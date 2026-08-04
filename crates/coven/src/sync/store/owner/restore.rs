@@ -1120,7 +1120,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn begin_device_join(
         self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
-        offer: crate::sync::store::DeviceJoinOffer,
+        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::JoiningStore<'storage>, crate::sync::store::DeviceJoinError>
     {
         crate::sync::store::JoiningStore::begin_from_restored_history(

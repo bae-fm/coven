@@ -1034,7 +1034,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
     .unwrap();
     let attempt_cut = StoreHistoryCut(BTreeMap::new());
     let owner_device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
-    let offer = crate::sync::store::DeviceJoinOffer::signed(
+    let offer = crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer::signed(
         attempt_id,
         keys::public_key_hex(&joiner),
         fixture.root_ref.clone(),
@@ -1048,12 +1048,13 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         &owner_device_signer,
     )
     .unwrap();
-    let access_request = crate::sync::store::DeviceProviderAccessRequest::signed(
-        offer,
-        provider_admin.provider.clone(),
-        &joiner,
-    )
-    .unwrap();
+    let access_request =
+        crate::protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest::signed(
+            offer,
+            provider_admin.provider.clone(),
+            &joiner,
+        )
+        .unwrap();
     let access_grant_id = crate::protocol::provider::ProviderAccessGrantId::from_random_bytes(
         *ObjectHash::digest(b"join provider access grant").as_bytes(),
     );
@@ -1082,14 +1083,14 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         semantic_hash: fixture.root_ref.store_root_hash,
         object: fixture.root_ref.object.clone(),
     };
-    let approval = crate::sync::store::DeviceProviderAdmissionApproval::signed(
+    let approval = crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
         access_request,
         crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant {
             grant: access_grant,
             grant_ref: access_grant_ref,
             activation: fixture.commit_ref.clone(),
         },
-        crate::sync::store::DeviceProviderAdmissionChallenge::SamePrincipal,
+        crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::SamePrincipal,
         &verified_root,
         &fixture.registration,
         &owner_device_signer,
@@ -1106,7 +1107,7 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         membership,
         provider_admin.grant_id,
         approval,
-        crate::sync::store::DeviceProviderResponseReservation::SamePrincipal,
+        crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation::SamePrincipal,
         fixture.registration_ref.clone(),
         fixture.root.descriptor.founder_grant.clone(),
         &fixture.registration,

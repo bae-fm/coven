@@ -376,10 +376,10 @@ impl LocalStoreWriter {
         owner_grant: crate::protocol::membership::MembershipGrantId,
         provider_admin: crate::protocol::provider::ProviderAdminGrantRecord,
     ) -> Result<
-        crate::sync::store::owner::device_join::DeviceJoinOffer,
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         crate::sync::store::owner::device_join::DeviceJoinError,
     > {
-        crate::sync::store::owner::device_join::DeviceJoinOffer::signed(
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer::signed(
             attempt_id,
             member_pubkey,
             root,
@@ -392,46 +392,54 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
+        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_join_offer(
         &self,
-        offer: &crate::sync::store::owner::device_join::DeviceJoinOffer,
+        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
-        offer.verify(self.registration.value())
+        offer
+            .verify(self.registration.value())
+            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn sign_device_join_abandonment(
         &self,
-        offer: &crate::sync::store::owner::device_join::DeviceJoinOffer,
+        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<
-        crate::sync::store::owner::device_join::DeviceJoinAbandonmentObject,
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinAbandonmentObject,
         crate::sync::store::owner::device_join::DeviceJoinError,
     > {
-        crate::sync::store::owner::device_join::DeviceJoinAbandonmentObject::signed(
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinAbandonmentObject::signed(
             offer,
             self.registration.value(),
             &self.device_signer,
         )
+        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_join_abandonment(
         &self,
         reference: &crate::protocol::store_commit::DeviceJoinAbandonmentRef,
-        value: &crate::sync::store::owner::device_join::DeviceJoinAbandonmentObject,
+        value: &crate::protocol::store_commit::device_join_exchange::DeviceJoinAbandonmentObject,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
-        reference.verify(value, self.registration.value())
+        reference
+            .verify(value, self.registration.value())
+            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_admission_approval_as_owner(
         &self,
-        approval: &crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
+        approval: &crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
         root: &crate::protocol::objects::VerifiedObject<
             crate::protocol::store_commit::StoreProtocolRoot,
         >,
         administrator: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
-        approval.verify(root, self.registration.value(), administrator)
+        approval
+            .verify(root, self.registration.value(), administrator)
+            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -446,8 +454,8 @@ impl LocalStoreWriter {
         bootstrap_cut: crate::protocol::store_commit::StoreHistoryCut,
         membership: crate::protocol::circle_control::StoreMembershipStateRef,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
-        provider_approval: crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
-        provider_response: crate::sync::store::owner::device_join::DeviceProviderResponseReservation,
+        provider_approval: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+        provider_response: crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
         owner_grant: crate::protocol::membership::MembershipGrantId,
     ) -> Result<
         crate::protocol::store_commit::DeviceJoinAttempt,
@@ -530,16 +538,16 @@ impl LocalStoreWriter {
         &self,
         attempt: &crate::protocol::store_commit::DeviceJoinAttempt,
         cancellation: crate::protocol::store_commit::DeviceJoinOutcomeRef,
-        administrator_terminal: crate::sync::store::owner::device_join::ProviderAdminJoinTerminal,
-        joiner_terminal: crate::sync::store::owner::device_join::JoinerJoinTerminal,
+        administrator_terminal: crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+        joiner_terminal: crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
         deleted_slots: Vec<crate::protocol::objects::ObjectSlot>,
         membership: crate::protocol::circle_control::StoreMembershipStateRef,
         provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
     ) -> Result<
-        crate::sync::store::owner::device_join::DeviceJoinCleanupReceiptObject,
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject,
         crate::sync::store::owner::device_join::DeviceJoinError,
     > {
-        crate::sync::store::owner::device_join::DeviceJoinCleanupReceiptObject::signed(
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject::signed(
             attempt,
             cancellation,
             administrator_terminal,
@@ -551,16 +559,19 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
+        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_join_cleanup_receipt(
         &self,
         reference: &crate::protocol::store_commit::DeviceJoinCleanupReceiptRef,
-        receipt: &crate::sync::store::owner::device_join::DeviceJoinCleanupReceiptObject,
+        receipt: &crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject,
         attempt: &crate::protocol::store_commit::DeviceJoinAttempt,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
         receipt.verify(attempt, self.registration.value())?;
-        reference.verify(receipt, self.registration.value())
+        reference
+            .verify(receipt, self.registration.value())
+            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn sign_circle_epoch_close_exclusion(
@@ -580,28 +591,30 @@ impl LocalStoreWriter {
 
     pub(crate) fn verify_device_admission_approval_as_administrator(
         &self,
-        approval: &crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
+        approval: &crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
         root: &crate::protocol::objects::VerifiedObject<
             crate::protocol::store_commit::StoreProtocolRoot,
         >,
         owner: &crate::protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
-        approval.verify(root, owner, self.registration.value())
+        approval
+            .verify(root, owner, self.registration.value())
+            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn sign_device_admission_approval(
         &self,
-        request: crate::sync::store::owner::device_join::DeviceProviderAccessRequest,
+        request: crate::protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
         access_grant: crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-        admission: crate::sync::store::owner::device_join::DeviceProviderAdmissionChallenge,
+        admission: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge,
         root: &crate::protocol::objects::VerifiedObject<
             crate::protocol::store_commit::StoreProtocolRoot,
         >,
     ) -> Result<
-        crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval,
+        crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
         crate::sync::store::owner::device_join::DeviceJoinError,
     > {
-        crate::sync::store::owner::device_join::DeviceProviderAdmissionApproval::signed(
+        crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
             request,
             access_grant,
             admission,
@@ -609,6 +622,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
+        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_cross_principal_challenge(
@@ -655,13 +669,13 @@ impl LocalStoreWriter {
         &self,
         cancellation: crate::protocol::store_commit::DeviceJoinOutcomeRef,
         administrator_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        challenge: crate::sync::store::owner::device_join::ProviderChallengeDisposition,
+        challenge: crate::protocol::store_commit::device_join_exchange::ProviderChallengeDisposition,
         prior_state_hash: crate::protocol::store_commit::ObjectHash,
     ) -> Result<
-        crate::sync::store::owner::device_join::ProviderAdminJoinClosure,
+        crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinClosure,
         crate::sync::store::owner::device_join::DeviceJoinError,
     > {
-        crate::sync::store::owner::device_join::ProviderAdminJoinClosure::signed(
+        crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinClosure::signed(
             cancellation,
             administrator_registration,
             challenge,
@@ -669,23 +683,24 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
+        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_device_join_write_revocation(
         &self,
         cancellation: crate::protocol::store_commit::DeviceJoinOutcomeRef,
-        producer: crate::sync::store::owner::device_join::DeviceJoinProducer,
-        authority: crate::sync::store::owner::device_join::ProviderWriteAuthorityRef,
+        producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer,
+        authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
         protected_slots: Vec<crate::protocol::objects::ObjectSlot>,
         withdrawal: crate::protocol::provider::ProviderAccessWithdrawal,
         executor_grant: crate::protocol::provider::ProviderAdminGrantId,
         executor_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::sync::store::owner::device_join::DeviceJoinProducerWriteRevocation,
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation,
         crate::sync::store::owner::device_join::DeviceJoinError,
     > {
-        crate::sync::store::owner::device_join::DeviceJoinProducerWriteRevocation::signed(
+        crate::protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation::signed(
             cancellation,
             producer,
             authority,
@@ -696,6 +711,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
+        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
     }
 
     pub(crate) async fn load_circle_activations(

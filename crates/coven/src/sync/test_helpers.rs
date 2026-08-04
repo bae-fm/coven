@@ -875,8 +875,8 @@ mod test_device {
             bootstrap_cut: crate::protocol::store_commit::StoreHistoryCut,
             membership: crate::protocol::circle_control::StoreMembershipStateRef,
             provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
-            provider_approval: crate::sync::store::DeviceProviderAdmissionApproval,
-            provider_response: crate::sync::store::DeviceProviderResponseReservation,
+            provider_approval: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+            provider_response: crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
             owner_grant: crate::protocol::membership::MembershipGrantId,
         ) -> Result<
             crate::protocol::store_commit::DeviceJoinAttempt,
@@ -903,11 +903,12 @@ mod test_device {
 
         pub(crate) fn sign_provider_admission_approval_without_shape_validation_for_test(
             &self,
-            request: crate::sync::store::DeviceProviderAccessRequest,
+            request: crate::protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
             access_grant: crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-            admission: crate::sync::store::DeviceProviderAdmissionChallenge,
-        ) -> crate::sync::store::DeviceProviderAdmissionApproval {
-            crate::sync::store::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
+            admission: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge,
+        ) -> crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval
+        {
+            crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
                 request,
                 access_grant,
                 admission,
@@ -1691,12 +1692,14 @@ mod test_device {
 
         pub(crate) async fn authorize_device_provider_access(
             &self,
-            request: crate::sync::store::DeviceProviderAccessRequest,
+            request: crate::protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
             access_administrator: Option<
                 &dyn crate::sync::store::DeviceProviderAccessAdministrator,
             >,
-        ) -> Result<crate::sync::store::DeviceProviderAdmissionApproval, crate::DeviceJoinError>
-        {
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .authorize_device_provider_access(request, access_administrator)
                 .await
@@ -1704,9 +1707,11 @@ mod test_device {
 
         pub(crate) async fn publish_device_provider_challenge(
             &self,
-            bootstrap: crate::sync::store::ProvisionalDeviceBootstrap,
-        ) -> Result<crate::sync::store::ProviderReadyDeviceBootstrap, crate::DeviceJoinError>
-        {
+            bootstrap: crate::protocol::store_commit::device_join_exchange::ProvisionalDeviceBootstrap,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::ProviderReadyDeviceBootstrap,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .publish_device_provider_challenge(bootstrap)
                 .await
@@ -1714,9 +1719,11 @@ mod test_device {
 
         pub(crate) async fn complete_device_provider_admission(
             &self,
-            readiness: crate::sync::store::DeviceJoinReadiness,
-        ) -> Result<crate::sync::store::DeviceProviderAdmissionCompletion, crate::DeviceJoinError>
-        {
+            readiness: crate::protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .complete_device_provider_admission(readiness)
                 .await
@@ -1724,8 +1731,11 @@ mod test_device {
 
         pub(crate) async fn close_device_provider_admission(
             &self,
-            cancellation: crate::sync::store::DeviceJoinCancellation,
-        ) -> Result<crate::sync::store::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .close_device_provider_admission(cancellation)
                 .await
@@ -1733,9 +1743,12 @@ mod test_device {
 
         pub(crate) async fn revoke_device_provider_admission_writes(
             &self,
-            cancellation: crate::sync::store::DeviceJoinCancellation,
+            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
             revocation_executor: &dyn crate::sync::store::DeviceJoinWriteRevocationExecutor,
-        ) -> Result<crate::sync::store::ProviderAdminJoinTerminal, crate::DeviceJoinError> {
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .revoke_device_provider_admission_writes(cancellation, revocation_executor)
                 .await
@@ -1743,38 +1756,51 @@ mod test_device {
 
         pub(crate) async fn abandon_device_join(
             &self,
-            offer: crate::sync::store::DeviceJoinOffer,
-        ) -> Result<crate::sync::store::DeviceJoinAbandonment, crate::DeviceJoinError> {
+            offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceJoinAbandonment,
+            crate::DeviceJoinError,
+        > {
             self.store.abandon_device_join(offer).await
         }
 
         pub(crate) async fn accept_device_registration_request(
             &self,
-            request: crate::sync::store::DeviceRegistrationRequest,
-        ) -> Result<crate::sync::store::ProvisionalDeviceBootstrap, crate::DeviceJoinError>
-        {
+            request: crate::protocol::store_commit::device_join_exchange::DeviceRegistrationRequest,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::ProvisionalDeviceBootstrap,
+            crate::DeviceJoinError,
+        > {
             self.store.accept_device_registration_request(request).await
         }
 
         pub(crate) async fn cancel_device_join(
             &self,
             attempt: crate::protocol::store_commit::DeviceJoinAttemptRef,
-        ) -> Result<crate::sync::store::DeviceJoinCancellation, crate::DeviceJoinError> {
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            crate::DeviceJoinError,
+        > {
             self.store.cancel_device_join(attempt).await
         }
 
         pub(crate) async fn finalize_device_join(
             &self,
-            completion: crate::sync::store::DeviceProviderAdmissionCompletion,
-        ) -> Result<crate::sync::store::DeviceJoinActivation, crate::DeviceJoinError> {
+            completion: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceJoinActivation,
+            crate::DeviceJoinError,
+        > {
             self.store.finalize_device_join(completion).await
         }
 
         pub(crate) async fn complete_owner_device_join_cleanup(
             &self,
-            activation: crate::sync::store::DeviceJoinCleanupActivation,
-        ) -> Result<crate::sync::store::DeviceJoinCleanupActivation, crate::DeviceJoinError>
-        {
+            activation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .complete_owner_device_join_cleanup(activation)
                 .await
@@ -1782,9 +1808,12 @@ mod test_device {
 
         pub(crate) async fn revoke_joining_device_writes(
             &self,
-            cancellation: crate::sync::store::DeviceJoinCancellation,
+            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
             revocation_executor: &dyn crate::sync::store::DeviceJoinWriteRevocationExecutor,
-        ) -> Result<crate::sync::store::JoinerJoinTerminal, crate::DeviceJoinError> {
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .revoke_joining_device_writes(cancellation, revocation_executor)
                 .await
@@ -1792,10 +1821,13 @@ mod test_device {
 
         pub(crate) async fn prepare_device_join_cleanup(
             &self,
-            cancellation: crate::sync::store::DeviceJoinCancellation,
-            administrator_terminal: crate::sync::store::ProviderAdminJoinTerminal,
-            joiner_terminal: crate::sync::store::JoinerJoinTerminal,
-        ) -> Result<crate::sync::store::DeviceJoinCleanupReceipt, crate::DeviceJoinError> {
+            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            administrator_terminal: crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+            joiner_terminal: crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
+            crate::DeviceJoinError,
+        > {
             self.store
                 .prepare_device_join_cleanup(cancellation, administrator_terminal, joiner_terminal)
                 .await
@@ -1803,9 +1835,11 @@ mod test_device {
 
         pub(crate) async fn activate_device_join_cleanup(
             &self,
-            receipt: crate::sync::store::DeviceJoinCleanupReceipt,
-        ) -> Result<crate::sync::store::DeviceJoinCleanupActivation, crate::DeviceJoinError>
-        {
+            receipt: crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
+        ) -> Result<
+            crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
+            crate::DeviceJoinError,
+        > {
             self.store.activate_device_join_cleanup(receipt).await
         }
 
@@ -1862,7 +1896,7 @@ mod test_device {
         pub(crate) async fn pending_device_join_observation_for_test(
             &self,
             pending: &crate::sync::store::DeviceJoinJournalDatabase,
-            offer: &crate::sync::store::DeviceJoinOffer,
+            offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, String> {
             self.store
                 .pending_device_join_observation_for_test(pending, offer)
@@ -1874,7 +1908,7 @@ mod test_device {
             &self,
             pending: &crate::sync::store::DeviceJoinJournalDatabase,
             identity: &UserKeypair,
-            offer: crate::sync::store::DeviceJoinOffer,
+            offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, String> {
             self.store
                 .open_pending_device_join_for_test(pending, identity, offer)
@@ -3406,7 +3440,7 @@ impl TestStore {
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 approval.admission,
-                crate::sync::store::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
             ) {
                 return Err(
                     "distinct provider principals produced same-principal admission".into(),
@@ -3435,7 +3469,7 @@ impl TestStore {
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 readiness.provider,
-                crate::sync::store::DeviceProviderReadiness::CrossPrincipal(_)
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderReadiness::CrossPrincipal(_)
             ) {
                 return Err(
                     "distinct provider principals produced same-principal readiness".into(),
@@ -3447,7 +3481,7 @@ impl TestStore {
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 completion.admission,
-                crate::sync::store::DeviceProviderAdmission::CrossPrincipal(_)
+                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal(_)
             ) {
                 return Err(
                     "distinct provider principals produced same-principal completion".into(),
@@ -4249,7 +4283,7 @@ impl TestStore {
     pub(crate) async fn pending_device_join_observation(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
-        offer: &crate::sync::store::DeviceJoinOffer,
+        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, String> {
         self.founder
             .pending_device_join_observation_for_test(pending, offer)
@@ -4260,7 +4294,7 @@ impl TestStore {
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
         identity: &UserKeypair,
-        offer: crate::sync::store::DeviceJoinOffer,
+        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, String> {
         self.founder
             .open_pending_device_join_for_test(pending, identity, offer)

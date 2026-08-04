@@ -1,4 +1,5 @@
 mod objects;
+mod provider_probe;
 mod remote;
 mod sync_storage;
 
