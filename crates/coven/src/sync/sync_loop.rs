@@ -21,7 +21,6 @@ use crate::protocol::blob::BlobTransitionObserver;
 #[cfg(test)]
 use crate::store_dir::StoreDir;
 use crate::store_dir::StoreOpenGuard;
-use crate::store_security::StoreSecurity;
 
 use super::cycle::SyncComponents;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
@@ -98,7 +97,7 @@ pub(crate) struct SyncLoopHandle {
 struct SyncLoopHandleInner {
     components: SyncComponents,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
-    security: StoreSecurity,
+    security: Arc<dyn crate::sync::RotationKeyAdoption>,
     clock: ClockRef,
     config: Config,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -167,7 +166,7 @@ impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
         blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
-        security: StoreSecurity,
+        security: Arc<dyn crate::sync::RotationKeyAdoption>,
         clock: ClockRef,
         config: Config,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -740,7 +739,7 @@ impl SyncLoopHandle {
     ) -> Result<String, super::store::MembershipOpsError> {
         self.inner
             .components
-            .remove_member(public_key_hex, &self.inner.security)
+            .remove_member(public_key_hex, self.inner.security.as_ref())
             .await
     }
 
@@ -761,7 +760,7 @@ impl SyncLoopHandle {
     ) -> Result<String, crate::keys::KeyError> {
         self.inner
             .components
-            .adopt_key_rotation(encryption, &self.inner.security)
+            .adopt_key_rotation(encryption, self.inner.security.as_ref())
     }
 
     pub(crate) async fn drain_uploads(
@@ -1050,7 +1049,7 @@ impl SyncLoopHandleInner {
         self.components
             .run_cycle(
                 self.clock.as_ref(),
-                Some(&self.security),
+                Some(self.security.as_ref()),
                 self.observer.as_deref(),
             )
             .await

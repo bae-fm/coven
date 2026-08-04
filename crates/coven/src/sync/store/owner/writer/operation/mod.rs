@@ -583,7 +583,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
-        security: Option<&crate::store_security::StoreSecurity>,
+        security: Option<&dyn crate::sync::RotationKeyAdoption>,
     ) -> Result<(), SyncCycleFailure> {
         let result = async {
             if cipher.snapshot().is_plaintext() {
@@ -930,7 +930,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         public_key_hex: &str,
         current_encryption: &crate::encryption::EncryptionService,
-        security: &crate::store_security::StoreSecurity,
+        security: &dyn crate::sync::RotationKeyAdoption,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {

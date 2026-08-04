@@ -370,3 +370,13 @@ impl StoreSecurity {
         }))
     }
 }
+
+impl crate::sync::RotationKeyAdoption for StoreSecurity {
+    fn adopt_key_rotation(
+        &self,
+        cipher: &dyn crate::storage::CloudCipherAccess,
+        encryption: &EncryptionService,
+    ) -> Result<String, KeyError> {
+        StoreSecurity::adopt_key_rotation(self, cipher, encryption)
+    }
+}

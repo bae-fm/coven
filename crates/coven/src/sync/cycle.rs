@@ -24,6 +24,17 @@ use crate::storage::{
     BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, SyncStorage,
 };
 
+/// Adopting a committed store-key rotation needs the master-key custody the
+/// host's security owner retains. Replication names only this port; the
+/// security owner implements it.
+pub(crate) trait RotationKeyAdoption: Send + Sync {
+    fn adopt_key_rotation(
+        &self,
+        cipher: &dyn CloudCipherAccess,
+        encryption: &crate::encryption::EncryptionService,
+    ) -> Result<String, crate::keys::KeyError>;
+}
+
 /// Result of a single sync cycle.
 #[derive(Debug)]
 pub(crate) struct SyncCycleResult {
@@ -189,7 +200,7 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     clock: &'cycle dyn crate::clock::Clock,
     cipher: &'cycle dyn CloudCipherAccess,
     pending_rotation: &'cycle dyn CloudRotationAccess,
-    security: Option<&'cycle crate::store_security::StoreSecurity>,
+    security: Option<&'cycle dyn RotationKeyAdoption>,
     routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     manage_tombstones: bool,
@@ -1017,7 +1028,7 @@ impl SyncComponents {
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,
-        security: &crate::store_security::StoreSecurity,
+        security: &dyn RotationKeyAdoption,
     ) -> Result<String, super::store::MembershipOpsError> {
         let encryption = self
             .current_encryption()
@@ -1047,7 +1058,7 @@ impl SyncComponents {
     pub(crate) fn adopt_key_rotation(
         &self,
         encryption: crate::encryption::EncryptionService,
-        security: &crate::store_security::StoreSecurity,
+        security: &dyn RotationKeyAdoption,
     ) -> Result<String, crate::keys::KeyError> {
         security.adopt_key_rotation(self.storage.as_ref(), &encryption)
     }
@@ -1194,7 +1205,7 @@ impl SyncComponents {
     pub(crate) async fn run_cycle(
         &self,
         clock: &dyn crate::clock::Clock,
-        security: Option<&crate::store_security::StoreSecurity>,
+        security: Option<&dyn RotationKeyAdoption>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
         let authorization =

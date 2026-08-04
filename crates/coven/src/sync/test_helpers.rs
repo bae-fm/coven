@@ -2313,7 +2313,7 @@ mod test_device {
         pub(crate) async fn run_cycle_with(
             &self,
             clock: &dyn crate::clock::Clock,
-            security: Option<&crate::store_security::StoreSecurity>,
+            security: Option<&dyn crate::sync::RotationKeyAdoption>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
@@ -2332,7 +2332,7 @@ mod test_device {
         pub(crate) async fn run_cycle_with_interceptor<I>(
             &self,
             clock: &dyn crate::clock::Clock,
-            security: Option<&crate::store_security::StoreSecurity>,
+            security: Option<&dyn crate::sync::RotationKeyAdoption>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
             interceptor: I,
@@ -2355,7 +2355,7 @@ mod test_device {
             store: std::sync::Arc<crate::sync::store::Store>,
             storage: std::sync::Arc<S>,
             clock: &dyn crate::clock::Clock,
-            security: Option<&crate::store_security::StoreSecurity>,
+            security: Option<&dyn crate::sync::RotationKeyAdoption>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>

@@ -1642,7 +1642,7 @@ impl Store {
         &self,
         public_key_hex: &str,
         encryption: &crate::encryption::EncryptionService,
-        security: &crate::store_security::StoreSecurity,
+        security: &dyn crate::sync::RotationKeyAdoption,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
