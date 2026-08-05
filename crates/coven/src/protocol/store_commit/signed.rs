@@ -98,6 +98,18 @@ impl<T: SignedBody> Signed<T> {
         self.signature = keys::sign_hex(signer, self.digest().as_bytes()).1;
     }
 
+    /// Sign `body` with a device authority — a retained capability that signs
+    /// on a device's behalf without exposing the key [`Self::sign`] takes.
+    pub(crate) fn sign_by_device(body: T, signer: &dyn keys::DeviceSigningAuthority) -> Self {
+        let mut value = Self {
+            version: STORE_PROTOCOL_VERSION,
+            body,
+            signature: String::new(),
+        };
+        value.signature = hex::encode(signer.sign(value.digest().as_bytes()));
+        value
+    }
+
     /// Damage the signature so verification fails, for tests that assert a
     /// verifier refuses an artifact whose signature does not check out.
     #[cfg(test)]

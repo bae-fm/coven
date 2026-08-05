@@ -214,27 +214,25 @@ impl ProviderAccessLocator {
     }
 }
 
+/// The wire body of one member's provider access grant. Every field here is
+/// signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreMemberProviderAccessGrant {
+pub struct StoreMemberProviderAccessGrantBody {
     pub grant_id: ProviderAccessGrantId,
     pub member_pubkey: String,
     pub provider: ProviderDeviceBinding,
     pub locator: ProviderAccessLocator,
     pub administrator_grant: ProviderAdminGrantId,
     pub administrator: StoreDeviceRegistrationRef,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct StoreMemberProviderAccessGrantSignedFields<'a> {
-    grant_id: &'a ProviderAccessGrantId,
-    member_pubkey: &'a str,
-    provider: &'a ProviderDeviceBinding,
-    locator: &'a ProviderAccessLocator,
-    administrator_grant: &'a ProviderAdminGrantId,
-    administrator: &'a StoreDeviceRegistrationRef,
+impl crate::protocol::store_commit::SignedBody for StoreMemberProviderAccessGrantBody {
+    const DOMAIN: &'static [u8] = MEMBER_ACCESS_GRANT_DOMAIN;
 }
+
+pub(crate) type StoreMemberProviderAccessGrant =
+    crate::protocol::store_commit::Signed<StoreMemberProviderAccessGrantBody>;
 
 impl StoreMemberProviderAccessGrant {
     #[allow(clippy::too_many_arguments)]
@@ -257,42 +255,21 @@ impl StoreMemberProviderAccessGrant {
             return invalid("provider access grant signer is not the administrator device");
         }
         locator.validate_for(store, &provider)?;
-        let mut grant = Self {
-            grant_id,
-            member_pubkey,
-            provider,
-            locator,
-            administrator_grant,
-            administrator,
-            signature: String::new(),
-        };
-        grant.signature = hex::encode(
-            administrator_signer
-                .sign(ObjectHash::digest(&grant.canonical_signed_bytes()).as_bytes()),
-        );
-        Ok(grant)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            MEMBER_ACCESS_GRANT_DOMAIN,
-            &StoreMemberProviderAccessGrantSignedFields {
-                grant_id: &self.grant_id,
-                member_pubkey: &self.member_pubkey,
-                provider: &self.provider,
-                locator: &self.locator,
-                administrator_grant: &self.administrator_grant,
-                administrator: &self.administrator,
+        Ok(crate::protocol::store_commit::Signed::sign_by_device(
+            StoreMemberProviderAccessGrantBody {
+                grant_id,
+                member_pubkey,
+                provider,
+                locator,
+                administrator_grant,
+                administrator,
             },
-        )
+            administrator_signer,
+        ))
     }
 
     pub fn grant_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("provider member access grant serialization cannot fail")
+        self.hash()
     }
 
     pub fn verify(
@@ -309,11 +286,10 @@ impl StoreMemberProviderAccessGrant {
         self.locator
             .validate_for(store, &self.provider)
             .map_err(ProviderProbeError::Storage)?;
-        if !crate::keys::verify_signature_hex(
-            &administrator.device_signing_pubkey,
-            &self.signature,
-            self.grant_hash().as_bytes(),
-        ) {
+        if self
+            .verify_by(&administrator.device_signing_pubkey)
+            .is_err()
+        {
             return invalid("provider access grant signature is invalid");
         }
         Ok(())
