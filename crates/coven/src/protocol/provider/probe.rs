@@ -1,4 +1,5 @@
 use super::*;
+pub(super) use crate::protocol::store_commit::domain_json;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProviderProbeId([u8; 32]);
@@ -521,14 +522,6 @@ pub(super) fn validate_probe_exact_object(
 
 pub(crate) fn invalid<T>(reason: &str) -> Result<T, ProviderProbeError> {
     Err(ProviderProbeError::InvalidReceipt(reason.to_string()))
-}
-
-pub(super) fn domain_json<T: Serialize>(domain: &[u8], value: &T) -> Vec<u8> {
-    let mut bytes = domain.to_vec();
-    bytes.extend(
-        serde_json::to_vec(value).expect("closed provider transcript serialization cannot fail"),
-    );
-    bytes
 }
 
 pub(super) fn exact_transcript_hash(

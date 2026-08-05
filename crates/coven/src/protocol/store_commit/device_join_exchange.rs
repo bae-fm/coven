@@ -10,6 +10,7 @@ use crate::protocol::provider::{
     DeviceJoinChallengePublicationAuthorization, ProviderAccessWithdrawal, ProviderAdminGrantId,
     ProviderAdminGrantRecord, StoreMemberProviderAccessGrantRef,
 };
+use crate::protocol::store_commit::domain_json;
 use crate::protocol::{ProviderDeviceBinding, StoreProviderBinding};
 
 use super::device_join::{
@@ -860,9 +861,7 @@ impl DeviceJoinProducerWriteRevocation {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
         protected_slots.sort();
-        if protected_slots.is_empty() || protected_slots.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(DeviceJoinExchangeError::CleanupMismatch);
-        }
+        validate_protected_slots(&protected_slots)?;
         let mut value = Self {
             cancellation,
             producer,
@@ -886,6 +885,7 @@ impl DeviceJoinProducerWriteRevocation {
         executor: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinExchangeError> {
         require_cancelled_outcome(&self.cancellation)?;
+        validate_protected_slots(&self.protected_slots)?;
         self.executor.verify_registration(executor)?;
         verify_signature(
             &executor.device_signing_pubkey,
@@ -893,6 +893,14 @@ impl DeviceJoinProducerWriteRevocation {
             WRITE_REVOCATION_DOMAIN,
             &self.signed_fields(),
         )
+    }
+
+    /// Re-sign over exactly the bytes this value currently holds. See the sibling
+    /// hook on the cleanup receipt.
+    #[cfg(test)]
+    pub(crate) fn resign_for_test(&mut self, signer: &UserKeypair) {
+        self.signature = String::new();
+        self.signature = sign(signer, WRITE_REVOCATION_DOMAIN, &self.signed_fields());
     }
 
     fn signed_fields(
@@ -973,6 +981,8 @@ impl DeviceJoinCleanupReceiptObject {
         {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
+        let mut deleted_slots = deleted_slots;
+        deleted_slots.sort();
         let mut value = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash: attempt.store_root.store_root_hash,
@@ -1008,8 +1018,7 @@ impl DeviceJoinCleanupReceiptObject {
         {
             return Err(DeviceJoinExchangeError::CleanupMismatch);
         }
-        let mut verified = self.clone();
-        verified.validate_shape(attempt)?;
+        self.validate_shape(attempt)?;
         verify_signature(
             &executor.device_signing_pubkey,
             &self.signature,
@@ -1022,18 +1031,25 @@ impl DeviceJoinCleanupReceiptObject {
         serde_json::to_vec(self).expect("device join cleanup receipt serialization cannot fail")
     }
 
-    fn validate_shape(
-        &mut self,
-        attempt: &DeviceJoinAttempt,
-    ) -> Result<(), DeviceJoinExchangeError> {
+    /// Re-sign over exactly the bytes this value currently holds. A test uses it
+    /// to forge the encodings a verifier must refuse — an attacker who reorders a
+    /// signed list can always sign the reordered bytes too.
+    #[cfg(test)]
+    pub(crate) fn resign_for_test(&mut self, signer: &UserKeypair) {
+        self.signature = String::new();
+        self.signature = sign(signer, CLEANUP_RECEIPT_DOMAIN, &self.signed_fields());
+    }
+
+    /// A pure check: the receipt is in canonical form or it is not this receipt.
+    /// Sorting here instead would accept a second encoding of one receipt, since
+    /// the signature covers the order the bytes actually carry.
+    fn validate_shape(&self, attempt: &DeviceJoinAttempt) -> Result<(), DeviceJoinExchangeError> {
         validate_terminals(
             &self.cancellation,
             &self.administrator_terminal,
             &self.joiner_terminal,
         )?;
-        let expected = canonical_cleanup_slots(attempt)?;
-        self.deleted_slots.sort();
-        if self.deleted_slots != expected {
+        if self.deleted_slots != canonical_cleanup_slots(attempt)? {
             return Err(DeviceJoinExchangeError::CleanupMismatch);
         }
         Ok(())
@@ -1106,12 +1122,6 @@ fn verify_signature<T: Serialize>(
     }
 }
 
-fn domain_json<T: Serialize>(domain: &[u8], value: &T) -> Vec<u8> {
-    let mut bytes = domain.to_vec();
-    bytes.extend(serde_json::to_vec(value).expect("closed device join serialization cannot fail"));
-    bytes
-}
-
 impl DeviceJoinAbandonmentRef {
     pub(crate) fn verify(
         &self,
@@ -1173,6 +1183,16 @@ pub(crate) fn require_cancelled_outcome(
     } else {
         Err(DeviceJoinExchangeError::AttemptMismatch)
     }
+}
+
+/// Protected slots are a set, carried in one order: sorted, non-empty, and
+/// without repeats. A verifier checks the form the bytes actually carry, so one
+/// revocation has exactly one encoding that verifies.
+fn validate_protected_slots(slots: &[ObjectSlot]) -> Result<(), DeviceJoinExchangeError> {
+    if slots.is_empty() || slots.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(DeviceJoinExchangeError::CleanupMismatch);
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_terminals(
