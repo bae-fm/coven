@@ -63,21 +63,18 @@ pub(super) fn resolve_deleted_audience(
                     parent: parent.clone(),
                 }
             })?;
-            if let Some(parent_row) = deleted.iter().find_map(|(candidate, row)| {
-                (candidate.0 == *parent
-                    && row.old_value(parent_col.index).flatten() == Some(parent_key))
-                .then_some(candidate)
-            }) {
-                resolve_deleted_audience(conn, gates, deleted, parent_row, seen)
-            } else {
-                let parent_id =
-                    row_id_for_column_value(conn, parent, &parent_col.name, parent_key)?
-                        .ok_or_else(|| GateError::MissingAudienceParent {
-                            table: key.0.clone(),
-                            row_id: Some(key.1.clone()),
-                            parent: parent.clone(),
-                        })?;
-                live_row_audience(conn, gates, parent, &parent_id)
+            match deleted_or_live_parent(conn, deleted, parent, parent_col, parent_key)? {
+                Some(DeletedParent::Deleted(parent_key)) => {
+                    resolve_deleted_audience(conn, gates, deleted, &parent_key, seen)
+                }
+                Some(DeletedParent::Live(parent_id)) => {
+                    live_row_audience(conn, gates, parent, &parent_id)
+                }
+                None => Err(GateError::MissingAudienceParent {
+                    table: key.0.clone(),
+                    row_id: Some(key.1.clone()),
+                    parent: parent.clone(),
+                }),
             }
         }
         _ => Err(GateError::MissingAudienceRow {
@@ -353,16 +350,17 @@ pub(super) fn required_store_ancestors(
             if !gates.tables.contains_key(&parent) {
                 continue;
             }
-            let Some(parent_key) = query_column_text(conn, &table, &fk_column, &row_id)? else {
-                continue;
-            };
-            let parent_id = row_id_for_column_value(conn, &parent, &parent_column, &parent_key)?
-                .ok_or_else(|| GateError::MissingAudienceParent {
-                    table: table.clone(),
-                    row_id: Some(row_id.clone()),
-                    parent: parent.clone(),
-                })?;
-            pending.push((parent, parent_id));
+            match fk_parent_row(conn, &table, &row_id, &fk_column, &parent, &parent_column)? {
+                FkParentRow::Found(parent_id) => pending.push((parent, parent_id)),
+                FkParentRow::RowAbsent | FkParentRow::NullForeignKey => continue,
+                FkParentRow::ParentAbsent => {
+                    return Err(GateError::MissingAudienceParent {
+                        table: table.clone(),
+                        row_id: Some(row_id.clone()),
+                        parent,
+                    })
+                }
+            }
         }
     }
     Ok(ancestors)
@@ -387,42 +385,29 @@ pub(super) fn required_store_ancestors_for_deleted_rows(
                 table: key.0.clone(),
                 row_id: key.1.clone(),
             })?;
-        let columns = crate::database::gate::gate_table_columns(conn, &key.0)?;
         for (fk_column, parent, parent_column) in foreign_keys(conn, &key.0)? {
             if !gates.tables.contains_key(&parent) {
                 continue;
             }
-            let fk_index = columns
-                .iter()
-                .position(|column| column == &fk_column)
-                .ok_or_else(|| GateError::MissingFkColumn(key.0.clone(), fk_column.clone()))?;
-            let Some(parent_key) = row.old.get(fk_index).and_then(|value| value.as_deref()) else {
+            let fk_col = fk_column_ref(conn, &key.0, &fk_column)?;
+            let Some(parent_key) = row.old.get(fk_col.index).and_then(|value| value.as_deref())
+            else {
                 continue;
             };
-            let parent_columns = crate::database::gate::gate_table_columns(conn, &parent)?;
-            let parent_index = parent_columns
-                .iter()
-                .position(|column| column == &parent_column)
-                .ok_or_else(|| GateError::MissingFkColumn(parent.clone(), parent_column.clone()))?;
-            if let Some(deleted_parent) = deleted.iter().find_map(|(candidate, parent_row)| {
-                (candidate.0 == parent
-                    && parent_row
-                        .old
-                        .get(parent_index)
-                        .and_then(|value| value.as_deref())
-                        == Some(parent_key))
-                .then(|| candidate.clone())
-            }) {
-                pending.push(deleted_parent);
-                continue;
+            let parent_col = fk_column_ref(conn, &parent, &parent_column)?;
+            match deleted_or_live_parent(conn, deleted, &parent, &parent_col, parent_key)? {
+                Some(DeletedParent::Deleted(deleted_parent)) => pending.push(deleted_parent),
+                Some(DeletedParent::Live(parent_id)) => {
+                    live_seeds.insert((parent, parent_id));
+                }
+                None => {
+                    return Err(GateError::MissingAudienceParent {
+                        table: key.0.clone(),
+                        row_id: Some(key.1.clone()),
+                        parent,
+                    })
+                }
             }
-            let parent_id = row_id_for_column_value(conn, &parent, &parent_column, parent_key)?
-                .ok_or_else(|| GateError::MissingAudienceParent {
-                    table: key.0.clone(),
-                    row_id: Some(key.1.clone()),
-                    parent: parent.clone(),
-                })?;
-            live_seeds.insert((parent, parent_id));
         }
     }
     required_store_ancestors(conn, gates, &live_seeds)
@@ -499,17 +484,13 @@ pub(crate) fn live_row_audience(
     }
     match gates.tables.get(table) {
         Some(TableGate::ScopedRoot { audience_col }) => {
-            let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1",
-                quote_ident(&audience_col.name),
-                quote_ident(table)
-            );
             let value =
-                query_row_optional(conn, &sql, [id], |row| row.get::<_, Option<String>>(0))?
-                    .ok_or_else(|| GateError::MissingAudienceRow {
+                query_column_present(conn, table, &audience_col.name, id)?.ok_or_else(|| {
+                    GateError::MissingAudienceRow {
                         table: table.to_string(),
                         row_id: id.to_string(),
-                    })?;
+                    }
+                })?;
             Audience::from_column(value.as_deref()).map_err(|error| GateError::InvalidAudience {
                 table: table.to_string(),
                 value,
@@ -521,20 +502,15 @@ pub(crate) fn live_row_audience(
             parent,
             parent_col,
         }) => {
-            let parent_key =
-                query_column_text(conn, table, &fk_col.name, id)?.ok_or_else(|| {
-                    GateError::MissingAudienceParent {
-                        table: table.to_string(),
-                        row_id: Some(id.to_string()),
-                        parent: parent.clone(),
-                    }
-                })?;
-            let parent_id = row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
-                .ok_or_else(|| GateError::MissingAudienceParent {
-                table: table.to_string(),
-                row_id: Some(id.to_string()),
-                parent: parent.clone(),
-            })?;
+            let FkParentRow::Found(parent_id) =
+                fk_parent_row(conn, table, id, &fk_col.name, parent, &parent_col.name)?
+            else {
+                return Err(GateError::MissingAudienceParent {
+                    table: table.to_string(),
+                    row_id: Some(id.to_string()),
+                    parent: parent.clone(),
+                });
+            };
             live_row_audience(conn, gates, parent, &parent_id)
         }
         None

@@ -1032,6 +1032,18 @@ fn fk_column(cols: &[String], table: &str, name: &str) -> Result<GateColumn, Gat
     column_ref_or(cols, table, name, GateError::MissingFkColumn)
 }
 
+/// The foreign-key column `name` of `table` as a [`GateColumn`], reading its
+/// changeset position from the live schema. For callers holding a column name
+/// from an FK scan that need to read the same column out of a changeset row.
+pub(super) fn fk_column_ref(
+    conn: &Connection,
+    table: &str,
+    name: &str,
+) -> Result<GateColumn, GateError> {
+    let columns = super::gate_table_columns(conn, table)?;
+    fk_column(&columns, table, name)
+}
+
 fn column_ref_or(
     cols: &[String],
     table: &str,

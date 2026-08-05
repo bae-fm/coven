@@ -102,30 +102,30 @@ pub(super) fn circle_snapshot_retained_rows(
             if !gates.is_synced_table(&parent_table) {
                 continue;
             }
-            let parent_key = query_row_optional(
+            let parent_id = match fk_parent_row(
                 conn,
-                &format!(
-                    "SELECT {} FROM {} WHERE id = ?1",
-                    quote_ident(&child_column),
-                    quote_ident(&table),
-                ),
-                [&row_id],
-                |row| row.get::<_, Option<String>>(0),
-            )?
-            .ok_or_else(|| GateError::MissingAudienceRow {
-                table: table.clone(),
-                row_id: row_id.clone(),
-            })?;
-            let Some(parent_key) = parent_key else {
-                continue;
-            };
-            let parent_id =
-                row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
-                    .ok_or_else(|| GateError::MissingAudienceParent {
+                &table,
+                &row_id,
+                &child_column,
+                &parent_table,
+                &parent_column,
+            )? {
+                FkParentRow::Found(parent_id) => parent_id,
+                FkParentRow::NullForeignKey => continue,
+                FkParentRow::RowAbsent => {
+                    return Err(GateError::MissingAudienceRow {
+                        table: table.clone(),
+                        row_id: row_id.clone(),
+                    })
+                }
+                FkParentRow::ParentAbsent => {
+                    return Err(GateError::MissingAudienceParent {
                         table: table.clone(),
                         row_id: Some(row_id.clone()),
                         parent: parent_table.clone(),
-                    })?;
+                    })
+                }
+            };
             let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
             if parent_audience != Audience::Store && parent_audience != audience {
                 return Err(GateError::InvalidAudience {

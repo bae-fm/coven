@@ -468,12 +468,10 @@ fn connected_component(
             {
                 continue;
             }
-            if let Some(parent_key) = query_column_text(conn, &table, &fk_col_name, &id)? {
-                if let Some(parent_id) =
-                    row_id_for_column_value(conn, &parent, &parent_col, &parent_key)?
-                {
-                    work.push((parent, parent_id));
-                }
+            if let FkParentRow::Found(parent_id) =
+                fk_parent_row(conn, &table, &id, &fk_col_name, &parent, &parent_col)?
+            {
+                work.push((parent, parent_id));
             }
         }
         // Down: each gated child referencing this row — filtered to kept children
@@ -804,28 +802,22 @@ unsafe fn was_shared(
                 Some(row) => row.fk_value(fk_col.index).map(str::to_string),
                 None => query_column_text(conn, table, &fk_col.name, id)?,
             };
-            let parent_id = match parent_key {
+            let parent_row = match parent_key {
                 Some(parent_key) => {
-                    if let Some(((_, id), _)) =
-                        deleted.iter().find(|((candidate_table, _), row)| {
-                            candidate_table == parent
-                                && row
-                                    .old
-                                    .get(parent_col.index)
-                                    .and_then(|value| value.as_deref())
-                                    == Some(parent_key.as_str())
-                        })
-                    {
-                        Some(id.clone())
-                    } else {
-                        row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
-                    }
+                    deleted_or_live_parent(conn, deleted, parent, parent_col, &parent_key)?
                 }
                 None => None,
             };
-            match parent_id {
-                Some(parent_id) => was_shared(
-                    conn, gates, deleted, parent, &parent_id, memo, visiting, scope,
+            match parent_row {
+                Some(parent_row) => was_shared(
+                    conn,
+                    gates,
+                    deleted,
+                    parent,
+                    parent_row.id(),
+                    memo,
+                    visiting,
+                    scope,
                 )?,
                 None => {
                     warn!(table, id, "gate: child has no FK parent while resolving pre-delete share; treating as not shared");
@@ -1061,16 +1053,13 @@ pub(super) fn resolve_root(
             fk_col,
             parent,
             parent_col,
-        }) => match query_column_text(conn, table, &fk_col.name, id)? {
-            Some(parent_key) => {
-                let Some(parent_id) =
-                    row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
-                else {
-                    return Ok(None);
-                };
-                resolve_root(conn, gates, parent, &parent_id)
+        }) => match fk_parent_row(conn, table, id, &fk_col.name, parent, &parent_col.name)? {
+            FkParentRow::Found(parent_id) => resolve_root(conn, gates, parent, &parent_id),
+            FkParentRow::ParentAbsent => {
+                warn!("gate: {table}.{id} names a {parent} row absent from the live db; cannot resolve gate");
+                Ok(None)
             }
-            None => {
+            FkParentRow::RowAbsent | FkParentRow::NullForeignKey => {
                 warn!("gate: {table}.{id} has no FK parent in live db; cannot resolve gate");
                 Ok(None)
             }
@@ -1088,20 +1077,117 @@ pub(super) fn resolve_root(
         None => Ok(None),
     }
 }
-/// Query a single text column value for the row with id `id`.
-pub(super) fn query_column_text(
+/// Query a single column value for the row with id `id`, keeping the two ways it
+/// can read empty apart: the outer `None` is a row absent from the live db, the
+/// inner `None` a row whose column is NULL.
+pub(super) fn query_column_present(
     conn: &Connection,
     table: &str,
     column: &str,
     id: &str,
-) -> Result<Option<String>, GateError> {
+) -> Result<Option<Option<String>>, GateError> {
     let sql = format!(
         "SELECT {} FROM {} WHERE {} = ?",
         quote_ident(column),
         quote_ident(table),
         quote_ident("id"),
     );
-    query_row_optional(conn, &sql, [id], |row| row_value_to_string(row, 0)).map(|row| row.flatten())
+    query_row_optional(conn, &sql, [id], |row| row_value_to_string(row, 0))
+}
+
+/// Query a single text column value for the row with id `id`, for callers that
+/// treat an absent row and a NULL column alike.
+pub(super) fn query_column_text(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    id: &str,
+) -> Result<Option<String>, GateError> {
+    Ok(query_column_present(conn, table, column, id)?.flatten())
+}
+
+/// How one hop up a declared foreign key came out — see [`fk_parent_row`].
+pub(super) enum FkParentRow {
+    /// The parent row's id.
+    Found(String),
+    /// The row the hop started from is absent from the live db.
+    RowAbsent,
+    /// The row's foreign-key column is NULL: it names no parent.
+    NullForeignKey,
+    /// The foreign key names a key no row in the parent table carries.
+    ParentAbsent,
+}
+
+/// One hop up a declared foreign key: the row in `parent` that the live row
+/// `(table, id)` names through `fk_col`, matched on the parent's `parent_col`.
+///
+/// The three ways the hop comes up empty stay apart because callers answer them
+/// differently: a NULL foreign key names no parent by design, while a key no
+/// parent carries — or a missing row — is an anomaly some callers refuse.
+pub(super) fn fk_parent_row(
+    conn: &Connection,
+    table: &str,
+    id: &str,
+    fk_col: &str,
+    parent: &str,
+    parent_col: &str,
+) -> Result<FkParentRow, GateError> {
+    let Some(parent_key) = query_column_present(conn, table, fk_col, id)? else {
+        return Ok(FkParentRow::RowAbsent);
+    };
+    let Some(parent_key) = parent_key else {
+        return Ok(FkParentRow::NullForeignKey);
+    };
+    match row_id_for_column_value(conn, parent, parent_col, &parent_key)? {
+        Some(parent_id) => Ok(FkParentRow::Found(parent_id)),
+        None => Ok(FkParentRow::ParentAbsent),
+    }
+}
+
+/// Which row of a parent table carries a foreign key's value once a changeset's
+/// deletions are taken into account — see [`deleted_or_live_parent`].
+pub(super) enum DeletedParent {
+    /// A parent row this changeset deletes, keyed `(table, id)`.
+    Deleted((String, String)),
+    /// A parent row still present in the live db.
+    Live(String),
+}
+
+impl DeletedParent {
+    pub(super) fn id(&self) -> &str {
+        match self {
+            Self::Deleted((_, id)) => id,
+            Self::Live(id) => id,
+        }
+    }
+}
+
+/// The row of `parent` whose `parent_col` holds `parent_key`, searching the
+/// changeset's deleted rows before the live db: a parent deleted in the same
+/// changeset has no live row left to find, and resolving a deleted child against
+/// it is the only way to read the pre-deletion state of a whole removed subtree.
+pub(super) fn deleted_or_live_parent(
+    conn: &Connection,
+    deleted: &HashMap<(String, String), ChangeRow>,
+    parent: &str,
+    parent_col: &GateColumn,
+    parent_key: &str,
+) -> Result<Option<DeletedParent>, GateError> {
+    let deleted_parent = deleted.iter().find(|((table, _), row)| {
+        table == parent
+            && row
+                .old
+                .get(parent_col.index)
+                .and_then(|value| value.as_deref())
+                == Some(parent_key)
+    });
+    if let Some((key, _)) = deleted_parent {
+        return Ok(Some(DeletedParent::Deleted(key.clone())));
+    }
+    Ok(
+        row_id_for_column_value(conn, parent, &parent_col.name, parent_key)?
+            .map(DeletedParent::Live),
+    )
 }
 
 pub(super) fn row_id_for_column_value(

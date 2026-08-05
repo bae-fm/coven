@@ -205,28 +205,30 @@ pub(crate) fn validate_scoped_foreign_key_audiences(
                 if !gates.is_synced_table(&parent_table) {
                     continue;
                 }
-                let sql = format!(
-                    "SELECT {} FROM {} WHERE id = ?1",
-                    quote_ident(&fk_column),
-                    quote_ident(&table),
-                );
-                let parent_key = query_row_optional(conn, &sql, [&row_id], |record| {
-                    record.get::<_, Option<String>>(0)
-                })?
-                .ok_or_else(|| GateError::MissingAudienceRow {
-                    table: table.clone(),
-                    row_id: row_id.clone(),
-                })?;
-                let Some(parent_key) = parent_key else {
-                    continue;
-                };
-                let parent_id =
-                    row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
-                        .ok_or_else(|| GateError::MissingAudienceParent {
+                let parent_id = match fk_parent_row(
+                    conn,
+                    &table,
+                    &row_id,
+                    &fk_column,
+                    &parent_table,
+                    &parent_column,
+                )? {
+                    FkParentRow::Found(parent_id) => parent_id,
+                    FkParentRow::NullForeignKey => continue,
+                    FkParentRow::RowAbsent => {
+                        return Err(GateError::MissingAudienceRow {
+                            table: table.clone(),
+                            row_id: row_id.clone(),
+                        })
+                    }
+                    FkParentRow::ParentAbsent => {
+                        return Err(GateError::MissingAudienceParent {
                             table: table.clone(),
                             row_id: Some(row_id.clone()),
                             parent: parent_table.clone(),
-                        })?;
+                        })
+                    }
+                };
                 let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
                 if parent_audience != Audience::Store && parent_audience != row_audience {
                     return Err(GateError::InvalidAudience {

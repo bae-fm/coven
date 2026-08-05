@@ -6,9 +6,10 @@ use rusqlite::ffi;
 use rusqlite::Connection;
 
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
-use super::model::{foreign_keys, rows_referencing, truthy, Gates, TableGate};
+use super::model::{fk_column_ref, foreign_keys, rows_referencing, truthy, Gates, TableGate};
 use super::outbound::{
-    full_state_diff, gate_store_outbound, query_column_text, row_id_for_column_value,
+    deleted_or_live_parent, fk_parent_row, full_state_diff, gate_store_outbound,
+    query_column_present, query_column_text, row_id_for_column_value, DeletedParent, FkParentRow,
     FullStateDirection,
 };
 use super::{query_mapped_rows, query_row_optional, GateError};
