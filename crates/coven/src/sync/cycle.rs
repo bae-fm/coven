@@ -198,7 +198,6 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     security: Option<&'cycle dyn RotationKeyAdoption>,
     routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
-    manage_tombstones: bool,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
     authorization: AuthorizedWriterOperation<'store>,
 }
@@ -284,25 +283,23 @@ impl AuthorizedSyncCycle<'_, '_> {
             );
         }
 
-        if self.manage_tombstones {
-            if rotation_pending.is_none() {
-                let drained = self
-                    .authorization
-                    .drain_tombstones(self.cipher, self.pending_rotation, self.clock)
-                    .await
-                    .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
-                if drained > 0 {
-                    info!(count = drained, "Drained blob tombstones");
-                }
-            }
-            let reclaimed = self
+        if rotation_pending.is_none() {
+            let drained = self
                 .authorization
-                .gc_tombstones(self.cipher, self.clock)
+                .drain_tombstones(self.cipher, self.pending_rotation, self.clock)
                 .await
-                .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
-            if reclaimed > 0 {
-                info!(count = reclaimed, "Reclaimed tombstoned blobs");
+                .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
+            if drained > 0 {
+                info!(count = drained, "Drained blob tombstones");
             }
+        }
+        let reclaimed = self
+            .authorization
+            .gc_tombstones(self.cipher, self.clock)
+            .await
+            .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
+        if reclaimed > 0 {
+            info!(count = reclaimed, "Reclaimed tombstoned blobs");
         }
 
         let local_seq = self
@@ -1120,7 +1117,6 @@ impl SyncComponents {
             security,
             routing_encryption: self.routing_encryption.as_ref(),
             local_blob_access: &self.local_blob_access,
-            manage_tombstones: true,
             observer,
             authorization,
         }
