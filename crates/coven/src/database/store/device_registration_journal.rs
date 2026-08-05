@@ -6,14 +6,30 @@ use rusqlite::OptionalExtension;
 
 use super::*;
 
-impl StoreDatabase {
-    pub(crate) async fn stage_local_store_device_registration(
-        &self,
+/// One local device registration together with the first acknowledgement that
+/// anchors its stream, checked against each other before any of it reaches a
+/// column. Every way a registration enters the journal — a joining device's
+/// staged registration, an existing founder's installation, an Owner recovery —
+/// builds one of these first, so the journal cannot hold a graph whose
+/// references disagree with the objects beside them.
+pub(crate) struct LocalRegistrationRecord {
+    registration: ExactProtocolObject<StoreDeviceRegistration>,
+    initial_ack_ref: StoreAckRef,
+    initial_ack: ExactProtocolObject<StoreAck>,
+    reference: StoreDeviceRegistrationRef,
+}
+
+impl LocalRegistrationRecord {
+    /// Each reference must name the exact object beside it, and both the
+    /// registration and its acknowledgement must serialize back to the bytes
+    /// they carry. `subject` names the graph in any refusal.
+    pub(crate) fn checked(
         registration: ExactProtocolObject<StoreDeviceRegistration>,
         initial_ack_ref: StoreAckRef,
         initial_ack: ExactProtocolObject<StoreAck>,
-    ) -> Result<(), DbError> {
-        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+        subject: &str,
+    ) -> Result<Self, DbError> {
+        let reference = StoreDeviceRegistrationRef::from_registration(
             &registration.value,
             registration.object.clone(),
         );
@@ -23,33 +39,122 @@ impl StoreDatabase {
             || initial_ack.object != *initial_ack.prepared.reference()
             || initial_ack_ref.object != initial_ack.object
             || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
-            || initial_ack_ref.registration != registration_ref
+            || initial_ack_ref.registration != reference
             || initial_ack_ref.sequence != initial_ack.value.sequence
-            || initial_ack.value.registration != registration_ref
+            || initial_ack.value.registration != reference
         {
-            return Err(DbError::Message(
-                "local registration staging graph contains mismatched exact objects".to_string(),
-            ));
+            return Err(DbError::Message(format!(
+                "{subject} contains mismatched exact objects"
+            )));
         }
+        Ok(Self {
+            registration,
+            initial_ack_ref,
+            initial_ack,
+            reference,
+        })
+    }
+
+    /// The same graph, for a device whose acknowledgement stream begins here:
+    /// the acknowledgement is the first one and has no predecessor.
+    pub(crate) fn checked_at_stream_start(
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+        subject: &str,
+    ) -> Result<Self, DbError> {
+        let record = Self::checked(registration, initial_ack_ref, initial_ack, subject)?;
+        if record.initial_ack_ref.sequence != 1
+            || record.initial_ack.value.successor.predecessor.is_some()
+        {
+            return Err(DbError::Message(format!(
+                "{subject} does not start its acknowledgement stream"
+            )));
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn reference(&self) -> &StoreDeviceRegistrationRef {
+        &self.reference
+    }
+
+    pub(crate) fn registration(&self) -> &StoreDeviceRegistration {
+        &self.registration.value
+    }
+
+    pub(crate) fn device_id(&self) -> String {
+        self.reference.device_id.to_string()
+    }
+
+    /// The Store root this database is installed under, refusing a graph signed
+    /// against a different one.
+    pub(crate) fn require_installed_store_root(
+        &self,
+        conn: &rusqlite::Connection,
+        subject: &str,
+    ) -> Result<crate::protocol::store_commit::StoreRootRef, DbError> {
+        let root = required_store_root_authority_on(conn)?;
+        if self.registration.value.store_root != root {
+            return Err(DbError::Message(format!(
+                "{subject} belongs to another Store root"
+            )));
+        }
+        Ok(root)
+    }
+
+    /// The journal's seven object columns, in table order.
+    pub(crate) fn columns(
+        &self,
+        subject: &str,
+    ) -> Result<PreparedLocalDeviceRegistrationRow, DbError> {
+        Ok((
+            self.device_id(),
+            self.reference.registration_hash.to_string(),
+            self.registration.bytes.clone(),
+            encode(&self.registration.prepared, subject, "registration object")?,
+            encode(&self.initial_ack_ref, subject, "acknowledgement ref")?,
+            self.initial_ack.bytes.clone(),
+            encode(
+                &self.initial_ack.prepared,
+                subject,
+                "acknowledgement object",
+            )?,
+        ))
+    }
+
+    /// The published-acknowledgement columns that name this device's first
+    /// acknowledgement and the slot its successor will occupy.
+    pub(crate) fn published_ack_columns(&self, subject: &str) -> Result<(String, String), DbError> {
+        Ok((
+            encode(&self.initial_ack_ref, subject, "acknowledgement ref")?,
+            encode(
+                &self.initial_ack.value.successor.next_slot,
+                subject,
+                "acknowledgement successor",
+            )?,
+        ))
+    }
+}
+
+fn encode<T: serde::Serialize>(value: &T, subject: &str, what: &str) -> Result<String, DbError> {
+    serde_json::to_string(value)
+        .map_err(|error| DbError::Message(format!("serialize {subject} {what}: {error}")))
+}
+
+impl StoreDatabase {
+    pub(crate) async fn stage_local_store_device_registration(
+        &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+    ) -> Result<(), DbError> {
+        const SUBJECT: &str = "local registration staging graph";
+        let record =
+            LocalRegistrationRecord::checked(registration, initial_ack_ref, initial_ack, SUBJECT)?;
         self.connection
             .call(move |conn| {
-                let root = required_store_root_authority_on(conn)?;
-                if registration.value.store_root != root {
-                    return Err(DbError::Message(
-                        "local registration staging graph belongs to another Store root"
-                            .to_string(),
-                    ));
-                }
-                let prepared = serde_json::to_string(&registration.prepared).map_err(|error| {
-                    DbError::Message(format!("serialize prepared local registration: {error}"))
-                })?;
-                let ack_ref = serde_json::to_string(&initial_ack_ref).map_err(|error| {
-                    DbError::Message(format!("serialize local initial ack ref: {error}"))
-                })?;
-                let ack_prepared =
-                    serde_json::to_string(&initial_ack.prepared).map_err(|error| {
-                        DbError::Message(format!("serialize prepared local initial ack: {error}"))
-                    })?;
+                record.require_installed_store_root(conn, SUBJECT)?;
+                let expected = record.columns(SUBJECT)?;
                 let existing: Option<PreparedLocalDeviceRegistrationRow> = conn
                 .query_row(
                     "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
@@ -70,15 +175,6 @@ impl StoreDatabase {
                 )
                 .optional()
                 .map_err(DbError::from)?;
-                let expected = (
-                    registration_ref.device_id.to_string(),
-                    registration_ref.registration_hash.to_string(),
-                    registration.bytes.clone(),
-                    prepared.clone(),
-                    ack_ref.clone(),
-                    initial_ack.bytes.clone(),
-                    ack_prepared.clone(),
-                );
                 match existing {
                     Some(existing) if existing == expected => Ok(()),
                     Some(_) => Err(DbError::Message(
@@ -119,45 +215,27 @@ impl StoreDatabase {
         initial_ack_ref: StoreAckRef,
         initial_ack: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
-        let registration_ref = StoreDeviceRegistrationRef::from_registration(
-            &registration.value,
-            registration.object.clone(),
-        );
-        if registration.value.to_bytes() != registration.bytes
-            || registration.object != *registration.prepared.reference()
-            || initial_ack.value.to_bytes() != initial_ack.bytes
-            || initial_ack.object != *initial_ack.prepared.reference()
-            || initial_ack_ref.object != initial_ack.object
-            || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
-            || initial_ack_ref.registration != registration_ref
-            || initial_ack_ref.sequence != 1
-            || initial_ack.value.sequence != 1
-            || initial_ack.value.successor.predecessor.is_some()
-            || initial_ack.value.registration != registration_ref
-        {
-            return Err(DbError::Message(
-                "existing founder device graph contains mismatched exact objects".to_string(),
-            ));
-        }
+        const SUBJECT: &str = "existing founder device graph";
+        let record = LocalRegistrationRecord::checked_at_stream_start(
+            registration,
+            initial_ack_ref,
+            initial_ack,
+            SUBJECT,
+        )?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let root = required_store_root_authority_on(&tx)?;
+                let root = record.require_installed_store_root(&tx, SUBJECT)?;
                 let crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
                     ..
-                } = &registration.value.origin
+                } = &record.registration().origin
                 else {
                     return Err(DbError::Message(
                         "existing local founder device has a non-founder origin".to_string(),
                     ));
                 };
-                if registration.value.store_root != root {
-                    return Err(DbError::Message(
-                        "existing local founder device belongs to another Store root".to_string(),
-                    ));
-                }
-                let activated = load_activated_registration_on(&tx, &root, &registration_ref)?;
-                if activated != registration.value {
+                let activated = load_activated_registration_on(&tx, &root, record.reference())?;
+                if activated != *record.registration() {
                     return Err(DbError::Message(
                         "existing local founder device differs from its installed activation"
                             .to_string(),
@@ -167,28 +245,20 @@ impl StoreDatabase {
                     crate::protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
                         root: root.clone(),
                     };
+                let objects = record.columns(SUBJECT)?;
                 let expected = (
-                    registration_ref.device_id.to_string(),
-                    registration_ref.registration_hash.to_string(),
-                    registration.bytes.clone(),
-                    serde_json::to_string(&registration.prepared).map_err(|error| {
-                        DbError::Message(format!(
-                            "serialize existing founder registration: {error}"
-                        ))
-                    })?,
-                    serde_json::to_string(&initial_ack_ref).map_err(|error| {
-                        DbError::Message(format!("serialize existing founder ack ref: {error}"))
-                    })?,
-                    initial_ack.bytes.clone(),
-                    serde_json::to_string(&initial_ack.prepared).map_err(|error| {
-                        DbError::Message(format!("serialize existing founder ack object: {error}"))
-                    })?,
-                    serde_json::to_string(&LocalDeviceRegistrationState::Activated { authority })
-                        .map_err(|error| {
-                        DbError::Message(format!(
-                            "serialize existing founder registration state: {error}"
-                        ))
-                    })?,
+                    objects.0,
+                    objects.1,
+                    objects.2,
+                    objects.3,
+                    objects.4,
+                    objects.5,
+                    objects.6,
+                    encode(
+                        &LocalDeviceRegistrationState::Activated { authority },
+                        SUBJECT,
+                        "registration state",
+                    )?,
                 );
                 tx.execute(
                     "INSERT INTO local_store_device_registration
@@ -234,19 +304,11 @@ impl StoreDatabase {
                         "existing local founder journal owns different exact objects".to_string(),
                     ));
                 }
-                let ack_ref = serde_json::to_string(&initial_ack_ref).map_err(|error| {
-                    DbError::Message(format!("serialize existing founder ack ref: {error}"))
-                })?;
-                let successor = serde_json::to_string(&initial_ack.value.successor.next_slot)
-                    .map_err(|error| {
-                        DbError::Message(format!(
-                            "serialize existing founder ack successor: {error}"
-                        ))
-                    })?;
+                let published_ack = record.published_ack_columns(SUBJECT)?;
                 tx.execute(
                     "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot)
                  VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
-                    (&ack_ref, &successor),
+                    (&published_ack.0, &published_ack.1),
                 )
                 .map_err(DbError::from)?;
                 let stored_ack: (String, String) = tx
@@ -256,7 +318,7 @@ impl StoreDatabase {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
-                if stored_ack != (ack_ref, successor) {
+                if stored_ack != published_ack {
                     return Err(DbError::Message(
                         "existing local founder acknowledgement differs from exact cloud state"
                             .to_string(),
@@ -313,47 +375,27 @@ impl StoreDatabase {
                 "Owner recovery registration differs from its activation authority".into(),
             ));
         }
-        let registration_ref = StoreDeviceRegistrationRef::from_registration(
-            &registration.value,
-            registration.object.clone(),
-        );
-        if registration.value.to_bytes() != registration.bytes
-            || registration.object != *registration.prepared.reference()
-            || initial_ack.value.to_bytes() != initial_ack.bytes
-            || initial_ack.object != *initial_ack.prepared.reference()
-            || initial_ack_ref.object != initial_ack.object
-            || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
-            || initial_ack_ref.registration != registration_ref
-            || initial_ack_ref.sequence != 1
-            || initial_ack.value.successor.predecessor.is_some()
-            || initial_ack.value.registration != registration_ref
-        {
-            return Err(DbError::Message(
-                "Owner recovery registration graph contains mismatched exact objects".into(),
-            ));
-        }
+        const SUBJECT: &str = "Owner recovery registration graph";
+        let record = LocalRegistrationRecord::checked_at_stream_start(
+            registration,
+            initial_ack_ref,
+            initial_ack,
+            SUBJECT,
+        )?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let root = required_store_root_authority_on(&tx)?;
-                if registration.value.store_root != root {
-                    return Err(DbError::Message(
-                        "Owner recovery registration belongs to another Store root".into(),
-                    ));
-                }
+                record.require_installed_store_root(&tx, SUBJECT)?;
+                let objects = record.columns(SUBJECT)?;
                 let exact_registration_ref =
-                    serde_json::to_string(&registration_ref).map_err(|error| {
-                        DbError::Message(format!("Owner recovery registration ref: {error}"))
-                    })?;
-                let exact_activation = serde_json::to_string(&activation).map_err(|error| {
-                    DbError::Message(format!("Owner recovery activation authority: {error}"))
-                })?;
-                let activated = tx
+                    encode(record.reference(), SUBJECT, "registration ref")?;
+                let exact_activation = encode(&activation, SUBJECT, "activation authority")?;
+                let installed = tx
                     .query_row(
                         "SELECT registration_hash, registration_bytes, registration_object, \
                             activation_authority \
                      FROM store_device_registration_activations WHERE device_id = ?1",
-                        [registration_ref.device_id.to_string()],
+                        [record.device_id()],
                         |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
@@ -365,13 +407,13 @@ impl StoreDatabase {
                     )
                     .optional()
                     .map_err(DbError::from)?;
-                let activated = match activated {
+                let activated = match installed {
                     None => false,
                     Some(existing)
                         if existing
                             == (
-                                registration_ref.registration_hash.to_string(),
-                                registration.bytes.clone(),
+                                objects.1.clone(),
+                                objects.2.clone(),
                                 exact_registration_ref,
                                 exact_activation,
                             ) =>
@@ -390,6 +432,17 @@ impl StoreDatabase {
                 tx.execute("DELETE FROM published_store_acks", [])
                     .map_err(DbError::from)?;
                 crate::database::delete_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
+                let state = encode(
+                    &if activated {
+                        LocalDeviceRegistrationState::Activated {
+                            authority: activation,
+                        }
+                    } else {
+                        LocalDeviceRegistrationState::Prepared
+                    },
+                    SUBJECT,
+                    "journal state",
+                )?;
                 tx.execute(
                     "INSERT INTO local_store_device_registration \
                  (singleton, device_id, registration_hash, registration_bytes, \
@@ -397,56 +450,22 @@ impl StoreDatabase {
                   initial_ack_prepared, state) \
                  VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     rusqlite::params![
-                        registration_ref.device_id.to_string(),
-                        registration_ref.registration_hash.to_string(),
-                        registration.bytes,
-                        serde_json::to_string(&registration.prepared).map_err(|error| {
-                            DbError::Message(format!("Owner recovery registration object: {error}"))
-                        })?,
-                        serde_json::to_string(&initial_ack_ref).map_err(|error| {
-                            DbError::Message(format!("Owner recovery initial ack ref: {error}"))
-                        })?,
-                        initial_ack.bytes,
-                        serde_json::to_string(&initial_ack.prepared).map_err(|error| {
-                            DbError::Message(format!("Owner recovery initial ack object: {error}"))
-                        })?,
-                        serde_json::to_string(&if activated {
-                            LocalDeviceRegistrationState::Activated {
-                                authority: activation,
-                            }
-                        } else {
-                            LocalDeviceRegistrationState::Prepared
-                        })
-                        .map_err(|error| DbError::Message(format!(
-                            "Owner recovery journal state: {error}"
-                        )))?,
+                        objects.0, objects.1, objects.2, objects.3, objects.4, objects.5,
+                        objects.6, state,
                     ],
                 )
                 .map_err(DbError::from)?;
                 if activated {
                     tx.execute(
                         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
-                        (
-                            LOCAL_DEVICE_ID_STATE_KEY,
-                            registration_ref.device_id.to_string(),
-                        ),
+                        (LOCAL_DEVICE_ID_STATE_KEY, &objects.0),
                     )
                     .map_err(DbError::from)?;
+                    let published_ack = record.published_ack_columns(SUBJECT)?;
                     tx.execute(
                         "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
                      VALUES (1, ?1, ?2)",
-                        rusqlite::params![
-                            serde_json::to_string(&initial_ack_ref).map_err(|error| {
-                                DbError::Message(format!(
-                                    "Owner recovery published initial ack ref: {error}"
-                                ))
-                            })?,
-                            serde_json::to_string(&initial_ack.value.successor.next_slot).map_err(
-                                |error| DbError::Message(format!(
-                                    "Owner recovery initial ack successor: {error}"
-                                ))
-                            )?,
-                        ],
+                        (&published_ack.0, &published_ack.1),
                     )
                     .map_err(DbError::from)?;
                 }
