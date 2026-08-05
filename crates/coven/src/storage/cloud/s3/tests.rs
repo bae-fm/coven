@@ -109,6 +109,19 @@ async fn test_home(
     .expect("construct test S3CloudHome")
 }
 
+/// A test home in `us-east-1`, unprefixed, whose exact slots ride standard
+/// conditional requests.
+async fn standard_test_home(bucket: String, endpoint: String) -> S3CloudHome {
+    test_home(
+        bucket,
+        "us-east-1",
+        endpoint,
+        None,
+        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+    )
+    .await
+}
+
 /// Bind, serve, and wire graceful shutdown for a fake S3 server — the
 /// scaffolding every fake endpoint shares; each test supplies its Router.
 async fn spawn_fake_s3(app: Router) -> (String, tokio::sync::oneshot::Sender<()>) {
@@ -367,14 +380,7 @@ async fn listing_exhausts_every_page() {
             }),
     )
     .await;
-    let home = test_home(
-        bucket,
-        "us-east-1",
-        endpoint,
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-    )
-    .await;
+    let home = standard_test_home(bucket, endpoint).await;
 
     let listing = home.list("objects/").await.expect("list objects");
 
@@ -434,14 +440,7 @@ async fn immutable_append_is_create_only_but_generic_put_remains_mutable() {
             }),
     )
     .await;
-    let home = test_home(
-        bucket,
-        "us-east-1",
-        endpoint,
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-    )
-    .await;
+    let home = standard_test_home(bucket, endpoint).await;
 
     home.put_object("mutable", b"first".to_vec())
         .await
@@ -590,14 +589,7 @@ async fn public_immutable_append_streams_parts_and_completes_create_only() {
             }),
     )
     .await;
-    let home = test_home(
-        bucket,
-        "us-east-1",
-        endpoint,
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-    )
-    .await;
+    let home = standard_test_home(bucket, endpoint).await;
 
     let slot = ObjectSlot::logical("immutable".to_string()).unwrap();
     ExactSlotStorage::create_at(
@@ -731,14 +723,7 @@ async fn multipart_sink_retains_the_s3_runtime_through_abort() {
             .with_state((bucket.clone(), abort_seen.clone())),
     )
     .await;
-    let home = test_home(
-        bucket,
-        "us-east-1",
-        endpoint,
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-    )
-    .await;
+    let home = standard_test_home(bucket, endpoint).await;
     let sink = home
         .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
         .await
@@ -766,14 +751,7 @@ async fn immutable_append_reports_body_and_multipart_abort_failures() {
             .with_state((bucket.clone(), abort_failures.clone())),
     )
     .await;
-    let home = test_home(
-        bucket,
-        "us-east-1",
-        endpoint,
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-    )
-    .await;
+    let home = standard_test_home(bucket, endpoint).await;
     let reader = crate::storage::local_file::PlaintextReader::from_test_reader(FailingBodyReader {
         emitted: false,
     });
@@ -800,12 +778,9 @@ async fn immutable_append_reports_body_and_multipart_abort_failures() {
 
 #[tokio::test]
 async fn exact_operations_reject_an_opaque_s3_locator() {
-    let home = test_home(
+    let home = standard_test_home(
         "exact-locator-test".to_string(),
-        "us-east-1",
         "http://127.0.0.1:9".to_string(),
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
     )
     .await;
     let slot = ObjectSlot::opaque("protocol/copy".to_string(), "protocol/other".to_string())
@@ -833,12 +808,9 @@ async fn exact_operations_reject_an_opaque_s3_locator() {
 /// same deterministic rejection forever.
 #[tokio::test]
 async fn an_opaque_s3_locator_is_not_retryable() {
-    let home = test_home(
+    let home = standard_test_home(
         "retryability-test".to_string(),
-        "us-east-1",
         "http://127.0.0.1:9".to_string(),
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
     )
     .await;
     let slot = ObjectSlot::opaque("protocol/copy".to_string(), "protocol/other".to_string())
@@ -892,12 +864,9 @@ async fn provider_binding_canonicalizes_the_custom_origin_and_hashes_the_access_
 
 #[tokio::test]
 async fn provider_binding_rejects_a_custom_endpoint_with_a_base_path() {
-    let home = test_home(
+    let home = standard_test_home(
         "bucket-a".to_string(),
-        "us-east-1",
         "https://objects.example/s3".to_string(),
-        None,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
     )
     .await;
 
@@ -968,14 +937,7 @@ fn cancellation_abort_failure_does_not_terminate_the_process() {
                     .with_state((bucket.clone(), abort_failures.clone())),
             )
             .await;
-            let home = test_home(
-                bucket,
-                "us-east-1",
-                endpoint,
-                None,
-                Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-            )
-            .await;
+            let home = standard_test_home(bucket, endpoint).await;
             let sink = home
                 .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
                 .await
