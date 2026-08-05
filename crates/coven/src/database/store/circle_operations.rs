@@ -141,19 +141,45 @@ impl StoreDatabase {
         ),
         DbError,
     > {
+        self.circle_signing_context(
+            circle_id,
+            identity_pubkey,
+            |state| state.authoring_state(),
+            |circle_id| format!("Circle {circle_id} has no active authoring state"),
+            |circle_id| format!("active Circle {circle_id} belongs to another local identity"),
+        )
+        .await
+    }
+
+    /// The signing context shared by Circle commands: the current state's
+    /// authoring view selected by `authoring`, required to belong to the local
+    /// identity, plus the commit that activated the current control.
+    async fn circle_signing_context(
+        &self,
+        circle_id: crate::protocol::circle::CircleId,
+        identity_pubkey: &str,
+        authoring: fn(
+            &crate::protocol::circle_activation::CircleCurrentState,
+        ) -> Option<crate::protocol::circle_activation::CircleAuthoringState>,
+        missing_authoring: fn(crate::protocol::circle::CircleId) -> String,
+        foreign_identity: fn(crate::protocol::circle::CircleId) -> String,
+    ) -> Result<
+        (
+            crate::protocol::circle_activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
                 let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
                     DbError::Message(format!("Circle {circle_id} has no current state"))
                 })?;
-                let authoring = state.authoring_state().ok_or_else(|| {
-                    DbError::Message(format!("Circle {circle_id} has no active authoring state"))
-                })?;
+                let authoring = authoring(&state)
+                    .ok_or_else(|| DbError::Message(missing_authoring(circle_id)))?;
                 if authoring.access.recipient_pubkey != identity_pubkey {
-                    return Err(DbError::Message(format!(
-                        "active Circle {circle_id} belongs to another local identity"
-                    )));
+                    return Err(DbError::Message(foreign_identity(circle_id)));
                 }
                 let activated_commit = Self::circle_activation_commit_ref_on(
                     conn,
@@ -186,35 +212,14 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call(move |conn| {
-                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
-                    DbError::Message(format!("Circle {circle_id} has no current state"))
-                })?;
-                let authoring = state.deletable_authoring_state().ok_or_else(|| {
-                    DbError::Message(format!(
-                        "Circle {circle_id} has no resolved authoring state to delete"
-                    ))
-                })?;
-                if authoring.access.recipient_pubkey != identity_pubkey {
-                    return Err(DbError::Message(format!(
-                        "Circle {circle_id} belongs to another local identity"
-                    )));
-                }
-                let activated_commit = Self::circle_activation_commit_ref_on(
-                    conn,
-                    circle_id,
-                    &authoring.control.coord,
-                )?
-                .ok_or_else(|| {
-                    DbError::Message(format!(
-                        "Circle {circle_id} current control has no materialized activation"
-                    ))
-                })?;
-                Ok((authoring, activated_commit))
-            })
-            .await
+        self.circle_signing_context(
+            circle_id,
+            identity_pubkey,
+            |state| state.deletable_authoring_state(),
+            |circle_id| format!("Circle {circle_id} has no resolved authoring state to delete"),
+            |circle_id| format!("Circle {circle_id} belongs to another local identity"),
+        )
+        .await
     }
 
     /// The retained conflicting branch coordinates for a Circle whose control
@@ -341,30 +346,14 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call(move |conn| {
-                let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
-                    DbError::Message(format!("Circle {circle_id} has no current state"))
-                })?;
-                let closing = state.closing_authoring_state().ok_or_else(|| {
-                    DbError::Message(format!("Circle {circle_id} is not closing"))
-                })?;
-                if closing.access.recipient_pubkey != identity_pubkey {
-                    return Err(DbError::Message(format!(
-                        "closing Circle {circle_id} belongs to another local identity"
-                    )));
-                }
-                let activated_commit =
-                    Self::circle_activation_commit_ref_on(conn, circle_id, &closing.control.coord)?
-                        .ok_or_else(|| {
-                            DbError::Message(format!(
-                                "Circle {circle_id} closing control has no materialized activation"
-                            ))
-                        })?;
-                Ok((closing, activated_commit))
-            })
-            .await
+        self.circle_signing_context(
+            circle_id,
+            identity_pubkey,
+            |state| state.closing_authoring_state(),
+            |circle_id| format!("Circle {circle_id} is not closing"),
+            |circle_id| format!("closing Circle {circle_id} belongs to another local identity"),
+        )
+        .await
     }
 
     pub(crate) async fn circle_publication_context(
