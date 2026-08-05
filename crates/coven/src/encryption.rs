@@ -640,12 +640,47 @@ struct KeyEntry {
     key: [u8; 32],
 }
 
+/// The key a keyring seals new data under: the highest generation, and among
+/// equal generations the greatest fingerprint. Deterministic, so every device
+/// holding the same keys converges on the same choice.
+///
+/// Selecting it is a property of the key material, which is why both the
+/// custody-facing [`MasterKeyring`] and the [`EncryptionService`] cipher read it
+/// here rather than one building the other to ask.
+fn seal_entry_of(keys: &BTreeMap<KeyFingerprint, KeyEntry>) -> (&KeyFingerprint, &KeyEntry) {
+    keys.iter()
+        .max_by(|(fingerprint_a, a), (fingerprint_b, b)| {
+            a.generation
+                .cmp(&b.generation)
+                .then_with(|| fingerprint_a.cmp(fingerprint_b))
+        })
+        .expect("a keyring always holds at least one key")
+}
+
+/// The stored keyring JSON for `keys` — the one on-disk form, written by
+/// whichever type holds the material.
+fn keyring_string(keys: &BTreeMap<KeyFingerprint, KeyEntry>) -> Result<String, EncryptionError> {
+    let payload = StoredKeyring {
+        keys: keys
+            .values()
+            .map(|entry| StoredKeyringGeneration {
+                generation: entry.generation,
+                key_hex: hex::encode(entry.key),
+            })
+            .collect(),
+    };
+    serde_json::to_string(&payload)
+        .map_err(|e| EncryptionError::KeyManagement(format!("serialize keyring: {e}")))
+}
+
 /// A store's master key material: every key it holds. This is the value custody
 /// implementations store, unlock, and re-protect — never a cipher. coven builds
 /// the [`EncryptionService`] cipher from it internally; custody never touches
 /// cipher machinery.
 #[derive(Clone)]
-pub struct MasterKeyring(EncryptionService);
+pub struct MasterKeyring {
+    keys: BTreeMap<KeyFingerprint, KeyEntry>,
+}
 
 impl std::fmt::Debug for MasterKeyring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -658,39 +693,37 @@ impl std::fmt::Debug for MasterKeyring {
 impl MasterKeyring {
     /// One fresh generation-1 key.
     pub fn generate() -> Self {
-        Self(EncryptionService::from_key(generate_random_key()))
+        Self::from(EncryptionService::from_key(generate_random_key()))
     }
 
     /// Serialize to the stored keyring JSON — the same format
-    /// [`EncryptionService::to_keyring_string`] produces, since every
-    /// generation this type holds came from (or feeds) that cipher.
+    /// [`EncryptionService::to_keyring_string`] produces, since both write the
+    /// same material.
     pub fn to_serialized(&self) -> String {
-        self.0
-            .to_keyring_string()
-            .expect("a MasterKeyring always holds at least one generation")
+        keyring_string(&self.keys).expect("a MasterKeyring always holds at least one generation")
     }
 
     /// Parse the stored master-key format [`Self::to_serialized`] produces.
     pub fn from_serialized(s: &str) -> Result<Self, EncryptionError> {
-        EncryptionService::new(s).map(Self)
+        EncryptionService::new(s).map(Self::from)
     }
 
     /// SHA-256 fingerprint of the seal key (the deterministically selected
     /// key this keyring seals new data under), hex-encoded in full.
     pub fn fingerprint(&self) -> String {
-        self.0.fingerprint()
+        hex::encode(seal_entry_of(&self.keys).0.as_bytes())
     }
 }
 
 impl From<EncryptionService> for MasterKeyring {
     fn from(service: EncryptionService) -> Self {
-        Self(service)
+        Self { keys: service.keys }
     }
 }
 
 impl From<MasterKeyring> for EncryptionService {
     fn from(keyring: MasterKeyring) -> Self {
-        keyring.0
+        EncryptionService { keys: keyring.keys }
     }
 }
 
@@ -784,14 +817,7 @@ impl EncryptionService {
     /// a fork propagate so every device holds both keys, they all pick the same
     /// one here — a fork converges instead of partitioning.
     fn seal_entry(&self) -> (&KeyFingerprint, &KeyEntry) {
-        self.keys
-            .iter()
-            .max_by(|(fingerprint_a, a), (fingerprint_b, b)| {
-                a.generation
-                    .cmp(&b.generation)
-                    .then_with(|| fingerprint_a.cmp(fingerprint_b))
-            })
-            .expect("a keyring always holds at least one key")
+        seal_entry_of(&self.keys)
     }
 
     pub fn current_generation(&self) -> u64 {
@@ -826,18 +852,7 @@ impl EncryptionService {
     }
 
     pub fn to_keyring_string(&self) -> Result<String, EncryptionError> {
-        let payload = StoredKeyring {
-            keys: self
-                .keys
-                .values()
-                .map(|entry| StoredKeyringGeneration {
-                    generation: entry.generation,
-                    key_hex: hex::encode(entry.key),
-                })
-                .collect(),
-        };
-        serde_json::to_string(&payload)
-            .map_err(|e| EncryptionError::KeyManagement(format!("serialize keyring: {e}")))
+        keyring_string(&self.keys)
     }
 
     pub fn to_keyring_payload(&self) -> Result<Vec<u8>, EncryptionError> {
