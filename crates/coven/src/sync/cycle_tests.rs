@@ -112,6 +112,62 @@ async fn cycle_test_store(
         .expect("create exact cycle test Store")
 }
 
+/// A fresh owner Store plus the second identity its device-join cases admit.
+struct OwnerAndMember {
+    owner: UserKeypair,
+    owner_db: Database,
+    storage: Arc<TestStore>,
+    member: UserKeypair,
+}
+
+async fn owner_and_member() -> OwnerAndMember {
+    let owner = UserKeypair::generate();
+    let owner_db = open_test_db();
+    let storage = cycle_test_store(
+        &owner_db,
+        &owner,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member: UserKeypair::generate(),
+    }
+}
+
+/// Invites `member` into the owner's Store as an ordinary member.
+async fn invite_test_member(
+    storage: &TestStore,
+    owner_db: &Database,
+    owner: &UserKeypair,
+    member: &UserKeypair,
+    encryption: &EncryptionService,
+) {
+    storage
+        .invite_member(
+            owner_db,
+            owner,
+            &pubkey_hex(member),
+            None,
+            crate::protocol::membership::MemberRole::Member,
+            encryption,
+            "Test Store",
+        )
+        .await
+        .expect("invite exact Member identity");
+}
+
+/// A `note_photos` schema whose rows carry a blob at `fill`, plus the Store its
+/// owner publishes through.
+async fn blob_cycle_store(keypair: &UserKeypair, fill: CacheFill) -> (Database, Arc<TestStore>) {
+    let db = open_test_db_with_blob(BlobDecl::new("photos", Provenance::HostProvided, fill));
+    let storage =
+        cycle_test_store(&db, keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    (db, storage)
+}
+
 async fn run_cycle_in_task(
     storage: Arc<CycleStorageInterceptor>,
     device: TestDevice,
@@ -3017,14 +3073,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let db = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheEager,
-    ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
@@ -3215,14 +3264,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
     // The live cipher is generation 1; the cloud has committed generation 2.
-    let db = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheEager,
-    ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
@@ -3368,14 +3410,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let db = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheEager,
-    ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
     db.execute_test_host_write(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Release', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
@@ -3508,14 +3543,7 @@ async fn ready_make_remote_provider_transport_is_offline() {
 async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let db = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheLazy,
-    ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
     storage
         .retain_store_packages_for_assertion(&db, b"captured-changeset-blob-retry")
         .await;
@@ -3626,14 +3654,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let db = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheLazy,
-    ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
     storage
         .retain_store_packages_for_assertion(&db, b"already-uploaded-host-blob")
         .await;
@@ -3723,14 +3744,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
 async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let db = open_test_db_with_blob(BlobDecl::new(
-        "photos",
-        Provenance::HostProvided,
-        CacheFill::CacheLazy,
-    ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
     let device = storage
         .open_into(&db)
@@ -4667,8 +4681,6 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
 /// A registered Member publishes rows but cannot author a catalog snapshot.
 #[tokio::test]
 async fn member_device_does_not_create_a_snapshot() {
-    use crate::protocol::membership::MemberRole;
-
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
     let storage = Arc::new(
@@ -4682,18 +4694,7 @@ async fn member_device_does_not_create_a_snapshot() {
     let (_tmp, ld) = temp_store_dir();
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([42; 32]);
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &encryption,
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
+    invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
 
     let member_db = open_test_db();
     let member_device = storage
@@ -4815,30 +4816,14 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
 
 #[tokio::test]
 async fn same_principal_device_join_completes_on_the_runtime_stack() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let encryption = EncryptionService::from_key([43; 32]);
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &encryption,
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
+    invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
 
     let member_db = open_test_db();
     storage
@@ -4870,18 +4855,14 @@ impl<'storage> SamePrincipalApprovalFixture<'storage> {
         owner: &UserKeypair,
         member: &UserKeypair,
     ) -> Self {
-        storage
-            .invite_member(
-                owner_db,
-                owner,
-                &pubkey_hex(member),
-                None,
-                crate::protocol::membership::MemberRole::Member,
-                &EncryptionService::from_key([59; 32]),
-                "Test Store",
-            )
-            .await
-            .expect("invite exact Member identity");
+        invite_test_member(
+            storage,
+            owner_db,
+            owner,
+            member,
+            &EncryptionService::from_key([59; 32]),
+        )
+        .await;
         let owner_device = storage
             .bind_device(owner_db, owner)
             .await
@@ -4918,15 +4899,12 @@ impl<'storage> SamePrincipalApprovalFixture<'storage> {
 
 #[tokio::test]
 async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut first =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let first_registration_request = first
@@ -4968,17 +4946,12 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
 /// position safely.
 #[tokio::test]
 async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_loop() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = Arc::new(
-        cycle_test_store(
-            &owner_db,
-            &owner,
-            crate::sync::test_helpers::test_cloud_home(),
-        )
-        .await,
-    );
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut approval =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let request = approval
@@ -5100,15 +5073,12 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
 
 #[tokio::test]
 async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut fixture =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let request = fixture
@@ -5180,15 +5150,12 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
 
 #[tokio::test]
 async fn owner_rejects_invalid_access_activation_without_consuming_the_join_journal() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut fixture =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let valid_request = fixture
@@ -5334,15 +5301,12 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
 
 #[tokio::test]
 async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_access() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut fixture =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let later_member = UserKeypair::generate();
@@ -5363,15 +5327,12 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
 
 #[tokio::test]
 async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commit() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut fixture =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let activation = fixture.approval.access_grant.activation.clone();
@@ -5419,15 +5380,12 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
 
 #[tokio::test]
 async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let mut fixture =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
     let activation = fixture.approval.access_grant.activation.clone();
@@ -5509,30 +5467,14 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
 
 #[tokio::test]
 async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
-        &owner_db,
-        &owner,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
     let encryption = EncryptionService::from_key([44; 32]);
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &encryption,
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
+    invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
     exercise_pre_attempt_abandonment(
         &crate::database::StoreDatabase::new(&owner_db),
         &storage,
@@ -5544,29 +5486,20 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
 
 #[tokio::test]
 async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
+    invite_test_member(
+        &storage,
         &owner_db,
         &owner,
-        crate::sync::test_helpers::test_cloud_home(),
+        &member,
+        &EncryptionService::from_key([45; 32]),
     )
     .await;
-    let member = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([45; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
     exercise_post_attempt_cancellation(
         &crate::database::StoreDatabase::new(&owner_db),
         &storage,
@@ -5579,29 +5512,20 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
 
 #[tokio::test]
 async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
+    invite_test_member(
+        &storage,
         &owner_db,
         &owner,
-        crate::sync::test_helpers::test_cloud_home(),
+        &member,
+        &EncryptionService::from_key([46; 32]),
     )
     .await;
-    let member = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([46; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
     exercise_post_attempt_cancellation(
         &crate::database::StoreDatabase::new(&owner_db),
         &storage,
@@ -5614,29 +5538,20 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
 
 #[tokio::test]
 async fn cancellation_removes_an_inflight_registration_on_merge() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
+    invite_test_member(
+        &storage,
         &owner_db,
         &owner,
-        crate::sync::test_helpers::test_cloud_home(),
+        &member,
+        &EncryptionService::from_key([52; 32]),
     )
     .await;
-    let member = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([52; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
     let owner_database = crate::database::StoreDatabase::new(&owner_db);
     Box::pin(async {
         let owner_device = storage
@@ -5731,29 +5646,20 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
 
 #[tokio::test]
 async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_merge() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
+    invite_test_member(
+        &storage,
         &owner_db,
         &owner,
-        crate::sync::test_helpers::test_cloud_home(),
+        &member,
+        &EncryptionService::from_key([49; 32]),
     )
     .await;
-    let member = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([49; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
     exercise_provider_access_grant_create_interruption(
         &crate::database::StoreDatabase::new(&owner_db),
         &storage,
@@ -5766,29 +5672,20 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
 
 #[tokio::test]
 async fn provider_access_grant_create_settles_lost_response_on_merge() {
-    use crate::protocol::membership::MemberRole;
-
-    let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let storage = cycle_test_store(
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        storage,
+        member,
+    } = owner_and_member().await;
+    invite_test_member(
+        &storage,
         &owner_db,
         &owner,
-        crate::sync::test_helpers::test_cloud_home(),
+        &member,
+        &EncryptionService::from_key([50; 32]),
     )
     .await;
-    let member = UserKeypair::generate();
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &EncryptionService::from_key([50; 32]),
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
     exercise_provider_access_grant_create_interruption(
         &crate::database::StoreDatabase::new(&owner_db),
         &storage,
@@ -5801,7 +5698,6 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
 
 #[tokio::test]
 async fn cross_principal_device_join_completes_on_the_runtime_stack() {
-    use crate::protocol::membership::MemberRole;
     use crate::protocol::objects::{
         ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
     };
@@ -5827,18 +5723,7 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
     .expect("create exact cross-principal test Store");
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([43; 32]);
-    storage
-        .invite_member(
-            &owner_db,
-            &owner,
-            &pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            &encryption,
-            "Test Store",
-        )
-        .await
-        .expect("invite exact Member identity");
+    invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
 
     let member_db = open_test_db();
     storage
