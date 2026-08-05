@@ -19,14 +19,11 @@ fn encrypted_cloud_object_tag_carries_the_full_key_digest() {
 
     let stored = cipher.seal(plaintext.clone(), aad);
 
-    assert_eq!(&stored[..KEY_TAG_MAGIC.len()], KEY_TAG_MAGIC);
+    let (tagged, body) = KeyTag::read(&stored).expect("a stored object carries a key tag");
+    assert_eq!(&tagged, fingerprint.as_bytes());
     assert_eq!(
-        &stored[KEY_TAG_MAGIC.len()..KEY_TAG_LEN],
-        fingerprint.as_bytes()
-    );
-    assert_eq!(
-        stored.len() as u64,
-        KEY_TAG_LEN as u64 + crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
+        body.len() as u64,
+        crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
         "a protocol object keeps the whole-object chunked format the blob namespace left",
     );
     assert_eq!(cipher.open(stored, aad).unwrap(), plaintext);
@@ -257,7 +254,7 @@ async fn ranged_reads_transfer_only_the_chunks_they_cover() {
     let opened_bytes = home.exact_range_read_bytes();
     assert_eq!(
         opened_bytes,
-        (KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN) as u64,
+        (KeyTag::LEN + SEALED_BLOB_HEADER_LEN) as u64,
         "opening costs one prefix read and nothing else",
     );
     home.clear_exact_range_reads();
@@ -453,7 +450,7 @@ async fn a_tampered_chunk_fails_only_the_ranges_that_touch_it() {
 
     // Flip one byte inside chunk 3's ciphertext.
     let mut stored = home.stored_exact_object(blob.object().slot());
-    let victim = KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16) + 10;
+    let victim = KeyTag::LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16) + 10;
     stored[victim] ^= 0xff;
     home.replace_exact_object(blob.object().slot(), stored);
 
@@ -500,7 +497,7 @@ async fn a_tampered_header_fails_the_first_open() {
     // Halve the declared chunk size. The object's length no longer matches
     // what that header implies, which is caught before a chunk is opened.
     let mut stored = home.stored_exact_object(blob.object().slot());
-    stored[KEY_TAG_LEN + 1..KEY_TAG_LEN + 5].copy_from_slice(&(CHUNK / 2).to_le_bytes());
+    stored[KeyTag::LEN + 1..KeyTag::LEN + 5].copy_from_slice(&(CHUNK / 2).to_le_bytes());
     home.replace_exact_object(blob.object().slot(), stored.clone());
     assert!(
         matches!(
@@ -519,10 +516,10 @@ async fn a_tampered_header_fails_the_first_open() {
     // exact size, so a header whose framing implies a different one is
     // refused before a chunk is opened.
     let mut stored = home.stored_exact_object(blob.object().slot());
-    stored[KEY_TAG_LEN + 1..KEY_TAG_LEN + 5].copy_from_slice(&CHUNK.to_le_bytes());
+    stored[KeyTag::LEN + 1..KeyTag::LEN + 5].copy_from_slice(&CHUNK.to_le_bytes());
     let shorter = plaintext.len() as u64 - CHUNK as u64;
-    stored[KEY_TAG_LEN + 5..KEY_TAG_LEN + 13].copy_from_slice(&shorter.to_le_bytes());
-    stored.truncate(KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16));
+    stored[KeyTag::LEN + 5..KeyTag::LEN + 13].copy_from_slice(&shorter.to_le_bytes());
+    stored.truncate(KeyTag::LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16));
     home.replace_exact_object(blob.object().slot(), stored);
     assert!(
         matches!(
@@ -558,10 +555,10 @@ async fn a_tampered_header_fails_the_first_open() {
     );
 
     let mut stored = home.stored_exact_object(blob.object().slot());
-    stored[KEY_TAG_LEN + 1..KEY_TAG_LEN + 5].copy_from_slice(&NUDGED.to_le_bytes());
-    stored[KEY_TAG_LEN + 5..KEY_TAG_LEN + 13]
+    stored[KeyTag::LEN + 1..KeyTag::LEN + 5].copy_from_slice(&NUDGED.to_le_bytes());
+    stored[KeyTag::LEN + 5..KeyTag::LEN + 13]
         .copy_from_slice(&(plaintext.len() as u64).to_le_bytes());
-    stored.truncate(KEY_TAG_LEN + unaltered.sealed_len() as usize);
+    stored.truncate(KeyTag::LEN + unaltered.sealed_len() as usize);
     home.replace_exact_object(blob.object().slot(), stored);
 
     let reader = storage
@@ -595,7 +592,7 @@ async fn a_spliced_chunk_refuses_to_open() {
     let (_donor_storage, donor, _donor_key, _donor_temp) =
         publish_sealed_blob(&home, "splice", "donor", &plaintext, small_chunking(CHUNK)).await;
     let donor_stored = home.stored_exact_object(donor.object().slot());
-    let body = KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN;
+    let body = KeyTag::LEN + SEALED_BLOB_HEADER_LEN;
 
     // Cross-blob: the donor's chunk 2 in the victim's chunk 2.
     let mut spliced = home.stored_exact_object(victim.object().slot());

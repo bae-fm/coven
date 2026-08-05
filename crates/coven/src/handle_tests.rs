@@ -947,9 +947,10 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
 
             // `[key tag][header][chunks]` — the header the sealer wrote is what every
             // later reader frames the object by.
-            let header =
-                crate::encryption::SealedBlobHeader::parse(&at_rest[crate::storage::KEY_TAG_LEN..])
-                    .expect("stored blob carries a sealed header");
+            let header = crate::encryption::SealedBlobHeader::parse(
+                &at_rest[crate::encryption::KeyTag::LEN..],
+            )
+            .expect("stored blob carries a sealed header");
             assert_eq!(
                 header.chunk_size().get(),
                 CHUNK,

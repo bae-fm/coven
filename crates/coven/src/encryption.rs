@@ -26,16 +26,110 @@ pub(crate) const ENCRYPTED_CHUNK_SIZE: usize = CHUNK_SIZE + TAG_SIZE;
 pub(crate) const INITIAL_KEY_GENERATION: u64 = 1;
 const AEAD_V2_LABEL: &[u8] = b"coven-aead-v2";
 
-/// The sealed app-data format version this build writes, and the only one it
-/// reads. The leading byte of every payload [`EncryptionService::seal_app_data`]
-/// produces; a payload naming any other version is refused
-/// ([`SealError::UnknownVersion`]) rather than guessed at.
-pub(crate) const APP_DATA_SEAL_VERSION: u8 = 1;
+const KEY_TAG_MARKER: &[u8; 3] = b"CKF";
 
-/// The fixed header every sealed app-data payload carries ahead of its
-/// ciphertext: the version byte, then the sealing key's full SHA-256 digest.
-const APP_DATA_FINGERPRINT_SIZE: usize = 32;
-const APP_DATA_HEADER_SIZE: usize = 1 + APP_DATA_FINGERPRINT_SIZE;
+/// The key-tag format this build writes, and the only one it reads. A tag
+/// naming any other version is refused rather than guessed at.
+const KEY_TAG_VERSION: u8 = 1;
+
+/// The cleartext prefix every sealed payload carries ahead of its ciphertext,
+/// naming the key it is under:
+///
+/// ```text
+/// [0..3]  marker `CKF`
+/// [3]     format version
+/// [4..36] the key's full SHA-256 fingerprint
+/// ```
+///
+/// Naming the key rather than assuming the current one is what keeps a payload
+/// openable across any number of later rotations and forks: a reader resolves
+/// whichever key the payload names, and a key once held is never dropped.
+/// Every sealed form in the system — a host's app data, a stored blob, an
+/// encrypted protocol object — carries this one tag, so which key a stored byte
+/// string wants is one question with one answer, not a per-producer convention.
+///
+/// The tag says only *which* key; how to reach that key stays with the caller,
+/// because it differs by kind — app data resolves the fingerprint against the
+/// keyring directly, a scoped blob re-derives its scope key from the master key
+/// the fingerprint names.
+pub(crate) struct KeyTag;
+
+impl KeyTag {
+    pub(crate) const LEN: usize = KEY_TAG_MARKER.len() + 1 + 32;
+
+    pub(crate) fn write(fingerprint: &[u8; 32]) -> Vec<u8> {
+        Self::tagged(fingerprint, KEY_TAG_VERSION)
+    }
+
+    /// A tag claiming a version this build does not write, for tests that
+    /// assert a reader refuses one instead of guessing at its layout.
+    #[cfg(test)]
+    pub(crate) fn write_version_for_test(fingerprint: &[u8; 32], version: u8) -> Vec<u8> {
+        Self::tagged(fingerprint, version)
+    }
+
+    fn tagged(fingerprint: &[u8; 32], version: u8) -> Vec<u8> {
+        let mut tag = Vec::with_capacity(Self::LEN);
+        tag.extend_from_slice(KEY_TAG_MARKER);
+        tag.push(version);
+        tag.extend_from_slice(fingerprint);
+        tag
+    }
+
+    /// Split `stored` into the key fingerprint its tag names and the body that
+    /// follows it.
+    pub(crate) fn read(stored: &[u8]) -> Result<([u8; 32], &[u8]), KeyTagError> {
+        if stored.len() < Self::LEN {
+            return Err(KeyTagError::Truncated);
+        }
+        let (tag, body) = stored.split_at(Self::LEN);
+        let (marker, versioned) = tag.split_at(KEY_TAG_MARKER.len());
+        if marker != KEY_TAG_MARKER {
+            return Err(KeyTagError::Unmarked);
+        }
+        let (&version, fingerprint) = versioned
+            .split_first()
+            .expect("a key tag holds its version byte");
+        if version != KEY_TAG_VERSION {
+            return Err(KeyTagError::UnknownVersion(version));
+        }
+        Ok((
+            fingerprint
+                .try_into()
+                .expect("a key tag holds 32 fingerprint bytes"),
+            body,
+        ))
+    }
+}
+
+/// What a stored payload's leading key tag can fail to be.
+#[derive(Debug, Error)]
+pub enum KeyTagError {
+    #[error("sealed payload is too short to carry a key tag")]
+    Truncated,
+    #[error("sealed payload carries no key tag")]
+    Unmarked,
+    #[error("unsupported key tag version {0}")]
+    UnknownVersion(u8),
+}
+
+impl From<KeyTagError> for EncryptionError {
+    fn from(error: KeyTagError) -> Self {
+        Self::Decryption(error.to_string())
+    }
+}
+
+/// A tag naming a version this build does not read is its own answer to the
+/// host — "this payload is newer than me", not "decryption failed". Every other
+/// malformed tag is a corrupt envelope, which reads as a decryption failure.
+impl From<KeyTagError> for SealError {
+    fn from(error: KeyTagError) -> Self {
+        match error {
+            KeyTagError::UnknownVersion(version) => Self::UnknownVersion(version),
+            KeyTagError::Truncated | KeyTagError::Unmarked => Self::Crypto(error.into()),
+        }
+    }
+}
 
 /// Stable wire identity of one 32-byte encryption key: its full SHA-256 digest,
 /// serialized as exactly 64 lowercase hex digits.
@@ -1068,29 +1162,17 @@ impl EncryptionService {
     }
 
     /// Seal `plaintext` for storage in a host's own rows, under this keyring's
-    /// seal key:
+    /// seal key: a [`KeyTag`] naming that key, then the chunked ciphertext
+    /// `encrypt` produces under it.
     ///
-    /// ```text
-    /// [0]     version = APP_DATA_SEAL_VERSION
-    /// [1..33] the seal key's full SHA-256 fingerprint
-    /// [33..]  the chunked ciphertext `encrypt` produces under that key
-    /// ```
-    ///
-    /// Naming the key by fingerprint is what keeps the payload openable across
-    /// any number of later rotations and forks — [`Self::open_app_data`] resolves
-    /// whichever key the payload names, not the current one, and a key once held
-    /// is never dropped. `aad` binds the ciphertext to its context (the owning
-    /// row's primary key, say) and must be presented unchanged to open it.
+    /// `aad` binds the ciphertext to its context (the owning row's primary key,
+    /// say) and must be presented unchanged to open it.
     ///
     /// The body is the existing chunked format, so a large payload streams the
     /// same way a blob does; there is no size cliff and no second cipher.
     pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-        let fingerprint = self.seal_fingerprint();
-        let mut sealed = Vec::with_capacity(
-            APP_DATA_HEADER_SIZE + chunked_encrypted_len(plaintext.len() as u64) as usize,
-        );
-        sealed.push(APP_DATA_SEAL_VERSION);
-        sealed.extend_from_slice(&fingerprint);
+        let mut sealed = KeyTag::write(&self.seal_fingerprint());
+        sealed.reserve(chunked_encrypted_len(plaintext.len() as u64) as usize);
         sealed.extend(self.encrypt(plaintext, aad));
         sealed
     }
@@ -1101,7 +1183,7 @@ impl EncryptionService {
     /// this keyring does not hold, is a typed error; a wrong `aad` or a tampered
     /// payload surfaces the AEAD failure through [`SealError::Crypto`].
     pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        let (fingerprint, ciphertext) = split_sealed_app_data(sealed)?;
+        let (fingerprint, ciphertext) = KeyTag::read(sealed)?;
         self.service_for_fingerprint(&fingerprint)
             // `service_for_fingerprint` fails only when the keyring holds no key
             // with that fingerprint, so this names the cause exactly.
@@ -1109,33 +1191,6 @@ impl EncryptionService {
             .decrypt(ciphertext, aad)
             .map_err(SealError::Crypto)
     }
-}
-
-/// Split a sealed app-data payload into the key fingerprint it names and its
-/// ciphertext body, refusing a version this build does not read.
-///
-/// A payload too short to hold the fixed header cannot name a version or a
-/// fingerprint, so it is a corrupt envelope — reported as a decryption failure
-/// rather than guessed at or padded.
-fn split_sealed_app_data(sealed: &[u8]) -> Result<([u8; 32], &[u8]), SealError> {
-    let (&version, rest) = sealed.split_first().ok_or_else(|| {
-        SealError::Crypto(EncryptionError::Decryption(
-            "sealed app-data payload is empty".to_string(),
-        ))
-    })?;
-    if version != APP_DATA_SEAL_VERSION {
-        return Err(SealError::UnknownVersion(version));
-    }
-    if rest.len() < APP_DATA_FINGERPRINT_SIZE {
-        return Err(SealError::Crypto(EncryptionError::Decryption(
-            "sealed app-data payload is truncated before its key fingerprint".to_string(),
-        )));
-    }
-    let (fingerprint, ciphertext) = rest.split_at(APP_DATA_FINGERPRINT_SIZE);
-    let fingerprint: [u8; 32] = fingerprint
-        .try_into()
-        .expect("split_at yields exactly APP_DATA_FINGERPRINT_SIZE bytes");
-    Ok((fingerprint, ciphertext))
 }
 
 fn derive_key_from(key: &[u8; 32], info: &str) -> [u8; 32] {

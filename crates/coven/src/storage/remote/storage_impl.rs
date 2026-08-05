@@ -652,7 +652,7 @@ impl SyncStorage for CloudSyncStorage {
         // only request a range does not pay for.
         let prefix = self
             .exact
-            .read_range_at(&slot, 0, (KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN) as u64)
+            .read_range_at(&slot, 0, (KeyTag::LEN + SEALED_BLOB_HEADER_LEN) as u64)
             .await
             .map_err(StorageError::from)?;
         let opener = verified_sealed_blob_opener(

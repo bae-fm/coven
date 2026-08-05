@@ -412,7 +412,7 @@ fn master_keyring_debug_redacts_keys() {
 const APP_DATA_V1_FIXTURE_PLAINTEXT: &[u8] = b"pinned app-data payload";
 const APP_DATA_V1_FIXTURE_AAD: &[u8] = b"pinned-app-data-context";
 const APP_DATA_V1_FIXTURE_HEX: &str = concat!(
-    "01",
+    "434b4601",
     "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
     "2bdfe10d13cb397b648c2eb352bbadd92a19eafd8499b5c5",
     "b0d1e8eb56f757621ec41a78488c937427aac5df38b5e8af",
@@ -423,7 +423,9 @@ const APP_DATA_V1_FIXTURE_HEX: &str = concat!(
 /// header — so the tests below assert the recorded key rather than trusting
 /// `open_app_data` to have picked the right one silently.
 fn sealed_fingerprint(sealed: &[u8]) -> [u8; 32] {
-    sealed[1..33].try_into().expect("a sealed header")
+    KeyTag::read(sealed)
+        .expect("a sealed payload carries its key tag")
+        .0
 }
 
 #[test]
@@ -432,16 +434,16 @@ fn seal_app_data_round_trips_and_records_its_version_and_key() {
     for payload in [b"".as_slice(), b"x", b"a longer app-data secret value"] {
         let sealed = service.seal_app_data(payload, TEST_AAD);
 
-        assert_eq!(sealed[0], APP_DATA_SEAL_VERSION, "the version byte leads");
+        let (fingerprint, body) = KeyTag::read(&sealed).expect("a sealed payload is tagged");
         assert_eq!(
-            sealed_fingerprint(&sealed),
+            fingerprint,
             service.seal_fingerprint(),
-            "the header names the key it sealed under",
+            "the tag names the key it sealed under",
         );
         assert_eq!(
-            sealed.len(),
-            APP_DATA_HEADER_SIZE + chunked_encrypted_len(payload.len() as u64) as usize,
-            "the body is exactly the chunked ciphertext, behind the fixed header",
+            body.len(),
+            chunked_encrypted_len(payload.len() as u64) as usize,
+            "the body is exactly the chunked ciphertext, behind the tag",
         );
         assert_eq!(service.open_app_data(&sealed, TEST_AAD).unwrap(), payload);
     }
@@ -454,10 +456,11 @@ fn sealed_app_data_header_carries_the_full_key_digest() {
     let sealed = service.seal_app_data(plaintext, TEST_AAD);
     let expected: [u8; 32] = Sha256::digest(test_key()).into();
 
-    assert_eq!(&sealed[1..33], expected.as_slice());
+    let (fingerprint, body) = KeyTag::read(&sealed).expect("a sealed payload is tagged");
+    assert_eq!(fingerprint, expected);
     assert_eq!(
-        sealed.len(),
-        33 + chunked_encrypted_len(plaintext.len() as u64) as usize
+        body.len(),
+        chunked_encrypted_len(plaintext.len() as u64) as usize
     );
     assert_eq!(service.open_app_data(&sealed, TEST_AAD).unwrap(), plaintext);
 }
@@ -496,7 +499,10 @@ fn open_app_data_rejects_a_flipped_ciphertext_byte() {
 fn open_app_data_rejects_an_unknown_version() {
     let service = create_test_service();
     let mut sealed = service.seal_app_data(b"a version-1 payload", TEST_AAD);
-    sealed[0] = 2;
+    sealed.splice(
+        ..KeyTag::LEN,
+        KeyTag::write_version_for_test(&service.seal_fingerprint(), 2),
+    );
 
     let error = service
         .open_app_data(&sealed, TEST_AAD)
@@ -574,7 +580,6 @@ fn open_app_data_rejects_a_key_the_keyring_lacks() {
 fn sealed_app_data_v1_fixture_opens() {
     let sealed = hex::decode(APP_DATA_V1_FIXTURE_HEX).expect("the fixture is valid hex");
 
-    assert_eq!(sealed[0], APP_DATA_SEAL_VERSION, "a version-1 payload");
     assert_eq!(
         sealed_fingerprint(&sealed),
         EncryptionService::from_key(test_key()).seal_fingerprint(),

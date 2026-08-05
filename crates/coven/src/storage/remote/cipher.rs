@@ -1,19 +1,5 @@
 use super::*;
 
-/// Every encrypted object carries this cleartext prefix naming the key it was
-/// sealed under: magic, then the key's full SHA-256 fingerprint. A read resolves
-/// that exact key from the keyring rather than trusting a generation number a
-/// fork could reuse.
-pub(super) const KEY_TAG_MAGIC: &[u8; 4] = b"CKF1";
-
-pub(super) const KEY_FINGERPRINT_LEN: usize = 32;
-
-/// How many bytes of key tag a sealed object carries before its payload — for a
-/// blob, before the [`SealedBlobHeader`] that names its chunk size. The public
-/// sibling of [`SEALED_BLOB_HEADER_LEN`], so a reader outside this crate can
-/// locate a stored blob's header in the object's bytes.
-pub(crate) const KEY_TAG_LEN: usize = KEY_TAG_MAGIC.len() + KEY_FINGERPRINT_LEN;
-
 /// A sync session's fixed at-rest representation. The mode is selected once at
 /// construction: plaintext has no mutable key state, while encrypted sessions
 /// may merge new key generations without ever becoming plaintext.
@@ -283,7 +269,7 @@ impl CloudCipher {
     /// streaming upload can declare its length up front.
     pub(crate) fn body_len(&self, header: SealedBlobHeader) -> u64 {
         match self {
-            CloudCipher::Encrypted(_) => KEY_TAG_LEN as u64 + header.sealed_len(),
+            CloudCipher::Encrypted(_) => KeyTag::LEN as u64 + header.sealed_len(),
             CloudCipher::Plaintext => header.plaintext_len(),
         }
     }
@@ -359,31 +345,6 @@ pub(super) fn protocol_object_aad_context(
     aad
 }
 
-pub(super) fn key_tag(fingerprint: &[u8; KEY_FINGERPRINT_LEN]) -> Vec<u8> {
-    let mut tag = Vec::with_capacity(KEY_TAG_LEN);
-    tag.extend_from_slice(KEY_TAG_MAGIC);
-    tag.extend_from_slice(fingerprint);
-    tag
-}
-
-pub(super) fn read_key_tag(
-    stored: &[u8],
-) -> Result<([u8; KEY_FINGERPRINT_LEN], &[u8]), EncryptionError> {
-    if stored.len() < KEY_TAG_LEN {
-        return Err(EncryptionError::Decryption(
-            "ciphertext too short for key tag".to_string(),
-        ));
-    }
-    if &stored[..KEY_TAG_MAGIC.len()] != KEY_TAG_MAGIC {
-        return Err(EncryptionError::Decryption(
-            "ciphertext missing key tag".to_string(),
-        ));
-    }
-    let mut fingerprint = [0u8; KEY_FINGERPRINT_LEN];
-    fingerprint.copy_from_slice(&stored[KEY_TAG_MAGIC.len()..KEY_TAG_LEN]);
-    Ok((fingerprint, &stored[KEY_TAG_LEN..]))
-}
-
 /// The key `scope` seals under plus the cleartext key-tag prefix every encrypted
 /// object carries (the master seal key's fingerprint, so a later read resolves
 /// the exact key to open with — for a derived scope it re-derives from that
@@ -397,7 +358,7 @@ impl ScopedBlobSealing {
     fn new(scope: crate::protocol::blob::BlobScope, master: &EncryptionService) -> Self {
         Self {
             encryption: encryption_for_scope(scope, master),
-            key_tag: key_tag(&master.seal_fingerprint()),
+            key_tag: KeyTag::write(&master.seal_fingerprint()),
         }
     }
 
@@ -416,7 +377,7 @@ impl ScopedBlobSealing {
         let mut prefix = self.key_tag;
         prefix.extend_from_slice(&header.to_bytes());
         BlobBody::from_file_with_prefix(
-            KEY_TAG_LEN as u64 + header.sealed_len(),
+            KeyTag::LEN as u64 + header.sealed_len(),
             reader,
             Some(self.encryption.blob_sealer(header, aad_context)),
             prefix,
@@ -427,7 +388,7 @@ impl ScopedBlobSealing {
 pub(super) fn opening_encryption_for_scope(
     scope: crate::protocol::blob::BlobScope,
     master: &EncryptionService,
-    fingerprint: &[u8; KEY_FINGERPRINT_LEN],
+    fingerprint: &[u8; 32],
 ) -> Result<EncryptionService, EncryptionError> {
     match scope {
         crate::protocol::blob::BlobScope::Master => master.service_for_fingerprint(fingerprint),
@@ -443,6 +404,6 @@ pub(super) fn open_scoped_encrypted(
     stored: &[u8],
     aad_context: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-    let (fingerprint, ciphertext) = read_key_tag(stored)?;
+    let (fingerprint, ciphertext) = KeyTag::read(stored)?;
     opening_encryption_for_scope(scope, master, &fingerprint)?.decrypt(ciphertext, aad_context)
 }

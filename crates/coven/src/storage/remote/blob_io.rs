@@ -109,8 +109,8 @@ impl BlobRangeReader {
             let span = header.sealed_span(run.clone());
             let sealed = self
                 .read_stored(
-                    KEY_TAG_LEN as u64 + span.start,
-                    KEY_TAG_LEN as u64 + span.end,
+                    KeyTag::LEN as u64 + span.start,
+                    KeyTag::LEN as u64 + span.end,
                 )
                 .await?;
             let covered = header.plaintext_span(run.clone());
@@ -189,7 +189,7 @@ impl ExactBlobPlaintextReader {
             ) => {
                 let prefix = read_source_exact(
                     &mut source,
-                    KEY_TAG_LEN + SEALED_BLOB_HEADER_LEN,
+                    KeyTag::LEN + SEALED_BLOB_HEADER_LEN,
                     locator.locator_hash(),
                 )
                 .await?;
@@ -289,7 +289,7 @@ impl ExactBlobPlaintextReader {
 pub(crate) fn split_sealed_blob(
     stored: &[u8],
 ) -> Result<(crate::encryption::KeyFingerprint, SealedBlobHeader, &[u8]), EncryptionError> {
-    let (fingerprint, rest) = read_key_tag(stored)?;
+    let (fingerprint, rest) = KeyTag::read(stored)?;
     let header = SealedBlobHeader::parse(rest)
         .map_err(|error| EncryptionError::Decryption(error.to_string()))?;
     Ok((
@@ -336,7 +336,7 @@ pub(super) fn verified_sealed_blob_opener(
             locator.plaintext_size()
         )));
     }
-    check_stored_blob_length(blob, KEY_TAG_LEN as u64 + header.sealed_len())?;
+    check_stored_blob_length(blob, KeyTag::LEN as u64 + header.sealed_len())?;
     Ok(encryption.blob_opener(header, aad_context))
 }
 

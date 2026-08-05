@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 use super::provider_probe::ProviderProbeStorage;
 use super::SyncStorage;
 use crate::encryption::{
-    EncryptionError, EncryptionService, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
+    EncryptionError, EncryptionService, KeyTag, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
 };
 use crate::keys::UserKeypair;
 use crate::protocol::objects::ObjectSlot;
@@ -37,8 +37,6 @@ mod storage_impl;
 pub(crate) use blob_io::split_sealed_blob;
 pub(crate) use blob_io::BlobChunking;
 pub(crate) use blob_io::{BlobPathScheme, BlobRangeReader};
-#[cfg(test)]
-pub(crate) use cipher::KEY_TAG_LEN;
 pub(crate) use cipher::{cloud_aad_context, CloudCipherAccess, CloudCipherState};
 pub(crate) use rotation::{CloudRotationAccess, PendingRotation};
 
