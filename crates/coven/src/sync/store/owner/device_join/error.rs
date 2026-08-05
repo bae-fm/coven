@@ -18,8 +18,6 @@ pub enum DeviceJoinError {
     NonAdjacentJournalTransition,
     #[error("device join journal has a different durable value for this role and attempt")]
     JournalConflict,
-    #[error("pending join payload hash differs from the exact transferred payload")]
-    PendingTransferHashMismatch,
     #[error("device join reserved slots are not pairwise distinct")]
     DuplicateReservedSlot,
     #[error("device join requires an existing Member identity")]
@@ -36,8 +34,6 @@ pub enum DeviceJoinError {
     ProviderAdministratorRequired,
     #[error("device join requires resolved Store membership")]
     MembershipConflict,
-    #[error("device join requires the provider's exact-slot adapter")]
-    ExactSlotStorageRequired,
     #[error("device join attempt cut does not include its provider-access activation")]
     ApprovalActivationMissing,
     #[error("device join activation is not materialized in the installed Store database")]

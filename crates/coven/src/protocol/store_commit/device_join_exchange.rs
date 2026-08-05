@@ -557,7 +557,6 @@ pub enum ProviderChallengeDisposition {
     SamePrincipal,
     NeverCreated,
     Created(ExactObjectRef),
-    AlreadyDeleted(ExactObjectRef),
 }
 
 /// The wire body of a provider administrator's closure of a cancelled attempt.

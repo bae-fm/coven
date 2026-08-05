@@ -48,8 +48,6 @@ pub enum MembershipOpsError {
          missing (it is established at store creation, not on invite)"
     )]
     NoFounderChain,
-    #[error("no membership chain exists")]
-    NoMembershipChain,
     #[error("membership chain has no founder")]
     ChainHasNoFounder,
     #[error("membership has an unresolved semantic conflict: {0:?}")]

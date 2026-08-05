@@ -807,12 +807,6 @@ impl LocalStoreMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldStorePositionReason {
     MissingCommit,
-    MissingPackage,
-    MissingDeviceRegistration {
-        device_id: String,
-        revision: u64,
-        registration_hash: ObjectHash,
-    },
     MissingPredecessor(StoreBatchCommitRef),
     MissingDependency {
         device_id: String,
@@ -846,7 +840,6 @@ pub enum HeldStorePositionReason {
     },
     InvalidSignature,
     WrongSlot(String),
-    ObjectCollision(String),
     ObjectUnreadable {
         key: String,
         detail: String,

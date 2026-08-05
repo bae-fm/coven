@@ -81,7 +81,6 @@ pub enum WriteStatus {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WriteResolution {
     Discarded,
-    Replaced { replacement: WriteId },
     Retracted { witness: WriteRetractionWitness },
 }
 

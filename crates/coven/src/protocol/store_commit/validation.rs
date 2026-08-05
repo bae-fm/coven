@@ -103,11 +103,6 @@ pub enum StoreProtocolError {
     },
     #[error("invalid Store membership resolution authority for resolver {0:?}")]
     InvalidMembershipResolutionAuthority(String),
-    #[error("membership object coordinate {expected:?} differs from signed entry {declared:?}")]
-    MembershipCoordinateMismatch {
-        expected: Box<MembershipCoord>,
-        declared: Box<MembershipCoord>,
-    },
     #[error("Store package length exceeds the platform address space")]
     PackageTooLarge,
     #[error("Store package length is {actual}, expected {expected}")]
