@@ -190,7 +190,7 @@ impl CovenHandle {
             open_guard,
             cloud_storage,
             local_blob_access.clone(),
-            blob_storage,
+            blob_storage.clone(),
             local_blob_transitions,
         );
         let rows = StoreRows::new(
@@ -199,7 +199,7 @@ impl CovenHandle {
             security.clone(),
             sync.clone(),
         );
-        let blobs = StoreBlobs::new(database.clone(), sync.clone());
+        let blobs = StoreBlobs::new(database.clone(), blob_storage, local_blob_access);
         let membership = StoreMembership::new(sync.clone());
         let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
         let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());
@@ -650,7 +650,7 @@ impl CovenHandle {
     /// A `Plain` home whose `cloud_path` is absent, or does not name the blob it
     /// carries, is a surfaced error — see [`CloudSyncStorage::blob_key`].
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        self.blobs.cloud_key(blob)
+        self.sync.blob_cloud_key(blob)
     }
 
     /// Whether every blob in `blobs` is pinned for offline — present in coven's
@@ -685,7 +685,7 @@ impl CovenHandle {
         root_id: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        self.blobs.make_remote(root_table, root_id, pin).await
+        self.sync.make_remote(root_table, root_id, pin).await
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
@@ -697,7 +697,7 @@ impl CovenHandle {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        self.blobs.cancel_make_remote(root_table, root_id).await
+        self.sync.cancel_make_remote(root_table, root_id).await
     }
 
     /// Make `(root_table, root_id)` Local (Remote → Local): bring each blob back to
@@ -714,7 +714,7 @@ impl CovenHandle {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
-        self.blobs
+        self.sync
             .make_local(root_table, root_id, dest, cancel)
             .await
     }
@@ -819,7 +819,7 @@ impl CovenHandle {
     /// (test builds only) connects without a loop, so this call is the only
     /// drain.
     pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
-        self.blobs.drain_uploads().await
+        self.sync.drain_uploads().await
     }
 
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
@@ -881,8 +881,8 @@ impl CovenHandle {
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        self.joining
-            .drive(invite, policy, access_administrator, timing)
+        self.sync
+            .drive_device_join(&invite.bundle, policy, access_administrator, timing)
             .await
     }
 
@@ -902,7 +902,9 @@ impl CovenHandle {
         invite: &crate::DeviceJoinInvite,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        self.joining.cancel_invite(invite, timing).await
+        self.sync
+            .cancel_device_join_transport(&invite.bundle, timing)
+            .await
     }
 
     /// Give up on an invited join and publish the abandonment, so a joining
@@ -914,21 +916,23 @@ impl CovenHandle {
         &self,
         invite: &crate::DeviceJoinInvite,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        self.joining.abandon_invite(invite).await
+        self.sync
+            .abandon_device_join_transport(&invite.bundle)
+            .await
     }
 
     pub async fn begin_device_join(
         &self,
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        self.joining.begin(member_pubkey).await
+        self.sync.begin_device_join(member_pubkey).await
     }
 
     pub async fn abandon_device_join(
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        self.joining.abandon(offer).await
+        self.sync.abandon_device_join(offer).await
     }
 
     pub async fn authorize_device_provider_access(
@@ -936,8 +940,8 @@ impl CovenHandle {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        self.joining
-            .authorize_provider_access(request, access_administrator)
+        self.sync
+            .authorize_device_provider_access(request, access_administrator)
             .await
     }
 
@@ -945,42 +949,46 @@ impl CovenHandle {
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        self.joining.accept_registration(request).await
+        self.sync.accept_device_registration(request).await
     }
 
     pub async fn publish_device_provider_challenge(
         &self,
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        self.joining.publish_provider_challenge(bootstrap).await
+        self.sync.publish_device_provider_challenge(bootstrap).await
     }
 
     pub async fn complete_device_provider_admission(
         &self,
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        self.joining.complete_provider_admission(readiness).await
+        self.sync
+            .complete_device_provider_admission(readiness)
+            .await
     }
 
     pub async fn finalize_device_join(
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        self.joining.finalize(completion).await
+        self.sync.finalize_device_join(completion).await
     }
 
     pub async fn cancel_device_join(
         &self,
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        self.joining.cancel(attempt).await
+        self.sync.cancel_device_join(attempt).await
     }
 
     pub async fn close_device_provider_admission(
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        self.joining.close_provider_admission(cancellation).await
+        self.sync
+            .close_device_provider_admission(cancellation)
+            .await
     }
 
     pub async fn revoke_device_provider_admission_writes(
@@ -988,8 +996,8 @@ impl CovenHandle {
         cancellation: crate::DeviceJoinCancellation,
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        self.joining
-            .revoke_provider_writes(cancellation, revocation_executor)
+        self.sync
+            .revoke_device_provider_admission_writes(cancellation, revocation_executor)
             .await
     }
 
@@ -998,8 +1006,8 @@ impl CovenHandle {
         cancellation: crate::DeviceJoinCancellation,
         revocation_executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        self.joining
-            .revoke_joiner_writes(cancellation, revocation_executor)
+        self.sync
+            .revoke_joining_device_writes(cancellation, revocation_executor)
             .await
     }
 
@@ -1007,14 +1015,16 @@ impl CovenHandle {
         &self,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        self.joining.activate_cleanup(receipt).await
+        self.sync.activate_device_join_cleanup(receipt).await
     }
 
     pub async fn complete_cancelled_device_join(
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        self.joining.complete_cancelled(activation).await
+        self.sync
+            .complete_owner_device_join_cleanup(activation)
+            .await
     }
 
     pub async fn device_join_status(

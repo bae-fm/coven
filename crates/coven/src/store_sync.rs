@@ -24,7 +24,6 @@ use crate::store_security::StoreSecurity;
 use crate::sync::cycle::SyncComponents;
 use crate::sync::store::blob::LocalStoreBlobAccess;
 use crate::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
-use crate::sync::BlobCacheError;
 use crate::sync::Store;
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;

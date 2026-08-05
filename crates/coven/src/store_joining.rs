@@ -3,6 +3,10 @@ use crate::protocol::membership::MemberRole;
 use crate::store_membership::StoreMembership;
 use crate::store_sync::{StoreSync, SyncError};
 
+/// The two parts of device joining that are not a plain sync command: minting
+/// an invite, which pairs a membership invite with the attempt's transport
+/// bundle, and reading the join journal the database holds. Every other step is
+/// a command on [`StoreSync`], which its caller issues there.
 #[derive(Clone)]
 pub(crate) struct StoreJoining {
     database: StoreDatabase,
@@ -34,143 +38,6 @@ impl StoreJoining {
         let invite_code = self.membership.invite(&member_pubkey, None, role).await?;
         let bundle = self.sync.begin_device_join_bundle(&member_pubkey).await?;
         Ok(crate::joining::DeviceJoinInvite::new(invite_code, bundle))
-    }
-
-    pub(crate) async fn drive(
-        &self,
-        invite: &crate::joining::DeviceJoinInvite,
-        policy: crate::DeviceJoinApprovalPolicy<'_>,
-        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
-        timing: crate::DeviceJoinTransportTiming,
-    ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        self.sync
-            .drive_device_join(&invite.bundle, policy, access_administrator, timing)
-            .await
-    }
-
-    pub(crate) async fn cancel_invite(
-        &self,
-        invite: &crate::joining::DeviceJoinInvite,
-        timing: crate::DeviceJoinTransportTiming,
-    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        self.sync
-            .cancel_device_join_transport(&invite.bundle, timing)
-            .await
-    }
-
-    pub(crate) async fn abandon_invite(
-        &self,
-        invite: &crate::joining::DeviceJoinInvite,
-    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        self.sync
-            .abandon_device_join_transport(&invite.bundle)
-            .await
-    }
-
-    pub(crate) async fn begin(
-        &self,
-        member_pubkey: &str,
-    ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        self.sync.begin_device_join(member_pubkey).await
-    }
-
-    pub(crate) async fn abandon(
-        &self,
-        offer: crate::DeviceJoinOffer,
-    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        self.sync.abandon_device_join(offer).await
-    }
-
-    pub(crate) async fn authorize_provider_access(
-        &self,
-        request: crate::DeviceProviderAccessRequest,
-        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
-    ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        self.sync
-            .authorize_device_provider_access(request, access_administrator)
-            .await
-    }
-
-    pub(crate) async fn accept_registration(
-        &self,
-        request: crate::DeviceRegistrationRequest,
-    ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        self.sync.accept_device_registration(request).await
-    }
-
-    pub(crate) async fn publish_provider_challenge(
-        &self,
-        bootstrap: crate::ProvisionalDeviceBootstrap,
-    ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        self.sync.publish_device_provider_challenge(bootstrap).await
-    }
-
-    pub(crate) async fn complete_provider_admission(
-        &self,
-        readiness: crate::DeviceJoinReadiness,
-    ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        self.sync
-            .complete_device_provider_admission(readiness)
-            .await
-    }
-
-    pub(crate) async fn finalize(
-        &self,
-        completion: crate::DeviceProviderAdmissionCompletion,
-    ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        self.sync.finalize_device_join(completion).await
-    }
-
-    pub(crate) async fn cancel(
-        &self,
-        attempt: crate::DeviceJoinAttemptRef,
-    ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        self.sync.cancel_device_join(attempt).await
-    }
-
-    pub(crate) async fn close_provider_admission(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        self.sync
-            .close_device_provider_admission(cancellation)
-            .await
-    }
-
-    pub(crate) async fn revoke_provider_writes(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        self.sync
-            .revoke_device_provider_admission_writes(cancellation, executor)
-            .await
-    }
-
-    pub(crate) async fn revoke_joiner_writes(
-        &self,
-        cancellation: crate::DeviceJoinCancellation,
-        executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
-    ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        self.sync
-            .revoke_joining_device_writes(cancellation, executor)
-            .await
-    }
-
-    pub(crate) async fn activate_cleanup(
-        &self,
-        receipt: crate::DeviceJoinCleanupReceipt,
-    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        self.sync.activate_device_join_cleanup(receipt).await
-    }
-
-    pub(crate) async fn complete_cancelled(
-        &self,
-        activation: crate::DeviceJoinCleanupActivation,
-    ) -> Result<(), SyncError> {
-        self.sync
-            .complete_owner_device_join_cleanup(activation)
-            .await
     }
 
     pub(crate) async fn status(

@@ -5,7 +5,7 @@ use crate::database::StoreDatabase;
 use crate::protocol::blob::RowBlobRef;
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::store_cloud_storage::StoreCloudStorage;
-use crate::store_sync::{ConfigProvider, StoreSync};
+use crate::store_sync::ConfigProvider;
 use crate::sync::store::blob::{
     CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
 };
@@ -270,46 +270,62 @@ impl ResolvedBlobAccess {
     }
 }
 
+/// A blob's on-device life: reading it wherever its locality puts it, keeping
+/// it offline, and the durable queue and cache bookkeeping the database holds.
+///
+/// None of that involves sync. A blob read resolves against the blob access the
+/// connection installs, not the connection; only a *transition* between
+/// localities needs a sync loop, and those live on [`StoreSync`] where their
+/// caller reaches them directly.
 #[derive(Clone)]
 pub(crate) struct StoreBlobs {
     database: StoreDatabase,
-    sync: StoreSync,
+    blobs: StoreBlobAccess,
+    local: LocalStoreBlobAccess,
 }
 
 impl StoreBlobs {
-    pub(crate) fn new(database: StoreDatabase, sync: StoreSync) -> Self {
-        Self { database, sync }
+    pub(crate) fn new(
+        database: StoreDatabase,
+        blobs: StoreBlobAccess,
+        local: LocalStoreBlobAccess,
+    ) -> Self {
+        Self {
+            database,
+            blobs,
+            local,
+        }
     }
 
     pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        self.sync.read_blob(blob).await
+        self.blobs.read(blob).await
     }
 
     pub(crate) async fn materialize(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.sync.materialize_blob(blob).await
+        self.blobs.materialize(blob).await
     }
 
     pub(crate) async fn open_stream(
         &self,
         blob: &RowBlobRef,
     ) -> Result<BlobStream, BlobCacheError> {
-        self.sync.open_blob_stream(blob).await
+        self.blobs.open_stream(blob).await
     }
 
     pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.sync.pin_blobs(blobs).await
+        self.blobs.pin(blobs).await
     }
 
     pub(crate) async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.sync.unpin_blobs(blobs).await
+        self.local.unpin(blobs).await
     }
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        self.sync.all_blobs_pinned(blobs).await
+        self.blobs.all_pinned(blobs).await
     }
 
     pub(crate) async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.sync.evict_blob(blob).await
+        self.local.evict(blob).await
     }
 
     pub(crate) async fn row_blob_ref(
@@ -318,42 +334,6 @@ impl StoreBlobs {
         row_id: &str,
     ) -> Result<RowBlobRef, crate::database::DbError> {
         self.database.row_blob_ref(table, row_id).await
-    }
-
-    pub(crate) fn cloud_key(
-        &self,
-        blob: &crate::protocol::blob::BlobRef,
-    ) -> Result<String, crate::protocol::objects::StorageError> {
-        self.sync.blob_cloud_key(blob)
-    }
-
-    pub(crate) async fn make_remote(
-        &self,
-        root_table: &str,
-        root_id: &str,
-        pin: bool,
-    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
-        self.sync.make_remote(root_table, root_id, pin).await
-    }
-
-    pub(crate) async fn cancel_make_remote(
-        &self,
-        root_table: &str,
-        root_id: &str,
-    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
-        self.sync.cancel_make_remote(root_table, root_id).await
-    }
-
-    pub(crate) async fn make_local(
-        &self,
-        root_table: &str,
-        root_id: &str,
-        dest: &std::collections::HashMap<String, std::path::PathBuf>,
-        cancel: &tokio::sync::watch::Receiver<bool>,
-    ) -> Result<(), crate::blob::transition::MakeLocalError> {
-        self.sync
-            .make_local(root_table, root_id, dest, cancel)
-            .await
     }
 
     pub(crate) async fn queued_uploads(
@@ -394,12 +374,6 @@ impl StoreBlobs {
         self.database
             .make_remote_progress(root_table, root_id)
             .await
-    }
-
-    pub(crate) async fn drain_uploads(
-        &self,
-    ) -> Result<crate::protocol::blob::DrainOutcome, crate::store_sync::SyncError> {
-        self.sync.drain_uploads().await
     }
 
     pub(crate) async fn cache_budget(

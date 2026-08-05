@@ -1,55 +1,6 @@
 use super::*;
 
 impl StoreSync {
-    pub(crate) async fn read_blob(
-        &self,
-        reference: &crate::protocol::blob::RowBlobRef,
-    ) -> Result<Vec<u8>, BlobCacheError> {
-        self.blob_access.read(reference).await
-    }
-
-    pub(crate) async fn materialize_blob(
-        &self,
-        reference: &crate::protocol::blob::RowBlobRef,
-    ) -> Result<(), BlobCacheError> {
-        self.blob_access.materialize(reference).await
-    }
-
-    pub(crate) async fn open_blob_stream(
-        &self,
-        reference: &crate::protocol::blob::RowBlobRef,
-    ) -> Result<crate::sync::BlobStream, BlobCacheError> {
-        self.blob_access.open_stream(reference).await
-    }
-
-    pub(crate) async fn pin_blobs(
-        &self,
-        references: &[crate::protocol::blob::RowBlobRef],
-    ) -> Result<(), BlobCacheError> {
-        self.blob_access.pin(references).await
-    }
-
-    pub(crate) async fn unpin_blobs(
-        &self,
-        references: &[crate::protocol::blob::RowBlobRef],
-    ) -> Result<(), BlobCacheError> {
-        self.local_blob_access.unpin(references).await
-    }
-
-    pub(crate) async fn all_blobs_pinned(
-        &self,
-        references: &[crate::protocol::blob::RowBlobRef],
-    ) -> Result<bool, BlobCacheError> {
-        self.local_blob_access.all_pinned(references).await
-    }
-
-    pub(crate) async fn evict_blob(
-        &self,
-        reference: &crate::protocol::blob::RowBlobRef,
-    ) -> Result<(), BlobCacheError> {
-        self.local_blob_access.evict(reference).await
-    }
-
     pub(crate) fn host_write_blob_staging(
         &self,
     ) -> Option<crate::sync::store::HostWriteBlobStaging> {
