@@ -275,10 +275,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(execution.result)
     }
 
-    pub(crate) async fn should_stop_before_pull(&self) -> Result<bool, SyncCycleFailure> {
-        Ok(false)
-    }
-
     pub(super) fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
         if self.membership.is_owner_now(author_pubkey) {
             Ok(())

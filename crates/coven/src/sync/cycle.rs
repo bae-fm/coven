@@ -182,11 +182,6 @@ struct PreparedCycle {
     rotation_pending: Option<RotationPending>,
 }
 
-enum CycleBeforePull {
-    Continue(PreparedCycle),
-    Complete(SyncCycleResult),
-}
-
 struct CompletedPullCycle {
     store_pull: super::store::StorePullResult,
     local_blob_cleanup_pending: bool,
@@ -213,10 +208,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         self.authorization
             .resume_operations(self.routing_encryption)
             .await?;
-        let prepared = match Box::pin(self.prepare_before_pull()).await? {
-            CycleBeforePull::Continue(prepared) => prepared,
-            CycleBeforePull::Complete(result) => return Ok(result),
-        };
+        let prepared = Box::pin(self.prepare_before_pull()).await?;
         let store_pull = self.authorization.pull(self.routing_encryption).await?;
         let completed = Box::pin(self.complete_after_pull(prepared, store_pull)).await?;
         if completed.rotation_pending.is_none() {
@@ -259,7 +251,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         })
     }
 
-    async fn prepare_before_pull(&mut self) -> Result<CycleBeforePull, SyncCycleFailure> {
+    async fn prepare_before_pull(&mut self) -> Result<PreparedCycle, SyncCycleFailure> {
         // Refresh authorization/decryption state BEFORE anything this cycle pushes,
         // judges, or decrypts. Membership and the rotatable store key are
         // per-cycle preconditions, not init-time bootstraps:
@@ -366,25 +358,11 @@ impl AuthorizedSyncCycle<'_, '_> {
             }
         }
 
-        if self.authorization.should_stop_before_pull().await? {
-            return Ok(CycleBeforePull::Complete(SyncCycleResult {
-                changesets_applied: 0,
-                held_positions: Vec::new(),
-                device_activity: Vec::new(),
-                sync_time,
-                asset_downloads_failed: false,
-                local_blob_cleanup_pending: false,
-                row_changes: Vec::new(),
-                resume_drain_promptly: false,
-                rotation_pending,
-            }));
-        }
-
-        Ok(CycleBeforePull::Continue(PreparedCycle {
+        Ok(PreparedCycle {
             sync_time,
             resume_drain_promptly,
             rotation_pending,
-        }))
+        })
     }
 
     async fn complete_after_pull(
