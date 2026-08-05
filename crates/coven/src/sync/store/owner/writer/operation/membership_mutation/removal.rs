@@ -452,6 +452,11 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 persistence.mark_remote_object_uploaded(expected).await?;
             }
         }
+        let prepared_wraps = plan
+            .wraps
+            .iter()
+            .map(|wrap| wrap.prepared.clone())
+            .collect::<Vec<_>>();
         match &plan.publication {
             RevokeMembershipPublication::Direct { .. } => {
                 operation
@@ -460,14 +465,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             }
             RevokeMembershipPublication::StoreActivated { transition, .. } => {
                 operation
-                    .publish_membership_authority(
-                        transition,
-                        &plan
-                            .wraps
-                            .iter()
-                            .map(|wrap| wrap.prepared.clone())
-                            .collect::<Vec<_>>(),
-                    )
+                    .publish_membership_authority(transition, &prepared_wraps)
                     .await?;
             }
         }
@@ -513,17 +511,19 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 mut candidate,
                 publication,
             } => {
-                let initial_remotes = candidate
-                    .merge_membership_activation_remote_objects(
-                        &transition,
-                        &publication,
-                        &plan
-                            .wraps
-                            .iter()
-                            .map(|wrap| wrap.prepared.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+                // Every publication attempt re-derives this from the candidate it
+                // is about to publish, and a reprepare changes the candidate.
+                let candidate_remotes =
+                    |candidate: &crate::protocol::prepared_commit::PreparedStoreOperationCommit| {
+                        candidate
+                            .merge_membership_activation_remote_objects(
+                                &transition,
+                                &publication,
+                                &prepared_wraps,
+                            )
+                            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+                    };
+                let initial_remotes = candidate_remotes(&candidate)?;
                 operation
                     .upload_commit(&candidate)
                     .await
@@ -536,17 +536,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .await?;
                 loop {
                     let previous_candidate = candidate.as_ref().clone();
-                    let current_remotes = candidate
-                        .merge_membership_activation_remote_objects(
-                            &transition,
-                            &publication,
-                            &plan
-                                .wraps
-                                .iter()
-                                .map(|wrap| wrap.prepared.clone())
-                                .collect::<Vec<_>>(),
-                        )
-                        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+                    let current_remotes = candidate_remotes(&candidate)?;
                     let outcome = operation
                     .publish_membership_activation(
                         &transition,
@@ -589,33 +579,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                                     .to_string(),
                             ));
                         }
-                        let previous_remotes = previous_candidate
-                            .merge_membership_activation_remote_objects(
-                                &transition,
-                                &publication,
-                                &plan
-                                    .wraps
-                                    .iter()
-                                    .map(|wrap| wrap.prepared.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|error| {
-                                InviteError::InvalidDurableMutation(error.to_string())
-                            })?;
+                        let previous_remotes = candidate_remotes(&previous_candidate)?;
                         candidate = replacement;
-                        let replacement_remotes = candidate
-                            .merge_membership_activation_remote_objects(
-                                &transition,
-                                &publication,
-                                &plan
-                                    .wraps
-                                    .iter()
-                                    .map(|wrap| wrap.prepared.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|error| {
-                                InviteError::InvalidDurableMutation(error.to_string())
-                            })?;
+                        let replacement_remotes = candidate_remotes(&candidate)?;
                         let previous_head = previous_candidate.head_ref();
                         let replacement_head = candidate.head_ref();
                         plan.publication = RevokeMembershipPublication::StoreActivated {
