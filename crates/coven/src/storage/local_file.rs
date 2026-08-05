@@ -7,7 +7,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
-pub(super) struct PlaintextReader(
+pub(crate) struct PlaintextReader(
     Box<dyn crate::local_file::PlaintextChunkReader<Error = PlaintextChunkError>>,
 );
 
@@ -28,7 +28,7 @@ impl PlaintextReader {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum PlaintextChunkError {
+pub(crate) enum PlaintextChunkError {
     #[error(transparent)]
     Remote(#[from] crate::protocol::objects::StorageError),
     #[error("invalid remote content: {0}")]
