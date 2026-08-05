@@ -104,8 +104,16 @@ impl<'a> StoreCommitVerifier<'a> {
                 key: reference.object.slot().logical_key().to_string(),
                 source: Box::new(source),
             })?;
+        /// Who signed the commit, read out of the envelope before the whole
+        /// commit is parsed: the author's registration is what the full parse
+        /// then verifies the signature against, so it has to be known first.
         #[derive(serde::Deserialize)]
         struct StoreCommitAuthorProjection {
+            body: StoreCommitAuthorBody,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct StoreCommitAuthorBody {
             author_registration: StoreDeviceRegistrationRef,
         }
 
@@ -115,7 +123,7 @@ impl<'a> StoreCommitVerifier<'a> {
             &reference.object,
             Box::new(move || {
                 serde_json::from_slice::<StoreCommitAuthorProjection>(&parse_bytes)
-                    .map(|projection| projection.author_registration)
+                    .map(|projection| projection.body.author_registration)
                     .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
             }),
         )
