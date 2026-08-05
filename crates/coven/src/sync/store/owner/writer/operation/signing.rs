@@ -1,0 +1,139 @@
+use super::*;
+
+impl<'storage> AuthorizedWriterOperation<'storage> {
+    pub(crate) fn sign_owner_promotion_acceptance(
+        &self,
+        request: crate::protocol::store_commit::OwnerPromotionRequest,
+        activation: crate::protocol::store_commit::OwnerPromotionRequestActivation,
+        anchors: crate::protocol::store_commit::OwnerPromotionAnchors,
+    ) -> Result<
+        crate::protocol::store_commit::OwnerPromotionAcceptance,
+        crate::protocol::store_commit::StoreProtocolError,
+    > {
+        self.writer
+            .sign_owner_promotion_acceptance(request, activation, anchors)
+    }
+
+    pub(crate) fn seal_local_keyring(
+        &self,
+        store_id: &str,
+        recipient: &str,
+        recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: &crate::encryption::EncryptionService,
+    ) -> Result<
+        crate::protocol::wrapped_store_key::WrappedStoreKey,
+        crate::encryption::EncryptionError,
+    > {
+        self.writer
+            .seal_keyring(store_id, recipient, recipient_key, keyring)
+    }
+
+    pub(crate) fn sign_finalize_owner_promotion(
+        &self,
+        membership: &crate::protocol::membership::MembershipChain,
+        root: &crate::protocol::store_commit::StoreRootRef,
+        candidate: &crate::protocol::store_commit::StoreDeviceRegistration,
+        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+        wrapped_key: crate::protocol::wrapped_store_key::WrappedStoreKeyRef,
+        timestamp: String,
+    ) -> Result<
+        crate::protocol::membership::MembershipEntry,
+        crate::protocol::membership::MembershipError,
+    > {
+        self.writer.sign_finalize_owner_promotion(
+            membership,
+            root,
+            candidate,
+            acceptance,
+            wrapped_key,
+            timestamp,
+        )
+    }
+
+    pub(super) async fn prepare_replacement_wrapped_key(
+        &self,
+        store_id: &str,
+        recipient: &str,
+        recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: &crate::encryption::EncryptionService,
+    ) -> Result<PreparedWrappedStoreKey, InviteError> {
+        let wrapped = self
+            .writer
+            .seal_keyring(store_id, recipient, recipient_key, keyring)
+            .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?;
+        self.prepare_wrapped_key(recipient, wrapped)
+            .await
+            .map_err(InviteError::from)
+    }
+
+    pub(super) fn sign_owner_barrier_removal(
+        &self,
+        chain: &MembershipChain,
+        stream_id: membership::AuthorStreamId,
+        revokee_pubkey: String,
+        wrapped_keys: Vec<WrappedStoreKeyRef>,
+        device_state: crate::protocol::store_commit::StoreDeviceStateRef,
+        timestamp: String,
+    ) -> Result<MembershipEntry, InviteError> {
+        self.writer
+            .sign_owner_barrier_removal(
+                chain,
+                stream_id,
+                revokee_pubkey,
+                wrapped_keys,
+                device_state,
+                timestamp,
+            )
+            .map_err(InviteError::from)
+    }
+
+    pub(super) fn sign_direct_removal(
+        &self,
+        chain: &MembershipChain,
+        stream_id: membership::AuthorStreamId,
+        revokee_pubkey: String,
+        wrapped_keys: Vec<WrappedStoreKeyRef>,
+        timestamp: String,
+    ) -> Result<MembershipEntry, InviteError> {
+        self.writer
+            .sign_direct_removal(chain, stream_id, revokee_pubkey, wrapped_keys, timestamp)
+            .map_err(InviteError::from)
+    }
+
+    pub(crate) fn attach_merge_membership_proof(
+        &self,
+        candidate: &mut operations::PreparedStoreOperationCommit,
+        publication: &PreparedMembershipPublication,
+        resolution: Option<&membership::StoreMembershipConflictResolution>,
+    ) -> Result<(), StoreError> {
+        self.writer.attach_merge_membership_proof(
+            candidate,
+            publication,
+            resolution,
+            |context, slot, prefix, bytes| {
+                self.storage
+                    .prepare_protocol_object(context, slot, prefix, bytes)
+                    .map_err(StoreObjectError::from)
+            },
+        )
+    }
+
+    pub(super) fn attach_membership_proof(
+        &self,
+        candidate: &mut operations::PreparedStoreOperationCommit,
+        publication: &PreparedMembershipPublication,
+    ) -> Result<(), InviteError> {
+        self.attach_merge_membership_proof(candidate, publication, None)
+            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+    }
+
+    pub(super) async fn set_membership_access(
+        &self,
+        state: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, InviteError> {
+        self.storage
+            .set_member_access(state)
+            .await
+            .map_err(InviteError::from)
+    }
+}
