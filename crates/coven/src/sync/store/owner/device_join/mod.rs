@@ -5,7 +5,6 @@
 //! boundary. Durable role journals store one closed progress value and advance
 //! only from the exact adjacent predecessor.
 
-use super::pull::StorePullError;
 use super::verified_history::MergeHistoryVerifier;
 use super::{
     prepare_registration_object, AuthorizedStoreHistory, AuthorizedWriterOperation,

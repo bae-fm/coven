@@ -261,8 +261,8 @@ impl<'storage> JoiningStore<'storage> {
         let root = self.history.root().clone();
         let (attempt, owner) = self
             .history
-            .device_join()
-            .load_verified_attempt_and_owner(&attempt_ref)
+            .merge_history()
+            .load_verified_device_join_attempt_and_owner(&attempt_ref)
             .await?;
         self.history
             .materialize_device_join_activation(
@@ -273,8 +273,8 @@ impl<'storage> JoiningStore<'storage> {
             .await?;
         let outcome = self
             .history
-            .device_join()
-            .load_outcome(&activation.outcome, &owner.value)
+            .merge_history()
+            .load_device_join_outcome(&activation.outcome, &owner.value)
             .await?
             .value;
         let crate::protocol::store_commit::DeviceJoinOutcomeBody::Activated { readiness } =
@@ -337,20 +337,20 @@ impl<'storage> JoiningStore<'storage> {
         }
         let attempt_owner = self
             .history
-            .device_join()
+            .merge_history()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
         let administrator = self
             .history
-            .device_join()
+            .merge_history()
             .load_registration(&offer.provider_admin.administrator)
             .await?
             .value;
         let (verified_attempt, bootstrap_plan) = Box::pin(
             self.history
-                .device_join()
-                .verify_attempt_and_prepare_bootstrap(
+                .merge_history()
+                .verify_attempt_and_prepare_device_join_bootstrap(
                     &bootstrap.bootstrap.publication_authorization.attempt,
                     &attempt_owner,
                     &bootstrap
@@ -500,7 +500,7 @@ impl<'storage> JoiningStore<'storage> {
 
 impl<'storage> PendingDeviceJoinAuthority<'storage> {
     pub(crate) async fn open(
-        mut observation: PendingDeviceJoinObservation<'storage>,
+        observation: PendingDeviceJoinObservation<'storage>,
         identity: &UserKeypair,
         offer: DeviceJoinOffer,
     ) -> Result<Self, DeviceJoinError> {
@@ -620,29 +620,17 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     }
 
     async fn verify_offer(
-        &mut self,
+        &self,
         identity: &UserKeypair,
         offer: &DeviceJoinOffer,
     ) -> Result<(), DeviceJoinError> {
-        if crate::keys::public_key_hex(identity) != offer.member_pubkey
-            || self.storage.provider_binding().await?.store != offer.provider
-            || self
-                .history_verifier
-                .verified_root()
-                .protocol()
-                .descriptor
-                .provider
-                != offer.provider
-            || self.history_verifier.verified_root().reference() != &offer.store_root
-        {
-            return Err(DeviceJoinError::OfferMismatch);
-        }
-        let owner = self
-            .history_verifier
-            .load_registration(&offer.owner_registration)
-            .await?
-            .value;
-        offer.verify(&owner).map_err(DeviceJoinError::from)
+        super::history::verify_offer(
+            self.storage.as_ref(),
+            &self.history_verifier,
+            identity,
+            offer,
+        )
+        .await
     }
 
     pub(crate) fn authorize_closure(

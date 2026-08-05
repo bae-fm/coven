@@ -90,8 +90,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         })
     }
 
-    fn history(&mut self) -> history::DeviceJoinHistory<'_, 'storage> {
-        self.writer.device_join_history()
+    fn merge_history(&mut self) -> &mut MergeHistoryVerifier<'storage> {
+        self.writer.merge_history()
     }
 
     fn verify_device_admission_approval(
@@ -328,12 +328,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let administrator = self
-            .history()
+            .merge_history()
             .load_registration(&provider_admin.administrator)
             .await?
             .value;
         self.verify_device_admission_approval(&request.approval, &administrator)?;
-        self.history()
+        self.merge_history()
             .verify_accepted_provider_access_activation(
                 &request.approval.access_grant,
                 &provider_admin,
@@ -369,7 +369,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await;
         let cut = plan.predecessor_cut()?;
         if !self
-            .history()
+            .merge_history()
             .history_cut_covers(&cut, &request.approval.access_grant.activation)
             .await?
         {
@@ -480,7 +480,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let attempt = local_writer
-            .load_verified_device_join_attempt(&mut self.history(), &attempt_ref)
+            .load_verified_device_join_attempt(self.writer.merge_history(), &attempt_ref)
             .await?
             .value;
         if !self
@@ -544,7 +544,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let verified_outcome = local_writer
-            .load_own_device_join_outcome(&self.history(), &outcome_ref)
+            .load_own_device_join_outcome(self.writer.merge_history(), &outcome_ref)
             .await?;
         if verified_outcome.value != outcome {
             return Err(DeviceJoinError::AttemptMismatch);
@@ -622,17 +622,17 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let attempt = local_writer
-            .load_verified_device_join_attempt(&mut self.history(), &attempt_ref)
+            .load_verified_device_join_attempt(self.writer.merge_history(), &attempt_ref)
             .await?
             .value;
         let registration = self
-            .history()
+            .merge_history()
             .load_registration(&completion.readiness.proof.registration)
             .await?
             .value;
         let ack = self
-            .history()
-            .load_ack(&completion.readiness.proof.initial_ack, &registration)
+            .merge_history()
+            .load_store_ack(&completion.readiness.proof.initial_ack, &registration)
             .await?
             .value;
         completion.readiness.proof.verify(
@@ -656,7 +656,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     return Err(DeviceJoinError::ProviderAdministratorRequired);
                 }
                 let administrator = self
-                    .history()
+                    .merge_history()
                     .load_registration(&provider_admin.administrator)
                     .await?
                     .value;
@@ -866,10 +866,13 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if durable_cancellation != &cancellation {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let (attempt, owner) = self.history().load_attempt_and_owner(&attempt_ref).await?;
+        let (attempt, owner) = self
+            .merge_history()
+            .load_device_join_attempt_and_owner(&attempt_ref)
+            .await?;
         let outcome = self
-            .history()
-            .load_outcome(&cancellation.outcome, &owner.value)
+            .merge_history()
+            .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(

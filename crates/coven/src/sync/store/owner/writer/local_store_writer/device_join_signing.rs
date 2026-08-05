@@ -118,14 +118,14 @@ impl LocalStoreWriter {
 
     pub(crate) async fn load_verified_device_join_attempt(
         &self,
-        history: &mut crate::sync::store::owner::device_join::history::DeviceJoinHistory<'_, '_>,
+        history: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
         reference: &crate::protocol::store_commit::DeviceJoinAttemptRef,
     ) -> Result<
         crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::DeviceJoinAttempt>,
         crate::sync::store::owner::pull::StorePullError,
     > {
         history
-            .load_verified_attempt(reference, self.registration.value())
+            .load_verified_device_join_attempt(reference, self.registration.value())
             .await
     }
 
@@ -150,14 +150,14 @@ impl LocalStoreWriter {
 
     pub(crate) async fn load_own_device_join_outcome(
         &self,
-        history: &crate::sync::store::owner::device_join::history::DeviceJoinHistory<'_, '_>,
+        history: &crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
         reference: &crate::protocol::store_commit::DeviceJoinOutcomeRef,
     ) -> Result<
         crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::DeviceJoinOutcome>,
         crate::protocol::objects::StoreObjectError,
     > {
         history
-            .load_outcome(reference, self.registration.value())
+            .load_device_join_outcome(reference, self.registration.value())
             .await
     }
 

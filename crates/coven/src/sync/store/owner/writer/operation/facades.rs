@@ -439,11 +439,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.circles()
     }
 
-    pub(crate) fn device_join_history(
+    pub(crate) fn merge_history(
         &mut self,
-    ) -> crate::sync::store::owner::writer::device_join::history::DeviceJoinHistory<'_, 'storage>
-    {
-        self.history.device_join()
+    ) -> &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage> {
+        self.history.merge_history()
     }
 
     pub(crate) fn device_exclusion_history(

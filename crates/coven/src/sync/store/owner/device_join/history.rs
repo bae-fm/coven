@@ -34,21 +34,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         identity: &UserKeypair,
         offer: &DeviceJoinOffer,
     ) -> Result<(), DeviceJoinError> {
-        if crate::keys::public_key_hex(identity) != offer.member_pubkey
-            || self.storage.provider_binding().await?.store != offer.provider
-            || self.root().protocol().descriptor.provider != offer.provider
-            || self.root().reference() != &offer.store_root
-        {
-            return Err(DeviceJoinError::OfferMismatch);
-        }
-        let owner = self
-            .history
-            .load_registration(&offer.owner_registration)
-            .await?
-            .value;
-        offer
-            .verify(&owner)
-            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        verify_offer(self.storage, self.history, identity, offer).await
     }
 
     pub(super) async fn validate_store_owner(&self) -> Result<(), crate::database::DbError> {
@@ -86,129 +72,6 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     ) -> Result<(), DeviceJoinError> {
         pending
             .complete_on(&self.database, current, activated)
-            .await
-    }
-
-    pub(super) async fn load_registration(
-        &self,
-        reference: &StoreDeviceRegistrationRef,
-    ) -> Result<
-        crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        crate::protocol::objects::StoreObjectError,
-    > {
-        self.history.load_registration(reference).await
-    }
-
-    pub(super) async fn load_commit(
-        &mut self,
-        reference: &StoreBatchCommitRef,
-    ) -> Result<crate::protocol::store_commit::VerifiedStoreBatchCommit, super::StorePullError>
-    {
-        self.history.load_ref(reference).await
-    }
-
-    pub(super) async fn verify_accepted_provider_access_activation(
-        &mut self,
-        access: &ActivatedStoreMemberProviderAccessGrant,
-        provider_admin: &ProviderAdminGrantRecord,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<(), super::StorePullError> {
-        self.history
-            .verify_accepted_provider_access_activation(access, provider_admin, administrator)
-            .await
-    }
-
-    pub(super) async fn history_cut_covers(
-        &mut self,
-        cut: &crate::protocol::store_commit::StoreHistoryCut,
-        target: &StoreBatchCommitRef,
-    ) -> Result<bool, super::StorePullError> {
-        self.history.history_cut_covers(cut, target).await
-    }
-
-    pub(crate) async fn load_verified_attempt(
-        &mut self,
-        reference: &DeviceJoinAttemptRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>, super::StorePullError>
-    {
-        self.history
-            .load_verified_device_join_attempt(reference, owner)
-            .await
-    }
-
-    pub(crate) async fn load_outcome(
-        &self,
-        reference: &DeviceJoinOutcomeRef,
-        owner: &StoreDeviceRegistration,
-    ) -> Result<
-        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::DeviceJoinOutcome>,
-        crate::protocol::objects::StoreObjectError,
-    > {
-        self.history
-            .load_device_join_outcome(reference, owner)
-            .await
-    }
-
-    pub(super) async fn load_ack(
-        &self,
-        reference: &crate::protocol::store_commit::StoreAckRef,
-        registration: &StoreDeviceRegistration,
-    ) -> Result<
-        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::StoreAck>,
-        crate::protocol::objects::StoreObjectError,
-    > {
-        self.history.load_store_ack(reference, registration).await
-    }
-
-    pub(super) async fn load_attempt_and_owner(
-        &self,
-        reference: &DeviceJoinAttemptRef,
-    ) -> Result<
-        (
-            crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-            crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        ),
-        crate::protocol::objects::StoreObjectError,
-    > {
-        self.history
-            .load_device_join_attempt_and_owner(reference)
-            .await
-    }
-
-    pub(super) async fn load_verified_attempt_and_owner(
-        &mut self,
-        reference: &DeviceJoinAttemptRef,
-    ) -> Result<
-        (
-            crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-            crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        ),
-        super::StorePullError,
-    > {
-        self.history
-            .load_verified_device_join_attempt_and_owner(reference)
-            .await
-    }
-
-    pub(super) async fn verify_attempt_and_prepare_bootstrap(
-        &mut self,
-        attempt: &DeviceJoinAttemptRef,
-        attempt_owner: &StoreDeviceRegistration,
-        attempt_activation: &StoreBatchCommitRef,
-    ) -> Result<
-        (
-            crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
-            super::DeviceJoinBootstrapPlan,
-        ),
-        super::StorePullError,
-    > {
-        self.history
-            .verify_attempt_and_prepare_device_join_bootstrap(
-                attempt,
-                attempt_owner,
-                attempt_activation,
-            )
             .await
     }
 
@@ -457,4 +320,29 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 
 fn registration_database_error(error: crate::database::DbError) -> StoreRegistrationError {
     StoreRegistrationError::Database(error.to_string())
+}
+
+/// An offer is this device's offer only when it names this member, the provider
+/// principal this device is bound to, the provider the Store's own root
+/// declares, and that exact root — and carries the owner's signature over all
+/// of it. Both the pre-Store observation and the joining Store check it here.
+pub(super) async fn verify_offer(
+    storage: &dyn crate::storage::SyncStorage,
+    history: &super::MergeHistoryVerifier<'_>,
+    identity: &UserKeypair,
+    offer: &DeviceJoinOffer,
+) -> Result<(), DeviceJoinError> {
+    let root = history.verified_root();
+    if crate::keys::public_key_hex(identity) != offer.member_pubkey
+        || storage.provider_binding().await?.store != offer.provider
+        || root.protocol().descriptor.provider != offer.provider
+        || root.reference() != &offer.store_root
+    {
+        return Err(DeviceJoinError::OfferMismatch);
+    }
+    let owner = history
+        .load_registration(&offer.owner_registration)
+        .await?
+        .value;
+    offer.verify(&owner).map_err(DeviceJoinError::from)
 }

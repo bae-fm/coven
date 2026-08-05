@@ -3,8 +3,8 @@ use super::{provider_error, require_cancelled_outcome, *};
 impl<'operation, 'storage>
     AuthorizedJoin<'operation, 'storage, ProviderAdministratorJoinAuthority>
 {
-    fn history(&mut self) -> history::DeviceJoinHistory<'_, 'storage> {
-        self.writer.device_join_history()
+    fn merge_history(&mut self) -> &mut MergeHistoryVerifier<'storage> {
+        self.writer.merge_history()
     }
 
     fn verify_device_admission_approval(
@@ -63,8 +63,8 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let attempt = self
-            .history()
-            .load_verified_attempt(&authorization.attempt, attempt_owner)
+            .merge_history()
+            .load_verified_device_join_attempt(&authorization.attempt, attempt_owner)
             .await?;
         if attempt.value.store_root != context.root
             || attempt.value.attempt_id != context.attempt_id
@@ -73,8 +73,8 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let activation = self
-            .history()
-            .load_commit(&authorization.attempt_activation)
+            .merge_history()
+            .load_ref(&authorization.attempt_activation)
             .await?;
         if activation.author() != attempt_owner
             || !activation
@@ -114,7 +114,7 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
-            .history()
+            .merge_history()
             .load_registration(&request.offer.owner_registration)
             .await?
             .value;
@@ -297,7 +297,7 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
-            .history()
+            .merge_history()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
@@ -516,10 +516,13 @@ impl<'operation, 'storage>
             ) => return Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation.clone())),
             _ => {}
         }
-        let (attempt, owner) = self.history().load_attempt_and_owner(&attempt_ref).await?;
+        let (attempt, owner) = self
+            .merge_history()
+            .load_device_join_attempt_and_owner(&attempt_ref)
+            .await?;
         let outcome = self
-            .history()
-            .load_outcome(&cancellation.outcome, &owner.value)
+            .merge_history()
+            .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(
@@ -629,10 +632,13 @@ impl<'operation, 'storage>
     ) -> Result<DeviceJoinProducerWriteRevocation, DeviceJoinError> {
         require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
-        let (attempt, owner) = self.history().load_attempt_and_owner(&attempt_ref).await?;
+        let (attempt, owner) = self
+            .merge_history()
+            .load_device_join_attempt_and_owner(&attempt_ref)
+            .await?;
         let outcome = self
-            .history()
-            .load_outcome(&cancellation.outcome, &owner.value)
+            .merge_history()
+            .load_device_join_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(

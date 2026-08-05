@@ -1,6 +1,13 @@
 use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
+    /// The verifier every role-scoped view reads through. Roles whose loads
+    /// need nothing but the verifier's own vocabulary use it directly instead
+    /// of renaming its operations behind another view.
+    pub(crate) fn merge_history(&mut self) -> &mut MergeHistoryVerifier<'storage> {
+        &mut self.history_verifier
+    }
+
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, crate::database::DbError> {
         crate::database::LocalBlobCleanup::new(&self.database, self.store_dir)
             .drain()
