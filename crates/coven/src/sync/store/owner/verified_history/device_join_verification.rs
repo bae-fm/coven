@@ -67,7 +67,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .to_string(),
             ));
         }
-        Ok(loaded.receipt.joiner_terminal)
+        Ok(loaded.receipt.joiner_terminal.clone())
     }
 
     pub(super) async fn validate_commit_join_abandonments(

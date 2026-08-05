@@ -5099,7 +5099,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .await
         .expect("load exact founder authority");
     let mut invalid_approval = request.approval.as_ref().clone();
-    invalid_approval.signature.push('0');
+    invalid_approval.corrupt_signature_for_test();
     let attempt = owner_authority
         .sign_device_join_attempt_for_test(
             offer.store_root.clone(),

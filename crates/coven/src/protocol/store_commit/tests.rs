@@ -1943,7 +1943,7 @@ fn a_cleanup_receipt_with_unsorted_deleted_slots_is_refused() {
     // The same receipt, re-encoded with its slot list out of canonical order and
     // signed over those exact bytes. Only one encoding of a receipt may verify.
     let mut reordered = receipt.clone();
-    reordered.deleted_slots.reverse();
+    reordered.body_mut_for_test().deleted_slots.reverse();
     reordered.resign_for_test(&owner_device_signer);
 
     assert!(
@@ -1987,7 +1987,7 @@ fn a_write_revocation_with_unsorted_protected_slots_is_refused() {
     assert!(revocation.verify(&fixture.registration).is_ok());
 
     let mut reordered = revocation.clone();
-    reordered.protected_slots.reverse();
+    reordered.body_mut_for_test().protected_slots.reverse();
     reordered.resign_for_test(&owner_device_signer);
 
     assert!(

@@ -10,7 +10,7 @@ use crate::protocol::provider::{
     DeviceJoinChallengePublicationAuthorization, ProviderAccessWithdrawal, ProviderAdminGrantId,
     ProviderAdminGrantRecord, StoreMemberProviderAccessGrantRef,
 };
-use crate::protocol::store_commit::domain_json;
+use crate::protocol::store_commit::{Signed, SignedBody};
 use crate::protocol::{ProviderDeviceBinding, StoreProviderBinding};
 
 use super::device_join::{
@@ -57,10 +57,10 @@ const JOINER_CLOSURE_DOMAIN: &[u8] = b"coven.device-join-joiner-closure.v1\0";
 const WRITE_REVOCATION_DOMAIN: &[u8] = b"coven.device-join-write-revocation.v1\0";
 const CLEANUP_RECEIPT_DOMAIN: &[u8] = b"coven.device-join-cleanup-receipt.v1\0";
 
+/// The wire body of a device-join offer. Every field here is signed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceJoinOffer {
-    pub version: u32,
+pub struct DeviceJoinOfferBody {
     pub attempt_id: DeviceJoinAttemptId,
     pub member_pubkey: String,
     pub store_root: StoreRootRef,
@@ -70,7 +70,37 @@ pub struct DeviceJoinOffer {
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
     pub provider_admin: Box<ProviderAdminGrantRecord>,
-    pub signature: String,
+}
+
+impl SignedBody for DeviceJoinOfferBody {
+    const DOMAIN: &'static [u8] = OFFER_DOMAIN;
+}
+
+pub type DeviceJoinOffer = Signed<DeviceJoinOfferBody>;
+
+impl DeviceJoinOfferBody {
+    fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
+        if self.member_pubkey.is_empty()
+            || self.provider_admin.administrator != self.owner_registration
+                && self.provider_admin.administrator.device_id == self.owner_registration.device_id
+            || self.attempt_slot == self.outcome_slot
+        {
+            return Err(DeviceJoinExchangeError::OfferMismatch);
+        }
+        self.provider.validate()?;
+        self.provider_admin
+            .provider
+            .validate_for(&self.provider)
+            .map_err(DeviceJoinExchangeError::Storage)?;
+        if let crate::protocol::provider::ProviderAdminGrantOrigin::Founder { root } =
+            &self.provider_admin.created_at
+        {
+            if root != &self.store_root {
+                return Err(DeviceJoinExchangeError::OfferMismatch);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl DeviceJoinOffer {
@@ -92,8 +122,7 @@ impl DeviceJoinOffer {
         if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
-        let mut value = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = DeviceJoinOfferBody {
             attempt_id,
             member_pubkey,
             store_root,
@@ -103,89 +132,36 @@ impl DeviceJoinOffer {
             owner_registration,
             owner_grant,
             provider_admin: Box::new(provider_admin),
-            signature: String::new(),
         };
-        value.validate_shape()?;
-        value.signature = sign(owner_device_signer, OFFER_DOMAIN, &value.signed_fields());
-        Ok(value)
+        body.validate_shape()?;
+        Ok(Signed::sign(body, owner_device_signer))
     }
 
     pub fn verify(&self, owner: &StoreDeviceRegistration) -> Result<(), DeviceJoinExchangeError> {
-        self.validate_shape()?;
+        self.body().validate_shape()?;
         self.owner_registration.verify_registration(owner)?;
-        verify_signature(
-            &owner.device_signing_pubkey,
-            &self.signature,
-            OFFER_DOMAIN,
-            &self.signed_fields(),
-        )
+        self.verify_by(&owner.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 
     pub(crate) fn offer_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&domain_json(OFFER_DOMAIN, &self.signed_fields()))
-    }
-
-    fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
-        if self.version != STORE_PROTOCOL_VERSION
-            || self.member_pubkey.is_empty()
-            || self.provider_admin.administrator != self.owner_registration
-                && self.provider_admin.administrator.device_id == self.owner_registration.device_id
-            || self.attempt_slot == self.outcome_slot
-        {
-            return Err(DeviceJoinExchangeError::OfferMismatch);
-        }
-        self.provider.validate()?;
-        self.provider_admin
-            .provider
-            .validate_for(&self.provider)
-            .map_err(DeviceJoinExchangeError::Storage)?;
-        if let crate::protocol::provider::ProviderAdminGrantOrigin::Founder { root } =
-            &self.provider_admin.created_at
-        {
-            if root != &self.store_root {
-                return Err(DeviceJoinExchangeError::OfferMismatch);
-            }
-        }
-        Ok(())
-    }
-
-    fn signed_fields(&self) -> DeviceJoinOfferFields<'_> {
-        DeviceJoinOfferFields {
-            version: self.version,
-            attempt_id: self.attempt_id,
-            member_pubkey: &self.member_pubkey,
-            store_root: &self.store_root,
-            provider: &self.provider,
-            attempt_slot: &self.attempt_slot,
-            outcome_slot: &self.outcome_slot,
-            owner_registration: &self.owner_registration,
-            owner_grant: &self.owner_grant,
-            provider_admin: &self.provider_admin,
-        }
+        self.hash()
     }
 }
 
-#[derive(Serialize)]
-struct DeviceJoinOfferFields<'a> {
-    version: u32,
-    attempt_id: DeviceJoinAttemptId,
-    member_pubkey: &'a str,
-    store_root: &'a StoreRootRef,
-    provider: &'a StoreProviderBinding,
-    attempt_slot: &'a ObjectSlot,
-    outcome_slot: &'a ObjectSlot,
-    owner_registration: &'a StoreDeviceRegistrationRef,
-    owner_grant: &'a MembershipGrantId,
-    provider_admin: &'a ProviderAdminGrantRecord,
-}
-
+/// The wire body of a joining device's provider-access request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceProviderAccessRequest {
+pub struct DeviceProviderAccessRequestBody {
     pub offer: Box<DeviceJoinOffer>,
     pub peer_provider: ProviderDeviceBinding,
-    pub signature: String,
 }
+
+impl SignedBody for DeviceProviderAccessRequestBody {
+    const DOMAIN: &'static [u8] = ACCESS_REQUEST_DOMAIN;
+}
+
+pub type DeviceProviderAccessRequest = Signed<DeviceProviderAccessRequestBody>;
 
 impl DeviceProviderAccessRequest {
     pub fn signed(
@@ -197,32 +173,24 @@ impl DeviceProviderAccessRequest {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
         peer_provider.validate_for(&offer.provider)?;
-        let mut request = Self {
-            offer: Box::new(offer),
-            peer_provider,
-            signature: String::new(),
-        };
-        request.signature = sign(
+        Ok(Signed::sign(
+            DeviceProviderAccessRequestBody {
+                offer: Box::new(offer),
+                peer_provider,
+            },
             member_signer,
-            ACCESS_REQUEST_DOMAIN,
-            &request.signed_fields(),
-        );
-        Ok(request)
+        ))
     }
 
     pub fn verify(&self, owner: &StoreDeviceRegistration) -> Result<(), DeviceJoinExchangeError> {
         self.offer.verify(owner)?;
         self.peer_provider.validate_for(&self.offer.provider)?;
-        verify_signature(
-            &self.offer.member_pubkey,
-            &self.signature,
-            ACCESS_REQUEST_DOMAIN,
-            &self.signed_fields(),
-        )
+        self.verify_by(&self.offer.member_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 
     pub fn request_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&domain_json(ACCESS_REQUEST_DOMAIN, &self.signed_fields()))
+        self.hash()
     }
 
     pub(crate) fn cross_challenge_context(
@@ -239,10 +207,6 @@ impl DeviceProviderAccessRequest {
             peer_binding: self.peer_provider.clone(),
         }
     }
-
-    fn signed_fields(&self) -> (&DeviceJoinOffer, &ProviderDeviceBinding) {
-        (&self.offer, &self.peer_provider)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,63 +216,22 @@ pub enum DeviceProviderAdmissionChallenge {
     CrossPrincipal(CrossPrincipalProbeChallenge),
 }
 
+/// The wire body of a provider administrator's admission approval.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceProviderAdmissionApproval {
+pub struct DeviceProviderAdmissionApprovalBody {
     pub request: Box<DeviceProviderAccessRequest>,
     pub access_grant: ActivatedStoreMemberProviderAccessGrant,
     pub admission: DeviceProviderAdmissionChallenge,
-    pub signature: String,
 }
 
-impl DeviceProviderAdmissionApproval {
-    pub(crate) fn signed(
-        request: DeviceProviderAccessRequest,
-        access_grant: ActivatedStoreMemberProviderAccessGrant,
-        admission: DeviceProviderAdmissionChallenge,
-        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
-        administrator: &StoreDeviceRegistration,
-        administrator_device_signer: &UserKeypair,
-    ) -> Result<Self, DeviceJoinExchangeError> {
-        if keys::public_key_hex(administrator_device_signer) != administrator.device_signing_pubkey
-        {
-            return Err(DeviceJoinExchangeError::InvalidSignature);
-        }
-        let mut value = Self {
-            request: Box::new(request),
-            access_grant,
-            admission,
-            signature: String::new(),
-        };
-        value.validate_shape(store_root, administrator)?;
-        value.sign_with(administrator_device_signer);
-        Ok(value)
-    }
+impl SignedBody for DeviceProviderAdmissionApprovalBody {
+    const DOMAIN: &'static [u8] = APPROVAL_DOMAIN;
+}
 
-    fn sign_with(&mut self, administrator_device_signer: &UserKeypair) {
-        self.signature = sign(
-            administrator_device_signer,
-            APPROVAL_DOMAIN,
-            &self.signed_fields(),
-        );
-    }
+pub type DeviceProviderAdmissionApproval = Signed<DeviceProviderAdmissionApprovalBody>;
 
-    pub(crate) fn verify(
-        &self,
-        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
-        owner: &StoreDeviceRegistration,
-        administrator: &StoreDeviceRegistration,
-    ) -> Result<(), DeviceJoinExchangeError> {
-        self.request.verify(owner)?;
-        self.validate_shape(store_root, administrator)?;
-        verify_signature(
-            &administrator.device_signing_pubkey,
-            &self.signature,
-            APPROVAL_DOMAIN,
-            &self.signed_fields(),
-        )
-    }
-
+impl DeviceProviderAdmissionApprovalBody {
     fn validate_shape(
         &self,
         store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
@@ -343,15 +266,40 @@ impl DeviceProviderAdmissionApproval {
         }
         Ok(())
     }
+}
 
-    fn signed_fields(
+impl DeviceProviderAdmissionApproval {
+    pub(crate) fn signed(
+        request: DeviceProviderAccessRequest,
+        access_grant: ActivatedStoreMemberProviderAccessGrant,
+        admission: DeviceProviderAdmissionChallenge,
+        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        administrator: &StoreDeviceRegistration,
+        administrator_device_signer: &UserKeypair,
+    ) -> Result<Self, DeviceJoinExchangeError> {
+        if keys::public_key_hex(administrator_device_signer) != administrator.device_signing_pubkey
+        {
+            return Err(DeviceJoinExchangeError::InvalidSignature);
+        }
+        let body = DeviceProviderAdmissionApprovalBody {
+            request: Box::new(request),
+            access_grant,
+            admission,
+        };
+        body.validate_shape(store_root, administrator)?;
+        Ok(Signed::sign(body, administrator_device_signer))
+    }
+
+    pub(crate) fn verify(
         &self,
-    ) -> (
-        &DeviceProviderAccessRequest,
-        &ActivatedStoreMemberProviderAccessGrant,
-        &DeviceProviderAdmissionChallenge,
-    ) {
-        (&self.request, &self.access_grant, &self.admission)
+        store_root: &crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        owner: &StoreDeviceRegistration,
+        administrator: &StoreDeviceRegistration,
+    ) -> Result<(), DeviceJoinExchangeError> {
+        self.request.verify(owner)?;
+        self.body().validate_shape(store_root, administrator)?;
+        self.verify_by(&administrator.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 
     #[cfg(test)]
@@ -361,14 +309,14 @@ impl DeviceProviderAdmissionApproval {
         admission: DeviceProviderAdmissionChallenge,
         administrator_device_signer: &UserKeypair,
     ) -> Self {
-        let mut value = Self {
-            request: Box::new(request),
-            access_grant,
-            admission,
-            signature: String::new(),
-        };
-        value.sign_with(administrator_device_signer);
-        value
+        Signed::sign(
+            DeviceProviderAdmissionApprovalBody {
+                request: Box::new(request),
+                access_grant,
+                admission,
+            },
+            administrator_device_signer,
+        )
     }
 }
 
@@ -379,53 +327,23 @@ pub enum DeviceProviderResponseReservation {
     CrossPrincipal { response_slot: ObjectSlot },
 }
 
+/// The wire body of a joining device's registration request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceRegistrationRequest {
+pub struct DeviceRegistrationRequestBody {
     pub approval: Box<DeviceProviderAdmissionApproval>,
     pub expected_registration: StoreDeviceRegistration,
     pub registration_slot: ObjectSlot,
     pub response: DeviceProviderResponseReservation,
-    pub signature: String,
 }
 
-impl DeviceRegistrationRequest {
-    pub fn signed(
-        approval: DeviceProviderAdmissionApproval,
-        expected_registration: StoreDeviceRegistration,
-        registration_slot: ObjectSlot,
-        response: DeviceProviderResponseReservation,
-        member_signer: &UserKeypair,
-    ) -> Result<Self, DeviceJoinExchangeError> {
-        if keys::public_key_hex(member_signer) != approval.request.offer.member_pubkey {
-            return Err(DeviceJoinExchangeError::InvalidSignature);
-        }
-        let mut value = Self {
-            approval: Box::new(approval),
-            expected_registration,
-            registration_slot,
-            response,
-            signature: String::new(),
-        };
-        value.validate_shape()?;
-        value.signature = sign(
-            member_signer,
-            REGISTRATION_REQUEST_DOMAIN,
-            &value.signed_fields(),
-        );
-        Ok(value)
-    }
+impl SignedBody for DeviceRegistrationRequestBody {
+    const DOMAIN: &'static [u8] = REGISTRATION_REQUEST_DOMAIN;
+}
 
-    pub fn verify(&self) -> Result<(), DeviceJoinExchangeError> {
-        self.validate_shape()?;
-        verify_signature(
-            &self.approval.request.offer.member_pubkey,
-            &self.signature,
-            REGISTRATION_REQUEST_DOMAIN,
-            &self.signed_fields(),
-        )
-    }
+pub type DeviceRegistrationRequest = Signed<DeviceRegistrationRequestBody>;
 
+impl DeviceRegistrationRequestBody {
     fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
         let offer = &self.approval.request.offer;
         if self.expected_registration.store_root != offer.store_root
@@ -484,21 +402,34 @@ impl DeviceRegistrationRequest {
         require_distinct_slots(&slots)?;
         Ok(())
     }
+}
 
-    fn signed_fields(
-        &self,
-    ) -> (
-        &DeviceProviderAdmissionApproval,
-        &StoreDeviceRegistration,
-        &ObjectSlot,
-        &DeviceProviderResponseReservation,
-    ) {
-        (
-            &self.approval,
-            &self.expected_registration,
-            &self.registration_slot,
-            &self.response,
-        )
+impl DeviceRegistrationRequest {
+    pub fn signed(
+        approval: DeviceProviderAdmissionApproval,
+        expected_registration: StoreDeviceRegistration,
+        registration_slot: ObjectSlot,
+        response: DeviceProviderResponseReservation,
+        member_signer: &UserKeypair,
+    ) -> Result<Self, DeviceJoinExchangeError> {
+        if keys::public_key_hex(member_signer) != approval.request.offer.member_pubkey {
+            return Err(DeviceJoinExchangeError::InvalidSignature);
+        }
+        let body = DeviceRegistrationRequestBody {
+            approval: Box::new(approval),
+            expected_registration,
+            registration_slot,
+            response,
+        };
+        body.validate_shape()?;
+        Ok(Signed::sign(body, member_signer))
+    }
+
+    pub fn verify(&self) -> Result<(), DeviceJoinExchangeError> {
+        self.body().validate_shape()?;
+        let member_pubkey = self.approval.request.offer.member_pubkey.clone();
+        self.verify_by(&member_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 
@@ -567,18 +498,23 @@ pub struct DeviceJoinCancellation {
     pub outcome_activation: StoreBatchCommitRef,
 }
 
+/// The wire body of an owner's abandonment of a join attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeviceJoinAbandonmentObject {
-    pub version: u32,
+pub(crate) struct DeviceJoinAbandonmentBody {
     pub store_root_hash: ObjectHash,
     pub offer_hash: ObjectHash,
     pub attempt_id: DeviceJoinAttemptId,
     pub attempt_slot: ObjectSlot,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub signature: String,
 }
+
+impl SignedBody for DeviceJoinAbandonmentBody {
+    const DOMAIN: &'static [u8] = ABANDONMENT_DOMAIN;
+}
+
+pub(crate) type DeviceJoinAbandonmentObject = Signed<DeviceJoinAbandonmentBody>;
 
 impl DeviceJoinAbandonmentObject {
     pub(crate) fn signed(
@@ -590,52 +526,21 @@ impl DeviceJoinAbandonmentObject {
         if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
-        let mut value = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: offer.store_root.store_root_hash,
-            offer_hash: offer.offer_hash(),
-            attempt_id: offer.attempt_id,
-            attempt_slot: offer.attempt_slot.clone(),
-            owner_registration: offer.owner_registration.clone(),
-            owner_grant: offer.owner_grant.clone(),
-            signature: String::new(),
-        };
-        value.signature = sign(
+        Ok(Signed::sign(
+            DeviceJoinAbandonmentBody {
+                store_root_hash: offer.store_root.store_root_hash,
+                offer_hash: offer.offer_hash(),
+                attempt_id: offer.attempt_id,
+                attempt_slot: offer.attempt_slot.clone(),
+                owner_registration: offer.owner_registration.clone(),
+                owner_grant: offer.owner_grant.clone(),
+            },
             owner_device_signer,
-            ABANDONMENT_DOMAIN,
-            &value.signed_fields(),
-        );
-        Ok(value)
+        ))
     }
 
     pub(crate) fn abandonment_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&domain_json(ABANDONMENT_DOMAIN, &self.signed_fields()))
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("device join abandonment serialization cannot fail")
-    }
-
-    fn signed_fields(
-        &self,
-    ) -> (
-        u32,
-        ObjectHash,
-        ObjectHash,
-        DeviceJoinAttemptId,
-        &ObjectSlot,
-        &StoreDeviceRegistrationRef,
-        &MembershipGrantId,
-    ) {
-        (
-            self.version,
-            self.store_root_hash,
-            self.offer_hash,
-            self.attempt_id,
-            &self.attempt_slot,
-            &self.owner_registration,
-            &self.owner_grant,
-        )
+        self.hash()
     }
 }
 
@@ -655,15 +560,21 @@ pub enum ProviderChallengeDisposition {
     AlreadyDeleted(ExactObjectRef),
 }
 
+/// The wire body of a provider administrator's closure of a cancelled attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderAdminJoinClosure {
+pub struct ProviderAdminJoinClosureBody {
     pub cancellation: DeviceJoinOutcomeRef,
     pub administrator_registration: StoreDeviceRegistrationRef,
     pub challenge: ProviderChallengeDisposition,
     pub prior_state_hash: ObjectHash,
-    pub signature: String,
 }
+
+impl SignedBody for ProviderAdminJoinClosureBody {
+    const DOMAIN: &'static [u8] = PROVIDER_CLOSURE_DOMAIN;
+}
+
+pub type ProviderAdminJoinClosure = Signed<ProviderAdminJoinClosureBody>;
 
 impl ProviderAdminJoinClosure {
     pub fn signed(
@@ -679,15 +590,15 @@ impl ProviderAdminJoinClosure {
         if keys::public_key_hex(signer) != administrator.device_signing_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
-        let mut value = Self {
-            cancellation,
-            administrator_registration,
-            challenge,
-            prior_state_hash,
-            signature: String::new(),
-        };
-        value.signature = sign(signer, PROVIDER_CLOSURE_DOMAIN, &value.signed_fields());
-        Ok(value)
+        Ok(Signed::sign(
+            ProviderAdminJoinClosureBody {
+                cancellation,
+                administrator_registration,
+                challenge,
+                prior_state_hash,
+            },
+            signer,
+        ))
     }
 
     pub fn verify(
@@ -697,28 +608,8 @@ impl ProviderAdminJoinClosure {
         require_cancelled_outcome(&self.cancellation)?;
         self.administrator_registration
             .verify_registration(administrator)?;
-        verify_signature(
-            &administrator.device_signing_pubkey,
-            &self.signature,
-            PROVIDER_CLOSURE_DOMAIN,
-            &self.signed_fields(),
-        )
-    }
-
-    fn signed_fields(
-        &self,
-    ) -> (
-        &DeviceJoinOutcomeRef,
-        &StoreDeviceRegistrationRef,
-        &ProviderChallengeDisposition,
-        ObjectHash,
-    ) {
-        (
-            &self.cancellation,
-            &self.administrator_registration,
-            &self.challenge,
-            self.prior_state_hash,
-        )
+        self.verify_by(&administrator.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 
@@ -745,17 +636,23 @@ pub enum JoinerResponseDisposition {
     Slot(SlotDisposition),
 }
 
+/// The wire body of a joining device's closure of a cancelled attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JoinerJoinClosure {
+pub struct JoinerJoinClosureBody {
     pub cancellation: DeviceJoinOutcomeRef,
     pub expected_registration: StoreDeviceRegistration,
     pub registration: SlotDisposition,
     pub initial_ack: SlotDisposition,
     pub response: JoinerResponseDisposition,
     pub prior_state_hash: ObjectHash,
-    pub signature: String,
 }
+
+impl SignedBody for JoinerJoinClosureBody {
+    const DOMAIN: &'static [u8] = JOINER_CLOSURE_DOMAIN;
+}
+
+pub type JoinerJoinClosure = Signed<JoinerJoinClosureBody>;
 
 impl JoinerJoinClosure {
     #[allow(clippy::too_many_arguments)]
@@ -772,47 +669,24 @@ impl JoinerJoinClosure {
         if keys::public_key_hex(signer) != expected_registration.device_signing_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
-        let mut value = Self {
-            cancellation,
-            expected_registration,
-            registration,
-            initial_ack,
-            response,
-            prior_state_hash,
-            signature: String::new(),
-        };
-        value.signature = sign(signer, JOINER_CLOSURE_DOMAIN, &value.signed_fields());
-        Ok(value)
+        Ok(Signed::sign(
+            JoinerJoinClosureBody {
+                cancellation,
+                expected_registration,
+                registration,
+                initial_ack,
+                response,
+                prior_state_hash,
+            },
+            signer,
+        ))
     }
 
     pub fn verify(&self) -> Result<(), DeviceJoinExchangeError> {
         require_cancelled_outcome(&self.cancellation)?;
-        verify_signature(
-            &self.expected_registration.device_signing_pubkey,
-            &self.signature,
-            JOINER_CLOSURE_DOMAIN,
-            &self.signed_fields(),
-        )
-    }
-
-    fn signed_fields(
-        &self,
-    ) -> (
-        &DeviceJoinOutcomeRef,
-        &StoreDeviceRegistration,
-        &SlotDisposition,
-        &SlotDisposition,
-        &JoinerResponseDisposition,
-        ObjectHash,
-    ) {
-        (
-            &self.cancellation,
-            &self.expected_registration,
-            &self.registration,
-            &self.initial_ack,
-            &self.response,
-            self.prior_state_hash,
-        )
+        let pubkey = self.expected_registration.device_signing_pubkey.clone();
+        self.verify_by(&pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 
@@ -830,9 +704,10 @@ pub enum ProviderWriteAuthorityRef {
     MemberAccess(StoreMemberProviderAccessGrantRef),
 }
 
+/// The wire body of a write-authority revocation against a join producer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceJoinProducerWriteRevocation {
+pub struct DeviceJoinProducerWriteRevocationBody {
     pub cancellation: DeviceJoinOutcomeRef,
     pub producer: DeviceJoinProducer,
     pub authority: ProviderWriteAuthorityRef,
@@ -840,10 +715,16 @@ pub struct DeviceJoinProducerWriteRevocation {
     pub withdrawal: ProviderAccessWithdrawal,
     pub executor_grant: ProviderAdminGrantId,
     pub executor: StoreDeviceRegistrationRef,
-    pub signature: String,
 }
 
+impl SignedBody for DeviceJoinProducerWriteRevocationBody {
+    const DOMAIN: &'static [u8] = WRITE_REVOCATION_DOMAIN;
+}
+
+pub type DeviceJoinProducerWriteRevocation = Signed<DeviceJoinProducerWriteRevocationBody>;
+
 impl DeviceJoinProducerWriteRevocation {
+    #[allow(clippy::too_many_arguments)]
     pub fn signed(
         cancellation: DeviceJoinOutcomeRef,
         producer: DeviceJoinProducer,
@@ -862,22 +743,18 @@ impl DeviceJoinProducerWriteRevocation {
         }
         protected_slots.sort();
         validate_protected_slots(&protected_slots)?;
-        let mut value = Self {
-            cancellation,
-            producer,
-            authority,
-            protected_slots,
-            withdrawal,
-            executor_grant,
-            executor,
-            signature: String::new(),
-        };
-        value.signature = sign(
+        Ok(Signed::sign(
+            DeviceJoinProducerWriteRevocationBody {
+                cancellation,
+                producer,
+                authority,
+                protected_slots,
+                withdrawal,
+                executor_grant,
+                executor,
+            },
             executor_signer,
-            WRITE_REVOCATION_DOMAIN,
-            &value.signed_fields(),
-        );
-        Ok(value)
+        ))
     }
 
     pub fn verify(
@@ -887,42 +764,8 @@ impl DeviceJoinProducerWriteRevocation {
         require_cancelled_outcome(&self.cancellation)?;
         validate_protected_slots(&self.protected_slots)?;
         self.executor.verify_registration(executor)?;
-        verify_signature(
-            &executor.device_signing_pubkey,
-            &self.signature,
-            WRITE_REVOCATION_DOMAIN,
-            &self.signed_fields(),
-        )
-    }
-
-    /// Re-sign over exactly the bytes this value currently holds. See the sibling
-    /// hook on the cleanup receipt.
-    #[cfg(test)]
-    pub(crate) fn resign_for_test(&mut self, signer: &UserKeypair) {
-        self.signature = String::new();
-        self.signature = sign(signer, WRITE_REVOCATION_DOMAIN, &self.signed_fields());
-    }
-
-    fn signed_fields(
-        &self,
-    ) -> (
-        &DeviceJoinOutcomeRef,
-        DeviceJoinProducer,
-        &ProviderWriteAuthorityRef,
-        &[ObjectSlot],
-        &ProviderAccessWithdrawal,
-        &ProviderAdminGrantId,
-        &StoreDeviceRegistrationRef,
-    ) {
-        (
-            &self.cancellation,
-            self.producer,
-            &self.authority,
-            &self.protected_slots,
-            &self.withdrawal,
-            &self.executor_grant,
-            &self.executor,
-        )
+        self.verify_by(&executor.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 
@@ -942,10 +785,11 @@ pub enum JoinerJoinTerminal {
     WriteRevoked(DeviceJoinProducerWriteRevocation),
 }
 
+/// The wire body of a cleanup receipt: what the unwind deleted, and under whose
+/// authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeviceJoinCleanupReceiptObject {
-    pub version: u32,
+pub(crate) struct DeviceJoinCleanupReceiptBody {
     pub store_root_hash: ObjectHash,
     pub cancellation: DeviceJoinOutcomeRef,
     pub administrator_terminal: ProviderAdminJoinTerminal,
@@ -954,7 +798,29 @@ pub(crate) struct DeviceJoinCleanupReceiptObject {
     pub membership: StoreMembershipStateRef,
     pub provider_admin_grant: ProviderAdminGrantId,
     pub executor: StoreDeviceRegistrationRef,
-    pub signature: String,
+}
+
+impl SignedBody for DeviceJoinCleanupReceiptBody {
+    const DOMAIN: &'static [u8] = CLEANUP_RECEIPT_DOMAIN;
+}
+
+pub(crate) type DeviceJoinCleanupReceiptObject = Signed<DeviceJoinCleanupReceiptBody>;
+
+impl DeviceJoinCleanupReceiptBody {
+    /// A pure check: the receipt is in canonical form or it is not this receipt.
+    /// Sorting here instead would accept a second encoding of one receipt, since
+    /// the signature covers the order the bytes actually carry.
+    fn validate_shape(&self, attempt: &DeviceJoinAttempt) -> Result<(), DeviceJoinExchangeError> {
+        validate_terminals(
+            &self.cancellation,
+            &self.administrator_terminal,
+            &self.joiner_terminal,
+        )?;
+        if self.deleted_slots != canonical_cleanup_slots(attempt)? {
+            return Err(DeviceJoinExchangeError::CleanupMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl DeviceJoinCleanupReceiptObject {
@@ -983,8 +849,7 @@ impl DeviceJoinCleanupReceiptObject {
         }
         let mut deleted_slots = deleted_slots;
         deleted_slots.sort();
-        let mut value = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = DeviceJoinCleanupReceiptBody {
             store_root_hash: attempt.store_root.store_root_hash,
             cancellation,
             administrator_terminal,
@@ -993,19 +858,13 @@ impl DeviceJoinCleanupReceiptObject {
             membership,
             provider_admin_grant,
             executor,
-            signature: String::new(),
         };
-        value.validate_shape(attempt)?;
-        value.signature = sign(
-            executor_signer,
-            CLEANUP_RECEIPT_DOMAIN,
-            &value.signed_fields(),
-        );
-        Ok(value)
+        body.validate_shape(attempt)?;
+        Ok(Signed::sign(body, executor_signer))
     }
 
     pub(crate) fn receipt_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&domain_json(CLEANUP_RECEIPT_DOMAIN, &self.signed_fields()))
+        self.hash()
     }
 
     pub(crate) fn verify(
@@ -1013,72 +872,12 @@ impl DeviceJoinCleanupReceiptObject {
         attempt: &DeviceJoinAttempt,
         executor: &StoreDeviceRegistration,
     ) -> Result<(), DeviceJoinExchangeError> {
-        if self.version != STORE_PROTOCOL_VERSION
-            || self.store_root_hash != attempt.store_root.store_root_hash
-        {
+        if self.store_root_hash != attempt.store_root.store_root_hash {
             return Err(DeviceJoinExchangeError::CleanupMismatch);
         }
-        self.validate_shape(attempt)?;
-        verify_signature(
-            &executor.device_signing_pubkey,
-            &self.signature,
-            CLEANUP_RECEIPT_DOMAIN,
-            &self.signed_fields(),
-        )
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("device join cleanup receipt serialization cannot fail")
-    }
-
-    /// Re-sign over exactly the bytes this value currently holds. A test uses it
-    /// to forge the encodings a verifier must refuse — an attacker who reorders a
-    /// signed list can always sign the reordered bytes too.
-    #[cfg(test)]
-    pub(crate) fn resign_for_test(&mut self, signer: &UserKeypair) {
-        self.signature = String::new();
-        self.signature = sign(signer, CLEANUP_RECEIPT_DOMAIN, &self.signed_fields());
-    }
-
-    /// A pure check: the receipt is in canonical form or it is not this receipt.
-    /// Sorting here instead would accept a second encoding of one receipt, since
-    /// the signature covers the order the bytes actually carry.
-    fn validate_shape(&self, attempt: &DeviceJoinAttempt) -> Result<(), DeviceJoinExchangeError> {
-        validate_terminals(
-            &self.cancellation,
-            &self.administrator_terminal,
-            &self.joiner_terminal,
-        )?;
-        if self.deleted_slots != canonical_cleanup_slots(attempt)? {
-            return Err(DeviceJoinExchangeError::CleanupMismatch);
-        }
-        Ok(())
-    }
-
-    fn signed_fields(
-        &self,
-    ) -> (
-        u32,
-        ObjectHash,
-        &DeviceJoinOutcomeRef,
-        &ProviderAdminJoinTerminal,
-        &JoinerJoinTerminal,
-        &[ObjectSlot],
-        &StoreMembershipStateRef,
-        &ProviderAdminGrantId,
-        &StoreDeviceRegistrationRef,
-    ) {
-        (
-            self.version,
-            self.store_root_hash,
-            &self.cancellation,
-            &self.administrator_terminal,
-            &self.joiner_terminal,
-            &self.deleted_slots,
-            &self.membership,
-            &self.provider_admin_grant,
-            &self.executor,
-        )
+        self.body().validate_shape(attempt)?;
+        self.verify_by(&executor.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 
@@ -1103,25 +902,6 @@ pub struct JoinedStore {
     pub activation: DeviceJoinActivation,
 }
 
-fn sign<T: Serialize>(signer: &UserKeypair, domain: &[u8], value: &T) -> String {
-    let digest = ObjectHash::digest(&domain_json(domain, value));
-    keys::sign_hex(signer, digest.as_bytes()).1
-}
-
-fn verify_signature<T: Serialize>(
-    public_key: &str,
-    signature: &str,
-    domain: &[u8],
-    value: &T,
-) -> Result<(), DeviceJoinExchangeError> {
-    let digest = ObjectHash::digest(&domain_json(domain, value));
-    if keys::verify_signature_hex(public_key, signature, digest.as_bytes()) {
-        Ok(())
-    } else {
-        Err(DeviceJoinExchangeError::InvalidSignature)
-    }
-}
-
 impl DeviceJoinAbandonmentRef {
     pub(crate) fn verify(
         &self,
@@ -1134,12 +914,9 @@ impl DeviceJoinAbandonmentRef {
         {
             return Err(DeviceJoinExchangeError::AttemptMismatch);
         }
-        verify_signature(
-            &owner.device_signing_pubkey,
-            &abandonment.signature,
-            ABANDONMENT_DOMAIN,
-            &abandonment.signed_fields(),
-        )
+        abandonment
+            .verify_by(&owner.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 
@@ -1155,12 +932,9 @@ impl DeviceJoinCleanupReceiptRef {
         {
             return Err(DeviceJoinExchangeError::CleanupMismatch);
         }
-        verify_signature(
-            &executor.device_signing_pubkey,
-            &receipt.signature,
-            CLEANUP_RECEIPT_DOMAIN,
-            &receipt.signed_fields(),
-        )
+        receipt
+            .verify_by(&executor.device_signing_pubkey)
+            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
 }
 

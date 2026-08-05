@@ -39,6 +39,7 @@ mod packages;
 mod protocol_root;
 mod registration;
 mod retained_history;
+mod signed;
 mod validation;
 
 pub(crate) use ack_snapshot::*;
@@ -53,6 +54,7 @@ pub(crate) use packages::*;
 pub(crate) use protocol_root::*;
 pub(crate) use registration::*;
 pub(crate) use retained_history::*;
+pub(crate) use signed::{Signed, SignedBody};
 pub(crate) use validation::*;
 
 mod ordered_map_entries {
