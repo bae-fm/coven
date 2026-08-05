@@ -294,14 +294,14 @@ impl AuthorizedWriterOperation<'_> {
             .map_err(|error| UploadFailureCause::Local(error.to_string()))
     }
 
-    async fn record_blob_upload_failure(
+    async fn record_outbox_failure(
         &self,
         entry: &OutboxEntry,
         error: &str,
         attempt_time: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
         self.database
-            .record_blob_upload_failure(entry, error, &attempt_time.to_rfc3339())
+            .record_outbox_failure(entry, error, &attempt_time.to_rfc3339())
             .await
     }
 }
@@ -333,7 +333,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             ..
         } = self.entry.operation.clone()
         else {
-            unreachable!("get_pending_cloud_uploads returns only Upload rows");
+            unreachable!("pending_blob_uploads returns only Upload rows");
         };
         let file_id = row.blob().id.clone();
         if let Some(observer) = self.observer {
@@ -627,7 +627,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
     async fn record_failure(&self, file_id: &str, error: &str) {
         if let Err(record_error) = self
             .writer
-            .record_blob_upload_failure(&self.entry, error, &self.now)
+            .record_outbox_failure(&self.entry, error, &self.now)
             .await
         {
             warn!(

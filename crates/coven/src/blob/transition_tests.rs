@@ -184,14 +184,19 @@ async fn gate_stamp(db: &Database, note_id: &str) -> String {
 }
 
 async fn pending_uploads(db: &Database) -> usize {
-    db.get_pending_cloud_uploads().await.unwrap().len()
+    crate::database::StoreDatabase::new(db)
+        .pending_blob_uploads()
+        .await
+        .unwrap()
+        .len()
 }
 
 async fn created_upload_blob(
     db: &Database,
     blob_id: &str,
 ) -> crate::protocol::blob::locator::StoredBlobRef {
-    db.get_pending_cloud_uploads()
+    crate::database::StoreDatabase::new(db)
+        .pending_blob_uploads()
         .await
         .expect("load exact upload journals")
         .into_iter()
@@ -208,7 +213,8 @@ async fn created_upload_blob(
 }
 
 async fn pending_deletes(db: &Database) -> Vec<String> {
-    db.get_pending_cloud_deletes()
+    crate::database::StoreDatabase::new(db)
+        .pending_blob_deletes()
         .await
         .unwrap()
         .into_iter()
@@ -446,8 +452,8 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
         .row_blob_ref("note_photos", id)
         .await
         .expect("load exact pending upload row");
-    let mut matching = db
-        .get_pending_cloud_uploads()
+    let mut matching = crate::database::StoreDatabase::new(db)
+        .pending_blob_uploads()
         .await
         .expect("load pending exact row uploads")
         .into_iter()
@@ -2297,8 +2303,8 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await
         .expect("load local blob write authority");
     let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
-    let entries = db
-        .get_pending_cloud_uploads()
+    let entries = crate::database::StoreDatabase::new(&db)
+        .pending_blob_uploads()
         .await
         .expect("load same-locator upload journals");
     assert_eq!(entries.len(), 2);
@@ -2357,14 +2363,15 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .prepare_blob_object(&locator, &authority, slot, &spool)
             .await
             .expect("prepare exact blob");
-        db.mark_cloud_upload_prepared(
-            &pending,
-            crate::protocol::audience_package::PackageAudience::Store,
-            stored.clone(),
-            spool.clone(),
-        )
-        .await
-        .expect("record Prepared exact handoff");
+        crate::database::StoreDatabase::new(&db)
+            .mark_blob_upload_prepared(
+                &pending,
+                crate::protocol::audience_package::PackageAudience::Store,
+                stored.clone(),
+                spool.clone(),
+            )
+            .await
+            .expect("record Prepared exact handoff");
         storage
             .create_blob_object_from_file(
                 &stored,
@@ -2374,14 +2381,15 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             )
             .await
             .expect("create exact blob");
-        let prepared = db
-            .get_pending_cloud_uploads()
+        let prepared = crate::database::StoreDatabase::new(&db)
+            .pending_blob_uploads()
             .await
             .expect("reload Prepared handoff")
             .into_iter()
             .find(|entry| entry.id == pending.id)
             .expect("Prepared handoff remains queued");
-        db.mark_cloud_upload_created(&prepared)
+        crate::database::StoreDatabase::new(&db)
+            .mark_blob_upload_created(&prepared)
             .await
             .expect("record Created exact handoff");
         created.push(stored);
@@ -2769,7 +2777,10 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // failed-attempt backoff first (a restart/retry re-attempts past the window);
     // the drain then completes and flips.
     std::fs::write(&src2, b"second").unwrap();
-    db.reset_cloud_outbox_backoff().await.unwrap();
+    crate::database::StoreDatabase::new(&db)
+        .reset_outbox_backoff()
+        .await
+        .unwrap();
     storage
         .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await

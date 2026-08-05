@@ -333,8 +333,8 @@ impl UploadFixture {
     }
 
     async fn journal(&self, blob_id: &str) -> crate::database::OutboxEntry {
-        self.db
-            .get_pending_cloud_uploads()
+        crate::database::StoreDatabase::new(&self.db)
+            .pending_blob_uploads()
             .await
             .expect("read upload journals")
             .into_iter()
@@ -697,9 +697,8 @@ async fn backoff_skips_item_inside_window() {
         .await;
     fixture.home.fail_creates();
     let entry = fixture.journal("backoff1").await;
-    fixture
-        .db
-        .record_cloud_outbox_failure(&entry, "prior", T0)
+    crate::database::StoreDatabase::new(&fixture.db)
+        .record_outbox_failure(&entry, "prior", T0)
         .await
         .unwrap();
 
@@ -883,9 +882,8 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         })
         .await
         .unwrap();
-    assert!(fixture
-        .db
-        .get_pending_cloud_uploads()
+    assert!(crate::database::StoreDatabase::new(&fixture.db)
+        .pending_blob_uploads()
         .await
         .unwrap()
         .is_empty());
@@ -900,7 +898,11 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await
         .unwrap();
     assert_eq!(
-        fixture.db.get_pending_cloud_uploads().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&fixture.db)
+            .pending_blob_uploads()
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }

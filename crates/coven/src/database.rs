@@ -99,8 +99,6 @@ mod blob_records;
 mod changeset;
 mod changeset_identity;
 mod circle_operation_records;
-#[cfg(test)]
-mod cloud_outbox;
 mod cloud_outbox_records;
 mod connection_io;
 mod coven_schema;

@@ -147,7 +147,11 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let error = result.expect_err("tombstone publication failure fails the cycle");
     assert!(error.contains("drain queued blob tombstones"), "{error}");
     assert_eq!(
-        db.get_pending_cloud_deletes().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .len(),
         1,
         "failed maintenance remains queued"
     );

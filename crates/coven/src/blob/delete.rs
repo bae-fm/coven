@@ -271,7 +271,7 @@ impl<'a> TombstoneDrain<'a> {
     ) -> Result<(), String> {
         if let Err(record_error) = self
             .db
-            .record_blob_delete_failure(entry, error, attempted_at)
+            .record_outbox_failure(entry, error, attempted_at)
             .await
         {
             return Err(format!(

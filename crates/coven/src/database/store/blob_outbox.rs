@@ -178,17 +178,21 @@ impl StoreDatabase {
     }
 
     pub(crate) async fn pending_blob_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
+        self.pending_outbox("delete").await
+    }
+
+    async fn pending_outbox(&self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         self.connection
             .call(move |connection| {
                 let mut statement = connection
                     .prepare(
                         "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
                                 upload_state, attempt_count, last_attempt_at, root_table, root_id
-                         FROM cloud_outbox WHERE operation = 'delete' ORDER BY id",
+                         FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                     )
                     .map_err(DbError::from)?;
                 let entries = statement
-                    .query_map([], crate::database::row_to_outbox_entry)
+                    .query_map([operation], crate::database::row_to_outbox_entry)
                     .map_err(DbError::from)?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(DbError::from)?;
@@ -218,42 +222,6 @@ impl StoreDatabase {
                 if removed != 1 {
                     return Err(DbError::Message(
                         "blob delete outbox entry changed before exact dequeue".to_string(),
-                    ));
-                }
-                Ok(())
-            })
-            .await
-    }
-
-    pub(crate) async fn record_blob_delete_failure(
-        &self,
-        entry: &OutboxEntry,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        let OutboxOperation::Delete { stored } = &entry.operation else {
-            return Err(DbError::Message(
-                "blob delete failure requires a delete outbox entry".to_string(),
-            ));
-        };
-        let id = entry.id;
-        let stored = serde_json::to_string(stored)
-            .map_err(|error| DbError::Message(format!("serialize stored blob ref: {error}")))?;
-        let error = error.to_string();
-        let attempted_at = attempted_at.to_string();
-        self.connection
-            .call(move |connection| {
-                let updated = connection
-                    .execute(
-                        "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
-                         last_error = ?1, last_attempt_at = ?2
-                         WHERE id = ?3 AND operation = 'delete' AND stored_ref = ?4",
-                        rusqlite::params![error, attempted_at, id, stored],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "blob delete outbox entry changed before failure recording".to_string(),
                     ));
                 }
                 Ok(())
@@ -389,23 +357,7 @@ impl StoreDatabase {
     }
 
     pub(crate) async fn pending_blob_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        self.connection
-            .call(move |connection| {
-                let mut statement = connection
-                    .prepare(
-                        "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
-                                upload_state, attempt_count, last_attempt_at, root_table, root_id
-                         FROM cloud_outbox WHERE operation = 'upload' ORDER BY id",
-                    )
-                    .map_err(DbError::from)?;
-                let entries = statement
-                    .query_map([], crate::database::row_to_outbox_entry)
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                Ok(entries)
-            })
-            .await
+        self.pending_outbox("upload").await
     }
 
     pub(crate) async fn mark_blob_upload_prepared(
@@ -499,7 +451,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(crate) async fn record_blob_upload_failure(
+    pub(crate) async fn record_outbox_failure(
         &self,
         entry: &OutboxEntry,
         error: &str,
@@ -579,6 +531,21 @@ impl StoreDatabase {
                     )));
                 }
                 Ok(())
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reset_outbox_backoff(&self) -> Result<(), DbError> {
+        self.connection
+            .call(|connection| {
+                connection
+                    .execute(
+                        "UPDATE cloud_outbox SET last_attempt_at = NULL WHERE attempt_count > 0",
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
             })
             .await
     }

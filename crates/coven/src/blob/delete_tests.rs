@@ -343,7 +343,8 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
 
     // The outbox row is gone.
     assert!(
-        db.get_pending_cloud_deletes()
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
             .await
             .expect("pending")
             .is_empty(),
@@ -393,7 +394,11 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
     assert_eq!(tombstone.stored, stored);
     assert!(tombstone.verify("lib"));
     assert!(
-        db.get_pending_cloud_deletes().await.unwrap().is_empty(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .is_empty(),
         "the delete row clears only after a valid tombstone is present",
     );
 }
@@ -444,7 +449,11 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
         "the existing tombstone remains byte-for-byte unchanged",
     );
     assert!(
-        db.get_pending_cloud_deletes().await.unwrap().is_empty(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .is_empty(),
         "the delete row clears because the valid tombstone is already present",
     );
 }
@@ -495,7 +504,10 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         .await
         .expect("enqueue exact blob deletion");
 
-    let uploads = db.get_pending_cloud_uploads().await.expect("uploads");
+    let uploads = crate::database::StoreDatabase::new(&db)
+        .pending_blob_uploads()
+        .await
+        .expect("uploads");
     assert_eq!(uploads.len(), 1);
     assert_eq!(
         uploads[0].operation,
@@ -510,7 +522,10 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         "an upload entry carries its scope in the variant"
     );
 
-    let deletes = db.get_pending_cloud_deletes().await.expect("deletes");
+    let deletes = crate::database::StoreDatabase::new(&db)
+        .pending_blob_deletes()
+        .await
+        .expect("deletes");
     assert_eq!(deletes.len(), 1);
     assert_eq!(deletes[0].operation, OutboxOperation::Delete { stored });
 }
@@ -1665,12 +1680,20 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         .stage_pending_upload_for_test(sources.path(), "same-id", b"replacement", T0)
         .await;
     assert_eq!(
-        db.get_pending_cloud_uploads().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_uploads()
+            .await
+            .unwrap()
+            .len(),
         1,
         "the exact row-version upload remains",
     );
     assert_eq!(
-        db.get_pending_cloud_deletes().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .len(),
         1,
         "the old exact-object deletion remains",
     );
@@ -1695,12 +1718,20 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         .await
         .expect("enqueue exact blob deletion");
     assert_eq!(
-        db.get_pending_cloud_uploads().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_uploads()
+            .await
+            .unwrap()
+            .len(),
         1,
         "the exact row-version upload remains",
     );
     assert_eq!(
-        db.get_pending_cloud_deletes().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .len(),
         1,
         "the old exact-object deletion remains",
     );
@@ -1725,12 +1756,20 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         .await
         .expect("enqueue exact blob deletion");
     assert_eq!(
-        db.get_pending_cloud_uploads().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_uploads()
+            .await
+            .unwrap()
+            .len(),
         1,
         "the unrelated exact upload remains",
     );
     assert_eq!(
-        db.get_pending_cloud_deletes().await.unwrap().len(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .len(),
         1,
         "the old exact-object deletion remains",
     );
@@ -1888,7 +1927,11 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     // The re-enqueued row is removed too (the drain always removes the row once the
     // tombstone is present), so the queue converges.
     assert!(
-        db.get_pending_cloud_deletes().await.unwrap().is_empty(),
+        crate::database::StoreDatabase::new(&db)
+            .pending_blob_deletes()
+            .await
+            .unwrap()
+            .is_empty(),
         "the re-drained row is removed",
     );
 }

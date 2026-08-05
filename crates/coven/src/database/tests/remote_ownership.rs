@@ -242,8 +242,8 @@ async fn upload_retry_preserves_prepared_object_handoff() {
     .await
     .expect("enqueue upload");
 
-    let entry = db
-        .get_pending_cloud_uploads()
+    let entry = crate::database::StoreDatabase::new(&db)
+        .pending_blob_uploads()
         .await
         .expect("read upload")
         .pop()
@@ -252,14 +252,15 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         .blob()
         .clone();
     let spool_path = PathBuf::from("/spool/prepared");
-    db.mark_cloud_upload_prepared(
-        &entry,
-        crate::protocol::audience_package::PackageAudience::Store,
-        stored.clone(),
-        spool_path.clone(),
-    )
-    .await
-    .expect("record prepared object");
+    crate::database::StoreDatabase::new(&db)
+        .mark_blob_upload_prepared(
+            &entry,
+            crate::protocol::audience_package::PackageAudience::Store,
+            stored.clone(),
+            spool_path.clone(),
+        )
+        .await
+        .expect("record prepared object");
 
     db.call(move |conn| {
         CloudOutboxRecords::new(conn).enqueue_upload(
@@ -274,8 +275,8 @@ async fn upload_retry_preserves_prepared_object_handoff() {
     .await
     .expect("retry upload command");
 
-    let entries = db
-        .get_pending_cloud_uploads()
+    let entries = crate::database::StoreDatabase::new(&db)
+        .pending_blob_uploads()
         .await
         .expect("read retried upload");
     assert_eq!(entries.len(), 1);
@@ -294,11 +295,12 @@ async fn upload_retry_preserves_prepared_object_handoff() {
             },
         }
     );
-    db.mark_cloud_upload_created(&entries[0])
+    crate::database::StoreDatabase::new(&db)
+        .mark_blob_upload_created(&entries[0])
         .await
         .expect("record exact cloud creation");
-    let created = db
-        .get_pending_cloud_uploads()
+    let created = crate::database::StoreDatabase::new(&db)
+        .pending_blob_uploads()
         .await
         .expect("read Created upload");
     let OutboxOperation::Upload { state, .. } = &created[0].operation else {
@@ -325,13 +327,14 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
     })
     .await
     .expect("enqueue delete");
-    let failed = db
-        .get_pending_cloud_deletes()
+    let failed = crate::database::StoreDatabase::new(&db)
+        .pending_blob_deletes()
         .await
         .expect("read pending delete")
         .pop()
         .expect("delete entry");
-    db.record_cloud_outbox_failure(&failed, "provider unavailable", "2026-07-16T10:00:30Z")
+    crate::database::StoreDatabase::new(&db)
+        .record_outbox_failure(&failed, "provider unavailable", "2026-07-16T10:00:30Z")
         .await
         .expect("record delete failure");
     let retry_stored = stored.clone();
@@ -341,7 +344,10 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
     .await
     .expect("repeat exact delete");
 
-    let deletes = db.get_pending_cloud_deletes().await.expect("read deletes");
+    let deletes = crate::database::StoreDatabase::new(&db)
+        .pending_blob_deletes()
+        .await
+        .expect("read deletes");
     assert_eq!(deletes.len(), 1);
     assert_eq!(deletes[0].attempt_count, 0);
     assert_eq!(deletes[0].last_attempt_at, None);
@@ -368,7 +374,10 @@ async fn exact_deletes_for_distinct_objects_remain_distinct() {
     .await
     .expect("enqueue second delete");
 
-    let deletes = db.get_pending_cloud_deletes().await.expect("read deletes");
+    let deletes = crate::database::StoreDatabase::new(&db)
+        .pending_blob_deletes()
+        .await
+        .expect("read deletes");
     assert_eq!(deletes.len(), 2);
     assert_ne!(deletes[0].operation, deletes[1].operation);
 }
