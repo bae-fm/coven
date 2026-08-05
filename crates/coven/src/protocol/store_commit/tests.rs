@@ -1224,7 +1224,10 @@ fn store_ack_semantic_hash_is_distinct_from_its_stored_json_hash() {
 #[test]
 fn store_ack_wire_shape_binds_activation_state_without_a_parallel_predecessor_ref() {
     let ack = fixture().signed_ack("2026-07-18T00:00:00Z");
-    let value = serde_json::to_value(ack).unwrap();
+    let envelope = serde_json::to_value(ack).unwrap();
+    let value = envelope
+        .get("body")
+        .expect("a signed acknowledgement carries its body");
 
     assert!(value.get("registration").is_some());
     assert!(value.get("sequence").is_some());
@@ -1248,7 +1251,10 @@ fn store_protocol_root_authenticates_the_creation_descriptor() {
 #[test]
 fn store_protocol_root_signs_the_sync_routing_contract() {
     let fixture = fixture();
-    let value = serde_json::to_value(fixture.root).expect("serialize Store root");
+    let envelope = serde_json::to_value(fixture.root).expect("serialize Store root");
+    let value = envelope
+        .get("body")
+        .expect("a signed Store root carries its body");
 
     let descriptor = value
         .get("descriptor")
@@ -1262,7 +1268,10 @@ fn store_protocol_root_signs_the_sync_routing_contract() {
 #[test]
 fn operations_commit_uses_the_closed_body_and_signed_manifest_shape() {
     let fixture = fixture();
-    let value = serde_json::to_value(&fixture.commit).expect("serialize Store commit");
+    let envelope = serde_json::to_value(&fixture.commit).expect("serialize Store commit");
+    let value = envelope
+        .get("body")
+        .expect("a signed commit carries its body");
 
     assert!(value.get("package").is_none());
     assert!(value.get("store_package").is_none());
