@@ -8,6 +8,72 @@ use crate::protocol::store_commit::ObjectHash;
 use super::authority::target_key;
 use super::journal::OwnerPromotionJournalState;
 
+/// A Merge Store with one activated Member device and the promotion target that
+/// device's registration names — the starting point of every promotion case that
+/// works on a single candidate.
+struct PromotionCandidate {
+    owner_db: crate::database::Database,
+    owner: UserKeypair,
+    home: std::sync::Arc<crate::InMemoryCloudHome>,
+    store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
+    member: UserKeypair,
+    member_db: crate::database::Database,
+    member_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    encryption: EncryptionService,
+}
+
+impl PromotionCandidate {
+    async fn build(store_name: &str) -> Self {
+        let owner_db = crate::sync::test_helpers::open_test_db();
+        let owner = UserKeypair::generate();
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &owner_db,
+            store_name,
+            owner.clone(),
+            home.clone(),
+        )
+        .await
+        .expect("create Merge Store");
+        let member = UserKeypair::generate();
+        let encryption = EncryptionService::from_key([42; 32]);
+        store
+            .invite_member(
+                &owner_db,
+                &owner,
+                &keys::public_key_hex(&member),
+                None,
+                crate::protocol::membership::MemberRole::Member,
+                &encryption,
+                "Merge Store",
+            )
+            .await
+            .expect("invite Member identity");
+        let member_db = crate::sync::test_helpers::open_test_db();
+        store
+            .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
+            .await
+            .expect("activate Member device");
+        let member_registration = store
+            .bind_device(&member_db, &member)
+            .await
+            .expect("bind Member Store")
+            .owner_promotion_target_for_test()
+            .await
+            .expect("load Member promotion target");
+        Self {
+            owner_db,
+            owner,
+            home,
+            store,
+            member,
+            member_db,
+            member_registration,
+            encryption,
+        }
+    }
+}
+
 #[tokio::test]
 async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     let founder_db = crate::sync::test_helpers::open_test_db();
@@ -107,42 +173,16 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
 
 #[tokio::test]
 async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persists_exact_receipt() {
-    let owner_db = crate::sync::test_helpers::open_test_db();
-    let owner = UserKeypair::generate();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &owner_db,
-        "merge-owner-promotion",
-        owner.clone(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await
-    .expect("create Merge Store");
-    let member = UserKeypair::generate();
-    let encryption = EncryptionService::from_key([42; 32]);
-    store
-        .invite_member(
-            &owner_db,
-            &owner,
-            &keys::public_key_hex(&member),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &encryption,
-            "Merge Store",
-        )
-        .await
-        .expect("invite Member identity");
-    let member_db = crate::sync::test_helpers::open_test_db();
-    store
-        .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
-        .await
-        .expect("activate Member device");
-    let member_registration = store
-        .bind_device(&member_db, &member)
-        .await
-        .expect("bind Member Store")
-        .owner_promotion_target_for_test()
-        .await
-        .expect("load Member promotion target");
+    let PromotionCandidate {
+        owner_db,
+        owner,
+        home: _home,
+        store,
+        member,
+        member_db,
+        member_registration,
+        encryption,
+    } = PromotionCandidate::build("merge-owner-promotion").await;
 
     Box::pin(store.promote_active_member_fixture(
         &owner_db,
@@ -226,43 +266,16 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
 
 #[tokio::test]
 async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
-    let owner_db = crate::sync::test_helpers::open_test_db();
-    let owner = UserKeypair::generate();
-    let home = crate::sync::test_helpers::test_cloud_home();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &owner_db,
-        "corrupt-owner-promotion-request",
-        owner.clone(),
-        home.clone(),
-    )
-    .await
-    .expect("create Merge Store");
-    let member = UserKeypair::generate();
-    let encryption = EncryptionService::from_key([42; 32]);
-    store
-        .invite_member(
-            &owner_db,
-            &owner,
-            &keys::public_key_hex(&member),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &encryption,
-            "Merge Store",
-        )
-        .await
-        .expect("invite Member identity");
-    let member_db = crate::sync::test_helpers::open_test_db();
-    store
-        .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
-        .await
-        .expect("activate Member device");
-    let member_registration = store
-        .bind_device(&member_db, &member)
-        .await
-        .expect("bind Member Store")
-        .owner_promotion_target_for_test()
-        .await
-        .expect("load Member promotion target");
+    let PromotionCandidate {
+        owner_db,
+        owner,
+        home,
+        store,
+        member: _member,
+        member_db: _member_db,
+        member_registration,
+        encryption: _encryption,
+    } = PromotionCandidate::build("corrupt-owner-promotion-request").await;
     home.fail_exact_create_before_call(1);
     store
         .bind_device(&owner_db, &owner)
@@ -348,43 +361,16 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
 /// for the same target replaces the failed one and activates.
 #[tokio::test]
 async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() {
-    let owner_db = crate::sync::test_helpers::open_test_db();
-    let owner = UserKeypair::generate();
-    let home = crate::sync::test_helpers::test_cloud_home();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &owner_db,
-        "owner-promotion-loses-its-position",
-        owner.clone(),
-        home.clone(),
-    )
-    .await
-    .expect("create Merge Store");
-    let member = UserKeypair::generate();
-    let encryption = EncryptionService::from_key([42; 32]);
-    store
-        .invite_member(
-            &owner_db,
-            &owner,
-            &keys::public_key_hex(&member),
-            None,
-            crate::protocol::membership::MemberRole::Member,
-            &encryption,
-            "Merge Store",
-        )
-        .await
-        .expect("invite Member identity");
-    let member_db = crate::sync::test_helpers::open_test_db();
-    store
-        .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
-        .await
-        .expect("activate Member device");
-    let member_registration = store
-        .bind_device(&member_db, &member)
-        .await
-        .expect("bind Member Store")
-        .owner_promotion_target_for_test()
-        .await
-        .expect("load Member promotion target");
+    let PromotionCandidate {
+        owner_db,
+        owner,
+        home,
+        store,
+        member,
+        member_db,
+        member_registration,
+        encryption,
+    } = PromotionCandidate::build("owner-promotion-loses-its-position").await;
 
     let request = store
         .bind_device(&owner_db, &owner)
