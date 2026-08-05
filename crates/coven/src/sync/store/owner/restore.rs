@@ -435,7 +435,7 @@ impl<'storage> RestoringStore<'storage> {
                 node: node_ref.clone(),
             },
         };
-        let commit = StoreBatchCommit::signed_with_registrations(
+        let commit = StoreBatchCommit::signed_operations(
             root.store_root_hash,
             crate::WriteId::from_generated(format!("owner-recovery-{recovery_hash}")),
             coord.clone(),
@@ -455,7 +455,10 @@ impl<'storage> RestoringStore<'storage> {
                     .creation_authority
                     .clone(),
             },
-            vec![activation_ref],
+            crate::protocol::store_commit::StoreCommitOperationsInput {
+                device_registrations: vec![activation_ref],
+                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
+            },
             &device_signer,
         )
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;

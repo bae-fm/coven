@@ -1822,20 +1822,10 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
                 .expect("successor Circle commit carries membership authority"),
         },
         crate::protocol::store_commit::StoreCommitOperationsInput {
-            acknowledgement: None,
-            circle_acknowledgements: Vec::new(),
-            control: None,
-            device_join_attempt_decisions: Vec::new(),
-            device_join_outcomes: Vec::new(),
-            device_join_cleanup_receipts: Vec::new(),
-            provider_access_grants: Vec::new(),
-            device_registrations: Vec::new(),
-            device_exclusion_proposals: Vec::new(),
-            device_exclusion_outcomes: Vec::new(),
             stream_activations: successor_commit.stream_activations().to_vec(),
             circle_controls: successor_commit.circle_controls().to_vec(),
-            store_package: None,
             circle_packages: &circle_packages,
+            ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
         },
         &device_signer,
     )

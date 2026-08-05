@@ -224,20 +224,9 @@ impl AuthorizedWriterOperation<'_> {
                     device_state,
                     membership_authority,
                     StoreCommitOperationsInput {
-                        acknowledgement: None,
-                        circle_acknowledgements: Vec::new(),
-                        control: None,
-                        device_join_attempt_decisions: Vec::new(),
-                        device_join_outcomes: Vec::new(),
-                        device_join_cleanup_receipts: Vec::new(),
-                        provider_access_grants: Vec::new(),
-                        device_registrations: Vec::new(),
-                        device_exclusion_proposals: Vec::new(),
-                        device_exclusion_outcomes: Vec::new(),
-                        stream_activations: Vec::new(),
-                        circle_controls: Vec::new(),
                         store_package,
                         circle_packages: &circle_packages,
+                        ..StoreCommitOperationsInput::empty()
                     },
                 )
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;

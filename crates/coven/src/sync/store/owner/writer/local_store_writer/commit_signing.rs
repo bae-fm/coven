@@ -189,9 +189,36 @@ impl LocalStoreWriter {
         crate::sync::store::StoreError,
     > {
         use crate::protocol::store_commit::{
-            StoreBatchCommit, StoreCommitOperationsInput, StoreControl,
+            DeviceJoinAttemptDecisionRef, StoreBatchCommit, StoreCommitOperationsInput,
+            StoreControl,
         };
         use crate::sync::store::owner::writer::operation::operations::StoreOperationBatch;
+
+        fn sign_ops(
+            context: StoreOperationSigningContext,
+            write_id: crate::WriteId,
+            registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+            signer: &crate::keys::UserKeypair,
+            input: crate::protocol::store_commit::StoreCommitOperationsInput<'_>,
+        ) -> Result<
+            crate::protocol::store_commit::StoreBatchCommit,
+            crate::protocol::store_commit::StoreProtocolError,
+        > {
+            crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+                context.root.store_root_hash,
+                write_id,
+                context.coord,
+                registration_ref,
+                registration,
+                context.order,
+                context.membership_state,
+                context.device_state,
+                context.membership_authority,
+                input,
+                signer,
+            )
+        }
 
         let registration_activation = match &batch {
             StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
@@ -206,151 +233,131 @@ impl LocalStoreWriter {
                 reference: acknowledgement,
                 value: _,
                 circle_acknowledgements,
-            } => StoreBatchCommit::signed_operations(
-                root_hash,
+            } => sign_ops(
+                context,
                 write_id,
-                context.coord,
                 registration_ref,
                 registration,
-                context.order,
-                context.membership_state,
-                context.device_state,
-                context.membership_authority,
+                signer,
                 StoreCommitOperationsInput {
                     acknowledgement: Some(acknowledgement),
                     circle_acknowledgements: circle_acknowledgements
                         .iter()
                         .map(|circle| circle.reference.clone())
                         .collect(),
-                    control: None,
-                    device_join_attempt_decisions: Vec::new(),
-                    device_join_outcomes: Vec::new(),
-                    device_join_cleanup_receipts: Vec::new(),
-                    provider_access_grants: Vec::new(),
-                    device_registrations: Vec::new(),
-                    device_exclusion_proposals: Vec::new(),
-                    device_exclusion_outcomes: Vec::new(),
-                    stream_activations: Vec::new(),
-                    circle_controls: Vec::new(),
-                    store_package: None,
-                    circle_packages: &[],
+                    ..StoreCommitOperationsInput::empty()
                 },
-                signer,
             ),
-            StoreOperationBatch::ProviderAccessGrant(grant) => {
-                StoreBatchCommit::signed_with_provider_access(
-                    root_hash,
-                    write_id,
-                    context.coord,
-                    registration_ref,
-                    registration,
-                    context.order,
-                    context.membership_state,
-                    context.device_state,
-                    context.membership_authority,
-                    vec![grant],
-                    signer,
-                )
-            }
-            StoreOperationBatch::Attempt(attempt) => StoreBatchCommit::signed_with_join_attempts(
-                root_hash,
+            StoreOperationBatch::ProviderAccessGrant(grant) => sign_ops(
+                context,
                 write_id,
-                context.coord,
                 registration_ref,
                 registration,
-                context.order,
-                context.membership_state,
-                context.device_state,
-                context.membership_authority,
-                vec![attempt],
                 signer,
+                StoreCommitOperationsInput {
+                    provider_access_grants: vec![grant],
+                    ..StoreCommitOperationsInput::empty()
+                },
             ),
-            StoreOperationBatch::Abandonment(abandonment) => {
-                StoreBatchCommit::signed_with_join_abandonments(
-                    root_hash,
-                    write_id,
-                    context.coord,
-                    registration_ref,
-                    registration,
-                    context.order,
-                    context.membership_state,
-                    context.device_state,
-                    context.membership_authority,
-                    vec![abandonment],
-                    signer,
-                )
-            }
+            StoreOperationBatch::Attempt(attempt) => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    device_join_attempt_decisions: vec![DeviceJoinAttemptDecisionRef::Attempt(
+                        attempt,
+                    )],
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
+            StoreOperationBatch::Abandonment(abandonment) => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    device_join_attempt_decisions: vec![DeviceJoinAttemptDecisionRef::Abandoned(
+                        abandonment,
+                    )],
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
             StoreOperationBatch::Outcome {
                 outcome,
                 registration: activation,
-            } => StoreBatchCommit::signed_with_join_outcomes(
-                root_hash,
-                write_id,
-                context.coord,
-                registration_ref,
-                registration,
-                context.order,
-                context.membership_state,
-                context.device_state,
-                context.membership_authority,
-                vec![outcome],
-                activation
+            } => {
+                let device_registrations = activation
                     .into_iter()
                     .map(|activation| {
                         activation.activated_reference().map_err(|error| {
                             crate::sync::store::StoreError::InvalidOutbound(error.to_string())
                         })
                     })
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()?;
+                sign_ops(
+                    context,
+                    write_id,
+                    registration_ref,
+                    registration,
+                    signer,
+                    StoreCommitOperationsInput {
+                        device_join_outcomes: vec![outcome],
+                        device_registrations,
+                        ..StoreCommitOperationsInput::empty()
+                    },
+                )
+            }
+            StoreOperationBatch::CleanupReceipt(receipt) => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
                 signer,
+                StoreCommitOperationsInput {
+                    device_join_cleanup_receipts: vec![receipt],
+                    ..StoreCommitOperationsInput::empty()
+                },
             ),
-            StoreOperationBatch::CleanupReceipt(receipt) => {
-                StoreBatchCommit::signed_with_join_cleanup_receipts(
-                    root_hash,
-                    write_id,
-                    context.coord,
-                    registration_ref,
-                    registration,
-                    context.order,
-                    context.membership_state,
-                    context.device_state,
-                    context.membership_authority,
-                    vec![receipt],
-                    signer,
-                )
-            }
-            StoreOperationBatch::DeviceExclusionProposal(proposal) => {
-                StoreBatchCommit::signed_with_device_exclusions(
-                    root_hash,
-                    write_id,
-                    context.coord,
-                    registration_ref,
-                    registration,
-                    context.order,
-                    context.membership_state,
-                    context.device_state,
-                    context.membership_authority,
-                    vec![proposal.reference().clone()],
-                    Vec::new(),
-                    signer,
-                )
-            }
-            StoreOperationBatch::DeviceExclusionOutcome(outcome) => {
-                StoreBatchCommit::signed_with_device_exclusions(
-                    root_hash,
-                    write_id,
-                    context.coord,
-                    registration_ref,
-                    registration,
-                    context.order,
-                    context.membership_state,
-                    context.device_state,
-                    context.membership_authority,
-                    Vec::new(),
-                    vec![outcome.wire_reference()],
-                    signer,
-                )
-            }
+            StoreOperationBatch::DeviceExclusionProposal(proposal) => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    device_exclusion_proposals: vec![proposal.reference().clone()],
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
+            StoreOperationBatch::DeviceExclusionOutcome(outcome) => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    device_exclusion_outcomes: vec![outcome.wire_reference()],
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
+            StoreOperationBatch::MergeMembershipActivation {
+                transition,
+                stream_activations,
+            } => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    control: Some(StoreControl { transition }),
+                    stream_activations,
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
             StoreOperationBatch::ReclaimAuthorization(authorization) => {
                 StoreBatchCommit::signed_reclaim_authorization(
                     root_hash,
@@ -394,37 +401,6 @@ impl LocalStoreWriter {
                     signer,
                 )
             }
-            StoreOperationBatch::MergeMembershipActivation {
-                transition,
-                stream_activations,
-            } => StoreBatchCommit::signed_operations(
-                root_hash,
-                write_id,
-                context.coord,
-                registration_ref,
-                registration,
-                context.order,
-                context.membership_state,
-                context.device_state,
-                context.membership_authority,
-                StoreCommitOperationsInput {
-                    acknowledgement: None,
-                    circle_acknowledgements: Vec::new(),
-                    control: Some(StoreControl { transition }),
-                    device_join_attempt_decisions: Vec::new(),
-                    device_join_outcomes: Vec::new(),
-                    device_join_cleanup_receipts: Vec::new(),
-                    provider_access_grants: Vec::new(),
-                    device_registrations: Vec::new(),
-                    device_exclusion_proposals: Vec::new(),
-                    device_exclusion_outcomes: Vec::new(),
-                    stream_activations,
-                    circle_controls: Vec::new(),
-                    store_package: None,
-                    circle_packages: &[],
-                },
-                signer,
-            ),
         }
         .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
         Ok((commit, registration_activation))

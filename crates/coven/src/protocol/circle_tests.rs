@@ -617,20 +617,8 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
             predecessor: membership_authority.clone(),
         },
         store_commit::StoreCommitOperationsInput {
-            acknowledgement: None,
-            circle_acknowledgements: Vec::new(),
-            control: None,
-            device_join_attempt_decisions: Vec::new(),
-            device_join_outcomes: Vec::new(),
-            device_join_cleanup_receipts: Vec::new(),
-            provider_access_grants: Vec::new(),
-            device_registrations: Vec::new(),
-            device_exclusion_proposals: Vec::new(),
-            device_exclusion_outcomes: Vec::new(),
-            stream_activations: Vec::new(),
             circle_controls: vec![reference.clone()],
-            store_package: None,
-            circle_packages: &[],
+            ..store_commit::StoreCommitOperationsInput::empty()
         },
         &device.device_signer,
     )
@@ -761,20 +749,8 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
             predecessor: control.value.membership_authority().clone(),
         },
         store_commit::StoreCommitOperationsInput {
-            acknowledgement: None,
-            circle_acknowledgements: Vec::new(),
-            control: None,
-            device_join_attempt_decisions: Vec::new(),
-            device_join_outcomes: Vec::new(),
-            device_join_cleanup_receipts: Vec::new(),
-            provider_access_grants: Vec::new(),
-            device_registrations: Vec::new(),
-            device_exclusion_proposals: Vec::new(),
-            device_exclusion_outcomes: Vec::new(),
-            stream_activations: Vec::new(),
             circle_controls: vec![second_reference.clone()],
-            store_package: None,
-            circle_packages: &[],
+            ..store_commit::StoreCommitOperationsInput::empty()
         },
         &device.device_signer,
     )

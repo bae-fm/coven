@@ -3854,7 +3854,7 @@ impl TestStore {
         let predecessor = membership
             .write_grant_authority(&registration.value().author_pubkey)
             .expect("competing author has an active write grant");
-        let winner = crate::protocol::store_commit::StoreBatchCommit::signed(
+        let winner = crate::protocol::store_commit::StoreBatchCommit::signed_operations(
             self.root.store_root_hash,
             candidate.write_id.clone(),
             coord.clone(),
@@ -3864,11 +3864,14 @@ impl TestStore {
             candidate.membership_state.clone(),
             candidate.device_state.clone(),
             crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
-            crate::protocol::store_commit::StorePackageInput {
-                candidate_family: candidate.candidate_family(),
-                schema_version,
-                bytes: &package_bytes,
-                object: package_prepared.reference().clone(),
+            crate::protocol::store_commit::StoreCommitOperationsInput {
+                store_package: Some(crate::protocol::store_commit::StorePackageInput {
+                    candidate_family: candidate.candidate_family(),
+                    schema_version,
+                    bytes: &package_bytes,
+                    object: package_prepared.reference().clone(),
+                }),
+                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
             },
             &device_signer,
         )
@@ -4006,7 +4009,7 @@ impl TestStore {
                 package_bytes.clone(),
             )
             .expect("prepare third winner package");
-        let third = crate::protocol::store_commit::StoreBatchCommit::signed(
+        let third = crate::protocol::store_commit::StoreBatchCommit::signed_operations(
             self.root.store_root_hash,
             candidate.commit.value.write_id.clone(),
             coord.clone(),
@@ -4020,11 +4023,14 @@ impl TestStore {
                 .value
                 .operations_membership_authority()
                 .expect("load third winner membership authority"),
-            crate::protocol::store_commit::StorePackageInput {
-                candidate_family,
-                schema_version: peer_db.schema_version(),
-                bytes: &package_bytes,
-                object: package_prepared.reference().clone(),
+            crate::protocol::store_commit::StoreCommitOperationsInput {
+                store_package: Some(crate::protocol::store_commit::StorePackageInput {
+                    candidate_family,
+                    schema_version: peer_db.schema_version(),
+                    bytes: &package_bytes,
+                    object: package_prepared.reference().clone(),
+                }),
+                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
             },
             &device_signer,
         )

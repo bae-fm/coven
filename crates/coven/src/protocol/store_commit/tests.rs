@@ -151,7 +151,7 @@ impl Fixture {
             package,
         );
         let signer = self.registration.device_signer(&self.signer).unwrap();
-        let commit = StoreBatchCommit::signed(
+        let commit = StoreBatchCommit::signed_operations(
             self.root_ref.store_root_hash,
             write_id,
             self.commit_ref.coord.clone(),
@@ -163,11 +163,14 @@ impl Fixture {
             self.commit
                 .operations_membership_authority()
                 .expect("fixture carries membership authority"),
-            StorePackageInput {
-                candidate_family: family,
-                schema_version: 3,
-                bytes: package,
-                object: package_object,
+            StoreCommitOperationsInput {
+                store_package: Some(StorePackageInput {
+                    candidate_family: family,
+                    schema_version: 3,
+                    bytes: package,
+                    object: package_object,
+                }),
+                ..StoreCommitOperationsInput::empty()
             },
             &signer,
         )
@@ -228,7 +231,7 @@ impl Fixture {
             &stored,
         );
         let signer = self.registration.device_signer(&self.signer).unwrap();
-        let commit = StoreBatchCommit::signed(
+        let commit = StoreBatchCommit::signed_operations(
             self.root_ref.store_root_hash,
             write_id,
             self.commit_ref.coord.clone(),
@@ -240,11 +243,14 @@ impl Fixture {
             self.commit
                 .operations_membership_authority()
                 .expect("fixture carries membership authority"),
-            StorePackageInput {
-                candidate_family: family,
-                schema_version: 3,
-                bytes: &semantic,
-                object: package_object,
+            StoreCommitOperationsInput {
+                store_package: Some(StorePackageInput {
+                    candidate_family: family,
+                    schema_version: 3,
+                    bytes: &semantic,
+                    object: package_object,
+                }),
+                ..StoreCommitOperationsInput::empty()
             },
             &signer,
         )
@@ -804,7 +810,7 @@ fn fixture() -> Fixture {
         &package,
     );
     let device_signer = registration.device_signer(&signer).unwrap();
-    let commit = StoreBatchCommit::signed(
+    let commit = StoreBatchCommit::signed_operations(
         root_ref.store_root_hash,
         write_id,
         StoreCommitCoord {
@@ -821,11 +827,14 @@ fn fixture() -> Fixture {
                 founder.coord(),
             ),
         },
-        StorePackageInput {
-            candidate_family,
-            schema_version: 3,
-            bytes: &package,
-            object: package_object,
+        StoreCommitOperationsInput {
+            store_package: Some(StorePackageInput {
+                candidate_family,
+                schema_version: 3,
+                bytes: &package,
+                object: package_object,
+            }),
+            ..StoreCommitOperationsInput::empty()
         },
         &device_signer,
     )

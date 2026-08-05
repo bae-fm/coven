@@ -325,20 +325,9 @@ impl LocalStoreWriter {
             device_state,
             membership_authority,
             crate::protocol::store_commit::StoreCommitOperationsInput {
-                acknowledgement: None,
-                circle_acknowledgements: Vec::new(),
-                control: None,
-                device_join_attempt_decisions: Vec::new(),
-                device_join_outcomes: Vec::new(),
-                device_join_cleanup_receipts: Vec::new(),
-                provider_access_grants: Vec::new(),
-                device_registrations: Vec::new(),
-                device_exclusion_proposals: Vec::new(),
-                device_exclusion_outcomes: Vec::new(),
                 stream_activations,
                 circle_controls: vec![circle_reference],
-                store_package: None,
-                circle_packages: &[],
+                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
             },
         )
         .map_err(|error| {

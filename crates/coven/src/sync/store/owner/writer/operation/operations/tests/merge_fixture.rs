@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::store_commit::StoreCommitOperationsInput;
 use crate::protocol::store_commit::StoreDeviceHead;
 use crate::protocol::store_commit::StorePackageInput;
 use crate::protocol::store_commit::SuccessorLink;
@@ -361,7 +362,7 @@ impl PreparedWriteFixture {
         let predecessor = membership
             .write_grant_authority(&registration.value().author_pubkey)
             .expect("Merge test author has an active write grant");
-        let winner = StoreBatchCommit::signed(
+        let winner = StoreBatchCommit::signed_operations(
             self.root.store_root_hash,
             candidate.write_id.clone(),
             batch.head.value.commit.coord.clone(),
@@ -371,11 +372,14 @@ impl PreparedWriteFixture {
             candidate.membership_state.clone(),
             candidate.device_state.clone(),
             StoreOperationMembershipAuthority { predecessor },
-            StorePackageInput {
-                candidate_family: candidate.candidate_family(),
-                schema_version: self.db.schema_version(),
-                bytes: &package_bytes,
-                object: package_prepared.reference().clone(),
+            StoreCommitOperationsInput {
+                store_package: Some(StorePackageInput {
+                    candidate_family: candidate.candidate_family(),
+                    schema_version: self.db.schema_version(),
+                    bytes: &package_bytes,
+                    object: package_prepared.reference().clone(),
+                }),
+                ..StoreCommitOperationsInput::empty()
             },
             &signer,
         )

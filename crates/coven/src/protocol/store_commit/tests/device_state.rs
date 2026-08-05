@@ -364,7 +364,7 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
         .registration
         .device_signer(&fixture.signer)
         .expect("founder device signer");
-    let commit = StoreBatchCommit::signed_with_registrations(
+    let commit = StoreBatchCommit::signed_operations(
         fixture.root_ref.store_root_hash,
         WriteId::from_generated("retained-registration".to_string()),
         fixture.commit_ref.coord.clone(),
@@ -377,7 +377,10 @@ fn retained_registration_activations_reopen_exact_canonical_inputs() {
             .commit
             .operations_membership_authority()
             .expect("fixture carries membership authority"),
-        vec![activated.clone()],
+        StoreCommitOperationsInput {
+            device_registrations: vec![activated.clone()],
+            ..StoreCommitOperationsInput::empty()
+        },
         &device_signer,
     )
     .expect("sign registration activation commit");
@@ -503,7 +506,7 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         &fixture.registration,
     )
     .expect("retain exclusion proposal");
-    let proposal_commit = StoreBatchCommit::signed_with_device_exclusions(
+    let proposal_commit = StoreBatchCommit::signed_operations(
         fixture.root_ref.store_root_hash,
         WriteId::from_generated("retained-proposal".to_string()),
         fixture.commit_ref.coord.clone(),
@@ -516,8 +519,10 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
             .commit
             .operations_membership_authority()
             .expect("fixture carries membership authority"),
-        vec![proposal_ref.clone()],
-        Vec::new(),
+        StoreCommitOperationsInput {
+            device_exclusion_proposals: vec![proposal_ref.clone()],
+            ..StoreCommitOperationsInput::empty()
+        },
         &device_signer,
     )
     .expect("sign retained proposal commit");
@@ -579,7 +584,7 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
         &fixture.registration,
     )
     .expect("retain exclusion outcome");
-    let commit = StoreBatchCommit::signed_with_device_exclusions(
+    let commit = StoreBatchCommit::signed_operations(
         fixture.root_ref.store_root_hash,
         WriteId::from_generated("retained-exclusion".to_string()),
         fixture.commit_ref.coord.clone(),
@@ -592,8 +597,10 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
             .commit
             .operations_membership_authority()
             .expect("fixture carries membership authority"),
-        Vec::new(),
-        vec![outcome_ref],
+        StoreCommitOperationsInput {
+            device_exclusion_outcomes: vec![outcome_ref],
+            ..StoreCommitOperationsInput::empty()
+        },
         &device_signer,
     )
     .expect("sign retained exclusion commit");
