@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 mod authorized_history;
 mod authorized_store;
+mod candidate_cleanup;
 mod circles;
 pub(super) mod device_exclusion;
 pub(super) mod device_join;
@@ -30,6 +31,7 @@ use super::prepare_registration_object;
 use super::protocol_root::VerifiedStoreRoot;
 use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
+pub(crate) use candidate_cleanup::delete_candidate_cleanup_targets;
 #[cfg(test)]
 pub(crate) use circles::CirclePackageReadError;
 pub(crate) use circles::{AuthorizedCircleWriter, StoreCircleCommands};

@@ -22,16 +22,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .merge_candidate_cleanup_targets(write_id)
             .await?;
-        for target in targets {
-            self.storage
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            self.database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
-        Ok(())
+        delete_candidate_cleanup_targets(self.storage.as_ref(), &self.database, targets).await
     }
 
     pub(crate) async fn cleanup_circle_operation_candidate(
@@ -54,16 +45,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .circle_operation_discard_cleanup_targets(operation_id)
             .await?;
-        for target in targets {
-            self.storage
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            self.database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
-        Ok(())
+        delete_candidate_cleanup_targets(self.storage.as_ref(), &self.database, targets).await
     }
 
     pub(crate) async fn resume_merge_retraction_cleanups(
@@ -80,19 +62,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 verification,
             })
             .await?;
-            for target in self
+            let targets = self
                 .database
                 .merge_retraction_cleanup_targets(candidate.clone())
-                .await?
-            {
-                self.storage
-                    .delete_protocol_object(&target.object)
-                    .await
-                    .map_err(crate::protocol::objects::StoreObjectError::from)?;
-                self.database
-                    .mark_candidate_cleanup_absent(target.object)
-                    .await?;
-            }
+                .await?;
+            delete_candidate_cleanup_targets::<crate::sync::store::owner::pull::StorePullError>(
+                self.storage.as_ref(),
+                &self.database,
+                targets,
+            )
+            .await?;
             self.database
                 .finish_merge_retraction_cleanup(candidate)
                 .await?;

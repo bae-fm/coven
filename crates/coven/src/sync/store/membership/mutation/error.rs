@@ -33,6 +33,15 @@ impl From<crate::database::DbError> for InviteError {
     }
 }
 
+impl From<crate::protocol::objects::StoreObjectError> for InviteError {
+    fn from(error: crate::protocol::objects::StoreObjectError) -> Self {
+        match error {
+            crate::protocol::objects::StoreObjectError::Storage(error) => Self::Bucket(error),
+            error => Self::InvalidDurableMutation(error.to_string()),
+        }
+    }
+}
+
 impl From<crate::protocol::membership_mutation::MembershipPreparationError> for InviteError {
     fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
         InviteError::InvalidDurableMutation(error.to_string())

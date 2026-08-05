@@ -91,16 +91,12 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         &self,
         targets: Vec<crate::database::CandidateCleanupObject>,
     ) -> Result<(), OwnerPromotionError> {
-        for target in targets {
-            self.storage
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
-            self.database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
-        Ok(())
+        crate::sync::store::owner::delete_candidate_cleanup_targets(
+            self.storage.as_ref(),
+            &self.database,
+            targets,
+        )
+        .await
     }
 
     async fn finish_stale_cleanup(

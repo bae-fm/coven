@@ -65,31 +65,18 @@ impl StoreDatabase {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT circle_id, state
-                     FROM circle_current_state
-                     ORDER BY circle_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                Ok(Self::circle_current_states_on(conn)?
+                    .into_iter()
+                    .map(|state| {
+                        let (name, role) = state.display(&identity_pubkey);
+                        crate::protocol::circle::Circle {
+                            id: state.circle_id(),
+                            name,
+                            role,
+                            state: state.derived_state(&active_store_members),
+                        }
                     })
-                    .map_err(DbError::from)?;
-                let mut circles = Vec::new();
-                for row in rows {
-                    let (stored_circle_id, state) = row.map_err(DbError::from)?;
-                    let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
-                    let (name, role) = state.display(&identity_pubkey);
-                    circles.push(crate::protocol::circle::Circle {
-                        id: state.circle_id(),
-                        name,
-                        role,
-                        state: state.derived_state(&active_store_members),
-                    });
-                }
-                Ok(circles)
+                    .collect())
             })
             .await
     }
@@ -310,27 +297,10 @@ impl StoreDatabase {
     ) -> Result<Vec<crate::protocol::circle::PreparedCircleControl>, DbError> {
         self.connection
             .call(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT circle_id, state
-                         FROM circle_current_state
-                         ORDER BY circle_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(DbError::from)?;
-                let mut controls = Vec::new();
-                for row in rows {
-                    let (circle_id, payload) = row.map_err(DbError::from)?;
-                    let state = Self::parse_circle_current_state(&circle_id, &payload)?;
-                    if let Some(control) = state.closing_control() {
-                        controls.push(control.clone());
-                    }
-                }
-                Ok(controls)
+                Ok(Self::circle_current_states_on(conn)?
+                    .into_iter()
+                    .filter_map(|state| state.closing_control().cloned())
+                    .collect())
             })
             .await
     }
@@ -926,6 +896,30 @@ impl StoreDatabase {
         Ok(false)
     }
 
+    /// Every stored Circle current state, ordered by Circle id. The rows are read
+    /// and parsed up front so a caller can query or write through the same
+    /// connection while it walks them.
+    pub(crate) fn circle_current_states_on(
+        conn: &Connection,
+    ) -> Result<Vec<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
+        let mut statement = conn
+            .prepare("SELECT circle_id, state FROM circle_current_state ORDER BY circle_id")
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        rows.into_iter()
+            .map(|(stored_circle_id, payload)| {
+                Self::parse_circle_current_state(&stored_circle_id, &payload)
+            })
+            .collect()
+    }
+
     pub(crate) fn circle_current_state_on(
         conn: &Connection,
         circle_id: crate::protocol::circle::CircleId,
@@ -965,25 +959,9 @@ impl StoreDatabase {
     }
 
     pub(crate) fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT circle_id, state
-                 FROM circle_current_state
-                 ORDER BY circle_id",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
-
-        for (circle_id, payload) in rows {
-            let state =
-                Self::parse_circle_current_state(&circle_id, &payload)?.without_local_access();
+        for state in Self::circle_current_states_on(conn)? {
+            let circle_id = state.circle_id().to_string();
+            let state = state.without_local_access();
             let payload = serde_json::to_vec(&state).map_err(|error| {
                 DbError::Message(format!("serialize public Circle current state: {error}"))
             })?;
@@ -1015,22 +993,8 @@ impl StoreDatabase {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT circle_id, state
-                     FROM circle_current_state
-                     ORDER BY circle_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(DbError::from)?;
                 let mut circles = Vec::new();
-                for row in rows {
-                    let (stored_circle_id, state) = row.map_err(DbError::from)?;
-                    let state = Self::parse_circle_current_state(&stored_circle_id, &state)?;
+                for state in Self::circle_current_states_on(conn)? {
                     let circle_id = state.circle_id();
                     if state.is_deleted() {
                         // A deleted Circle must remain visible to the application

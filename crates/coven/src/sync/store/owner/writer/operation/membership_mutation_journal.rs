@@ -599,15 +599,12 @@ impl MutationPersistence {
                 ));
             }
         }
-        for target in cleanup {
-            self.storage
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(|error| InviteError::Crypto(error.to_string()))?;
-            self.database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
+        crate::sync::store::owner::delete_candidate_cleanup_targets::<InviteError>(
+            self.storage.as_ref(),
+            &self.database,
+            cleanup,
+        )
+        .await?;
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
         self.database
             .complete_nonactivating_membership_candidate_mutation(
@@ -674,15 +671,12 @@ impl MutationPersistence {
         cleanup: Vec<crate::database::CandidateCleanupObject>,
     ) -> Result<(), InviteError> {
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
-        for target in cleanup {
-            self.storage
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(|error| InviteError::Crypto(error.to_string()))?;
-            self.database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
+        crate::sync::store::owner::delete_candidate_cleanup_targets::<InviteError>(
+            self.storage.as_ref(),
+            &self.database,
+            cleanup,
+        )
+        .await?;
         self.database
             .complete_nonactivating_membership_candidate_mutation(
                 self.intent_hash,

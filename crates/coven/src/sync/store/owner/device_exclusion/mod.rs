@@ -645,21 +645,16 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         let database = self.database.clone();
         match operation.as_ref() {
             DurableStoreDeviceExclusionOperation::CandidateNonactivating { .. } => {
-                for target in Box::pin(
+                let targets = Box::pin(
                     database.nonactivating_store_device_exclusion_cleanup_targets(
                         operation.as_ref().clone(),
                     ),
                 )
-                .await?
-                {
-                    self.storage
-                        .delete_protocol_object(&target.object)
-                        .await
-                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
-                    database
-                        .mark_candidate_cleanup_absent(target.object)
-                        .await?;
-                }
+                .await?;
+                crate::sync::store::owner::delete_candidate_cleanup_targets::<
+                    StoreDeviceExclusionError,
+                >(self.storage.as_ref(), &database, targets)
+                .await?;
                 **operation = Box::pin(
                     database
                         .complete_nonactivating_store_device_exclusion(operation.as_ref().clone()),
@@ -668,21 +663,16 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                 completion_result(operation.as_ref()).map(Some)
             }
             DurableStoreDeviceExclusionOperation::ReplacingCandidate { .. } => {
-                for target in Box::pin(
+                let targets = Box::pin(
                     database.nonactivating_store_device_exclusion_cleanup_targets(
                         operation.as_ref().clone(),
                     ),
                 )
-                .await?
-                {
-                    self.storage
-                        .delete_protocol_object(&target.object)
-                        .await
-                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
-                    database
-                        .mark_candidate_cleanup_absent(target.object)
-                        .await?;
-                }
+                .await?;
+                crate::sync::store::owner::delete_candidate_cleanup_targets::<
+                    StoreDeviceExclusionError,
+                >(self.storage.as_ref(), &database, targets)
+                .await?;
                 **operation = Box::pin(
                     database.complete_store_device_exclusion_replacement_cleanup(
                         operation.as_ref().clone(),

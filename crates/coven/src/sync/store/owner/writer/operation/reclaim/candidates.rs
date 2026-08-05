@@ -160,18 +160,15 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         operation: DurableStoreReclaimOperation,
     ) -> Result<(), StoreReclaimError> {
         let database = &self.database;
-        for target in database
+        let targets = database
             .store_reclaim_replacement_cleanup_targets(operation.clone())
-            .await?
-        {
-            self.storage
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
+            .await?;
+        crate::sync::store::owner::delete_candidate_cleanup_targets::<StoreReclaimError>(
+            self.storage.as_ref(),
+            database,
+            targets,
+        )
+        .await?;
         database
             .complete_store_reclaim_candidate_replacement(operation)
             .await?;

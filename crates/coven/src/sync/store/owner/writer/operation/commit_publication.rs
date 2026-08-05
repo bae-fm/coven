@@ -534,20 +534,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         acknowledgement: crate::protocol::store_commit::StoreAckRef,
     ) -> Result<(), StoreError> {
-        if let Some(target) = self
+        let target = self
             .database
             .acknowledgement_cleanup_target(acknowledgement.clone())
-            .await?
-        {
-            self.storage
-                .as_ref()
-                .delete_protocol_object(&target.object)
-                .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            self.database
-                .mark_candidate_cleanup_absent(target.object)
-                .await?;
-        }
+            .await?;
+        crate::sync::store::owner::delete_candidate_cleanup_targets::<StoreError>(
+            self.storage.as_ref(),
+            &self.database,
+            target,
+        )
+        .await?;
         self.database
             .complete_nonactivating_acknowledgement(acknowledgement)
             .await?;

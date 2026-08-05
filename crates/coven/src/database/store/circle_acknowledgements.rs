@@ -2,7 +2,6 @@ use crate::database::*;
 use crate::protocol::circle::{
     CircleBootstrapCoverageRef, CircleControlCoord, CircleEpochId, CircleId,
 };
-use crate::protocol::circle_activation::CircleCurrentState;
 use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::store_commit::{
     CircleAck, CircleAckRef, CommitFrontier, StoreDeviceId, StoreDeviceStatus, StoreHistoryCut,
@@ -46,30 +45,9 @@ impl StoreDatabase {
     fn circle_acknowledgement_publication_inputs_on(
         conn: &Connection,
     ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
-        let mut statement = conn
-            .prepare("SELECT circle_id, state FROM circle_current_state ORDER BY circle_id")
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
         let mut inputs = Vec::new();
-        for (encoded_circle_id, payload) in rows {
-            let circle_id: CircleId = encoded_circle_id
-                .parse()
-                .map_err(|error| DbError::Message(format!("parse current Circle id: {error}")))?;
-            let state: CircleCurrentState = serde_json::from_slice(&payload).map_err(|error| {
-                DbError::Message(format!("parse Circle current state: {error}"))
-            })?;
-            if !state.verify() || state.circle_id() != circle_id {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} has invalid current state"
-                )));
-            }
+        for state in Self::circle_current_states_on(conn)? {
+            let circle_id = state.circle_id();
             // Only an active projection holds private history to acknowledge; an
             // inactive recipient has no access leaf and stages nothing.
             let Some(authoring) = state.authoring_state() else {
