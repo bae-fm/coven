@@ -32,6 +32,53 @@ fn has_change(
         .any(|change| change.table == table && change.op == op && change.pk() == Some(primary_key))
 }
 
+/// Every row of a query whose columns are three TEXT values.
+fn text_triples(
+    conn: &crate::database::DatabaseImageTest,
+    sql: &str,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    conn.query(sql, [], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })
+}
+
+/// Every row of a query whose columns are four TEXT values.
+fn text_quads(
+    conn: &crate::database::DatabaseImageTest,
+    sql: &str,
+) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+    conn.query(sql, [], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })
+}
+
+/// The private audience mirror, as `(routing id, Circle)` pairs.
+fn audience_mirror(
+    conn: &crate::database::DatabaseImageTest,
+) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+    conn.query(
+        "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    )
+}
+
+/// The number of rows in `table`.
+fn row_count(conn: &crate::database::DatabaseImageTest, table: &str) -> rusqlite::Result<i64> {
+    conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+        row.get::<_, i64>(0)
+    })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ReparentRollbackState {
     account: String,
@@ -57,29 +104,14 @@ fn reparent_rollback_state(
         [transaction_id],
         |row| row.get::<_, i64>(0),
     )?;
-    let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    let routes = conn.query(
+    let writes = row_count(conn, "store_writes")?;
+    let partitions = row_count(conn, "store_write_partitions")?;
+    let routes = text_triples(
+        conn,
         "SELECT routing_id, table_name, row_id FROM _coven_row_routes
                  ORDER BY routing_id",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
     )?;
-    let mirror = conn.query(
-        "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-    )?;
+    let mirror = audience_mirror(conn)?;
     Ok(ReparentRollbackState {
         account,
         requirement,
@@ -105,63 +137,26 @@ struct ScopedAncestorRollbackState {
 fn scoped_ancestor_rollback_state(
     conn: &crate::database::DatabaseImageTest,
 ) -> rusqlite::Result<ScopedAncestorRollbackState> {
-    let folders = conn.query(
+    let folders = text_triples(
+        conn,
         "SELECT id, name, _updated_at FROM folders ORDER BY id",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
     )?;
-    let documents = conn.query(
+    let documents = text_quads(
+        conn,
         "SELECT id, folder_id, audience, _updated_at FROM documents ORDER BY id",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
     )?;
-    let details = conn.query(
+    let details = text_triples(
+        conn,
         "SELECT id, document_id, _updated_at FROM details ORDER BY id",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
     )?;
-    let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    let routes = conn.query(
+    let writes = row_count(conn, "store_writes")?;
+    let partitions = row_count(conn, "store_write_partitions")?;
+    let routes = text_triples(
+        conn,
         "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                  ORDER BY table_name, row_id",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
     )?;
-    let mirror = conn.query(
-        "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-    )?;
+    let mirror = audience_mirror(conn)?;
     Ok(ScopedAncestorRollbackState {
         folders,
         documents,
@@ -312,23 +307,12 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     );
 
     let routes = inspect_database(&store_dir, |conn| {
-        let routes = conn.query(
+        let routes = text_triples(
+            conn,
             "SELECT routing_id, table_name, row_id
                  FROM _coven_row_routes ORDER BY row_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
         )?;
-        let mirror = conn.query(
-            "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )?;
+        let mirror = audience_mirror(conn)?;
         Ok((routes, mirror))
     })
     .expect("read deterministic scoped routes");
@@ -418,18 +402,9 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .expect("seed scoped rows");
 
     let before = inspect_database(&store_dir, |conn| {
-        let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        let partitions =
-            conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-        let mirror = conn.query(
-            "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )?;
+        let writes = row_count(conn, "store_writes")?;
+        let partitions = row_count(conn, "store_write_partitions")?;
+        let mirror = audience_mirror(conn)?;
         Ok((writes, partitions, mirror))
     })
     .expect("count durable writes before injected failure");
@@ -467,18 +442,9 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
             [],
             |row| row.get::<_, i64>(0),
         )?;
-        let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        let partitions =
-            conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-        let mirror = conn.query(
-            "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )?;
+        let writes = row_count(conn, "store_writes")?;
+        let partitions = row_count(conn, "store_write_partitions")?;
+        let mirror = audience_mirror(conn)?;
         Ok((audience, child_count, writes, partitions, mirror))
     })
     .expect("read state after injected partition failure");
@@ -529,23 +495,12 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
                 [move_write_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )?;
-            let routes = conn.query(
+            let routes = text_triples(
+                conn,
                 "SELECT routing_id, table_name, row_id
                      FROM _coven_row_routes ORDER BY row_id",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
             )?;
-            let mirror = conn.query(
-                "SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )?;
+            let mirror = audience_mirror(conn)?;
             Ok((audience, child_count, rows, routes, mirror))
         })
         .expect("read Store to Circle move partitions");
@@ -702,19 +657,10 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
                 [rejected_id],
                 |row| row.get::<_, i64>(0),
             )?;
-            let routes = conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let mirror = conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let partitions =
-                conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
+            let routes = row_count(conn, "_coven_row_routes")?;
+            let mirror = row_count(conn, "_coven_audience")?;
+            let writes = row_count(conn, "store_writes")?;
+            let partitions = row_count(conn, "store_write_partitions")?;
             Ok((host_rows, routes, mirror, writes, partitions))
         })
         .expect("read state after rejected scoped write");
@@ -797,18 +743,10 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         .expect("seed three Circle subtrees");
 
     let before_failure = inspect_database(&store_dir, |conn| {
-        let routes = conn.query(
+        let routes = text_quads(
+            conn,
             "SELECT routing_id, table_name, row_id, _updated_at
                      FROM _coven_row_routes ORDER BY routing_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
         )?;
         let mirror = conn.query(
             "SELECT routing_id, circle_id, _updated_at
@@ -822,13 +760,8 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
                 ))
             },
         )?;
-        let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        let partitions =
-            conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let writes = row_count(conn, "store_writes")?;
+        let partitions = row_count(conn, "store_write_partitions")?;
         Ok((routes, mirror, writes, partitions))
     })
     .expect("read state before injected failure");
@@ -859,18 +792,10 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             [],
             |row| row.get::<_, String>(0),
         )?;
-        let routes = conn.query(
+        let routes = text_quads(
+            conn,
             "SELECT routing_id, table_name, row_id, _updated_at
                      FROM _coven_row_routes ORDER BY routing_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
         )?;
         let mirror = conn.query(
             "SELECT routing_id, circle_id, _updated_at
@@ -884,13 +809,8 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
                 ))
             },
         )?;
-        let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        let partitions =
-            conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let writes = row_count(conn, "store_writes")?;
+        let partitions = row_count(conn, "store_write_partitions")?;
         Ok((audience, routes, mirror, writes, partitions))
     })
     .expect("read rolled-back Circle transition");
@@ -1406,19 +1326,10 @@ async fn validates_every_outgoing_synced_fk_audience() {
         ),
     ] {
         let before = inspect_database(&store_dir, move |conn| {
-            let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let partitions =
-                conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-            let routes = conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let mirror = conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+            let writes = row_count(conn, "store_writes")?;
+            let partitions = row_count(conn, "store_write_partitions")?;
+            let routes = row_count(conn, "_coven_row_routes")?;
+            let mirror = row_count(conn, "_coven_audience")?;
             Ok((writes, partitions, routes, mirror))
         })
         .expect("read state before rejected relationship");
@@ -1449,19 +1360,10 @@ async fn validates_every_outgoing_synced_fk_audience() {
                 [rejected_id],
                 |row| row.get::<_, i64>(0),
             )?;
-            let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let partitions =
-                conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-            let routes = conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-            let mirror = conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+            let writes = row_count(conn, "store_writes")?;
+            let partitions = row_count(conn, "store_write_partitions")?;
+            let routes = row_count(conn, "_coven_row_routes")?;
+            let mirror = row_count(conn, "_coven_audience")?;
             Ok((host_rows, writes, partitions, routes, mirror))
         })
         .expect("read state after rejected relationship");
@@ -1597,18 +1499,11 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         .expect("seed inherited reparenting cases");
 
     let before_routes = inspect_database(&store_dir, move |conn| {
-        conn.query(
+        text_triples(
+            conn,
             "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                  WHERE table_name IN ('transactions', 'line_items')
                  ORDER BY table_name, row_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
         )
     })
     .expect("read routes before reparent");
@@ -1632,18 +1527,11 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
             [write_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
-        let after_routes = conn.query(
+        let after_routes = text_triples(
+            conn,
             "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
         )?;
         Ok((partitions, after_routes))
     })
@@ -1852,18 +1740,11 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     drop(fault);
 
     let final_routes = inspect_database(&store_dir, move |conn| {
-        conn.query(
+        text_triples(
+            conn,
             "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
         )
     })
     .expect("read routes after inherited reparent matrix");
