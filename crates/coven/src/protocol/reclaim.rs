@@ -10,9 +10,9 @@ use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::MembershipGrantId;
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::store_commit::{
-    CircleAckRef, CirclePackageRef, CircleSnapshotRef, ObjectHash, SnapshotImageRef, StoreAckRef,
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StorePackageRef,
-    StoreProtocolError, StoreSnapshotLocator, STORE_PROTOCOL_VERSION,
+    CircleAckRef, CirclePackageRef, CircleSnapshotRef, ObjectHash, Signed, SignedBody,
+    SnapshotImageRef, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError, StoreSnapshotLocator,
 };
 
 const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
@@ -612,23 +612,20 @@ impl ReclaimEvidenceRef {
     }
 }
 
+/// The wire body of a reclaim claim's evidence. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReclaimEvidence {
-    pub version: u32,
+pub struct ReclaimEvidenceBody {
     pub store_root_hash: ObjectHash,
     pub claim: ReclaimClaim,
     pub author_pubkey: String,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct ReclaimEvidenceSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    claim: &'a ReclaimClaim,
-    author_pubkey: &'a str,
+impl SignedBody for ReclaimEvidenceBody {
+    const DOMAIN: &'static [u8] = RECLAIM_EVIDENCE_DOMAIN;
 }
+
+pub(crate) type ReclaimEvidence = Signed<ReclaimEvidenceBody>;
 
 impl ReclaimEvidence {
     pub fn signed(
@@ -637,49 +634,24 @@ impl ReclaimEvidence {
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         claim.validate()?;
-        let mut evidence = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            claim,
-            author_pubkey: keys::public_key_hex(signer),
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(signer, &evidence.canonical_signed_bytes());
-        evidence.signature = signature;
-        Ok(evidence)
-    }
-
-    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
-        crate::protocol::store_commit::domain_json(
-            RECLAIM_EVIDENCE_DOMAIN,
-            &ReclaimEvidenceSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                claim: &self.claim,
-                author_pubkey: &self.author_pubkey,
+        Ok(Signed::sign(
+            ReclaimEvidenceBody {
+                store_root_hash,
+                claim,
+                author_pubkey: keys::public_key_hex(signer),
             },
-        )
+            signer,
+        ))
     }
 
     pub fn evidence_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("ReclaimEvidence serialization cannot fail")
+        self.hash()
     }
 
     pub fn verify(&self) -> Result<(), StoreProtocolError> {
-        crate::protocol::store_commit::require_version(self.version)?;
         self.claim.validate()?;
-        if !keys::verify_signature_hex(
-            &self.author_pubkey,
-            &self.signature,
-            &self.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        let author_pubkey = self.author_pubkey.clone();
+        self.verify_by(&author_pubkey)
     }
 }
 
@@ -749,25 +721,22 @@ impl ReclaimAuthorizationRef {
     }
 }
 
+/// The wire body of an Owner's authorization to reclaim. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReclaimAuthorization {
-    pub version: u32,
+pub struct ReclaimAuthorizationBody {
     pub store_root_hash: ObjectHash,
     pub target: ReclaimTarget,
     pub evidence: ReclaimEvidenceRef,
     pub authority: StoreReclaimAuthority,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct ReclaimAuthorizationSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    target: &'a ReclaimTarget,
-    evidence: &'a ReclaimEvidenceRef,
-    authority: &'a StoreReclaimAuthority,
+impl SignedBody for ReclaimAuthorizationBody {
+    const DOMAIN: &'static [u8] = RECLAIM_AUTHORIZATION_DOMAIN;
 }
+
+pub(crate) type ReclaimAuthorization = Signed<ReclaimAuthorizationBody>;
 
 impl ReclaimAuthorization {
     pub fn signed(
@@ -777,50 +746,23 @@ impl ReclaimAuthorization {
         authority: StoreReclaimAuthority,
         signer: &UserKeypair,
     ) -> Self {
-        let mut authorization = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            target,
-            evidence,
-            authority,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(signer, &authorization.canonical_signed_bytes());
-        authorization.signature = signature;
-        authorization
-    }
-
-    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
-        crate::protocol::store_commit::domain_json(
-            RECLAIM_AUTHORIZATION_DOMAIN,
-            &ReclaimAuthorizationSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                target: &self.target,
-                evidence: &self.evidence,
-                authority: &self.authority,
+        Signed::sign(
+            ReclaimAuthorizationBody {
+                store_root_hash,
+                target,
+                evidence,
+                authority,
             },
+            signer,
         )
     }
 
     pub fn authorization_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("ReclaimAuthorization serialization cannot fail")
+        self.hash()
     }
 
     pub fn verify(&self, owner_pubkey: &str) -> Result<(), StoreProtocolError> {
-        crate::protocol::store_commit::require_version(self.version)?;
-        if !keys::verify_signature_hex(
-            owner_pubkey,
-            &self.signature,
-            &self.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        self.verify_by(owner_pubkey)
     }
 }
 
@@ -870,27 +812,23 @@ impl ReclaimReceiptRef {
     }
 }
 
+/// The wire body of a reclaim receipt: what was reclaimed, and under whose
+/// authority. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReclaimReceipt {
-    pub version: u32,
+pub struct ReclaimReceiptBody {
     pub store_root_hash: ObjectHash,
     pub authorization: ReclaimAuthorizationRef,
     pub provider_admin_state: StoreMembershipStateRef,
     pub provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
     pub executor: StoreDeviceRegistrationRef,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct ReclaimReceiptSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    authorization: &'a ReclaimAuthorizationRef,
-    provider_admin_state: &'a StoreMembershipStateRef,
-    provider_admin_grant: &'a crate::protocol::provider::ProviderAdminGrantId,
-    executor: &'a StoreDeviceRegistrationRef,
+impl SignedBody for ReclaimReceiptBody {
+    const DOMAIN: &'static [u8] = RECLAIM_RECEIPT_DOMAIN;
 }
+
+pub(crate) type ReclaimReceipt = Signed<ReclaimReceiptBody>;
 
 impl ReclaimReceipt {
     #[allow(clippy::too_many_arguments)]
@@ -911,57 +849,29 @@ impl ReclaimReceipt {
         if keys::public_key_hex(signer) != executor_registration.device_signing_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        let mut receipt = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            authorization,
-            provider_admin_state,
-            provider_admin_grant,
-            executor,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(signer, &receipt.canonical_signed_bytes());
-        receipt.signature = signature;
-        Ok(receipt)
-    }
-
-    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
-        crate::protocol::store_commit::domain_json(
-            RECLAIM_RECEIPT_DOMAIN,
-            &ReclaimReceiptSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                authorization: &self.authorization,
-                provider_admin_state: &self.provider_admin_state,
-                provider_admin_grant: &self.provider_admin_grant,
-                executor: &self.executor,
+        Ok(Signed::sign(
+            ReclaimReceiptBody {
+                store_root_hash,
+                authorization,
+                provider_admin_state,
+                provider_admin_grant,
+                executor,
             },
-        )
+            signer,
+        ))
     }
 
     pub fn receipt_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("ReclaimReceipt serialization cannot fail")
+        self.hash()
     }
 
     pub fn verify(&self, executor: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
-        crate::protocol::store_commit::require_version(self.version)?;
         self.executor.verify_registration(executor)?;
         crate::protocol::objects::verify_store_root(
             self.store_root_hash,
             executor.store_root.store_root_hash,
         )?;
-        if !keys::verify_signature_hex(
-            &executor.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        self.verify_by(&executor.device_signing_pubkey)
     }
 }
 

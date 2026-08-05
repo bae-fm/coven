@@ -375,7 +375,8 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     );
 
     let mut relocated = authorization.clone();
-    let ReclaimTarget::StorePackage(relocated_target) = &mut relocated.target else {
+    let ReclaimTarget::StorePackage(relocated_target) = &mut relocated.body_mut_for_test().target
+    else {
         unreachable!("Store package reclaim target");
     };
     relocated_target.package.object =
@@ -400,7 +401,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         )
         .expect("sign reclaim receipt");
     let mut reassigned = receipt.clone();
-    reassigned.provider_admin_grant =
+    reassigned.body_mut_for_test().provider_admin_grant =
         crate::protocol::provider::ProviderAdminGrantId(ObjectHash::digest(b"another admin"));
     assert!(matches!(
         reassigned.verify(founder_authority.registration()),
