@@ -521,7 +521,7 @@ impl RetainedStoreDeviceExclusionOutcome {
                 }
                 Ok(VerifiedStoreDeviceExclusionOutcome::Excluded {
                     source: self,
-                    accepted_cut: exclusion.proof.cutoff,
+                    accepted_cut: exclusion.proof.cutoff.clone(),
                 })
             }
             (Self::Cancelled { .. }, StoreDeviceExclusionOutcome::Cancelled(_)) => {

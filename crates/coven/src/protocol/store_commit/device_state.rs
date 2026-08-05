@@ -1,6 +1,4 @@
-use super::validation::{
-    require_version, validate_commit_frontier, validate_store_device_state_ref,
-};
+use super::validation::{validate_commit_frontier, validate_store_device_state_ref};
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

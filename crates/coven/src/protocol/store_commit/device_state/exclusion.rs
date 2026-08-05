@@ -113,10 +113,10 @@ impl StoreDeviceExclusionOutcomeRef {
     }
 }
 
+/// The wire body of a device-exclusion proposal. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusionProposal {
-    pub version: u32,
+pub struct StoreDeviceExclusionProposalBody {
     pub store_root_hash: ObjectHash,
     pub proposal_id: StoreDeviceExclusionProposalId,
     pub target: StoreDeviceRegistrationRef,
@@ -124,8 +124,13 @@ pub struct StoreDeviceExclusionProposal {
     pub outcome_slot: ObjectSlot,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub signature: String,
 }
+
+impl SignedBody for StoreDeviceExclusionProposalBody {
+    const DOMAIN: &'static [u8] = DEVICE_EXCLUSION_PROPOSAL_DOMAIN;
+}
+
+pub(crate) type StoreDeviceExclusionProposal = Signed<StoreDeviceExclusionProposalBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -134,29 +139,40 @@ pub enum StoreDeviceExclusionOutcome {
     Cancelled(StoreDeviceExclusionCancellation),
 }
 
+/// The wire body of an owner's withdrawal of an exclusion proposal. Every field
+/// here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusionCancellation {
-    pub version: u32,
+pub struct StoreDeviceExclusionCancellationBody {
     pub store_root_hash: ObjectHash,
     pub proposal: StoreDeviceExclusionProposalRef,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub signature: String,
 }
 
+impl SignedBody for StoreDeviceExclusionCancellationBody {
+    const DOMAIN: &'static [u8] = DEVICE_EXCLUSION_CANCELLATION_DOMAIN;
+}
+
+pub(crate) type StoreDeviceExclusionCancellation = Signed<StoreDeviceExclusionCancellationBody>;
+
+/// The wire body of a device's exclusion. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreDeviceExclusion {
-    pub version: u32,
+pub struct StoreDeviceExclusionBody {
     pub store_root_hash: ObjectHash,
     pub proposal: StoreDeviceExclusionProposalRef,
     pub target: StoreDeviceRegistrationRef,
     pub proof: StoreDeviceExclusionProof,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub signature: String,
 }
+
+impl SignedBody for StoreDeviceExclusionBody {
+    const DOMAIN: &'static [u8] = DEVICE_EXCLUSION_DOMAIN;
+}
+
+pub(crate) type StoreDeviceExclusion = Signed<StoreDeviceExclusionBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,45 +215,22 @@ impl StoreDeviceExclusionProposal {
             });
         }
         validate_store_device_state_ref(&frozen_device_state)?;
-        let mut proposal = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            proposal_id,
-            target,
-            frozen_device_state,
-            outcome_slot,
-            owner_registration,
-            owner_grant,
-            signature: String::new(),
-        };
-        let (_, signature) =
-            keys::sign_hex(owner_device_signer, &proposal.canonical_signed_bytes());
-        proposal.signature = signature;
-        Ok(proposal)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            DEVICE_EXCLUSION_PROPOSAL_DOMAIN,
-            &(
-                self.version,
-                self.store_root_hash,
-                self.proposal_id,
-                &self.target,
-                &self.frozen_device_state,
-                &self.outcome_slot,
-                &self.owner_registration,
-                &self.owner_grant,
-            ),
-        )
+        Ok(Signed::sign(
+            StoreDeviceExclusionProposalBody {
+                store_root_hash,
+                proposal_id,
+                target,
+                frozen_device_state,
+                outcome_slot,
+                owner_registration,
+                owner_grant,
+            },
+            owner_device_signer,
+        ))
     }
 
     pub fn proposal_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("Store device exclusion proposal serialization cannot fail")
+        self.hash()
     }
 
     pub fn parse_at(
@@ -247,7 +240,6 @@ impl StoreDeviceExclusionProposal {
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let proposal: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(proposal.version)?;
         expected.verify_proposal(&proposal)?;
         proposal.target.verify_registration(target)?;
         proposal.owner_registration.verify_registration(owner)?;
@@ -267,14 +259,10 @@ impl StoreDeviceExclusionProposal {
         }
         if proposal.store_root_hash != owner.store_root.store_root_hash
             || proposal.store_root_hash != target.store_root.store_root_hash
-            || !keys::verify_signature_hex(
-                &owner.device_signing_pubkey,
-                &proposal.signature,
-                &proposal.canonical_signed_bytes(),
-            )
         {
             return Err(StoreProtocolError::InvalidSignature);
         }
+        proposal.verify_by(&owner.device_signing_pubkey)?;
         Ok(proposal)
     }
 }
@@ -344,35 +332,19 @@ impl StoreDeviceExclusionCancellation {
         {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        let mut cancellation = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: owner.store_root.store_root_hash,
-            proposal,
-            owner_registration,
-            owner_grant,
-            signature: String::new(),
-        };
-        let (_, signature) =
-            keys::sign_hex(owner_device_signer, &cancellation.canonical_signed_bytes());
-        cancellation.signature = signature;
-        Ok(cancellation)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            DEVICE_EXCLUSION_CANCELLATION_DOMAIN,
-            &(
-                self.version,
-                self.store_root_hash,
-                &self.proposal,
-                &self.owner_registration,
-                &self.owner_grant,
-            ),
-        )
+        Ok(Signed::sign(
+            StoreDeviceExclusionCancellationBody {
+                store_root_hash: owner.store_root.store_root_hash,
+                proposal,
+                owner_registration,
+                owner_grant,
+            },
+            owner_device_signer,
+        ))
     }
 
     pub fn outcome_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 }
 
@@ -400,39 +372,21 @@ impl StoreDeviceExclusion {
             return Err(StoreProtocolError::InvalidSignature);
         }
         validate_device_exclusion_proof(&proof)?;
-        let mut exclusion = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: owner.store_root.store_root_hash,
-            proposal,
-            target,
-            proof,
-            owner_registration,
-            owner_grant,
-            signature: String::new(),
-        };
-        let (_, signature) =
-            keys::sign_hex(owner_device_signer, &exclusion.canonical_signed_bytes());
-        exclusion.signature = signature;
-        Ok(exclusion)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            DEVICE_EXCLUSION_DOMAIN,
-            &(
-                self.version,
-                self.store_root_hash,
-                &self.proposal,
-                &self.target,
-                &self.proof,
-                &self.owner_registration,
-                &self.owner_grant,
-            ),
-        )
+        Ok(Signed::sign(
+            StoreDeviceExclusionBody {
+                store_root_hash: owner.store_root.store_root_hash,
+                proposal,
+                target,
+                proof,
+                owner_registration,
+                owner_grant,
+            },
+            owner_device_signer,
+        ))
     }
 
     pub fn outcome_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 }
 
@@ -474,34 +428,23 @@ impl StoreDeviceExclusionOutcome {
         }
         match &outcome {
             Self::Excluded(exclusion) => {
-                require_version(exclusion.version)?;
                 exclusion.target.verify_registration(target)?;
                 exclusion.owner_registration.verify_registration(owner)?;
                 validate_device_exclusion_proof(&exclusion.proof)?;
                 if exclusion.store_root_hash != proposal.store_root_hash
                     || exclusion.store_root_hash != target.store_root.store_root_hash
                     || exclusion.target != proposal.target
-                    || !keys::verify_signature_hex(
-                        &owner.device_signing_pubkey,
-                        &exclusion.signature,
-                        &exclusion.canonical_signed_bytes(),
-                    )
                 {
                     return Err(StoreProtocolError::InvalidSignature);
                 }
+                exclusion.verify_by(&owner.device_signing_pubkey)?;
             }
             Self::Cancelled(cancellation) => {
-                require_version(cancellation.version)?;
                 cancellation.owner_registration.verify_registration(owner)?;
-                if cancellation.store_root_hash != proposal.store_root_hash
-                    || !keys::verify_signature_hex(
-                        &owner.device_signing_pubkey,
-                        &cancellation.signature,
-                        &cancellation.canonical_signed_bytes(),
-                    )
-                {
+                if cancellation.store_root_hash != proposal.store_root_hash {
                     return Err(StoreProtocolError::InvalidSignature);
                 }
+                cancellation.verify_by(&owner.device_signing_pubkey)?;
             }
         }
         Ok(outcome)
