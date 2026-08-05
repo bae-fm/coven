@@ -17,7 +17,7 @@ use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef}
 use super::store_commit::{
     CommitFrontier, ObjectHash, OwnerRecoveryCursor, Signed, SignedBody, SnapshotImageRef,
     StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    SuccessorLink, STORE_PROTOCOL_VERSION,
+    SuccessorLink,
 };
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
@@ -25,8 +25,8 @@ use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::objects::ObjectSlot;
 
 const RECIPIENT_SLOT_DOMAIN: &[u8] = b"coven.circle-recipient-slot.v1\0";
-const METADATA_DOMAIN: &str = "coven.circle-metadata.v1";
-const METADATA_HEAD_DOMAIN: &str = "coven.circle-metadata-head.v1";
+const METADATA_DOMAIN: &[u8] = b"coven.circle-metadata.v1\0";
+const METADATA_HEAD_DOMAIN: &[u8] = b"coven.circle-metadata-head.v1\0";
 const ACCESS_DOMAIN: &[u8] = b"coven.circle-access-leaf.v1\0";
 const CONTROL_DOMAIN: &[u8] = b"coven.circle-control.v1\0";
 const CONTROL_HEAD_DOMAIN: &[u8] = b"coven.circle-control-head.v1\0";
@@ -77,8 +77,8 @@ pub(crate) use epoch_close::{
 };
 pub(crate) use metadata::CircleMetadataHeadRef;
 pub(crate) use metadata::{
-    CircleMetadata, CircleMetadataCoord, CircleMetadataHead, CircleMetadataStateRef,
-    MergeCircleMetadataStateRef,
+    CircleMetadata, CircleMetadataBody, CircleMetadataCoord, CircleMetadataHead,
+    CircleMetadataStateRef, MergeCircleMetadataStateRef,
 };
 pub(crate) use semantic_path::{
     circle_control_head_prefix, circle_epoch_close_intent_semantic_prefix,

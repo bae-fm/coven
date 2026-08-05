@@ -11,9 +11,7 @@ use super::causal_grants::{
 };
 use super::circle::{CircleId, CircleRole};
 use super::membership::MembershipGrantId;
-use super::store_commit::{
-    ObjectHash, StoreDeviceRegistration, SuccessorLink, STORE_PROTOCOL_VERSION,
-};
+use super::store_commit::{ObjectHash, Signed, SignedBody, StoreDeviceRegistration, SuccessorLink};
 use crate::keys::{self, UserKeypair};
 use crate::protocol::objects::ExactObjectRef;
 
@@ -22,6 +20,8 @@ mod conflict;
 mod reduction;
 
 pub(crate) use chain::CircleRosterChain;
+#[cfg(test)]
+pub(crate) use conflict::CircleRosterConflictResolutionBody;
 pub(crate) use conflict::CircleRosterConflictResolutionRef;
 pub(crate) use conflict::{
     derive_circle_resolution_grant, resolve_circle_roster_conflict, CircleMaterializedRoster,
@@ -29,8 +29,9 @@ pub(crate) use conflict::{
     ResolvedCircleRoster,
 };
 
-const ROSTER_DOMAIN: &str = "coven.circle-roster.v1";
-const ROSTER_HEAD_DOMAIN: &str = "coven.circle-roster-head.v1";
+const ROSTER_DOMAIN: &[u8] = b"coven.circle-roster.v1\0";
+const ROSTER_HEAD_DOMAIN: &[u8] = b"coven.circle-roster-head.v1\0";
+const ROSTER_RESOLUTION_DOMAIN: &[u8] = b"coven.circle-roster-conflict-resolution.v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,10 +136,10 @@ pub(crate) enum CircleRosterChange {
     },
 }
 
+/// The wire body of one Circle roster entry. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleRosterEntry {
-    pub version: u32,
+pub(crate) struct CircleRosterEntryBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub author_pubkey: String,
@@ -150,8 +151,13 @@ pub(crate) struct CircleRosterEntry {
     pub dependencies: Vec<CircleRosterCoord>,
     pub resolution_dependencies: Vec<CircleRosterConflictResolutionRef>,
     pub change: CircleRosterChange,
-    pub signature: String,
 }
+
+impl SignedBody for CircleRosterEntryBody {
+    const DOMAIN: &'static [u8] = ROSTER_DOMAIN;
+}
+
+pub(crate) type CircleRosterEntry = Signed<CircleRosterEntryBody>;
 
 impl CircleRosterEntry {
     pub(crate) fn founder(
@@ -163,67 +169,29 @@ impl CircleRosterEntry {
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Self {
         let author_pubkey = keys::public_key_hex(signer);
-        let mut entry = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            circle_id,
-            author_pubkey: author_pubkey.clone(),
-            device_id: device_id.to_string(),
-            stream_id,
-            author_owner_grant: owner_grant.clone(),
-            seq: 1,
-            previous_hash: None,
-            dependencies: Vec::new(),
-            resolution_dependencies: Vec::new(),
-            change: CircleRosterChange::Founder {
-                member_pubkey: author_pubkey,
-                grant_id: owner_grant,
+        Signed::sign(
+            CircleRosterEntryBody {
+                store_root_hash,
+                circle_id,
+                author_pubkey: author_pubkey.clone(),
+                device_id: device_id.to_string(),
+                stream_id,
+                author_owner_grant: owner_grant.clone(),
+                seq: 1,
+                previous_hash: None,
+                dependencies: Vec::new(),
+                resolution_dependencies: Vec::new(),
+                change: CircleRosterChange::Founder {
+                    member_pubkey: author_pubkey,
+                    grant_id: owner_grant,
+                },
             },
-            signature: String::new(),
-        };
-        entry.signature = keys::sign_hex(signer, &entry.canonical_bytes()).1;
-        entry
-    }
-
-    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            author_pubkey: &'a str,
-            device_id: &'a str,
-            stream_id: AuthorStreamId,
-            author_owner_grant: &'a MembershipGrantId,
-            seq: u64,
-            previous_hash: Option<ObjectHash>,
-            dependencies: &'a [CircleRosterCoord],
-            resolution_dependencies: &'a [CircleRosterConflictResolutionRef],
-            change: &'a CircleRosterChange,
-        }
-        serde_json::to_vec(&Signed {
-            domain: ROSTER_DOMAIN,
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            author_pubkey: &self.author_pubkey,
-            device_id: &self.device_id,
-            stream_id: self.stream_id,
-            author_owner_grant: &self.author_owner_grant,
-            seq: self.seq,
-            previous_hash: self.previous_hash,
-            dependencies: &self.dependencies,
-            resolution_dependencies: &self.resolution_dependencies,
-            change: &self.change,
-        })
-        .expect("circle roster entry serialization cannot fail")
+            signer,
+        )
     }
 
     pub(crate) fn entry_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("circle roster entry serialization cannot fail"),
-        )
+        self.hash()
     }
 
     pub(crate) fn coord(&self) -> CircleRosterCoord {
@@ -268,8 +236,7 @@ impl CircleRosterEntry {
                 )
             }
         };
-        self.version == STORE_PROTOCOL_VERSION
-            && !self.author_pubkey.is_empty()
+        !self.author_pubkey.is_empty()
             && !self.device_id.is_empty()
             && position_is_valid
             && self
@@ -304,18 +271,14 @@ impl CircleRosterEntry {
                             .is_ok()
                 }
             }
-            && keys::verify_signature_hex(
-                &self.author_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&self.author_pubkey).is_ok()
     }
 }
 
+/// The wire body of one Circle roster head. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleRosterHead {
-    pub version: u32,
+pub(crate) struct CircleRosterHeadBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub author_pubkey: String,
@@ -327,8 +290,13 @@ pub(crate) struct CircleRosterHead {
     pub tip: ExactObjectRef,
     pub successor: SuccessorLink,
     pub resolutions: Vec<CircleRosterConflictResolutionRef>,
-    pub signature: String,
 }
+
+impl SignedBody for CircleRosterHeadBody {
+    const DOMAIN: &'static [u8] = ROSTER_HEAD_DOMAIN;
+}
+
+pub(crate) type CircleRosterHead = Signed<CircleRosterHeadBody>;
 
 impl CircleRosterHead {
     pub(crate) fn signed(
@@ -353,77 +321,34 @@ impl CircleRosterHead {
         resolutions: Vec<CircleRosterConflictResolutionRef>,
         signer: &UserKeypair,
     ) -> Self {
-        let mut head = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: entry.store_root_hash,
-            circle_id: entry.circle_id,
-            author_pubkey: entry.author_pubkey.clone(),
-            device_id: entry.device_id.clone(),
-            stream_id: entry.stream_id,
-            author_owner_grant: entry.author_owner_grant.clone(),
-            seq: entry.seq,
-            tip_hash: entry.entry_hash(),
-            tip,
-            successor,
-            resolutions,
-            signature: String::new(),
-        };
-        head.signature = keys::sign_hex(signer, &head.canonical_bytes()).1;
-        head
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            author_pubkey: &'a str,
-            device_id: &'a str,
-            stream_id: AuthorStreamId,
-            author_owner_grant: &'a MembershipGrantId,
-            seq: u64,
-            tip_hash: ObjectHash,
-            tip: &'a ExactObjectRef,
-            successor: &'a SuccessorLink,
-            resolutions: &'a [CircleRosterConflictResolutionRef],
-        }
-        serde_json::to_vec(&Signed {
-            domain: ROSTER_HEAD_DOMAIN,
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            author_pubkey: &self.author_pubkey,
-            device_id: &self.device_id,
-            stream_id: self.stream_id,
-            author_owner_grant: &self.author_owner_grant,
-            seq: self.seq,
-            tip_hash: self.tip_hash,
-            tip: &self.tip,
-            successor: &self.successor,
-            resolutions: &self.resolutions,
-        })
-        .expect("circle roster head serialization cannot fail")
-    }
-
-    pub(crate) fn head_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("circle roster head serialization cannot fail"),
+        Signed::sign(
+            CircleRosterHeadBody {
+                store_root_hash: entry.store_root_hash,
+                circle_id: entry.circle_id,
+                author_pubkey: entry.author_pubkey.clone(),
+                device_id: entry.device_id.clone(),
+                stream_id: entry.stream_id,
+                author_owner_grant: entry.author_owner_grant.clone(),
+                seq: entry.seq,
+                tip_hash: entry.entry_hash(),
+                tip,
+                successor,
+                resolutions,
+            },
+            signer,
         )
     }
 
+    pub(crate) fn head_hash(&self) -> ObjectHash {
+        self.hash()
+    }
+
     pub(crate) fn verify_for_registration(&self, registration: &StoreDeviceRegistration) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self.seq > 0
+        self.seq > 0
             && !self.device_id.is_empty()
             && self.device_id == registration.device_id.to_string()
             && self.resolutions.windows(2).all(|pair| pair[0] < pair[1])
-            && keys::verify_signature_hex(
-                &registration.device_signing_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&registration.device_signing_pubkey).is_ok()
     }
     pub(crate) fn entry_coord(&self) -> CircleRosterCoord {
         CircleRosterCoord {

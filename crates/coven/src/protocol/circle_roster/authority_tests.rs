@@ -155,9 +155,9 @@ fn roster_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {
         &owner,
     );
     let mut terminal = founder.clone();
-    terminal.seq = u64::MAX;
-    terminal.previous_hash = Some(founder.entry_hash());
-    terminal.signature = keys::sign_hex(&owner, &terminal.canonical_bytes()).1;
+    terminal.body_mut().seq = u64::MAX;
+    terminal.body_mut().previous_hash = Some(founder.entry_hash());
+    terminal.resign(&owner);
     let terminal_coord = terminal.coord();
     let stream = terminal_coord.stream_key();
     let mut chain = CircleRosterChain::from_entries(vec![founder]).expect("founder roster");
@@ -957,12 +957,12 @@ fn circle_entry_rejects_unsorted_or_duplicate_resolution_dependencies() {
     refs.sort();
 
     let mut unsorted = entry.clone();
-    unsorted.resolution_dependencies = refs.iter().rev().cloned().collect();
-    unsorted.signature = keys::sign_hex(&owner, &unsorted.canonical_bytes()).1;
+    unsorted.body_mut().resolution_dependencies = refs.iter().rev().cloned().collect();
+    unsorted.resign(&owner);
     assert!(!unsorted.verify());
 
     let mut duplicate = entry;
-    duplicate.resolution_dependencies = vec![refs[0].clone(), refs[0].clone()];
-    duplicate.signature = keys::sign_hex(&owner, &duplicate.canonical_bytes()).1;
+    duplicate.body_mut().resolution_dependencies = vec![refs[0].clone(), refs[0].clone()];
+    duplicate.resign(&owner);
     assert!(!duplicate.verify());
 }

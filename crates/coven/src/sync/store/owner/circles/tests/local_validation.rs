@@ -636,20 +636,21 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .await
         .expect("open the founder roster entry where it belongs");
 
-    let resolution = crate::protocol::circle_roster::CircleRosterConflictResolution {
-        version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
-        store_root_hash,
-        circle_id,
-        conflict_hash: ObjectHash::digest(b"roster kind crossing conflict"),
-        conflicting_heads: Vec::new(),
-        retired_owner_grants: Default::default(),
-        resolver_pubkey: author.clone(),
-        resolver_branch_heads: Vec::new(),
-        replacement_grant: crate::protocol::membership::MembershipGrantId(ObjectHash::digest(
-            b"roster kind crossing grant",
-        )),
-        signature: String::new(),
-    };
+    let resolution =
+        crate::protocol::circle_roster::CircleRosterConflictResolution::unsigned_for_test(
+            crate::protocol::circle_roster::CircleRosterConflictResolutionBody {
+                store_root_hash,
+                circle_id,
+                conflict_hash: ObjectHash::digest(b"roster kind crossing conflict"),
+                conflicting_heads: Vec::new(),
+                retired_owner_grants: Default::default(),
+                resolver_pubkey: author.clone(),
+                resolver_branch_heads: Vec::new(),
+                replacement_grant: crate::protocol::membership::MembershipGrantId(
+                    ObjectHash::digest(b"roster kind crossing grant"),
+                ),
+            },
+        );
     let resolution_plaintext =
         serde_json::to_vec(&resolution).expect("serialize the roster resolution");
     let resolution_ref = crate::protocol::circle_roster::CircleRosterConflictResolutionRef {

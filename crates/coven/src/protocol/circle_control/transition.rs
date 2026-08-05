@@ -392,25 +392,25 @@ impl CircleTransitionDraft {
         };
         let author_owner_grant = grant_id.clone();
 
-        let mut metadata = CircleMetadata {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            circle_id,
-            epoch_id,
-            name: name.to_string(),
-            seq: metadata_seq,
-            previous_hash: metadata_previous,
-            dependencies: metadata_dependencies,
-            metadata_stamp: metadata_stamp.to_string(),
-            author_pubkey: author_pubkey.clone(),
-            device_id: device_id.to_string(),
-            stream_id: author_stream_id,
-            author_owner_grant,
-            author_roster: roster_state.clone(),
-            key_fingerprint,
-            signature: String::new(),
-        };
-        metadata.signature = keys::sign_hex(signer, &metadata.canonical_bytes()).1;
+        let metadata = Signed::sign(
+            CircleMetadataBody {
+                store_root_hash,
+                circle_id,
+                epoch_id,
+                name: name.to_string(),
+                seq: metadata_seq,
+                previous_hash: metadata_previous,
+                dependencies: metadata_dependencies,
+                metadata_stamp: metadata_stamp.to_string(),
+                author_pubkey: author_pubkey.clone(),
+                device_id: device_id.to_string(),
+                stream_id: author_stream_id,
+                author_owner_grant,
+                author_roster: roster_state.clone(),
+                key_fingerprint,
+            },
+            signer,
+        );
 
         let mut metadata_state = metadata_state;
         let selected = [current_metadata, &metadata]

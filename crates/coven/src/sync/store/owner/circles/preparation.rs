@@ -223,8 +223,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let prepared_roster = if let Some((founder, predecessor_chain, mut entry)) =
                 roster_successor
             {
-                entry.stream_id = roster_stream;
-                entry.signature = keys::sign_hex(identity_signer, &entry.canonical_bytes()).1;
+                entry.body_mut().stream_id = roster_stream;
+                entry.resign(identity_signer);
                 let entry_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
                     circle_id: draft.circle_id,
                     coord: &entry.coord(),
@@ -396,7 +396,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let (metadata_state, metadata_head) = if draft.policy.metadata_successor {
                 let selects_authored_metadata =
                     draft.control.value.access_epoch().metadata.selected == draft.metadata.coord();
-                draft.metadata.author_roster = roster_state.clone();
+                draft.metadata.body_mut().author_roster = roster_state.clone();
                 let prior_metadata = metadata_heads
                     .iter()
                     .find(|head| head.coord.stream_id == metadata_stream)
@@ -459,15 +459,15 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         );
                         (slot, 1, None, Some(activation))
                     };
-                draft.metadata.stream_id = metadata_stream;
-                draft.metadata.seq = metadata_seq;
-                draft.metadata.previous_hash = metadata_previous;
-                draft.metadata.dependencies = metadata_heads
+                let metadata = draft.metadata.body_mut();
+                metadata.stream_id = metadata_stream;
+                metadata.seq = metadata_seq;
+                metadata.previous_hash = metadata_previous;
+                metadata.dependencies = metadata_heads
                     .iter()
                     .map(|head| head.coord.clone())
                     .collect();
-                draft.metadata.signature =
-                    keys::sign_hex(identity_signer, &draft.metadata.canonical_bytes()).1;
+                draft.metadata.resign(identity_signer);
                 let metadata_prefix = circle_semantic_prefix(CircleSemanticSlot::MetadataEntry {
                     circle_id: draft.circle_id,
                     coord: &draft.metadata.coord(),

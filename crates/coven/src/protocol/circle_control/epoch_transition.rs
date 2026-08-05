@@ -266,7 +266,7 @@ impl CircleTransitionDraft {
             .heads
             .iter()
             .find(|head| head.coord.stream_id == metadata_stream);
-        let mut metadata = current_metadata.clone();
+        let mut metadata = current_metadata.body().clone();
         metadata.epoch_id = epoch_id;
         metadata.metadata_stamp = metadata_stamp.to_string();
         metadata.author_pubkey = author_pubkey.clone();
@@ -289,7 +289,7 @@ impl CircleTransitionDraft {
             .collect();
         metadata.author_roster = roster_state.clone();
         metadata.key_fingerprint = key_fingerprint;
-        metadata.signature = keys::sign_hex(signer, &metadata.canonical_bytes()).1;
+        let metadata = Signed::sign(metadata, signer);
         let metadata_state = MergeCircleMetadataStateRef {
             heads: close.frozen_epoch.metadata.heads.clone(),
             selected: metadata.coord(),

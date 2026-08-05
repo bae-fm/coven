@@ -52,10 +52,11 @@ pub struct CircleRosterConflictResolutionRef {
     pub resolution_hash: ObjectHash,
 }
 
+/// The wire body of one Circle roster conflict resolution. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleRosterConflictResolution {
-    pub version: u32,
+pub(crate) struct CircleRosterConflictResolutionBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub conflict_hash: ObjectHash,
@@ -64,43 +65,17 @@ pub(crate) struct CircleRosterConflictResolution {
     pub resolver_pubkey: String,
     pub resolver_branch_heads: Vec<CircleRosterHeadRef>,
     pub replacement_grant: MembershipGrantId,
-    pub signature: String,
 }
 
-impl CircleRosterConflictResolution {
-    pub(super) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            conflict_hash: ObjectHash,
-            conflicting_heads: &'a [CircleRosterHeadRef],
-            retired_owner_grants: &'a BTreeSet<MembershipGrantId>,
-            resolver_pubkey: &'a str,
-            resolver_branch_heads: &'a [CircleRosterHeadRef],
-            replacement_grant: &'a MembershipGrantId,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-roster-conflict-resolution.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            conflict_hash: self.conflict_hash,
-            conflicting_heads: &self.conflicting_heads,
-            retired_owner_grants: &self.retired_owner_grants,
-            resolver_pubkey: &self.resolver_pubkey,
-            resolver_branch_heads: &self.resolver_branch_heads,
-            replacement_grant: &self.replacement_grant,
-        })
-        .expect("Circle roster resolution serialization cannot fail")
-    }
+impl SignedBody for CircleRosterConflictResolutionBody {
+    const DOMAIN: &'static [u8] = ROSTER_RESOLUTION_DOMAIN;
+}
 
+pub(crate) type CircleRosterConflictResolution = Signed<CircleRosterConflictResolutionBody>;
+
+impl CircleRosterConflictResolution {
     pub(crate) fn resolution_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("Circle roster resolution serialization cannot fail"),
-        )
+        self.hash()
     }
 
     pub(crate) fn resolution_ref(&self) -> CircleRosterConflictResolutionRef {
@@ -112,14 +87,9 @@ impl CircleRosterConflictResolution {
     }
 
     pub(crate) fn verify_signature(&self) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self.replacement_grant
-                == derive_circle_resolution_grant(&self.conflict_hash, &self.resolver_pubkey)
-            && keys::verify_signature_hex(
-                &self.resolver_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+        self.replacement_grant
+            == derive_circle_resolution_grant(&self.conflict_hash, &self.resolver_pubkey)
+            && self.verify_by(&self.resolver_pubkey).is_ok()
     }
 
     pub(crate) fn verify_against(
@@ -151,8 +121,7 @@ impl CircleRosterConflictResolution {
                     .then_some(grant.clone())
             },
         ));
-        self.version == STORE_PROTOCOL_VERSION
-            && self.store_root_hash == store_root_hash
+        self.store_root_hash == store_root_hash
             && self.circle_id == circle_id
             && self.conflict_hash == *conflict_hash
             && self.conflicting_heads == *heads

@@ -737,22 +737,22 @@ impl CircleRosterChain {
                 owner_barriers,
             },
         };
-        let mut entry = CircleRosterEntry {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: self.entries[0].store_root_hash,
-            circle_id: self.entries[0].circle_id,
-            author_pubkey,
-            device_id: device_id.to_string(),
-            stream_id,
-            author_owner_grant,
-            seq,
-            previous_hash,
-            dependencies,
-            resolution_dependencies: self.resolution_refs().to_vec(),
-            change,
-            signature: String::new(),
-        };
-        entry.signature = keys::sign_hex(signer, &entry.canonical_bytes()).1;
+        let entry = Signed::sign(
+            CircleRosterEntryBody {
+                store_root_hash: self.entries[0].store_root_hash,
+                circle_id: self.entries[0].circle_id,
+                author_pubkey,
+                device_id: device_id.to_string(),
+                stream_id,
+                author_owner_grant,
+                seq,
+                previous_hash,
+                dependencies,
+                resolution_dependencies: self.resolution_refs().to_vec(),
+                change,
+            },
+            signer,
+        );
         let mut candidate_history = self.entries.clone();
         candidate_history.push(entry.clone());
         Self::from_entries_head_refs_and_checkpoint(
@@ -797,19 +797,18 @@ impl CircleRosterChain {
                     .then_some(grant.clone())
             },
         ));
-        let mut resolution = CircleRosterConflictResolution {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: self.entries[0].store_root_hash,
-            circle_id: self.entries[0].circle_id,
-            conflict_hash: *conflict_hash,
-            conflicting_heads: heads.clone(),
-            retired_owner_grants,
-            resolver_pubkey,
-            resolver_branch_heads,
-            replacement_grant,
-            signature: String::new(),
-        };
-        resolution.signature = keys::sign_hex(signer, &resolution.canonical_bytes()).1;
-        Ok(resolution)
+        Ok(Signed::sign(
+            super::CircleRosterConflictResolutionBody {
+                store_root_hash: self.entries[0].store_root_hash,
+                circle_id: self.entries[0].circle_id,
+                conflict_hash: *conflict_hash,
+                conflicting_heads: heads.clone(),
+                retired_owner_grants,
+                resolver_pubkey,
+                resolver_branch_heads,
+                replacement_grant,
+            },
+            signer,
+        ))
     }
 }
