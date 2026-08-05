@@ -197,8 +197,6 @@ pub(crate) use operation_models::{
     MembershipMutationActivation, PreparedLocalDeviceRegistrationRow, PreparedSnapshotBlob,
     PublishedCircleSnapshot, PublishedStoreSnapshot,
 };
-#[cfg(feature = "invariant-tests")]
-pub use prepared_audience_objects::exercise_exact_outbound_blob_graph;
 pub(crate) use prepared_audience_objects::{
     validate_prepared_audience_blob_graph, BlobActivation, MakeRemoteIntentState,
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, PreparedRemoteObject,

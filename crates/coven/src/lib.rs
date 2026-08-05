@@ -67,9 +67,6 @@ pub use config::{
 };
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
-#[cfg(feature = "invariant-tests")]
-#[doc(hidden)]
-pub use database::exercise_exact_outbound_blob_graph;
 pub use database::{
     DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload, SqlContext,
     SqlReadContext, WriteBatch,

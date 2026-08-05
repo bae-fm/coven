@@ -46,9 +46,9 @@ pub(crate) use google_drive::{folder_search_query, supports_all_drives};
 pub(crate) use setup::SetupError;
 
 mod blob_body;
-pub(crate) use blob_body::{
-    combine_cleanup_failure, no_progress, MultipartUpload, PROGRESS_CHUNK_SIZE,
-};
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use blob_body::PROGRESS_CHUNK_SIZE;
+pub(crate) use blob_body::{combine_cleanup_failure, no_progress, MultipartUpload};
 pub use blob_body::{BlobBody, BoxPartSink, PartSink, UploadProgress};
 
 use async_trait::async_trait;

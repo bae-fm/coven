@@ -264,137 +264,163 @@ pub(super) fn validate_prepared_audience_blob_bindings(
     Ok(())
 }
 
-#[cfg(feature = "invariant-tests")]
-#[doc(hidden)]
-pub fn exercise_exact_outbound_blob_graph(
-    circle: bool,
-    include_body: bool,
-    include_locator: bool,
-    include_binding: bool,
-) -> Result<(), String> {
-    use crate::protocol::audience_package::RowBlobLocatorBinding;
-    use crate::protocol::blob::BlobScope;
-    use crate::protocol::causal_grants::AuthorStreamId;
-    use crate::protocol::circle::CircleId;
-    use crate::protocol::circle_control::CircleControlCoord;
-    use crate::protocol::objects::ObjectSlot;
-    use crate::protocol::store_commit::{CandidateFamilyId, StoreCommitCoord};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let store_root_hash = ObjectHash::digest(b"outbound-graph-store");
-    let write_id = WriteId::from_generated("outbound-graph-write".to_string());
-    let coord = StoreCommitCoord {
-        stream_id: AuthorStreamId::from_bytes([4; 32]),
-        sequence: 1,
-    };
-    let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(b"outbound-family"));
-    let remote_audience = if circle {
-        RemoteAudience::Circle(CircleId::from_bytes([7; 16]))
-    } else {
-        RemoteAudience::Store
-    };
-    let uploader_bytes = b"outbound graph uploader registration";
-    let uploader = StoreDeviceRegistrationRef {
-        device_id: "01"
-            .repeat(32)
-            .parse::<crate::protocol::store_commit::StoreDeviceId>()
-            .map_err(|error| error.to_string())?,
-        registration_hash: ObjectHash::digest(uploader_bytes),
-        object: ExactObjectRef::new(
-            ObjectSlot::logical("store-v1/registrations/outbound-graph.json".to_string())
+    /// Build one prepared outbound graph and validate it, leaving out whichever
+    /// of the blob body, its locator, or its row binding the caller drops.
+    fn exercise_exact_outbound_blob_graph(
+        circle: bool,
+        include_body: bool,
+        include_locator: bool,
+        include_binding: bool,
+    ) -> Result<(), String> {
+        use crate::protocol::audience_package::RowBlobLocatorBinding;
+        use crate::protocol::blob::BlobScope;
+        use crate::protocol::causal_grants::AuthorStreamId;
+        use crate::protocol::circle::CircleId;
+        use crate::protocol::circle_control::CircleControlCoord;
+        use crate::protocol::objects::ObjectSlot;
+        use crate::protocol::store_commit::{CandidateFamilyId, StoreCommitCoord};
+
+        let store_root_hash = ObjectHash::digest(b"outbound-graph-store");
+        let write_id = WriteId::from_generated("outbound-graph-write".to_string());
+        let coord = StoreCommitCoord {
+            stream_id: AuthorStreamId::from_bytes([4; 32]),
+            sequence: 1,
+        };
+        let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(b"outbound-family"));
+        let remote_audience = if circle {
+            RemoteAudience::Circle(CircleId::from_bytes([7; 16]))
+        } else {
+            RemoteAudience::Store
+        };
+        let uploader_bytes = b"outbound graph uploader registration";
+        let uploader = StoreDeviceRegistrationRef {
+            device_id: "01"
+                .repeat(32)
+                .parse::<crate::protocol::store_commit::StoreDeviceId>()
                 .map_err(|error| error.to_string())?,
-            uploader_bytes.len() as u64,
-            ObjectHash::digest(uploader_bytes),
-        ),
-    };
-    let locator = BlobLocator::opaque(
-        "media".to_string(),
-        "blob-a".to_string(),
-        uploader,
-        remote_audience.clone(),
-        BlobScope::Master,
-        crate::KeyFingerprint::from_bytes([3; 32]),
-        7,
-        ObjectHash::digest(b"content"),
-    )
-    .map_err(|error| error.to_string())?;
-    let stored_bytes = b"sealed-content".to_vec();
-    let object = ExactObjectRef::new(
-        ObjectSlot::logical(locator.semantic_key()).map_err(|error| error.to_string())?,
-        stored_bytes.len() as u64,
-        ObjectHash::digest(&stored_bytes),
-    );
-    let stored = StoredBlobRef::new(locator, object).map_err(|error| error.to_string())?;
-    let bindings = if include_binding {
-        vec![
-            RowBlobLocatorBinding::new("items", "row-a", "stamp-a", "media_blob", stored.clone())
-                .map_err(|error| error.to_string())?,
-        ]
-    } else {
-        Vec::new()
-    };
-    let package = if let RemoteAudience::Circle(circle_id) = remote_audience {
-        AudiencePackage::circle(
-            store_root_hash,
-            candidate_family,
-            write_id.clone(),
-            coord,
-            1,
-            circle_id,
-            CircleControlCoord {
-                device_id: "01".repeat(32),
-                stream_id: AuthorStreamId::from_bytes([5; 32]),
-                author_pubkey: "author-a".to_string(),
-                author_owner_grant: crate::protocol::causal_grants::MembershipGrantId(
-                    ObjectHash::digest(b"outbound-graph owner grant"),
-                ),
-                seq: 1,
-                control_hash: ObjectHash::digest(b"circle-control"),
-            },
+            registration_hash: ObjectHash::digest(uploader_bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/registrations/outbound-graph.json".to_string())
+                    .map_err(|error| error.to_string())?,
+                uploader_bytes.len() as u64,
+                ObjectHash::digest(uploader_bytes),
+            ),
+        };
+        let locator = BlobLocator::opaque(
+            "media".to_string(),
+            "blob-a".to_string(),
+            uploader,
+            remote_audience.clone(),
+            BlobScope::Master,
             crate::KeyFingerprint::from_bytes([3; 32]),
-            b"changeset".to_vec(),
-            bindings,
+            7,
+            ObjectHash::digest(b"content"),
         )
-    } else {
-        AudiencePackage::store(
-            store_root_hash,
-            candidate_family,
-            write_id,
-            coord,
-            1,
-            b"changeset".to_vec(),
-            bindings,
+        .map_err(|error| error.to_string())?;
+        let stored_bytes = b"sealed-content".to_vec();
+        let object = ExactObjectRef::new(
+            ObjectSlot::logical(locator.semantic_key()).map_err(|error| error.to_string())?,
+            stored_bytes.len() as u64,
+            ObjectHash::digest(&stored_bytes),
+        );
+        let stored = StoredBlobRef::new(locator, object).map_err(|error| error.to_string())?;
+        let bindings = if include_binding {
+            vec![RowBlobLocatorBinding::new(
+                "items",
+                "row-a",
+                "stamp-a",
+                "media_blob",
+                stored.clone(),
+            )
+            .map_err(|error| error.to_string())?]
+        } else {
+            Vec::new()
+        };
+        let package = if let RemoteAudience::Circle(circle_id) = remote_audience {
+            AudiencePackage::circle(
+                store_root_hash,
+                candidate_family,
+                write_id.clone(),
+                coord,
+                1,
+                circle_id,
+                CircleControlCoord {
+                    device_id: "01".repeat(32),
+                    stream_id: AuthorStreamId::from_bytes([5; 32]),
+                    author_pubkey: "author-a".to_string(),
+                    author_owner_grant: crate::protocol::causal_grants::MembershipGrantId(
+                        ObjectHash::digest(b"outbound-graph owner grant"),
+                    ),
+                    seq: 1,
+                    control_hash: ObjectHash::digest(b"circle-control"),
+                },
+                crate::KeyFingerprint::from_bytes([3; 32]),
+                b"changeset".to_vec(),
+                bindings,
+            )
+        } else {
+            AudiencePackage::store(
+                store_root_hash,
+                candidate_family,
+                write_id,
+                coord,
+                1,
+                b"changeset".to_vec(),
+                bindings,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        let package_bytes = package.to_bytes();
+        let package_object = ExactObjectRef::new(
+            ObjectSlot::logical("test/package".to_string()).map_err(|error| error.to_string())?,
+            package_bytes.len() as u64,
+            ObjectHash::digest(&package_bytes),
+        );
+        let package_id = ObjectHash::digest(b"package-record");
+        let blob_id = ObjectHash::digest(b"blob-record");
+        let packages = vec![PreparedAudiencePackage::new(
+            package_id,
+            package_bytes.clone(),
+            package_bytes,
+            package_object,
         )
-    }
-    .map_err(|error| error.to_string())?;
-    let package_bytes = package.to_bytes();
-    let package_object = ExactObjectRef::new(
-        ObjectSlot::logical("test/package".to_string()).map_err(|error| error.to_string())?,
-        package_bytes.len() as u64,
-        ObjectHash::digest(&package_bytes),
-    );
-    let package_id = ObjectHash::digest(b"package-record");
-    let blob_id = ObjectHash::digest(b"blob-record");
-    let packages = vec![PreparedAudiencePackage::new(
-        package_id,
-        package_bytes.clone(),
-        package_bytes,
-        package_object,
-    )
-    .map_err(|error| error.to_string())?];
-    let blobs = if include_locator {
-        vec![PreparedAudienceBlob {
-            remote_object_id: blob_id,
-            audience: remote_audience,
-            blob: stored,
-            spool_path: Some(PathBuf::from("/outbound-blob.spool")),
-        }]
-    } else {
-        Vec::new()
-    };
-    let mut object_ids = std::collections::BTreeSet::from([package_id]);
-    if include_body {
-        object_ids.insert(blob_id);
-    }
-    validate_prepared_audience_blob_graph(&object_ids, &PreparedAudienceObjects { packages, blobs })
+        .map_err(|error| error.to_string())?];
+        let blobs = if include_locator {
+            vec![PreparedAudienceBlob {
+                remote_object_id: blob_id,
+                audience: remote_audience,
+                blob: stored,
+                spool_path: Some(PathBuf::from("/outbound-blob.spool")),
+            }]
+        } else {
+            Vec::new()
+        };
+        let mut object_ids = std::collections::BTreeSet::from([package_id]);
+        if include_body {
+            object_ids.insert(blob_id);
+        }
+        validate_prepared_audience_blob_graph(
+            &object_ids,
+            &PreparedAudienceObjects { packages, blobs },
+        )
         .map_err(|error| error.to_string())
+    }
+
+    /// A publishable blob needs all three of its parts: the body among the
+    /// uploaded object ids, the locator in the prepared blobs, and a package
+    /// binding that names it. Any one missing is refused, for Store and Circle
+    /// audiences alike.
+    #[test]
+    fn store_and_circle_blob_publication_require_body_locator_and_binding() {
+        for circle in [false, true] {
+            assert!(exercise_exact_outbound_blob_graph(circle, false, true, true).is_err());
+            assert!(exercise_exact_outbound_blob_graph(circle, true, false, true).is_err());
+            assert!(exercise_exact_outbound_blob_graph(circle, true, true, false).is_err());
+            exercise_exact_outbound_blob_graph(circle, true, true, true).unwrap();
+        }
+    }
 }

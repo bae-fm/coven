@@ -69,7 +69,6 @@ tokio = { version = "1.0", features = ["test-util"] }
 
 [features]
 test-utils = []
-invariant-tests = []
 oauth-providers = ["dep:open"]
 
 [lints]
@@ -86,7 +85,3 @@ workspace = true
 name = "apple_keyring"
 required-features = ["test-utils"]
 
-[[test]]
-name = "exact_outbound_blob"
-path = "tests/exact_outbound_blob.rs"
-required-features = ["invariant-tests"]
