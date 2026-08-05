@@ -623,9 +623,7 @@ struct KeyEntry {
 /// the [`EncryptionService`] cipher from it internally; custody never touches
 /// cipher machinery.
 #[derive(Clone)]
-pub struct MasterKeyring {
-    keys: BTreeMap<KeyFingerprint, KeyEntry>,
-}
+pub struct MasterKeyring(EncryptionService);
 
 impl std::fmt::Debug for MasterKeyring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -638,39 +636,39 @@ impl std::fmt::Debug for MasterKeyring {
 impl MasterKeyring {
     /// One fresh generation-1 key.
     pub fn generate() -> Self {
-        Self::from(EncryptionService::from_key(generate_random_key()))
+        Self(EncryptionService::from_key(generate_random_key()))
     }
 
     /// Serialize to the stored keyring JSON — the same format
     /// [`EncryptionService::to_keyring_string`] produces, since every
     /// generation this type holds came from (or feeds) that cipher.
     pub fn to_serialized(&self) -> String {
-        EncryptionService::from(self.clone())
+        self.0
             .to_keyring_string()
             .expect("a MasterKeyring always holds at least one generation")
     }
 
     /// Parse the stored master-key format [`Self::to_serialized`] produces.
     pub fn from_serialized(s: &str) -> Result<Self, EncryptionError> {
-        EncryptionService::new(s).map(Self::from)
+        EncryptionService::new(s).map(Self)
     }
 
     /// SHA-256 fingerprint of the seal key (the deterministically selected
     /// key this keyring seals new data under), hex-encoded in full.
     pub fn fingerprint(&self) -> String {
-        EncryptionService::from(self.clone()).fingerprint()
+        self.0.fingerprint()
     }
 }
 
 impl From<EncryptionService> for MasterKeyring {
     fn from(service: EncryptionService) -> Self {
-        Self { keys: service.keys }
+        Self(service)
     }
 }
 
 impl From<MasterKeyring> for EncryptionService {
     fn from(keyring: MasterKeyring) -> Self {
-        EncryptionService { keys: keyring.keys }
+        keyring.0
     }
 }
 
