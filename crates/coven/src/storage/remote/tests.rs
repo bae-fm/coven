@@ -497,7 +497,7 @@ async fn a_tampered_header_fails_the_first_open() {
     // Halve the declared chunk size. The object's length no longer matches
     // what that header implies, which is caught before a chunk is opened.
     let mut stored = home.stored_exact_object(blob.object().slot());
-    stored[KeyTag::LEN + 1..KeyTag::LEN + 5].copy_from_slice(&(CHUNK / 2).to_le_bytes());
+    stored[KeyTag::LEN + 2..KeyTag::LEN + 6].copy_from_slice(&(CHUNK / 2).to_le_bytes());
     home.replace_exact_object(blob.object().slot(), stored.clone());
     assert!(
         matches!(
@@ -516,9 +516,9 @@ async fn a_tampered_header_fails_the_first_open() {
     // exact size, so a header whose framing implies a different one is
     // refused before a chunk is opened.
     let mut stored = home.stored_exact_object(blob.object().slot());
-    stored[KeyTag::LEN + 1..KeyTag::LEN + 5].copy_from_slice(&CHUNK.to_le_bytes());
+    stored[KeyTag::LEN + 2..KeyTag::LEN + 6].copy_from_slice(&CHUNK.to_le_bytes());
     let shorter = plaintext.len() as u64 - CHUNK as u64;
-    stored[KeyTag::LEN + 5..KeyTag::LEN + 13].copy_from_slice(&shorter.to_le_bytes());
+    stored[KeyTag::LEN + 6..KeyTag::LEN + 14].copy_from_slice(&shorter.to_le_bytes());
     stored.truncate(KeyTag::LEN + SEALED_BLOB_HEADER_LEN + 3 * (CHUNK as usize + 16));
     home.replace_exact_object(blob.object().slot(), stored);
     assert!(
@@ -540,13 +540,18 @@ async fn a_tampered_header_fails_the_first_open() {
     // row's declared size all agree — and re-frames where each chunk starts.
     // Nothing but the tag over the header refuses this.
     const NUDGED: u32 = CHUNK + 1;
+    let derived = crate::encryption::NoncePolicy::DerivedFromContext {
+        context: b"unused by the length arithmetic".to_vec(),
+    };
     let unaltered = SealedBlobHeader::new(
         std::num::NonZeroU32::new(CHUNK).unwrap(),
         plaintext.len() as u64,
+        &derived,
     );
     let nudged = SealedBlobHeader::new(
         std::num::NonZeroU32::new(NUDGED).unwrap(),
         plaintext.len() as u64,
+        &derived,
     );
     assert_eq!(
         (nudged.chunk_count(), nudged.sealed_len()),
@@ -555,8 +560,8 @@ async fn a_tampered_header_fails_the_first_open() {
     );
 
     let mut stored = home.stored_exact_object(blob.object().slot());
-    stored[KeyTag::LEN + 1..KeyTag::LEN + 5].copy_from_slice(&NUDGED.to_le_bytes());
-    stored[KeyTag::LEN + 5..KeyTag::LEN + 13]
+    stored[KeyTag::LEN + 2..KeyTag::LEN + 6].copy_from_slice(&NUDGED.to_le_bytes());
+    stored[KeyTag::LEN + 6..KeyTag::LEN + 14]
         .copy_from_slice(&(plaintext.len() as u64).to_le_bytes());
     stored.truncate(KeyTag::LEN + unaltered.sealed_len() as usize);
     home.replace_exact_object(blob.object().slot(), stored);
@@ -813,8 +818,12 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
     let opened = circle_key
         .blob_opener(
             header,
+            &crate::encryption::NoncePolicy::DerivedFromContext {
+                context: cloud_aad_context("circle-blob-spool", &locator.semantic_key()),
+            },
             &cloud_aad_context("circle-blob-spool", &locator.semantic_key()),
         )
+        .expect("a blob is sealed under the derived policy")
         .open_chunks(0..header.chunk_count(), sealed)
         .expect("open Circle blob with supplied key");
     assert_eq!(opened, plaintext);

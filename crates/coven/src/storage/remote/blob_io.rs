@@ -295,7 +295,7 @@ pub(crate) fn split_sealed_blob(
     Ok((
         crate::encryption::KeyFingerprint::from_bytes(fingerprint),
         header,
-        &rest[SEALED_BLOB_HEADER_LEN..],
+        &rest[header.prefix_len() as usize..],
     ))
 }
 
@@ -337,7 +337,17 @@ pub(super) fn verified_sealed_blob_opener(
         )));
     }
     check_stored_blob_length(blob, KeyTag::LEN as u64 + header.sealed_len())?;
-    Ok(encryption.blob_opener(header, aad_context))
+    encryption
+        .blob_opener(
+            header,
+            &NoncePolicy::DerivedFromContext {
+                context: aad_context.to_vec(),
+            },
+            aad_context,
+        )
+        .map_err(|error| {
+            StorageError::Decryption(format!("blob {}: {error}", locator.locator_hash()))
+        })
 }
 
 /// Check a stored blob's length against what its own framing implies. The row

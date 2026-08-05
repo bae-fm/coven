@@ -15,7 +15,8 @@ use std::sync::{Arc, RwLock};
 use super::provider_probe::ProviderProbeStorage;
 use super::SyncStorage;
 use crate::encryption::{
-    EncryptionError, EncryptionService, KeyTag, SealedBlobHeader, SEALED_BLOB_HEADER_LEN,
+    EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
+    SEALED_BLOB_HEADER_LEN,
 };
 use crate::keys::UserKeypair;
 use crate::protocol::objects::ObjectSlot;

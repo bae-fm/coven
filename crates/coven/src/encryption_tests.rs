@@ -45,8 +45,15 @@ fn streaming_sealer_matches_whole_buffer_format() {
         let plaintext: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
 
         // Seal incrementally, exactly as a streaming upload would.
-        let mut sealer = service.sealer(plaintext.len() as u64, TEST_AAD);
-        let mut streamed = sealer.base_nonce().to_vec();
+        let header = SealedBlobHeader::new(
+            DEFAULT_BLOB_CHUNK_SIZE,
+            plaintext.len() as u64,
+            &NoncePolicy::RandomStored,
+        );
+        let mut sealer = service
+            .blob_sealer(header, &NoncePolicy::RandomStored, TEST_AAD)
+            .expect("the header records the policy it was built under");
+        let mut streamed = header.to_bytes();
         if plaintext.is_empty() {
             streamed.extend(sealer.seal_chunk(&[]));
         } else {
@@ -136,7 +143,7 @@ fn truncating_trailing_chunks_fails_to_decrypt() {
     let service = create_test_service();
     let plaintext: Vec<u8> = (0..CHUNK_SIZE * 3).map(|i| (i % 251) as u8).collect();
     let ciphertext = service.encrypt(&plaintext, TEST_AAD);
-    let truncated = &ciphertext[..ciphertext.len() - ENCRYPTED_CHUNK_SIZE];
+    let truncated = &ciphertext[..ciphertext.len() - (CHUNK_SIZE + TAG_SIZE)];
 
     assert!(
         service.decrypt(truncated, TEST_AAD).is_err(),
@@ -151,8 +158,11 @@ fn test_empty_plaintext() {
 
     let ciphertext = service.encrypt(plaintext, TEST_AAD);
 
-    // Should just be nonce + auth tag
-    assert_eq!(ciphertext.len(), NONCE_SIZE + TAG_SIZE);
+    // The header, its stored base nonce, and one tag-only chunk.
+    assert_eq!(
+        ciphertext.len() as u64,
+        SEALED_BLOB_HEADER_LEN as u64 + NONCE_SIZE as u64 + TAG_SIZE as u64,
+    );
 
     let decrypted = service.decrypt(&ciphertext, TEST_AAD).unwrap();
     assert_eq!(decrypted, plaintext);
@@ -414,9 +424,10 @@ const APP_DATA_V1_FIXTURE_AAD: &[u8] = b"pinned-app-data-context";
 const APP_DATA_V1_FIXTURE_HEX: &str = concat!(
     "434b4601",
     "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
-    "2bdfe10d13cb397b648c2eb352bbadd92a19eafd8499b5c5",
-    "b0d1e8eb56f757621ec41a78488c937427aac5df38b5e8af",
-    "2b2b8c9155ead15242e0c87b00bbe8",
+    "0101000001001700000000000000",
+    "6de9acc52f5174b4edda5cf3d1b8bf2696d8cee905e5174e",
+    "237e8ac01170cb0fd15f473d7fa2675addd2dea92ef2fcc5",
+    "996c5544a0519c583ce8f24bb21aed",
 );
 
 /// The key fingerprint a sealed payload names, read straight out of its
@@ -590,4 +601,157 @@ fn sealed_app_data_v1_fixture_opens() {
         .expect("the pinned v1 payload opens");
 
     assert_eq!(opened, APP_DATA_V1_FIXTURE_PLAINTEXT);
+}
+
+const POLICY_TEST_CONTEXT: &[u8] = b"nonce-policy-test-context";
+
+fn derived_policy() -> NoncePolicy {
+    NoncePolicy::DerivedFromContext {
+        context: POLICY_TEST_CONTEXT.to_vec(),
+    }
+}
+
+fn seal_whole(service: &EncryptionService, policy: &NoncePolicy, plaintext: &[u8]) -> Vec<u8> {
+    let header = SealedBlobHeader::new(
+        std::num::NonZeroU32::new(4096).expect("4 KiB"),
+        plaintext.len() as u64,
+        policy,
+    );
+    let mut sealer = service
+        .blob_sealer(header, policy, TEST_AAD)
+        .expect("a header records the policy it was built under");
+    let mut sealed = header.to_bytes();
+    for index in 0..header.chunk_count() {
+        let span = header.plaintext_span(index..index + 1);
+        sealed.extend(sealer.seal_chunk(&plaintext[span.start as usize..span.end as usize]));
+    }
+    sealed
+}
+
+/// One format, both policies: a payload sealed under a stored random base and
+/// one sealed under a derived base round-trip through the same header, sealer,
+/// and opener.
+#[test]
+fn both_nonce_policies_round_trip_through_one_format() {
+    let service = create_test_service();
+    for policy in [NoncePolicy::RandomStored, derived_policy()] {
+        for len in [0usize, 1, 4095, 4096, 4097, 20_000] {
+            let plaintext: Vec<u8> = (0..len).map(|index| (index % 251) as u8).collect();
+            let sealed = seal_whole(&service, &policy, &plaintext);
+
+            let header = SealedBlobHeader::parse(&sealed).expect("the payload frames itself");
+            assert_eq!(header.plaintext_len(), len as u64);
+            assert_eq!(sealed.len() as u64, header.sealed_len());
+
+            let opened = service
+                .blob_opener(header, &policy, TEST_AAD)
+                .expect("the header records this policy")
+                .open_chunks(
+                    0..header.chunk_count(),
+                    &sealed[header.prefix_len() as usize..],
+                )
+                .expect("every chunk opens");
+            assert_eq!(
+                opened, plaintext,
+                "{policy:?} failed to round-trip at {len}"
+            );
+        }
+    }
+}
+
+/// Only a derived base is deterministic. Sealing the same plaintext twice under
+/// one context reproduces identical bytes — which is what makes a stored blob
+/// addressable by its content — while a stored random base differs every time.
+#[test]
+fn only_a_derived_base_seals_deterministically() {
+    let service = create_test_service();
+    let plaintext = vec![7u8; 10_000];
+
+    let derived = seal_whole(&service, &derived_policy(), &plaintext);
+    assert_eq!(derived, seal_whole(&service, &derived_policy(), &plaintext));
+
+    let random = seal_whole(&service, &NoncePolicy::RandomStored, &plaintext);
+    assert_ne!(
+        random,
+        seal_whole(&service, &NoncePolicy::RandomStored, &plaintext),
+        "a fresh base nonce must make each sealing distinct",
+    );
+}
+
+/// A ranged read opens the chunks covering a span and no others, under either
+/// policy: the header carries everything the arithmetic needs, and a stored
+/// base is read from the header rather than recomputed.
+#[test]
+fn ranged_reads_open_only_their_chunks_under_both_policies() {
+    let service = create_test_service();
+    let plaintext: Vec<u8> = (0..20_000).map(|index| (index % 251) as u8).collect();
+    for policy in [NoncePolicy::RandomStored, derived_policy()] {
+        let sealed = seal_whole(&service, &policy, &plaintext);
+        let header = SealedBlobHeader::parse(&sealed).expect("the payload frames itself");
+        let opener = service
+            .blob_opener(header, &policy, TEST_AAD)
+            .expect("the header records this policy");
+
+        for (start, end) in [(0u64, 1u64), (4095, 4098), (8192, 16_384), (0, 20_000)] {
+            let chunks = header.covering_chunks(start, end).expect("range is inside");
+            let span = header.sealed_span(chunks.clone());
+            let window = header.plaintext_span(chunks.clone());
+            let opened = opener
+                .open_chunks(chunks, &sealed[span.start as usize..span.end as usize])
+                .expect("the covering chunks open");
+
+            assert_eq!(
+                opened,
+                plaintext[window.start as usize..window.end as usize],
+                "{policy:?} read {start}..{end} wrong",
+            );
+        }
+    }
+}
+
+/// The policy is not a hint a reader can override. A payload sealed under one
+/// base and opened as the other is refused before the cipher runs, because the
+/// bytes are not the payload the caller asked for.
+#[test]
+fn opening_under_the_other_nonce_policy_is_refused() {
+    let service = create_test_service();
+    let plaintext = b"a payload with one base nonce".to_vec();
+
+    for (sealed_under, opened_as) in [
+        (NoncePolicy::RandomStored, derived_policy()),
+        (derived_policy(), NoncePolicy::RandomStored),
+    ] {
+        let sealed = seal_whole(&service, &sealed_under, &plaintext);
+        let header = SealedBlobHeader::parse(&sealed).expect("the payload frames itself");
+
+        let Err(error) = service.blob_opener(header, &opened_as, TEST_AAD) else {
+            panic!("{sealed_under:?} opened as {opened_as:?} was accepted");
+        };
+
+        assert!(
+            matches!(error, SealedBlobError::NoncePolicyMismatch { .. }),
+            "{sealed_under:?} opened as {opened_as:?} gave {error:?}",
+        );
+    }
+}
+
+/// A whole-object payload states its policy in its own header, so a reader
+/// learns it from the bytes rather than from which producer wrote them.
+#[test]
+fn a_whole_object_payload_records_its_stored_random_base() {
+    let service = create_test_service();
+    let sealed = service.encrypt(b"whole object", TEST_AAD);
+    let header = SealedBlobHeader::parse(&sealed).expect("the payload frames itself");
+
+    assert_eq!(
+        header.prefix_len(),
+        SEALED_BLOB_HEADER_LEN as u64 + NONCE_SIZE as u64,
+        "a stored base nonce follows the fixed header",
+    );
+    assert!(
+        service
+            .blob_opener(header, &derived_policy(), TEST_AAD)
+            .is_err(),
+        "a whole object is never openable as a derived-base payload",
+    );
 }

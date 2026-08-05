@@ -1183,7 +1183,14 @@ impl SyncComponents {
         let (fingerprint, header, chunks) =
             crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
         let plaintext = encryption
-            .blob_opener(header, aad_context)
+            .blob_opener(
+                header,
+                &crate::encryption::NoncePolicy::DerivedFromContext {
+                    context: aad_context.to_vec(),
+                },
+                aad_context,
+            )
+            .map_err(|error| error.to_string())?
             .open_chunks(0..header.chunk_count(), chunks)
             .map_err(|error| error.to_string())?;
         Ok((fingerprint, plaintext))

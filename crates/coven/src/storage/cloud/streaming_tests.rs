@@ -21,15 +21,23 @@ async fn sealed_body(
     let reader = crate::storage::local_file::open_reader(&path)
         .await
         .unwrap();
+    let policy = crate::encryption::NoncePolicy::DerivedFromContext {
+        context: b"storage-cloud-test".to_vec(),
+    };
     let header = crate::encryption::SealedBlobHeader::new(
         crate::encryption::DEFAULT_BLOB_CHUNK_SIZE,
         plaintext.len() as u64,
+        &policy,
     );
     let body = BlobBody::from_file_with_prefix(
         header.sealed_len(),
         reader,
-        Some(service.blob_sealer(header, b"storage-cloud-test")),
-        header.to_bytes().to_vec(),
+        Some(
+            service
+                .blob_sealer(header, &policy, b"storage-cloud-test")
+                .expect("the header records the policy it was built under"),
+        ),
+        header.to_bytes(),
     );
     (dir, body)
 }
@@ -71,10 +79,17 @@ async fn sealed_body_streams_then_decrypts() {
             assert_eq!(header.plaintext_len(), len as u64);
             assert_eq!(
                 service
-                    .blob_opener(header, b"storage-cloud-test")
+                    .blob_opener(
+                        header,
+                        &crate::encryption::NoncePolicy::DerivedFromContext {
+                            context: b"storage-cloud-test".to_vec(),
+                        },
+                        b"storage-cloud-test",
+                    )
+                    .unwrap()
                     .open_chunks(
                         0..header.chunk_count(),
-                        &sealed[crate::encryption::SEALED_BLOB_HEADER_LEN..],
+                        &sealed[header.prefix_len() as usize..],
                     )
                     .unwrap(),
                 plaintext,

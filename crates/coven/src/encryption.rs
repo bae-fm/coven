@@ -21,10 +21,7 @@ pub(crate) const TAG_SIZE: usize = 16;
 
 /// 64KB plaintext chunks
 pub const CHUNK_SIZE: usize = 65536;
-/// Each encrypted chunk: plaintext + 16-byte auth tag
-pub(crate) const ENCRYPTED_CHUNK_SIZE: usize = CHUNK_SIZE + TAG_SIZE;
 pub(crate) const INITIAL_KEY_GENERATION: u64 = 1;
-const AEAD_V2_LABEL: &[u8] = b"coven-aead-v2";
 
 const KEY_TAG_MARKER: &[u8; 3] = b"CKF";
 
@@ -111,6 +108,12 @@ pub enum KeyTagError {
     Unmarked,
     #[error("unsupported key tag version {0}")]
     UnknownVersion(u8),
+}
+
+impl From<SealedBlobError> for EncryptionError {
+    fn from(error: SealedBlobError) -> Self {
+        Self::Decryption(error.to_string())
+    }
 }
 
 impl From<KeyTagError> for EncryptionError {
@@ -208,36 +211,30 @@ pub(crate) fn generate_random_key() -> [u8; 32] {
     key
 }
 
-/// The length of the encrypted blob [`EncryptionService::encrypt`] produces for
-/// a plaintext of `plaintext_len` bytes: the base nonce, the plaintext itself,
-/// and one 16-byte tag per chunk. An empty plaintext still produces one
-/// (tag-only) chunk. Lets a streaming upload know the final object size up
-/// front, before a byte is sealed.
+/// The sealed length of a whole-object payload of `plaintext_len` bytes — what
+/// a streaming upload declares before a byte is sealed.
 pub(crate) fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
-    NONCE_SIZE as u64
-        + plaintext_len
-        + chunk_count_for_plaintext_len(plaintext_len) * TAG_SIZE as u64
+    whole_object_header(plaintext_len).sealed_len()
 }
 
-/// Incremental encryptor for the whole-object format [`EncryptionService::encrypt`]
-/// produces — a protocol object or a host's sealed app data. Emits
-/// `[base_nonce][chunk_0][chunk_1]...` one chunk at a time so a large payload is
-/// never held whole twice.
+/// The header a whole-object payload is sealed under: the build's chunk size,
+/// and a random base nonce it stores in the clear.
 ///
-/// This format is read whole, always: it carries no header describing its own
-/// framing, so a reader needs every chunk before it knows anything. Blobs, which
-/// are read by range, use [`SealedBlobSealer`] instead.
-struct ChunkSealer {
-    cipher: ChunkCipher,
-    aad_context: Vec<u8>,
-    total_chunks: u64,
-    next_index: u64,
+/// A whole object is addressed by nothing the cipher can see — a protocol
+/// object's slot, a host row's primary key — so it cannot derive a nonce base
+/// that is guaranteed unique per plaintext. It stores a random one instead.
+fn whole_object_header(plaintext_len: u64) -> SealedBlobHeader {
+    SealedBlobHeader::new(
+        DEFAULT_BLOB_CHUNK_SIZE,
+        plaintext_len,
+        &NoncePolicy::RandomStored,
+    )
 }
 
 /// One key's chunked AEAD: the cipher, and the base nonce that chunk `n`'s own
-/// nonce derives from. Each format above keeps its own framing and builds its
-/// own additional data — this is the pair every one of them seals and opens
-/// with, so no format repeats the nonce derivation or the AEAD call.
+/// nonce derives from. Each caller keeps its own additional data — this is the
+/// pair every one of them seals and opens with, so nothing repeats the nonce
+/// derivation or the AEAD call.
 struct ChunkCipher {
     cipher: XChaCha20Poly1305,
     base_nonce: [u8; NONCE_SIZE],
@@ -249,18 +246,6 @@ impl ChunkCipher {
             cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
             base_nonce,
         }
-    }
-
-    /// A cipher over a fresh random base nonce — the form used by the format
-    /// that stores its base nonce ahead of the chunks.
-    fn with_random_base_nonce(key: &[u8; 32]) -> Self {
-        let mut base_nonce = [0u8; NONCE_SIZE];
-        rand::rng().fill_bytes(&mut base_nonce);
-        Self::new(key, base_nonce)
-    }
-
-    fn base_nonce(&self) -> [u8; NONCE_SIZE] {
-        self.base_nonce
     }
 
     fn seal(&self, index: u64, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
@@ -288,39 +273,6 @@ impl ChunkCipher {
     }
 }
 
-impl ChunkSealer {
-    /// Start a sealer with a fresh random base nonce.
-    fn new(key: &[u8; 32], plaintext_len: u64, aad_context: &[u8]) -> Self {
-        Self {
-            cipher: ChunkCipher::with_random_base_nonce(key),
-            aad_context: aad_context.to_vec(),
-            total_chunks: chunk_count_for_plaintext_len(plaintext_len),
-            next_index: 0,
-        }
-    }
-
-    /// The base nonce — the first [`NONCE_SIZE`] bytes of the payload, emitted
-    /// before any chunk.
-    fn base_nonce(&self) -> [u8; NONCE_SIZE] {
-        self.cipher.base_nonce()
-    }
-
-    /// Seal one plaintext chunk (at most [`CHUNK_SIZE`] bytes) into its
-    /// ciphertext-plus-tag, advancing the chunk counter. A chunk longer than
-    /// `CHUNK_SIZE` would desync the framing the decryptor expects, so the caller
-    /// must split the plaintext on `CHUNK_SIZE` boundaries.
-    fn seal_chunk(&mut self, plaintext: &[u8]) -> Vec<u8> {
-        debug_assert!(
-            plaintext.len() <= CHUNK_SIZE,
-            "a sealed chunk must be at most CHUNK_SIZE bytes"
-        );
-        let index = self.next_index;
-        self.next_index += 1;
-        let aad = chunk_aad(&self.aad_context, index, self.total_chunks);
-        self.cipher.seal(index, &aad, plaintext)
-    }
-}
-
 /// The sealed-blob format version this build writes, and the only one it reads.
 /// The leading byte of every blob header; a blob naming any other version is
 /// refused rather than guessed at.
@@ -331,23 +283,87 @@ pub(crate) const SEALED_BLOB_VERSION: u8 = 1;
 /// choice and can change without touching a blob already stored.
 pub(crate) const DEFAULT_BLOB_CHUNK_SIZE: NonZeroU32 = NonZeroU32::new(64 * 1024).expect("64 KiB");
 
-/// `[version: 1][chunk_size: 4 LE][plaintext_len: 8 LE]` — the fixed header
-/// every sealed blob carries ahead of its first chunk.
-pub(crate) const SEALED_BLOB_HEADER_LEN: usize = 1 + 4 + 8;
+/// `[version: 1][nonce policy: 1][chunk_size: 4 LE][plaintext_len: 8 LE]` — the
+/// fixed part of the header every sealed payload carries ahead of its first
+/// chunk. A payload under [`NoncePolicy::RandomStored`] follows it with the
+/// [`NONCE_SIZE`]-byte base nonce; [`SealedBlobHeader::prefix_len`] is the whole
+/// of it either way.
+pub(crate) const SEALED_BLOB_HEADER_LEN: usize = 1 + 1 + 4 + 8;
 
 const BLOB_AEAD_LABEL: &[u8] = b"coven-blob-aead-v1";
 const BLOB_NONCE_INFO: &[u8] = b"coven-blob-nonce-v1";
 
-/// What a sealed blob's header says about its own layout: the chunk size it was
-/// sealed at and the plaintext length it covers. Every other offset in the
-/// object is arithmetic over these two numbers, so a blob describes its own
-/// shape and nothing per-chunk is stored.
+const DERIVED_NONCE_TAG: u8 = 0;
+const RANDOM_NONCE_TAG: u8 = 1;
+
+/// Where a sealed payload's base nonce comes from — the choice every caller
+/// that seals or opens one states outright.
+///
+/// # Invariant: a derived base must be unique per plaintext
+///
+/// XChaCha20-Poly1305 offers no margin for nonce reuse. Two different
+/// plaintexts sealed under one key and one nonce leak their XOR and forfeit
+/// authentication, and that failure is silent — everything still encrypts,
+/// decrypts, and round-trips. [`Self::DerivedFromContext`] is therefore only
+/// safe while its `context` differs whenever the plaintext does, which is why
+/// the context is part of the policy rather than something a caller can forget
+/// to pass, and why the choice is a named variant rather than a flag or a
+/// default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoncePolicy {
+    /// A base nonce drawn at random and written into the header, ahead of the
+    /// chunks. Safe however the payload is addressed, at the cost of
+    /// [`NONCE_SIZE`] stored bytes and a base only the stored header carries.
+    RandomStored,
+    /// A base nonce derived by HKDF from the sealing key and `context`, stored
+    /// nowhere, so the same payload always seals to the same bytes and a reader
+    /// that knows the context can open any chunk without reading a base first.
+    ///
+    /// `context` must differ whenever the plaintext does. It holds for a blob
+    /// because the context is minted from the blob's semantic key, which for an
+    /// opaque blob is `{namespace}/opaque/{locator_hash}`, and the locator hash
+    /// covers the plaintext hash — so two different plaintexts cannot share a
+    /// context without a SHA-256 collision. Re-sealing identical bytes under an
+    /// identical context reproduces an identical base, which is fine: it
+    /// reproduces identical ciphertext, not a second message under one nonce.
+    ///
+    /// **Any change to how a payload is addressed must preserve that.** A
+    /// locator that stopped folding in the plaintext hash, or a context minted
+    /// from something that outlives the payload's content (a bare row id, a
+    /// stable path), would let one key seal two different plaintexts under one
+    /// nonce.
+    DerivedFromContext { context: Vec<u8> },
+}
+
+impl NoncePolicy {
+    fn tag(&self) -> u8 {
+        match self {
+            Self::RandomStored => RANDOM_NONCE_TAG,
+            Self::DerivedFromContext { .. } => DERIVED_NONCE_TAG,
+        }
+    }
+}
+
+/// The nonce base a sealed payload carries in its own header: the base itself
+/// when the writer drew one at random, nothing when the writer derived it and
+/// the reader has to derive the same one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredNonceBase {
+    Derived,
+    Random([u8; NONCE_SIZE]),
+}
+
+/// What a sealed payload's header says about its own layout: where its base
+/// nonce comes from, the chunk size it was sealed at, and the plaintext length
+/// it covers. Every other offset in the object is arithmetic over those, so a
+/// payload describes its own shape and nothing per-chunk is stored.
 ///
 /// The header travels in the clear (a reader must know the chunk size before it
 /// can open anything) but is bound into every chunk's AAD, so altering it makes
 /// the first chunk fail to open rather than silently re-framing the object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SealedBlobHeader {
+    base: StoredNonceBase,
     chunk_size: NonZeroU32,
     plaintext_len: u64,
 }
@@ -357,6 +373,10 @@ pub struct SealedBlobHeader {
 pub enum SealedBlobError {
     #[error("sealed blob header names version {0}, which this build does not read")]
     UnknownVersion(u8),
+    #[error("sealed blob header names nonce policy {0}, which this build does not read")]
+    UnknownNoncePolicy(u8),
+    #[error("sealed blob stores nonce policy {stored} but is being opened as {requested}")]
+    NoncePolicyMismatch { stored: u8, requested: u8 },
     #[error("sealed blob header is {0} bytes, expected {SEALED_BLOB_HEADER_LEN}")]
     ShortHeader(usize),
     #[error("sealed blob header names chunk size 0")]
@@ -378,9 +398,21 @@ pub enum SealedBlobError {
 }
 
 impl SealedBlobHeader {
-    /// Describe a blob of `plaintext_len` bytes sealed at `chunk_size`.
-    pub fn new(chunk_size: NonZeroU32, plaintext_len: u64) -> Self {
+    /// Describe a payload of `plaintext_len` bytes sealed at `chunk_size` under
+    /// `policy`. A random-stored policy draws its base nonce here, so the header
+    /// is complete — and its [`Self::sealed_len`] known — before any chunk is
+    /// sealed.
+    pub fn new(chunk_size: NonZeroU32, plaintext_len: u64, policy: &NoncePolicy) -> Self {
+        let base = match policy {
+            NoncePolicy::RandomStored => {
+                let mut nonce = [0u8; NONCE_SIZE];
+                rand::rng().fill_bytes(&mut nonce);
+                StoredNonceBase::Random(nonce)
+            }
+            NoncePolicy::DerivedFromContext { .. } => StoredNonceBase::Derived,
+        };
         Self {
+            base,
             chunk_size,
             plaintext_len,
         }
@@ -393,21 +425,81 @@ impl SealedBlobHeader {
         if bytes[0] != SEALED_BLOB_VERSION {
             return Err(SealedBlobError::UnknownVersion(bytes[0]));
         }
+        let base = match bytes[1] {
+            DERIVED_NONCE_TAG => StoredNonceBase::Derived,
+            RANDOM_NONCE_TAG => {
+                let end = SEALED_BLOB_HEADER_LEN + NONCE_SIZE;
+                if bytes.len() < end {
+                    return Err(SealedBlobError::ShortHeader(bytes.len()));
+                }
+                StoredNonceBase::Random(
+                    bytes[SEALED_BLOB_HEADER_LEN..end]
+                        .try_into()
+                        .expect("NONCE_SIZE base nonce bytes"),
+                )
+            }
+            other => return Err(SealedBlobError::UnknownNoncePolicy(other)),
+        };
         let chunk_size = NonZeroU32::new(u32::from_le_bytes(
-            bytes[1..5].try_into().expect("four header bytes"),
+            bytes[2..6].try_into().expect("four header bytes"),
         ))
         .ok_or(SealedBlobError::ZeroChunkSize)?;
         let plaintext_len =
-            u64::from_le_bytes(bytes[5..13].try_into().expect("eight header bytes"));
-        Ok(Self::new(chunk_size, plaintext_len))
+            u64::from_le_bytes(bytes[6..14].try_into().expect("eight header bytes"));
+        Ok(Self {
+            base,
+            chunk_size,
+            plaintext_len,
+        })
     }
 
-    pub fn to_bytes(self) -> [u8; SEALED_BLOB_HEADER_LEN] {
-        let mut bytes = [0u8; SEALED_BLOB_HEADER_LEN];
-        bytes[0] = SEALED_BLOB_VERSION;
-        bytes[1..5].copy_from_slice(&self.chunk_size.get().to_le_bytes());
-        bytes[5..13].copy_from_slice(&self.plaintext_len.to_le_bytes());
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.prefix_len() as usize);
+        bytes.push(SEALED_BLOB_VERSION);
+        bytes.push(match self.base {
+            StoredNonceBase::Derived => DERIVED_NONCE_TAG,
+            StoredNonceBase::Random(_) => RANDOM_NONCE_TAG,
+        });
+        bytes.extend_from_slice(&self.chunk_size.get().to_le_bytes());
+        bytes.extend_from_slice(&self.plaintext_len.to_le_bytes());
+        if let StoredNonceBase::Random(nonce) = self.base {
+            bytes.extend_from_slice(&nonce);
+        }
         bytes
+    }
+
+    /// How many bytes the header occupies ahead of the first chunk: the fixed
+    /// part, plus the base nonce when the payload stores one.
+    pub fn prefix_len(self) -> u64 {
+        SEALED_BLOB_HEADER_LEN as u64
+            + match self.base {
+                StoredNonceBase::Derived => 0,
+                StoredNonceBase::Random(_) => NONCE_SIZE as u64,
+            }
+    }
+
+    /// The base nonce chunk `n`'s own nonce derives from, under `policy` and
+    /// `key`. A policy that disagrees with what the header records is refused:
+    /// the bytes were sealed under the other one, and guessing which would mean
+    /// opening a payload the caller did not ask for.
+    fn base_nonce(
+        self,
+        key: &[u8; 32],
+        policy: &NoncePolicy,
+    ) -> Result<[u8; NONCE_SIZE], SealedBlobError> {
+        match (self.base, policy) {
+            (StoredNonceBase::Random(nonce), NoncePolicy::RandomStored) => Ok(nonce),
+            (StoredNonceBase::Derived, NoncePolicy::DerivedFromContext { context }) => {
+                Ok(derive_nonce_base(key, context))
+            }
+            (stored, policy) => Err(SealedBlobError::NoncePolicyMismatch {
+                stored: match stored {
+                    StoredNonceBase::Derived => DERIVED_NONCE_TAG,
+                    StoredNonceBase::Random(_) => RANDOM_NONCE_TAG,
+                },
+                requested: policy.tag(),
+            }),
+        }
     }
 
     pub fn chunk_size(self) -> NonZeroU32 {
@@ -424,11 +516,11 @@ impl SealedBlobHeader {
     /// makes a chunk refuse to open as a different blob's chunk, or as a
     /// different position in its own.
     fn chunk_aad(self, aad_context: &[u8], index: u64) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(
-            BLOB_AEAD_LABEL.len() + SEALED_BLOB_HEADER_LEN + 16 + aad_context.len(),
-        );
+        let header = self.to_bytes();
+        let mut aad =
+            Vec::with_capacity(BLOB_AEAD_LABEL.len() + header.len() + 16 + aad_context.len());
         aad.extend_from_slice(BLOB_AEAD_LABEL);
-        aad.extend_from_slice(&self.to_bytes());
+        aad.extend_from_slice(&header);
         aad.extend_from_slice(&(aad_context.len() as u64).to_le_bytes());
         aad.extend_from_slice(aad_context);
         aad.extend_from_slice(&index.to_le_bytes());
@@ -461,7 +553,7 @@ impl SealedBlobHeader {
     /// The whole sealed body: the header followed by every chunk. What a
     /// streaming upload declares as its length before a byte is sealed.
     pub fn sealed_len(self) -> u64 {
-        SEALED_BLOB_HEADER_LEN as u64 + self.plaintext_len + self.chunk_count() * TAG_SIZE as u64
+        self.prefix_len() + self.plaintext_len + self.chunk_count() * TAG_SIZE as u64
     }
 
     /// The chunks covering plaintext `start..end`. A caller reads exactly these
@@ -490,7 +582,7 @@ impl SealedBlobHeader {
     /// what a ranged cloud read asks for verbatim.
     pub fn sealed_span(self, chunks: std::ops::Range<u64>) -> std::ops::Range<u64> {
         let full = u64::from(self.chunk_size.get()) + TAG_SIZE as u64;
-        let start = SEALED_BLOB_HEADER_LEN as u64 + chunks.start * full;
+        let start = self.prefix_len() + chunks.start * full;
         let mut end = start;
         for index in chunks {
             end += self.sealed_chunk_len(index);
@@ -536,29 +628,14 @@ impl SealedBlobHeader {
     }
 }
 
-/// The per-blob nonce base: HKDF over the sealing key, bound to the blob's
-/// context. Chunk `n` uses this base XOR `n`, so no nonce is ever stored.
-///
-/// # Invariant: blob addressing must keep covering blob content
-///
-/// Nonce separation rests entirely on `aad_context` differing whenever the
-/// plaintext does. It holds today because the context is minted from the blob's
-/// semantic key, which for an opaque blob is `{namespace}/opaque/{locator_hash}`,
-/// and the locator hash covers the plaintext hash — so two different plaintexts
-/// cannot share a base without a SHA-256 collision. Re-sealing identical bytes
-/// under an identical locator reproduces an identical base, which is fine: it
-/// reproduces identical ciphertext, not a second message under one nonce.
-///
-/// **Any change to how a blob is addressed must preserve that.** A locator that
-/// stopped folding in the plaintext hash, or a context minted from something
-/// that outlives a blob's content (a bare row id, a stable path), would let one
-/// key seal two different plaintexts under one nonce — which for
-/// XChaCha20-Poly1305 leaks the plaintexts' XOR and forfeits authentication.
-/// That failure is silent: everything still encrypts, decrypts, and round-trips.
-fn blob_nonce_base(key: &[u8; 32], aad_context: &[u8]) -> [u8; NONCE_SIZE] {
-    let mut info = Vec::with_capacity(BLOB_NONCE_INFO.len() + aad_context.len());
+/// The base nonce [`NoncePolicy::DerivedFromContext`] produces: HKDF over the
+/// sealing key, bound to the payload's context. Chunk `n` uses this base XOR
+/// `n`, so no nonce is stored. The uniqueness the derivation rests on is the
+/// policy's invariant.
+fn derive_nonce_base(key: &[u8; 32], context: &[u8]) -> [u8; NONCE_SIZE] {
+    let mut info = Vec::with_capacity(BLOB_NONCE_INFO.len() + context.len());
     info.extend_from_slice(BLOB_NONCE_INFO);
-    info.extend_from_slice(aad_context);
+    info.extend_from_slice(context);
     let hk = Hkdf::<Sha256>::new(Some(b"coven-hkdf-salt-v1"), key);
     let mut base = [0u8; NONCE_SIZE];
     hk.expand(&info, &mut base)
@@ -577,13 +654,18 @@ pub struct SealedBlobSealer {
 }
 
 impl SealedBlobSealer {
-    fn new(key: &[u8; 32], header: SealedBlobHeader, aad_context: &[u8]) -> Self {
-        Self {
-            cipher: ChunkCipher::new(key, blob_nonce_base(key, aad_context)),
+    fn new(
+        key: &[u8; 32],
+        header: SealedBlobHeader,
+        policy: &NoncePolicy,
+        aad_context: &[u8],
+    ) -> Result<Self, SealedBlobError> {
+        Ok(Self {
+            cipher: ChunkCipher::new(key, header.base_nonce(key, policy)?),
             header,
             aad_context: aad_context.to_vec(),
             next_index: 0,
-        }
+        })
     }
 
     pub fn header(&self) -> SealedBlobHeader {
@@ -616,12 +698,17 @@ pub struct SealedBlobOpener {
 }
 
 impl SealedBlobOpener {
-    fn new(key: &[u8; 32], header: SealedBlobHeader, aad_context: &[u8]) -> Self {
-        Self {
-            cipher: ChunkCipher::new(key, blob_nonce_base(key, aad_context)),
+    fn new(
+        key: &[u8; 32],
+        header: SealedBlobHeader,
+        policy: &NoncePolicy,
+        aad_context: &[u8],
+    ) -> Result<Self, SealedBlobError> {
+        Ok(Self {
+            cipher: ChunkCipher::new(key, header.base_nonce(key, policy)?),
             header,
             aad_context: aad_context.to_vec(),
-        }
+        })
     }
 
     pub fn header(&self) -> SealedBlobHeader {
@@ -1048,78 +1135,62 @@ impl EncryptionService {
         self.seal_entry().1.key
     }
 
-    /// Encrypt data using chunked XChaCha20-Poly1305 format.
-    /// Returns: [base_nonce: 24 bytes][ciphertext with auth tags]
-    /// For small data (single chunk), this is equivalent to standard AEAD.
-    /// For large data, each chunk is independently encrypted for random-access.
+    /// Seal `plaintext` whole, under a fresh random base nonce this build
+    /// stores in the header. The one format: a payload read whole and a blob
+    /// read by range differ only in where their base nonce comes from.
     pub fn encrypt(&self, plaintext: &[u8], aad_context: &[u8]) -> Vec<u8> {
-        let mut sealer = self.sealer(plaintext.len() as u64, aad_context);
-        let mut output = sealer.base_nonce().to_vec();
-
-        // Empty plaintext still produces one chunk holding just the auth tag.
+        let header = whole_object_header(plaintext.len() as u64);
+        let mut sealer = self
+            .blob_sealer(header, &NoncePolicy::RandomStored, aad_context)
+            .expect("a header built for RandomStored opens under it");
+        let mut output = header.to_bytes();
+        // An empty plaintext still seals one chunk, holding just its tag, so
+        // opening it authenticates its emptiness.
         if plaintext.is_empty() {
             output.extend(sealer.seal_chunk(&[]));
             return output;
         }
-
-        for chunk in plaintext.chunks(CHUNK_SIZE) {
+        for chunk in plaintext.chunks(header.chunk_size().get() as usize) {
             output.extend(sealer.seal_chunk(chunk));
         }
-
         output
     }
 
-    /// Decrypt data in chunked format: [nonce (24 bytes)][ciphertext chunks...]
+    /// Open a payload [`Self::encrypt`] sealed, reading it whole.
     pub fn decrypt(
         &self,
         encrypted_data: &[u8],
         aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
-        let layout = encrypted_chunk_layout(encrypted_data.len())?;
-        let cipher = ChunkCipher::new(&self.key_bytes(), read_base_nonce(encrypted_data)?);
-
-        let mut result = Vec::with_capacity(decrypted_len_upper_bound(layout.data_len));
-        for chunk_index in 0..layout.total_chunks {
-            let (chunk_start, chunk_end) =
-                layout.chunk_bounds(encrypted_data.len(), chunk_index)?;
-            let aad = chunk_aad(aad_context, chunk_index as u64, layout.total_chunks as u64);
-            let decrypted = cipher
-                .open(
-                    chunk_index as u64,
-                    &aad,
-                    &encrypted_data[chunk_start..chunk_end],
-                )
-                .ok_or_else(|| {
-                    EncryptionError::Decryption(format!(
-                        "Authentication failed for chunk {}",
-                        chunk_index
-                    ))
-                })?;
-            result.extend(decrypted);
-        }
-
-        Ok(result)
+        let header = SealedBlobHeader::parse(encrypted_data)?;
+        let opener = self.blob_opener(header, &NoncePolicy::RandomStored, aad_context)?;
+        let body = encrypted_data
+            .get(header.prefix_len() as usize..)
+            .expect("a parsed header fits the payload it was parsed from");
+        Ok(opener.open_chunks(0..header.chunk_count(), body)?)
     }
 
-    /// A streaming sealer over this service's key. Only [`Self::encrypt`] uses
-    /// it: a whole-object payload is sealed chunk by chunk so a large one never
-    /// sits in memory twice, but it is always read whole.
-    fn sealer(&self, plaintext_len: u64, aad_context: &[u8]) -> ChunkSealer {
-        ChunkSealer::new(&self.key_bytes(), plaintext_len, aad_context)
+    /// A sealer for one payload, framed by `header` and based on `policy`. The
+    /// header travels in the clear ahead of the chunks; every chunk's AAD binds
+    /// the header, the payload's context, and the chunk index.
+    pub fn blob_sealer(
+        &self,
+        header: SealedBlobHeader,
+        policy: &NoncePolicy,
+        aad_context: &[u8],
+    ) -> Result<SealedBlobSealer, SealedBlobError> {
+        SealedBlobSealer::new(&self.key_bytes(), header, policy, aad_context)
     }
 
-    /// A sealer for one blob, framed by `header`. The blob namespace's format:
-    /// the header travels in the clear ahead of the chunks, every chunk's nonce
-    /// is derived rather than stored, and the AAD binds the header, the blob's
-    /// context, and the chunk index.
-    pub fn blob_sealer(&self, header: SealedBlobHeader, aad_context: &[u8]) -> SealedBlobSealer {
-        SealedBlobSealer::new(&self.key_bytes(), header, aad_context)
-    }
-
-    /// The opener for a blob whose header has been read. Random access: any
+    /// The opener for a payload whose header has been read. Random access: any
     /// chunk opens without the ones before it.
-    pub fn blob_opener(&self, header: SealedBlobHeader, aad_context: &[u8]) -> SealedBlobOpener {
-        SealedBlobOpener::new(&self.key_bytes(), header, aad_context)
+    pub fn blob_opener(
+        &self,
+        header: SealedBlobHeader,
+        policy: &NoncePolicy,
+        aad_context: &[u8],
+    ) -> Result<SealedBlobOpener, SealedBlobError> {
+        SealedBlobOpener::new(&self.key_bytes(), header, policy, aad_context)
     }
 
     /// Derive a scoped encryption service.
@@ -1199,85 +1270,6 @@ fn derive_key_from(key: &[u8; 32], info: &str) -> [u8; 32] {
     hk.expand(info.as_bytes(), &mut okm)
         .expect("32 bytes is a valid HKDF output length");
     okm
-}
-
-#[derive(Clone, Copy)]
-struct EncryptedChunkLayout {
-    data_len: usize,
-    total_chunks: usize,
-    has_partial: bool,
-}
-
-impl EncryptedChunkLayout {
-    fn chunk_bounds(
-        self,
-        ciphertext_len: usize,
-        chunk_index: usize,
-    ) -> Result<(usize, usize), EncryptionError> {
-        if chunk_index >= self.total_chunks {
-            return Err(EncryptionError::Decryption(format!(
-                "Chunk index {} out of range (total chunks: {})",
-                chunk_index, self.total_chunks
-            )));
-        }
-
-        let chunk_start = NONCE_SIZE + chunk_index * ENCRYPTED_CHUNK_SIZE;
-        let chunk_end = if chunk_index == self.total_chunks - 1 && self.has_partial {
-            ciphertext_len
-        } else {
-            chunk_start + ENCRYPTED_CHUNK_SIZE
-        };
-        Ok((chunk_start, chunk_end))
-    }
-}
-
-fn read_base_nonce(ciphertext: &[u8]) -> Result<[u8; NONCE_SIZE], EncryptionError> {
-    if ciphertext.len() < NONCE_SIZE {
-        return Err(EncryptionError::Decryption(
-            "Ciphertext too short for nonce".to_string(),
-        ));
-    }
-
-    let mut base_nonce = [0u8; NONCE_SIZE];
-    base_nonce.copy_from_slice(&ciphertext[..NONCE_SIZE]);
-    Ok(base_nonce)
-}
-
-fn encrypted_chunk_layout(ciphertext_len: usize) -> Result<EncryptedChunkLayout, EncryptionError> {
-    if ciphertext_len < NONCE_SIZE {
-        return Err(EncryptionError::Decryption(
-            "Ciphertext too short for nonce".to_string(),
-        ));
-    }
-
-    let data_len = ciphertext_len - NONCE_SIZE;
-    let num_full_chunks = data_len / ENCRYPTED_CHUNK_SIZE;
-    let has_partial = !data_len.is_multiple_of(ENCRYPTED_CHUNK_SIZE);
-    let total_chunks = num_full_chunks + usize::from(has_partial);
-    Ok(EncryptedChunkLayout {
-        data_len,
-        total_chunks,
-        has_partial,
-    })
-}
-
-fn decrypted_len_upper_bound(encrypted_data_len: usize) -> usize {
-    let chunk_count = encrypted_data_len.div_ceil(ENCRYPTED_CHUNK_SIZE);
-    encrypted_data_len.saturating_sub(chunk_count * TAG_SIZE)
-}
-
-fn chunk_count_for_plaintext_len(plaintext_len: u64) -> u64 {
-    plaintext_len.div_ceil(CHUNK_SIZE as u64).max(1)
-}
-
-fn chunk_aad(aad_context: &[u8], chunk_index: u64, total_chunks: u64) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(AEAD_V2_LABEL.len() + 8 + aad_context.len() + 16);
-    aad.extend_from_slice(AEAD_V2_LABEL);
-    aad.extend_from_slice(&(aad_context.len() as u64).to_le_bytes());
-    aad.extend_from_slice(aad_context);
-    aad.extend_from_slice(&chunk_index.to_le_bytes());
-    aad.extend_from_slice(&total_chunks.to_le_bytes());
-    aad
 }
 
 /// Derive nonce for chunk i: base_nonce XOR i (little-endian)

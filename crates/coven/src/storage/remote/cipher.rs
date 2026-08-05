@@ -287,7 +287,13 @@ impl CloudCipher {
         chunk_size: std::num::NonZeroU32,
     ) -> Result<BlobBody, String> {
         let plaintext_len = crate::local_file::file_len(file_path).await?;
-        let header = SealedBlobHeader::new(chunk_size, plaintext_len);
+        let header = SealedBlobHeader::new(
+            chunk_size,
+            plaintext_len,
+            &NoncePolicy::DerivedFromContext {
+                context: aad_context.to_vec(),
+            },
+        );
         let reader = crate::storage::local_file::open_reader(file_path).await?;
         Ok(match self {
             CloudCipher::Encrypted(encryption) => {
@@ -379,7 +385,17 @@ impl ScopedBlobSealing {
         BlobBody::from_file_with_prefix(
             KeyTag::LEN as u64 + header.sealed_len(),
             reader,
-            Some(self.encryption.blob_sealer(header, aad_context)),
+            Some(
+                self.encryption
+                    .blob_sealer(
+                        header,
+                        &NoncePolicy::DerivedFromContext {
+                            context: aad_context.to_vec(),
+                        },
+                        aad_context,
+                    )
+                    .expect("a blob header records the derived policy it was built under"),
+            ),
             prefix,
         )
     }
