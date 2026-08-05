@@ -16,9 +16,9 @@ use super::causal_grants::{
 pub(crate) use super::causal_grants::{AuthorStreamId, MembershipGrantId};
 use super::store_commit::{
     GrantStreamAnchor, ObjectHash, OwnerConflictResolutionAcceptance, OwnerPromotionAcceptance,
-    OwnerPromotionFinalization, OwnerRecoveryCursor, StoreBatchCommitRef, StoreCreationId,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
-    SuccessorLink, STORE_PROTOCOL_VERSION,
+    OwnerPromotionFinalization, OwnerRecoveryCursor, Signed, SignedBody, StoreBatchCommitRef,
+    StoreCreationId, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreRootRef, SuccessorLink,
 };
 #[cfg(test)]
 use super::store_commit::{
@@ -40,16 +40,19 @@ mod reduction;
 pub(crate) use conflict::{
     derive_store_resolution_grant, resolve_store_membership_conflict, MembershipConflict,
     MembershipConflictSelection, MembershipStatus, StoreMembershipConflictResolution,
-    StoreMembershipConflictResolutionRef,
+    StoreMembershipConflictResolutionBody, StoreMembershipConflictResolutionRef,
 };
 pub use conflict::{MembershipConflictChoice, MembershipConflictInfo};
 pub(crate) use entry::{
-    derive_founder_stream_id, derive_grant_id, entry_hash, founder_entry_for_creation,
-    sign_membership_entry, verify_membership_entry,
+    derive_founder_stream_id, derive_grant_id, founder_entry_for_creation, verify_membership_entry,
 };
 #[cfg(test)]
 pub(crate) use entry::{founder_entry, test_wrapped_key_ref};
 use reduction::*;
+
+const MEMBERSHIP_ENTRY_DOMAIN: &[u8] = b"coven.store-membership-entry.v1\0";
+const MEMBERSHIP_HEAD_DOMAIN: &[u8] = b"coven.store-membership-head.v1\0";
+const MEMBERSHIP_RESOLUTION_DOMAIN: &[u8] = b"coven.store-membership-conflict-resolution.v1\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemberRole {
@@ -289,10 +292,10 @@ impl MergeMembershipGrantRetirementBarrier {
     }
 }
 
+/// The wire body of one membership entry. Every field here is signed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipEntry {
-    pub version: u32,
+pub(crate) struct MembershipEntryBody {
     pub store_id: String,
     pub author_pubkey: String,
     pub author_owner_grant: MembershipGrantId,
@@ -305,8 +308,13 @@ pub(crate) struct MembershipEntry {
     pub change: MembershipChange,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_admin: Option<super::provider::ProviderAdminMembershipChange>,
-    pub signature: String,
 }
+
+impl SignedBody for MembershipEntryBody {
+    const DOMAIN: &'static [u8] = MEMBERSHIP_ENTRY_DOMAIN;
+}
+
+pub(crate) type MembershipEntry = Signed<MembershipEntryBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -322,20 +330,25 @@ impl MembershipEntry {
             author_owner_grant: self.author_owner_grant.clone(),
             stream_id: self.stream_id,
             seq: self.seq,
-            entry_hash: entry_hash(self),
+            entry_hash: self.hash(),
         }
     }
 }
 
+/// The wire body of one membership author head. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuthorHead {
-    pub version: u32,
+pub(crate) struct AuthorHeadBody {
     pub store_id: String,
     pub body: MembershipHeadBody,
     pub activation: MembershipHeadActivation,
-    pub signature: String,
 }
+
+impl SignedBody for AuthorHeadBody {
+    const DOMAIN: &'static [u8] = MEMBERSHIP_HEAD_DOMAIN;
+}
+
+pub(crate) type AuthorHead = Signed<AuthorHeadBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -362,7 +375,7 @@ pub struct MergeMembershipHeadTransition {
 }
 
 impl MergeMembershipHeadTransition {
-    pub fn matches_head(&self, head: &AuthorHead, reference: &MembershipHeadRef) -> bool {
+    pub(crate) fn matches_head(&self, head: &AuthorHead, reference: &MembershipHeadRef) -> bool {
         self.body == head.body
             && self.head_slot == *reference.object.slot()
             && self.body.entry.coord == reference.coord
@@ -694,25 +707,21 @@ impl AuthorHead {
     ) -> Self {
         body.resolutions.sort();
         body.resolutions.dedup();
-        let mut head = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_id,
-            body,
-            activation,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(device_signer, &head.canonical_bytes());
-        head.signature = signature;
-        head
+        Signed::sign(
+            AuthorHeadBody {
+                store_id,
+                body,
+                activation,
+            },
+            device_signer,
+        )
     }
 
     pub fn verify(&self, registration: &StoreDeviceRegistration) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self
-                .body
-                .resolutions
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
+        self.body
+            .resolutions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
             && self
                 .body
                 .author_registration
@@ -725,11 +734,7 @@ impl AuthorHead {
                     .predecessor
                     .as_ref()
                     .map(|reference| reference.object.clone())
-            && keys::verify_signature_hex(
-                &registration.device_signing_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&registration.device_signing_pubkey).is_ok()
     }
 
     pub fn entry_coord(&self) -> MembershipCoord {
@@ -737,26 +742,7 @@ impl AuthorHead {
     }
 
     pub fn head_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("membership head serialization cannot fail"),
-        )
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            version: u32,
-            store_id: &'a str,
-            body: &'a MembershipHeadBody,
-            activation: &'a MembershipHeadActivation,
-        }
-        serde_json::to_vec(&Signed {
-            version: self.version,
-            store_id: &self.store_id,
-            body: &self.body,
-            activation: &self.activation,
-        })
-        .expect("membership head signed fields serialize")
+        self.hash()
     }
 }
 

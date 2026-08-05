@@ -850,7 +850,11 @@ impl<'storage> ExactMembershipChain<'storage> {
             let device_signer = registration
                 .device_signer(signer)
                 .expect("membership signer owns exact device registration");
-            (head.body.author_registration, registration, device_signer)
+            (
+                head.body.author_registration.clone(),
+                registration,
+                device_signer,
+            )
         } else {
             use crate::protocol::store_commit::{
                 DeviceRecoveryId, DeviceStreamAnchor, StoreDeviceRegistration,
@@ -980,15 +984,14 @@ impl<'storage> ExactMembershipChain<'storage> {
             .expect("membership author has an exact stream anchor")
             .clone();
         let current_slot = match predecessor.as_ref() {
-            Some(reference) => {
-                authority
-                    .load_membership_head_for_test(reference)
-                    .await
-                    .expect("load exact membership predecessor")
-                    .body
-                    .successor
-                    .next_slot
-            }
+            Some(reference) => authority
+                .load_membership_head_for_test(reference)
+                .await
+                .expect("load exact membership predecessor")
+                .body
+                .successor
+                .next_slot
+                .clone(),
             None => match &anchor {
                 crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
                     first_slot,
@@ -7472,7 +7475,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         .await
         .expect("load exact founder head");
     let mut bad = founder.clone();
-    bad.signature = "00".to_string();
+    bad.corrupt_signature_for_test();
     let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
         crate::protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,

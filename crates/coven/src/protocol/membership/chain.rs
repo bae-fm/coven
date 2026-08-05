@@ -416,7 +416,7 @@ impl MembershipChain {
         }
 
         for (index, (coord, entry)) in self.entries_with_coords().enumerate() {
-            if entry.version != STORE_PROTOCOL_VERSION {
+            if entry.require_version().is_err() {
                 return Err(MembershipError::UnsupportedVersion(index));
             }
             if entry.store_id != expected_store {

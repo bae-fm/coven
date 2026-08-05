@@ -321,8 +321,9 @@ fn membership_head_requires_an_explicit_activation_rule() {
     let (_, head) = exact_head(&entry, &owner);
     let mut encoded = serde_json::to_value(head).expect("serialize membership head");
     encoded
-        .as_object_mut()
-        .expect("membership head object")
+        .get_mut("body")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("membership head body object")
         .remove("activation");
     assert!(serde_json::from_value::<AuthorHead>(encoded).is_err());
 }
@@ -447,12 +448,12 @@ fn merge_active_grant_lookup_returns_only_the_exact_live_record() {
     let MembershipChange::SetMember {
         grant_id: candidate,
         ..
-    } = &mut reuse.change
+    } = &mut reuse.body_mut().change
     else {
         unreachable!()
     };
     *candidate = grant_id.clone();
-    sign_membership_entry(&mut reuse, &owner);
+    reuse.resign(&owner);
     assert!(matches!(
         chain.add_entry(reuse),
         Err(MembershipError::DuplicateGrant {
@@ -1143,10 +1144,10 @@ fn concurrent_member_assignments_are_validated_conflict_state() {
         .expect("Owner selects an assignment");
     let mut incomplete_resolution = resolution_value.clone();
     incomplete_resolution
+        .body_mut()
         .retirement_barriers
         .remove(&retired_grant);
-    incomplete_resolution.signature =
-        keys::sign_hex(&owner, &incomplete_resolution.canonical_bytes()).1;
+    incomplete_resolution.resign(&owner);
     assert!(!incomplete_resolution.verify_against(
         store_root_hash,
         conflicted.conflict().expect("assignment conflict"),
@@ -1474,8 +1475,7 @@ fn concurrent_cross_revocation_is_a_validated_cycle_conflict() {
         )
         .expect("branch Owner resolves the conflict");
     let mut forged_resolution = resolution_value.clone();
-    forged_resolution.signature =
-        keys::sign_hex(&second_owner, &forged_resolution.canonical_bytes()).1;
+    forged_resolution.resign(&second_owner);
     assert!(!forged_resolution.verify_signature());
     assert!(!forged_resolution.verify_against(
         store_root_hash,
@@ -1584,20 +1584,17 @@ fn concurrent_cross_revocation_is_a_validated_cycle_conflict() {
     };
     let mut branch_resolution_value = resolution.1.clone();
     branch_resolution_value
+        .body_mut()
         .retirement_barriers
         .insert(branch_only_grant.clone(), branch_barrier.clone());
-    branch_resolution_value.signature =
-        keys::sign_hex(&first_owner, &branch_resolution_value.canonical_bytes()).1;
+    branch_resolution_value.resign(&first_owner);
     let branch_resolution = exact_resolution(branch_resolution_value);
     let mut branch_second_resolution_value = second_resolution.1.clone();
     branch_second_resolution_value
+        .body_mut()
         .retirement_barriers
         .insert(branch_only_grant.clone(), branch_barrier);
-    branch_second_resolution_value.signature = keys::sign_hex(
-        &second_owner,
-        &branch_second_resolution_value.canonical_bytes(),
-    )
-    .1;
+    branch_second_resolution_value.resign(&second_owner);
     let branch_second_resolution = exact_resolution(branch_second_resolution_value);
     let composed = resolve_store_membership_conflict(
         store_root_hash,
@@ -1767,8 +1764,8 @@ fn dependency_frontier_must_be_strictly_ordered_by_author_stream() {
         )
         .unwrap();
     assert!(unsorted.dependencies.len() > 1);
-    unsorted.dependencies.reverse();
-    sign_membership_entry(&mut unsorted, &founder);
+    unsorted.body_mut().dependencies.reverse();
+    unsorted.resign(&founder);
 
     assert!(matches!(
         chain.add_entry(unsorted),
@@ -1814,7 +1811,7 @@ fn owner_barrier_must_be_strictly_ordered_by_author_stream() {
     let MembershipChange::RemoveMember {
         retirement_barriers,
         ..
-    } = &mut removal.change
+    } = &mut removal.body_mut().change
     else {
         unreachable!();
     };
@@ -1838,7 +1835,7 @@ fn owner_barrier_must_be_strictly_ordered_by_author_stream() {
             panic!("Owner removal carries non-Owner barrier")
         }
     }
-    sign_membership_entry(&mut removal, &founder);
+    removal.resign(&founder);
 
     assert!(matches!(
         chain.add_entry(removal),
@@ -2097,7 +2094,7 @@ fn through_barrier_rejects_a_coordinate_hash_that_is_not_its_dependency() {
     let MembershipChange::RemoveMember {
         retirement_barriers,
         ..
-    } = &mut removal.change
+    } = &mut removal.body_mut().change
     else {
         unreachable!();
     };
@@ -2114,7 +2111,7 @@ fn through_barrier_rejects_a_coordinate_hash_that_is_not_its_dependency() {
         .first_mut()
         .expect("observed owner stream");
     barrier.entry_hash = ObjectHash::digest(b"wrong barrier hash");
-    sign_membership_entry(&mut removal, &founder);
+    removal.resign(&founder);
     assert!(matches!(
         chain.add_entry(removal),
         Err(MembershipError::InvalidOwnerRevocationBarrier { .. })
@@ -2126,7 +2123,7 @@ fn cross_store_replay_fails_even_with_the_same_founder_key() {
     let owner = key();
     let from_a = test_founder_entry("store-a", &owner, "founder", membership_anchor("store-a"));
     let mut replayed = from_a.clone();
-    replayed.store_id = "store-b".to_string();
+    replayed.body_mut().store_id = "store-b".to_string();
     assert!(!verify_membership_entry(&replayed));
     assert!(MembershipChain::from_entries(vec![from_a])
         .unwrap()
@@ -2138,7 +2135,7 @@ fn created_at_is_signed_but_never_orders_entries() {
     let owner = key();
     let entry = test_founder_entry("store", &owner, "display-time", membership_anchor("store"));
     let mut tampered = entry.clone();
-    tampered.created_at = "other".to_string();
+    tampered.body_mut().created_at = "other".to_string();
     assert!(!verify_membership_entry(&tampered));
 }
 
@@ -2209,12 +2206,12 @@ fn membership_entry_rejects_unsorted_or_duplicate_resolution_dependencies() {
     refs.sort();
 
     let mut unsorted = entry.clone();
-    unsorted.resolution_dependencies = refs.iter().rev().cloned().collect();
-    sign_membership_entry(&mut unsorted, &owner);
+    unsorted.body_mut().resolution_dependencies = refs.iter().rev().cloned().collect();
+    unsorted.resign(&owner);
     assert!(!verify_membership_entry(&unsorted));
 
     let mut duplicate = entry;
-    duplicate.resolution_dependencies = vec![refs[0].clone(), refs[0].clone()];
-    sign_membership_entry(&mut duplicate, &owner);
+    duplicate.body_mut().resolution_dependencies = vec![refs[0].clone(), refs[0].clone()];
+    duplicate.resign(&owner);
     assert!(!verify_membership_entry(&duplicate));
 }

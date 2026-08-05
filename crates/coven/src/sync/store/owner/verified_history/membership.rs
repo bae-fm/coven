@@ -102,15 +102,17 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
         let mut predecessor = None;
         for sequence in 1..=20_000_u64 {
             let mut node = seed.clone();
-            node.entry.seq = sequence;
-            node.entry.previous_hash = predecessor
+            let entry = node.entry.body_mut();
+            entry.seq = sequence;
+            entry.previous_hash = predecessor
                 .as_ref()
                 .map(|reference: &MembershipHeadRef| reference.coord.entry_hash);
-            node.entry.dependencies.clear();
-            node.entry.resolution_dependencies.clear();
+            entry.dependencies.clear();
+            entry.resolution_dependencies.clear();
             node.reference.coord = node.entry.coord();
-            node.head.body.entry.coord = node.reference.coord.clone();
-            node.head.body.predecessor = predecessor.clone();
+            let head = node.head.body_mut();
+            head.body.entry.coord = node.reference.coord.clone();
+            head.body.predecessor = predecessor.clone();
             predecessor = Some(node.reference.clone());
             path_heads.insert(node.reference.coord.clone(), node);
         }

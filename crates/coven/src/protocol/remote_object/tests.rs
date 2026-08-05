@@ -124,42 +124,48 @@ fn test_membership_resolution() -> (membership::StoreMembershipConflictResolutio
         )
         .expect("valid resolution recovery slot"),
     };
-    let resolution = membership::StoreMembershipConflictResolution {
-        version: store_commit::STORE_PROTOCOL_VERSION,
-        store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
-        conflict_hash,
-        conflicting_heads: Vec::new(),
-        retired_owner_grants: BTreeSet::new(),
-        retirement_barriers: BTreeMap::new(),
-        resolver_pubkey: resolver_pubkey.clone(),
-        selection: membership::MembershipConflictSelection::RevocationBranch { heads: Vec::new() },
-        replacement_grant: replacement_grant.clone(),
-        replacement_membership: membership.clone(),
-        replacement_acceptance: store_commit::OwnerConflictResolutionAcceptance::unsigned_for_test(
-            store_commit::OwnerConflictResolutionAcceptanceBody {
-                store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
-                owner_grant: replacement_grant,
-                owner_registration: registration,
-                provider: crate::protocol::objects::ProviderDeviceBinding {
-                    principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
-                        access_key_id_hash: ObjectHash::digest(b"resolution provider credential"),
-                    },
-                },
-                membership,
-                recovery,
-                device_state: store_commit::StoreDeviceStateRef::from_resolved(
-                    store_commit::CommitFrontier(BTreeMap::new()),
-                    &store_commit::ResolvedStoreDeviceState {
-                        devices: BTreeMap::new(),
-                        recovery: Vec::new(),
-                        state_hash: ObjectHash::digest(b"resolution device state"),
-                    },
-                )
-                .expect("construct resolution device state"),
+    let resolution = membership::StoreMembershipConflictResolution::unsigned_for_test(
+        membership::StoreMembershipConflictResolutionBody {
+            store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
+            conflict_hash,
+            conflicting_heads: Vec::new(),
+            retired_owner_grants: BTreeSet::new(),
+            retirement_barriers: BTreeMap::new(),
+            resolver_pubkey: resolver_pubkey.clone(),
+            selection: membership::MembershipConflictSelection::RevocationBranch {
+                heads: Vec::new(),
             },
-        ),
-        signature: "resolution signature".to_string(),
-    };
+            replacement_grant: replacement_grant.clone(),
+            replacement_membership: membership.clone(),
+            replacement_acceptance:
+                store_commit::OwnerConflictResolutionAcceptance::unsigned_for_test(
+                    store_commit::OwnerConflictResolutionAcceptanceBody {
+                        store_root_hash: ObjectHash::digest(b"remote-object resolution Store root"),
+                        owner_grant: replacement_grant,
+                        owner_registration: registration,
+                        provider: crate::protocol::objects::ProviderDeviceBinding {
+                            principal:
+                                crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
+                                    access_key_id_hash: ObjectHash::digest(
+                                        b"resolution provider credential",
+                                    ),
+                                },
+                        },
+                        membership,
+                        recovery,
+                        device_state: store_commit::StoreDeviceStateRef::from_resolved(
+                            store_commit::CommitFrontier(BTreeMap::new()),
+                            &store_commit::ResolvedStoreDeviceState {
+                                devices: BTreeMap::new(),
+                                recovery: Vec::new(),
+                                state_hash: ObjectHash::digest(b"resolution device state"),
+                            },
+                        )
+                        .expect("construct resolution device state"),
+                    },
+                ),
+        },
+    );
     let canonical = serde_json::to_vec(&resolution).expect("serialize membership resolution");
     let resolution_hash = resolution.resolution_hash();
     let object = ExactObjectRef::new(
@@ -525,8 +531,8 @@ fn deserialized_device_head_rejects_resolution_cleanup_state() {
                 activation: store_commit::StreamActivation::grant_authorized(
                     resolution.store_root_hash,
                     resolution.replacement_acceptance.owner_registration.clone(),
-                    resolution.replacement_grant,
-                    resolution.replacement_membership,
+                    resolution.replacement_grant.clone(),
+                    resolution.replacement_membership.clone(),
                 )
                 .activation_id(),
                 predecessor: None,

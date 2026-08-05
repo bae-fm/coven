@@ -85,29 +85,28 @@ pub(crate) fn founder_entry_for_creation(
 ) -> MembershipEntry {
     let owner_pubkey = keys::public_key_hex(owner);
     let stream_id = derive_founder_stream_id(store_id, &owner_pubkey);
-    let mut entry = MembershipEntry {
-        version: STORE_PROTOCOL_VERSION,
-        store_id: store_id.to_string(),
-        author_pubkey: owner_pubkey.clone(),
-        author_owner_grant: owner_grant_id.clone(),
-        stream_id,
-        seq: 1,
-        previous_hash: None,
-        dependencies: Vec::new(),
-        resolution_dependencies: Vec::new(),
-        created_at: created_at.to_string(),
-        change: MembershipChange::Founder {
-            creation_id,
-            owner_pubkey,
-            owner_grant_id,
-            membership,
-            provider_admin,
+    Signed::sign(
+        MembershipEntryBody {
+            store_id: store_id.to_string(),
+            author_pubkey: owner_pubkey.clone(),
+            author_owner_grant: owner_grant_id.clone(),
+            stream_id,
+            seq: 1,
+            previous_hash: None,
+            dependencies: Vec::new(),
+            resolution_dependencies: Vec::new(),
+            created_at: created_at.to_string(),
+            change: MembershipChange::Founder {
+                creation_id,
+                owner_pubkey,
+                owner_grant_id,
+                membership,
+                provider_admin,
+            },
+            provider_admin: None,
         },
-        provider_admin: None,
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, owner);
-    entry
+        owner,
+    )
 }
 
 #[cfg(test)]
@@ -130,53 +129,6 @@ pub(crate) fn founder_entry(
     )
 }
 
-pub(crate) fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
-    #[derive(Serialize)]
-    struct Signed<'a> {
-        version: u32,
-        store_id: &'a str,
-        author_pubkey: &'a str,
-        author_owner_grant: &'a MembershipGrantId,
-        stream_id: AuthorStreamId,
-        seq: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        previous_hash: Option<ObjectHash>,
-        dependencies: &'a [MembershipCoord],
-        resolution_dependencies: &'a [StoreMembershipConflictResolutionRef],
-        created_at: &'a str,
-        change: &'a MembershipChange,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        provider_admin: Option<&'a crate::protocol::provider::ProviderAdminMembershipChange>,
-    }
-    serde_json::to_vec(&Signed {
-        version: entry.version,
-        store_id: &entry.store_id,
-        author_pubkey: &entry.author_pubkey,
-        author_owner_grant: &entry.author_owner_grant,
-        stream_id: entry.stream_id,
-        seq: entry.seq,
-        previous_hash: entry.previous_hash,
-        dependencies: &entry.dependencies,
-        resolution_dependencies: &entry.resolution_dependencies,
-        created_at: &entry.created_at,
-        change: &entry.change,
-        provider_admin: entry.provider_admin.as_ref(),
-    })
-    .expect("membership signed fields serialize")
-}
-
-pub(crate) fn entry_hash(entry: &MembershipEntry) -> ObjectHash {
-    ObjectHash::digest(
-        &serde_json::to_vec(entry).expect("membership entry serialization cannot fail"),
-    )
-}
-
-pub(crate) fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserKeypair) {
-    entry.author_pubkey = keys::public_key_hex(keypair);
-    let (_, signature) = keys::sign_hex(keypair, &canonical_bytes(entry));
-    entry.signature = signature;
-}
-
 pub(crate) fn verify_membership_entry(entry: &MembershipEntry) -> bool {
     let activation_position_is_valid = match &entry.change {
         MembershipChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
@@ -192,9 +144,5 @@ pub(crate) fn verify_membership_entry(entry: &MembershipEntry) -> bool {
             .resolution_dependencies
             .windows(2)
             .all(|pair| pair[0] < pair[1])
-        && keys::verify_signature_hex(
-            &entry.author_pubkey,
-            &entry.signature,
-            &canonical_bytes(entry),
-        )
+        && entry.verify_by(&entry.author_pubkey).is_ok()
 }

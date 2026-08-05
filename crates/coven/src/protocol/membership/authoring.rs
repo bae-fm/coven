@@ -118,22 +118,21 @@ impl MembershipChain {
             effective_frontier,
             &replacement_acceptance.device_state,
         )?;
-        let mut resolution = StoreMembershipConflictResolution {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            conflict_hash: *conflict_hash,
-            conflicting_heads: heads.clone(),
-            retired_owner_grants,
-            retirement_barriers,
-            resolver_pubkey,
-            selection,
-            replacement_grant,
-            replacement_membership,
-            replacement_acceptance,
-            signature: String::new(),
-        };
-        resolution.signature = keys::sign_hex(signer, &resolution.canonical_bytes()).1;
-        Ok(resolution)
+        Ok(Signed::sign(
+            StoreMembershipConflictResolutionBody {
+                store_root_hash,
+                conflict_hash: *conflict_hash,
+                conflicting_heads: heads.clone(),
+                retired_owner_grants,
+                retirement_barriers,
+                resolver_pubkey,
+                selection,
+                replacement_grant,
+                replacement_membership,
+                replacement_acceptance,
+            },
+            signer,
+        ))
     }
 
     pub(crate) fn signed_set_member_with_anchor_and_wrapped_key_in_stream(
@@ -187,35 +186,35 @@ impl MembershipChain {
                 self.entries.len(),
             ));
         }
-        let mut entry = MembershipEntry {
-            version: STORE_PROTOCOL_VERSION,
-            store_id: self
-                .store_id()
-                .expect("validated chain has a store id")
-                .to_string(),
-            author_pubkey: author,
-            author_owner_grant: author_grant,
-            stream_id,
-            seq,
-            previous_hash,
-            dependencies: self.effective_frontier(),
-            resolution_dependencies: self.resolution_refs().to_vec(),
-            created_at,
-            change: MembershipChange::SetMember {
-                user_pubkey: user_pubkey.clone(),
-                provider_account_email,
-                role,
-                grant_id,
-                membership,
-                replaces,
-                retirement_barriers,
-                retirement_device_state: None,
-                wrapped_key,
+        let entry = Signed::sign(
+            MembershipEntryBody {
+                store_id: self
+                    .store_id()
+                    .expect("validated chain has a store id")
+                    .to_string(),
+                author_pubkey: author,
+                author_owner_grant: author_grant,
+                stream_id,
+                seq,
+                previous_hash,
+                dependencies: self.effective_frontier(),
+                resolution_dependencies: self.resolution_refs().to_vec(),
+                created_at,
+                change: MembershipChange::SetMember {
+                    user_pubkey: user_pubkey.clone(),
+                    provider_account_email,
+                    role,
+                    grant_id,
+                    membership,
+                    replaces,
+                    retirement_barriers,
+                    retirement_device_state: None,
+                    wrapped_key,
+                },
+                provider_admin: None,
             },
-            provider_admin: None,
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, signer);
+            signer,
+        );
         let mut candidate = self.clone();
         candidate.add_entry(entry.clone())?;
         Ok(entry)
@@ -349,31 +348,31 @@ impl MembershipChain {
         let (seq, previous_hash) = self.next_stream_position(&author, &author_grant, stream_id)?;
         let retirement_barriers =
             self.membership_retirement_barriers(&removes, retirement_device_state.as_ref())?;
-        let mut entry = MembershipEntry {
-            version: STORE_PROTOCOL_VERSION,
-            store_id: self
-                .store_id()
-                .expect("validated chain has a store id")
-                .to_string(),
-            author_pubkey: author,
-            author_owner_grant: author_grant,
-            stream_id,
-            seq,
-            previous_hash,
-            dependencies: self.effective_frontier(),
-            resolution_dependencies: self.resolution_refs().to_vec(),
-            created_at,
-            change: MembershipChange::RemoveMember {
-                user_pubkey,
-                removes,
-                retirement_barriers,
-                retirement_device_state,
-                wrapped_keys,
+        let entry = Signed::sign(
+            MembershipEntryBody {
+                store_id: self
+                    .store_id()
+                    .expect("validated chain has a store id")
+                    .to_string(),
+                author_pubkey: author,
+                author_owner_grant: author_grant,
+                stream_id,
+                seq,
+                previous_hash,
+                dependencies: self.effective_frontier(),
+                resolution_dependencies: self.resolution_refs().to_vec(),
+                created_at,
+                change: MembershipChange::RemoveMember {
+                    user_pubkey,
+                    removes,
+                    retirement_barriers,
+                    retirement_device_state,
+                    wrapped_keys,
+                },
+                provider_admin: None,
             },
-            provider_admin: None,
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, signer);
+            signer,
+        );
         let mut candidate = self.clone();
         candidate.add_entry(entry.clone())?;
         Ok(entry)
@@ -408,27 +407,27 @@ impl MembershipChain {
         {
             return Err(MembershipError::ResolutionActivationRequiresFreshStream);
         }
-        let mut entry = MembershipEntry {
-            version: STORE_PROTOCOL_VERSION,
-            store_id: self
-                .store_id()
-                .expect("validated chain has a store id")
-                .to_string(),
-            author_pubkey: author,
-            author_owner_grant: author_grant,
-            stream_id,
-            seq: 1,
-            previous_hash: None,
-            dependencies: self.effective_frontier(),
-            resolution_dependencies: self.resolution_refs().to_vec(),
-            created_at,
-            change: MembershipChange::ResolutionActivation {
-                resolution: reference,
+        let entry = Signed::sign(
+            MembershipEntryBody {
+                store_id: self
+                    .store_id()
+                    .expect("validated chain has a store id")
+                    .to_string(),
+                author_pubkey: author,
+                author_owner_grant: author_grant,
+                stream_id,
+                seq: 1,
+                previous_hash: None,
+                dependencies: self.effective_frontier(),
+                resolution_dependencies: self.resolution_refs().to_vec(),
+                created_at,
+                change: MembershipChange::ResolutionActivation {
+                    resolution: reference,
+                },
+                provider_admin: None,
             },
-            provider_admin: None,
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, signer);
+            signer,
+        );
         let mut candidate = self.clone();
         candidate.add_entry(entry.clone())?;
         let MembershipStatus::Resolved(resolved_after) = candidate.status() else {

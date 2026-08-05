@@ -210,7 +210,7 @@ async fn membership_head_must_match_its_exact_author_coordinate() {
         .load_membership_head_for_test(&reference)
         .await
         .expect("load exact head");
-    head.body.entry.coord.author_pubkey = hex::encode([9; 32]);
+    head.body_mut().body.entry.coord.author_pubkey = hex::encode([9; 32]);
     fixture
         .store
         .overwrite_membership_head(&reference, &head)
@@ -245,7 +245,7 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
         .load_membership_head_for_test(&reference)
         .await
         .expect("load exact head");
-    head.signature = hex::encode([0; 64]);
+    head.corrupt_signature_for_test();
     fixture
         .store
         .overwrite_membership_head(&reference, &head)
@@ -956,7 +956,11 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
         .load_membership_head_for_test(&latest)
         .await
         .expect("load latest head");
-    let predecessor = latest_head.body.predecessor.expect("remove predecessor");
+    let predecessor = latest_head
+        .body
+        .predecessor
+        .clone()
+        .expect("remove predecessor");
     fixture
         .store
         .storage()

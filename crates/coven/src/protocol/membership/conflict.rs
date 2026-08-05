@@ -103,10 +103,11 @@ pub(crate) enum MembershipConflictSelection {
     RevocationBranch { heads: Vec<MembershipHeadRef> },
 }
 
+/// The wire body of one membership conflict resolution. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreMembershipConflictResolution {
-    pub version: u32,
+pub(crate) struct StoreMembershipConflictResolutionBody {
     pub store_root_hash: ObjectHash,
     pub conflict_hash: ObjectHash,
     pub conflicting_heads: Vec<MembershipHeadRef>,
@@ -117,49 +118,17 @@ pub(crate) struct StoreMembershipConflictResolution {
     pub replacement_grant: MembershipGrantId,
     pub replacement_membership: GrantStreamAnchor,
     pub replacement_acceptance: OwnerConflictResolutionAcceptance,
-    pub signature: String,
 }
 
-impl StoreMembershipConflictResolution {
-    pub(super) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            conflict_hash: ObjectHash,
-            conflicting_heads: &'a [MembershipHeadRef],
-            retired_owner_grants: &'a BTreeSet<MembershipGrantId>,
-            retirement_barriers:
-                &'a BTreeMap<MembershipGrantId, MergeMembershipGrantRetirementBarrier>,
-            resolver_pubkey: &'a str,
-            selection: &'a MembershipConflictSelection,
-            replacement_grant: &'a MembershipGrantId,
-            replacement_membership: &'a GrantStreamAnchor,
-            replacement_acceptance: &'a OwnerConflictResolutionAcceptance,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.store-membership-conflict-resolution.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            conflict_hash: self.conflict_hash,
-            conflicting_heads: &self.conflicting_heads,
-            retired_owner_grants: &self.retired_owner_grants,
-            retirement_barriers: &self.retirement_barriers,
-            resolver_pubkey: &self.resolver_pubkey,
-            selection: &self.selection,
-            replacement_grant: &self.replacement_grant,
-            replacement_membership: &self.replacement_membership,
-            replacement_acceptance: &self.replacement_acceptance,
-        })
-        .expect("Store membership resolution serialization cannot fail")
-    }
+impl SignedBody for StoreMembershipConflictResolutionBody {
+    const DOMAIN: &'static [u8] = MEMBERSHIP_RESOLUTION_DOMAIN;
+}
 
+pub(crate) type StoreMembershipConflictResolution = Signed<StoreMembershipConflictResolutionBody>;
+
+impl StoreMembershipConflictResolution {
     pub(crate) fn resolution_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self)
-                .expect("Store membership resolution serialization cannot fail"),
-        )
+        self.hash()
     }
 
     pub(crate) fn resolution_ref(
@@ -175,17 +144,12 @@ impl StoreMembershipConflictResolution {
     }
 
     pub(crate) fn verify_signature(&self) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self.replacement_grant
-                == derive_store_resolution_grant(&self.conflict_hash, &self.resolver_pubkey)
+        self.replacement_grant
+            == derive_store_resolution_grant(&self.conflict_hash, &self.resolver_pubkey)
             && self.replacement_acceptance.store_root_hash == self.store_root_hash
             && self.replacement_acceptance.owner_grant == self.replacement_grant
             && self.replacement_acceptance.membership == self.replacement_membership
-            && keys::verify_signature_hex(
-                &self.resolver_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&self.resolver_pubkey).is_ok()
     }
 
     pub(crate) fn verify_against(
@@ -259,8 +223,7 @@ impl StoreMembershipConflictResolution {
                 }
                 _ => return false,
             };
-        self.version == STORE_PROTOCOL_VERSION
-            && self.store_root_hash == store_root_hash
+        self.store_root_hash == store_root_hash
             && self.conflict_hash == *conflict_hash
             && self.conflicting_heads == *heads
             && self.retired_owner_grants == expected_retired
