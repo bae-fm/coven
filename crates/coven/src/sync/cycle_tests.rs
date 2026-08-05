@@ -1291,26 +1291,11 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
 async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let keypair = UserKeypair::generate();
     let db = open_test_db_schema(
-        vec![
-            SyncedTable::new(
-                "notes",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
-            )
-            .remote_root(),
-            SyncedTable::new(
-                "note_tags",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
-            ),
-            SyncedTable::new(
-                "note_photos",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
-            )
-            .carries_blob(BlobDecl::new(
-                "photos",
-                Provenance::HostProvided,
-                CacheFill::CacheEager,
-            )),
-        ],
+        crate::sync::test_helpers::test_synced_tables_remote_root_with_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        )),
         test_migrations(),
     );
     let storage =
@@ -1358,26 +1343,9 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
 #[tokio::test]
 async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let keypair = UserKeypair::generate();
-    let tables = vec![
-        SyncedTable::new(
-            "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .remote_root(),
-        SyncedTable::new(
-            "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
-        ),
-        SyncedTable::new(
-            "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .carries_blob(BlobDecl::new(
-            "photos",
-            Provenance::HostProvided,
-            CacheFill::CacheEager,
-        )),
-    ];
+    let tables = crate::sync::test_helpers::test_synced_tables_remote_root_with_blob(
+        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
+    );
     let db = open_test_db_schema(tables.clone(), test_migrations());
     let storage = Arc::new(
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
@@ -1636,26 +1604,9 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
 #[tokio::test]
 async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let keypair = UserKeypair::generate();
-    let tables = vec![
-        SyncedTable::new(
-            "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .remote_root(),
-        SyncedTable::new(
-            "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
-        ),
-        SyncedTable::new(
-            "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
-        )
-        .carries_blob(BlobDecl::new(
-            "photos",
-            Provenance::HostProvided,
-            CacheFill::CacheEager,
-        )),
-    ];
+    let tables = crate::sync::test_helpers::test_synced_tables_remote_root_with_blob(
+        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
+    );
     let database_dir = tempfile::tempdir().expect("snapshot cleanup database directory");
     let database_path = database_dir.path().join("store.db");
     let open = || {

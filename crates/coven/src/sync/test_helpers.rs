@@ -145,6 +145,28 @@ pub(crate) fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
     ]
 }
 
+/// [`test_synced_tables_with_blob`] with an ungated `notes` root: the rows are
+/// remote from the start rather than waiting on a gate, which is what a snapshot
+/// test needs to have something to publish before any gate is opened.
+pub(crate) fn test_synced_tables_remote_root_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new(
+            "notes",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .remote_root(),
+        SyncedTable::new(
+            "note_tags",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+        SyncedTable::new(
+            "note_photos",
+            crate::protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .carries_blob(decl),
+    ]
+}
+
 /// [`test_synced_tables`] with TWO blob-bearing children of the gated `notes` root:
 /// `note_photos` per `photo_decl` (a release file, user-provided) and `note_covers`
 /// per `cover_decl` (a host-provided asset). Both inherit the `notes` gate, so a
