@@ -587,22 +587,11 @@ pub struct StoreMembershipBranch {
     pub state_hash: ObjectHash,
 }
 
-fn active_membership_grants(
-    grants: &BTreeMap<
-        MembershipGrantId,
-        GrantState<MembershipGrantRecord, MembershipGrantRetirement>,
-    >,
-) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
-    grants
-        .iter()
-        .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
-}
-
 impl ResolvedStoreMembership {
     pub(crate) fn active_grants(
         &self,
     ) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
-        active_membership_grants(&self.grants)
+        causal_grants::active_grants(&self.grants)
     }
 
     pub(crate) fn active_grant(&self, grant: &MembershipGrantId) -> Option<&MembershipGrantRecord> {
@@ -614,7 +603,7 @@ impl StoreMembershipBranch {
     pub fn active_grants(
         &self,
     ) -> impl Iterator<Item = (&MembershipGrantId, &MembershipGrantRecord)> {
-        active_membership_grants(&self.grants)
+        causal_grants::active_grants(&self.grants)
     }
 }
 

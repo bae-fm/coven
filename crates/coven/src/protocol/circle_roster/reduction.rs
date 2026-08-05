@@ -1,17 +1,9 @@
 use super::*;
 
-pub(super) fn active_circle_grants(
-    grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
-) -> impl Iterator<Item = (&MembershipGrantId, &CircleGrantRecord)> {
-    grants
-        .iter()
-        .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
-}
-
 pub(super) fn roster_members(
     grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> BTreeMap<String, CircleRole> {
-    active_circle_grants(grants)
+    causal_grants::active_grants(grants)
         .map(|(_, record)| record)
         .map(|record| (record.member_pubkey.clone(), record.role))
         .collect()
@@ -33,10 +25,10 @@ pub(super) fn roster_authorizes_owner_grant(
 pub(super) fn roster_grants_are_valid(
     grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> bool {
-    active_circle_grants(grants)
+    causal_grants::active_grants(grants)
         .map(|(_, record)| record)
         .any(|record| record.role == CircleRole::Owner)
-        && roster_members(grants).len() == active_circle_grants(grants).count()
+        && roster_members(grants).len() == causal_grants::active_grants(grants).count()
 }
 
 pub(super) fn circle_roster_state_hash(

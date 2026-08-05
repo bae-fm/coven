@@ -145,7 +145,7 @@ impl CircleRosterConflictResolution {
             return false;
         };
         let mut expected_retired = involved_owner_grants.clone();
-        expected_retired.extend(active_circle_grants(&branch.grants).filter_map(
+        expected_retired.extend(causal_grants::active_grants(&branch.grants).filter_map(
             |(grant, record)| {
                 (record.member_pubkey == self.resolver_pubkey && record.role == CircleRole::Owner)
                     .then_some(grant.clone())
@@ -159,7 +159,7 @@ impl CircleRosterConflictResolution {
             && self.retired_owner_grants == expected_retired
             && self.replacement_grant
                 == derive_circle_resolution_grant(conflict_hash, &self.resolver_pubkey)
-            && active_circle_grants(&branch.grants).any(|(_, record)| {
+            && causal_grants::active_grants(&branch.grants).any(|(_, record)| {
                 record.member_pubkey == self.resolver_pubkey && record.role == CircleRole::Owner
             })
             && self.verify_signature()
@@ -220,35 +220,6 @@ pub(crate) fn resolve_circle_roster_conflict(
         }
         retired_owner_grants.extend(resolution.retired_owner_grants.iter().cloned());
     }
-    let (first_branch, other_branches) = selected_branches
-        .split_first()
-        .ok_or(CircleRosterError::InvalidConflictResolution)?;
-    let mut grants = active_circle_grants(&first_branch.grants)
-        .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
-        .filter(|(grant, record)| {
-            other_branches.iter().all(|branch| {
-                branch.grants.get(*grant).and_then(GrantState::active) == Some(*record)
-            })
-        })
-        .map(|(grant, record)| {
-            (
-                grant.clone(),
-                GrantState::Active {
-                    record: record.clone(),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for branch in maximal_valid_branches {
-        for (grant, state) in &branch.grants {
-            if state.retirements().is_some()
-                && causal_grants::merge_conflict_grant_state(&mut grants, grant.clone(), state)
-                    .is_err()
-            {
-                return Err(CircleRosterError::InvalidConflictResolution);
-            }
-        }
-    }
     let mut resolution_retirements = resolutions
         .iter()
         .map(|resolution| CircleGrantRetirement::ConflictResolution(resolution.resolution_ref()));
@@ -262,61 +233,28 @@ pub(crate) fn resolve_circle_roster_conflict(
             CircleGrantRetirement::ConflictResolution(resolution.resolution_ref())
         }),
     );
-    for branch in maximal_valid_branches {
-        for (grant, record) in branch.active_grants() {
-            if grants.get(grant).and_then(GrantState::active).is_some() {
-                continue;
-            }
-            match grants.entry(grant.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(GrantState::Tombstoned {
-                        record: record.clone(),
-                        retirements: resolution_retirements.clone(),
-                    });
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if entry.get().record() != record {
-                        return Err(CircleRosterError::InvalidConflictResolution);
-                    }
-                    let GrantState::Tombstoned { retirements, .. } = entry.get_mut() else {
-                        unreachable!("active conflict grant was handled above")
-                    };
-                    retirements.extend(resolution_retirements.iter().cloned());
-                }
-            }
-        }
-    }
+    let mut grants = causal_grants::resolve_conflict_grants(
+        maximal_valid_branches.iter().map(|branch| &branch.grants),
+        selected_branches
+            .iter()
+            .copied()
+            .map(|branch| &branch.grants),
+        &retired_owner_grants,
+        |_| Ok(resolution_retirements.clone()),
+        || CircleRosterError::InvalidConflictResolution,
+    )?;
     for resolution in resolutions {
-        let reference = resolution.resolution_ref();
+        let retirements = GrantRetirements::new(CircleGrantRetirement::ConflictResolution(
+            resolution.resolution_ref(),
+        ));
         for retired in &resolution.retired_owner_grants {
             let record = selected_branches
                 .iter()
                 .find_map(|branch| branch.grants.get(retired).map(GrantState::record))
                 .ok_or(CircleRosterError::InvalidConflictResolution)?
                 .clone();
-            let retirement = CircleGrantRetirement::ConflictResolution(reference.clone());
-            match grants.entry(retired.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(GrantState::Tombstoned {
-                        record,
-                        retirements: GrantRetirements::new(retirement),
-                    });
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if entry.get().record() != &record {
-                        return Err(CircleRosterError::InvalidConflictResolution);
-                    }
-                    let mut retirements = match entry.get().retirements() {
-                        Some(retirements) => retirements.clone(),
-                        None => GrantRetirements::new(retirement.clone()),
-                    };
-                    retirements.insert(retirement);
-                    *entry.get_mut() = GrantState::Tombstoned {
-                        record,
-                        retirements,
-                    };
-                }
-            }
+            causal_grants::tombstone_conflict_grant(&mut grants, retired, &record, &retirements)
+                .map_err(|()| CircleRosterError::InvalidConflictResolution)?;
         }
     }
     for resolution in resolutions {
@@ -407,15 +345,16 @@ impl ResolvedCircleRoster {
     pub(crate) fn active_grants(
         &self,
     ) -> impl Iterator<Item = (&MembershipGrantId, &CircleGrantRecord)> {
-        active_circle_grants(&self.grants)
+        causal_grants::active_grants(&self.grants)
     }
 }
 
+#[cfg(test)]
 impl CircleRosterBranch {
     pub(crate) fn active_grants(
         &self,
     ) -> impl Iterator<Item = (&MembershipGrantId, &CircleGrantRecord)> {
-        active_circle_grants(&self.grants)
+        causal_grants::active_grants(&self.grants)
     }
 }
 

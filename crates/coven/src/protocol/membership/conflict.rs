@@ -414,71 +414,21 @@ pub(crate) fn resolve_store_membership_conflict(
                     selected_branches.push(branch);
                 }
             }
-            let (first_branch, other_branches) = selected_branches
-                .split_first()
-                .ok_or(MembershipError::InvalidConflictResolution)?;
-            let mut resolved = first_branch
-                .active_grants()
-                .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
-                .filter(|(grant, record)| {
-                    other_branches.iter().all(|branch| {
-                        branch.grants.get(*grant).and_then(GrantState::active) == Some(*record)
-                    })
-                })
-                .map(|(grant, record)| {
-                    (
-                        grant.clone(),
-                        GrantState::Active {
-                            record: record.clone(),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
+            let resolved = causal_grants::resolve_conflict_grants(
+                maximal_valid_branches.iter().map(|branch| &branch.grants),
+                selected_branches
+                    .iter()
+                    .copied()
+                    .map(|branch| &branch.grants),
+                &retired_owner_grants,
+                |grant| conflict_resolution_retirements(resolutions, grant),
+                || MembershipError::InvalidConflictResolution,
+            )?;
             let known_records = maximal_valid_branches
                 .iter()
                 .flat_map(|branch| branch.grants.iter())
                 .map(|(grant, state)| (grant.clone(), state.record().clone()))
                 .collect::<BTreeMap<_, _>>();
-            for branch in maximal_valid_branches {
-                for (grant, state) in &branch.grants {
-                    if state.retirements().is_some()
-                        && causal_grants::merge_conflict_grant_state(
-                            &mut resolved,
-                            grant.clone(),
-                            state,
-                        )
-                        .is_err()
-                    {
-                        return Err(MembershipError::InvalidConflictResolution);
-                    }
-                }
-            }
-            for branch in maximal_valid_branches {
-                for (grant, record) in branch.active_grants() {
-                    if resolved.get(grant).and_then(GrantState::active).is_some() {
-                        continue;
-                    }
-                    let resolution_retirements =
-                        conflict_resolution_retirements(resolutions, grant)?;
-                    match resolved.entry(grant.clone()) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(GrantState::Tombstoned {
-                                record: record.clone(),
-                                retirements: resolution_retirements.clone(),
-                            });
-                        }
-                        std::collections::btree_map::Entry::Occupied(mut entry) => {
-                            if entry.get().record() != record {
-                                return Err(MembershipError::InvalidConflictResolution);
-                            }
-                            let GrantState::Tombstoned { retirements, .. } = entry.get_mut() else {
-                                unreachable!("active conflict grant was handled above")
-                            };
-                            retirements.extend(resolution_retirements.iter().cloned());
-                        }
-                    }
-                }
-            }
             let provider_admin = crate::protocol::provider::ProviderAdminResolution::Resolved(
                 crate::protocol::provider::ProviderAdminState::merge(
                     selected_branches
@@ -500,32 +450,13 @@ pub(crate) fn resolve_store_membership_conflict(
                 .get(retired)
                 .cloned()
                 .ok_or(MembershipError::InvalidConflictResolution)?;
-            let retirement = MembershipGrantRetirement::ConflictResolution {
-                authority: reference.clone(),
-                barrier,
-            };
-            match grants.entry(retired.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(GrantState::Tombstoned {
-                        record,
-                        retirements: GrantRetirements::new(retirement),
-                    });
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if entry.get().record() != &record {
-                        return Err(MembershipError::InvalidConflictResolution);
-                    }
-                    let mut retirements = match entry.get().retirements() {
-                        Some(retirements) => retirements.clone(),
-                        None => GrantRetirements::new(retirement.clone()),
-                    };
-                    retirements.insert(retirement);
-                    *entry.get_mut() = GrantState::Tombstoned {
-                        record,
-                        retirements,
-                    };
-                }
-            }
+            let retirements =
+                GrantRetirements::new(MembershipGrantRetirement::ConflictResolution {
+                    authority: reference.clone(),
+                    barrier,
+                });
+            causal_grants::tombstone_conflict_grant(&mut grants, retired, &record, &retirements)
+                .map_err(|()| MembershipError::InvalidConflictResolution)?;
         }
     }
     for (reference, resolution) in resolutions {
@@ -554,8 +485,8 @@ pub(crate) fn resolve_store_membership_conflict(
         }
     }
     let mut members = BTreeSet::new();
-    if !active_membership_grants(&grants).any(|(_, record)| record.role.is_owner())
-        || active_membership_grants(&grants)
+    if !causal_grants::active_grants(&grants).any(|(_, record)| record.role.is_owner())
+        || causal_grants::active_grants(&grants)
             .any(|(_, record)| !members.insert(record.member_pubkey.clone()))
     {
         return Err(MembershipError::InvalidConflictResolution);

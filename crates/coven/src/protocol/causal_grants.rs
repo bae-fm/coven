@@ -163,11 +163,23 @@ impl<R: Clone + Eq, T: Clone + Ord> GrantState<R, T> {
     }
 }
 
+/// One domain's grants, keyed by grant id.
+pub(crate) type CausalGrants<R, T> = BTreeMap<MembershipGrantId, GrantState<R, T>>;
+
+/// The grants that currently hold their assignment, with their records.
+pub(crate) fn active_grants<R, T: Ord>(
+    grants: &CausalGrants<R, T>,
+) -> impl Iterator<Item = (&MembershipGrantId, &R)> {
+    grants
+        .iter()
+        .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
+}
+
 /// Merge one branch's grant state into a conflict result. A grant's record is
 /// immutable; divergent records are an invalid conflict, while retirement
 /// evidence accumulates across every selected branch.
 pub(crate) fn merge_conflict_grant_state<R: Clone + Eq, T: Clone + Ord>(
-    grants: &mut BTreeMap<MembershipGrantId, GrantState<R, T>>,
+    grants: &mut CausalGrants<R, T>,
     grant: MembershipGrantId,
     state: &GrantState<R, T>,
 ) -> Result<(), ()> {
@@ -186,6 +198,101 @@ pub(crate) fn merge_conflict_grant_state<R: Clone + Eq, T: Clone + Ord>(
             Ok(())
         }
     }
+}
+
+/// Retire `grant`, adding `retirements` to whatever evidence it already
+/// carries. A grant's record is immutable, so a divergent record is an invalid
+/// conflict.
+pub(crate) fn tombstone_conflict_grant<R: Clone + Eq, T: Clone + Ord>(
+    grants: &mut CausalGrants<R, T>,
+    grant: &MembershipGrantId,
+    record: &R,
+    retirements: &GrantRetirements<T>,
+) -> Result<(), ()> {
+    match grants.entry(grant.clone()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(GrantState::Tombstoned {
+                record: record.clone(),
+                retirements: retirements.clone(),
+            });
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if entry.get().record() != record {
+                return Err(());
+            }
+            let mut merged = entry
+                .get()
+                .retirements()
+                .cloned()
+                .unwrap_or_else(|| retirements.clone());
+            merged.extend(retirements.iter().cloned());
+            *entry.get_mut() = GrantState::Tombstoned {
+                record: record.clone(),
+                retirements: merged,
+            };
+        }
+    }
+    Ok(())
+}
+
+/// The grant state the branches selected by a revocation-cycle resolution agree
+/// on.
+///
+/// A grant stays active only when the first selected branch holds it active,
+/// every other selected branch holds the identical record active, and no
+/// resolver retired it. Every other grant across `branches` is retired:
+/// evidence accumulates from each branch that already retired it, and
+/// `resolution_retirements` supplies the evidence for a grant that survived its
+/// own branch but lost to the resolution.
+pub(crate) fn resolve_conflict_grants<'branch, R, T, E>(
+    branches: impl Iterator<Item = &'branch CausalGrants<R, T>> + Clone,
+    selected: impl Iterator<Item = &'branch CausalGrants<R, T>> + Clone,
+    retired_owner_grants: &BTreeSet<MembershipGrantId>,
+    resolution_retirements: impl Fn(&MembershipGrantId) -> Result<GrantRetirements<T>, E>,
+    invalid: impl Fn() -> E,
+) -> Result<CausalGrants<R, T>, E>
+where
+    R: Clone + Eq + 'branch,
+    T: Clone + Ord + 'branch,
+{
+    let mut selected = selected;
+    let first = selected.next().ok_or_else(&invalid)?;
+    let others = selected;
+    let mut resolved = active_grants(first)
+        .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
+        .filter(|(grant, record)| {
+            others
+                .clone()
+                .all(|branch| branch.get(*grant).and_then(GrantState::active) == Some(*record))
+        })
+        .map(|(grant, record)| {
+            (
+                grant.clone(),
+                GrantState::Active {
+                    record: record.clone(),
+                },
+            )
+        })
+        .collect::<CausalGrants<R, T>>();
+    for branch in branches.clone() {
+        for (grant, state) in branch {
+            if state.retirements().is_some() {
+                merge_conflict_grant_state(&mut resolved, grant.clone(), state)
+                    .map_err(|()| invalid())?;
+            }
+        }
+    }
+    for branch in branches {
+        for (grant, record) in active_grants(branch) {
+            if resolved.get(grant).and_then(GrantState::active).is_some() {
+                continue;
+            }
+            let retirements = resolution_retirements(grant)?;
+            tombstone_conflict_grant(&mut resolved, grant, record, &retirements)
+                .map_err(|()| invalid())?;
+        }
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn try_map_grant_state<C, A, R, T, E>(

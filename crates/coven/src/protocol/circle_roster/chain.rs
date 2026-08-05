@@ -806,14 +806,14 @@ impl CircleRosterChain {
             .iter()
             .find(|branch| branch.heads == resolver_branch_heads)
             .ok_or(CircleRosterError::InvalidConflictResolution)?;
-        if !active_circle_grants(&branch.grants).any(|(_, record)| {
+        if !causal_grants::active_grants(&branch.grants).any(|(_, record)| {
             record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner
         }) {
             return Err(CircleRosterError::SignerIsNotOwner(resolver_pubkey));
         }
         let replacement_grant = derive_circle_resolution_grant(conflict_hash, &resolver_pubkey);
         let mut retired_owner_grants = involved_owner_grants.clone();
-        retired_owner_grants.extend(active_circle_grants(&branch.grants).filter_map(
+        retired_owner_grants.extend(causal_grants::active_grants(&branch.grants).filter_map(
             |(grant, record)| {
                 (record.member_pubkey == resolver_pubkey && record.role == CircleRole::Owner)
                     .then_some(grant.clone())
