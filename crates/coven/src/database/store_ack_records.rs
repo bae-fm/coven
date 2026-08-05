@@ -1,4 +1,5 @@
 use crate::database::local_store_identity::local_store_authority_on;
+use crate::database::query_mapped_rows;
 use crate::protocol::store_commit::CircleAck;
 
 use super::*;
@@ -172,24 +173,19 @@ pub(crate) fn load_outbound_circle_acks_on(
     let authority = local_store_authority_on(conn)?;
     let registration = authority.value();
     let root = &registration.store_root;
-    let mut statement = conn
-        .prepare(
-            "SELECT ack_ref, ack_bytes, prepared_object FROM outbound_circle_acks
+    let rows = query_mapped_rows(
+        conn,
+        "SELECT ack_ref, ack_bytes, prepared_object FROM outbound_circle_acks
              ORDER BY circle_id",
-        )
-        .map_err(DbError::from)?;
-    let rows = statement
-        .query_map([], |row| {
+        [],
+        |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })
-        .map_err(DbError::from)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(DbError::from)?;
-    drop(statement);
+        },
+    )?;
     let mut activations = Vec::with_capacity(rows.len());
     for (reference, bytes, prepared) in rows {
         let reference: crate::protocol::store_commit::CircleAckRef =

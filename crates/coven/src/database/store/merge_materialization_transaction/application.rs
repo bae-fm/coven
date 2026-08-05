@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
     pub(crate) fn activate_store_operation_remote_objects(
@@ -351,20 +352,15 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )?;
         }
         if gates.has_scoped_graph() && !local_store_membership.retains_circle_rows() {
-            let mut statement = conn
-                .prepare(
-                    "SELECT DISTINCT circle_id
+            let circles = query_mapped_rows(
+                conn,
+                "SELECT DISTINCT circle_id
                      FROM _coven_audience
                      WHERE circle_id IS NOT NULL
                      ORDER BY circle_id",
-                )
-                .map_err(DbError::from)?;
-            let circles = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
-            drop(statement);
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
             for encoded in circles {
                 inactive_circles.insert(encoded.parse().map_err(|error| {
                     DbError::Message(format!(

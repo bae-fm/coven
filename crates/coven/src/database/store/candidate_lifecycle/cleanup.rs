@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 impl StoreDatabase {
     pub(crate) async fn merge_candidate_cleanup_pending(
@@ -265,25 +266,20 @@ impl StoreDatabase {
     ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
         self.connection
             .call(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT device_id, seq, commit_ref
+                let rows = query_mapped_rows(
+                    conn,
+                    "SELECT device_id, seq, commit_ref
                      FROM merge_retraction_cleanups
                      ORDER BY device_id, seq",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
+                    [],
+                    |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
                         ))
-                    })
-                    .map_err(DbError::from)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(DbError::from)?;
-                drop(statement);
+                    },
+                )?;
                 rows.into_iter()
                     .map(|(stream_id, sequence, encoded_ref)| {
                         let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;

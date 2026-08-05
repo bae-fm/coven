@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 #[derive(Clone, Default)]
 pub(crate) struct RetainedMergeMaterializationCache {
@@ -96,26 +97,21 @@ impl RetainedMergeMaterializationCache {
         root: &crate::protocol::store_commit::StoreRootRef,
         authorities: RetainedCommitAuthorities<'_>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT device_id, seq, commit_ref, input_hash
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT device_id, seq, commit_ref, input_hash
                  FROM retained_merge_materializations
                  ORDER BY device_id, seq",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                 ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            },
+        )?;
 
         let mut verified = BTreeMap::new();
         let mut replay_inputs = Vec::with_capacity(rows.len());
@@ -191,21 +187,14 @@ impl RetainedMergeMaterializationCache {
         &self,
         conn: &Connection,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT circle_id, control_coord
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT circle_id, control_coord
                  FROM circle_control_activations
                  ORDER BY circle_id, control_coord",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
         let mut index = CircleReplayEpochIndex {
             control_epochs: BTreeMap::new(),
             cutoffs: BTreeMap::new(),

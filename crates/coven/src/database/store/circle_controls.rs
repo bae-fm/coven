@@ -1,3 +1,4 @@
+use crate::database::query_mapped_rows;
 use rusqlite::Connection;
 
 use super::{MergeMaterializationTransaction, StoreDatabase};
@@ -113,24 +114,21 @@ impl StoreDatabase {
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         self.connection
             .call(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT operation_id, circle_id, payload
+                let rows = query_mapped_rows(
+                    conn,
+                    "SELECT operation_id, circle_id, payload
                          FROM circle_operations
                          ORDER BY rowid",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
+                    [],
+                    |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, Vec<u8>>(2)?,
                         ))
-                    })
-                    .map_err(DbError::from)?;
-                for row in rows {
-                    let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
+                    },
+                )?;
+                for (operation_id, circle_id, payload) in rows {
                     let journal = crate::database::parse_circle_operation_row(
                         &operation_id,
                         &circle_id,

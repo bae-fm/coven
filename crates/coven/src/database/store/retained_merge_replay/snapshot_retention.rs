@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 impl StoreDatabase {
     /// The `retained_merge_materializations` commit-refs a Store snapshot image
@@ -12,38 +13,28 @@ impl StoreDatabase {
         conn: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
     ) -> Result<BTreeSet<String>, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT DISTINCT activation_commit
+        let references = query_mapped_rows(
+            conn,
+            "SELECT DISTINCT activation_commit
                  FROM store_author_exclusion_activations
                  ORDER BY activation_commit",
-            )
-            .map_err(DbError::from)?;
-        let references = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
         let mut required = references.into_iter().collect::<BTreeSet<_>>();
-        let mut bootstrap_statement = conn
-            .prepare(
-                "SELECT circle_id, activation_commit, exact_cut
+        let bootstrap_rows = query_mapped_rows(
+            conn,
+            "SELECT circle_id, activation_commit, exact_cut
                  FROM circle_bootstrap_coverage ORDER BY circle_id",
-            )
-            .map_err(DbError::from)?;
-        let bootstrap_rows = bootstrap_statement
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                 ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(bootstrap_statement);
+            },
+        )?;
         let mut bootstrap_cuts = BTreeMap::new();
         for (circle_id, activation_commit, exact_cut) in bootstrap_rows {
             let circle_id: crate::protocol::circle::CircleId =
@@ -60,15 +51,12 @@ impl StoreDatabase {
             }
             required.insert(activation_commit);
         }
-        let mut materialization_statement = conn
-            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
-            .map_err(DbError::from)?;
-        let materialization_refs = materialization_statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(materialization_statement);
+        let materialization_refs = query_mapped_rows(
+            conn,
+            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
         for encoded in materialization_refs {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
@@ -186,15 +174,12 @@ impl StoreDatabase {
         coverage: BTreeMap<String, StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
         let mut required = coverage.into_values().collect::<BTreeSet<_>>();
-        let mut statement = conn
-            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
-            .map_err(DbError::from)?;
-        let retained = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+        let retained = query_mapped_rows(
+            conn,
+            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
         for encoded in retained {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
@@ -285,21 +270,14 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         // Each recorded author-exclusion activation must still match its
         // exclusion locator, so the image's exclusion table is internally exact.
-        let mut statement = conn
-            .prepare(
-                "SELECT exclusion_ref, activation_commit
+        let stored = query_mapped_rows(
+            conn,
+            "SELECT exclusion_ref, activation_commit
                  FROM store_author_exclusion_activations
                  ORDER BY exclusion_ref",
-            )
-            .map_err(DbError::from)?;
-        let stored = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
         for (encoded_exclusion, activation_commit) in stored {
             let exclusion = serde_json::from_str(&encoded_exclusion).map_err(|error| {
                 DbError::Message(format!("snapshot author exclusion reference: {error}"))

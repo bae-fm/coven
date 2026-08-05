@@ -108,27 +108,20 @@ fn execute_batch(conn: &Connection, sql: &str) -> Result<(), GateError> {
         .map_err(|e| GateError::Sql(format!("execute batch: {sql}"), e))
 }
 
+/// The shared row query, with the statement that failed named in the error the
+/// gate reports.
 fn query_mapped_rows<T, P, F>(
     conn: &Connection,
     sql: &str,
     params: P,
-    mut mapper: F,
+    mapper: F,
 ) -> Result<Vec<T>, GateError>
 where
     P: Params,
     F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
 {
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| GateError::Sql(format!("prepare: {sql}"), e))?;
-    let rows = stmt
-        .query_map(params, |row| mapper(row))
-        .map_err(|e| GateError::Sql(format!("query: {sql}"), e))?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| GateError::Sql(format!("query row: {sql}"), e))?);
-    }
-    Ok(out)
+    crate::database::query_mapped_rows(conn, sql, params, mapper)
+        .map_err(|e| GateError::Sql(format!("query: {sql}"), e))
 }
 
 fn query_row_optional<T, P, F>(

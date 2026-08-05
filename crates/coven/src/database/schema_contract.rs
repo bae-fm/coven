@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,18 +88,15 @@ pub(super) fn validate_host_synced_tables(
 }
 
 fn validate_host_trigger_names(conn: &Connection) -> Result<(), DbError> {
-    let mut statement = conn
-        .prepare(
-            "SELECT name FROM main.sqlite_schema WHERE type = 'trigger'
+    let names = query_mapped_rows(
+        conn,
+        "SELECT name FROM main.sqlite_schema WHERE type = 'trigger'
              UNION ALL
              SELECT name FROM temp.sqlite_schema WHERE type = 'trigger'",
-        )
-        .map_err(DbError::from)?;
-    let names = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(DbError::from)?;
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
     for name in names {
-        let name = name.map_err(DbError::from)?;
         if is_coven_cleanup_guard_name(&name) {
             return Err(DbError::Message(format!(
                 "host trigger {name:?} uses a name reserved for Coven blob cleanup guards"
@@ -137,12 +135,8 @@ pub(super) fn validate_existing_row_identities(
         "SELECT id FROM {}",
         crate::database::quote_ident(table.name())
     );
-    let mut statement = conn.prepare(&sql).map_err(DbError::from)?;
-    let ids = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(DbError::from)?;
+    let ids = query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(0))?;
     for id in ids {
-        let id = id.map_err(DbError::from)?;
         table
             .row_identity()
             .validate(table.name(), &id)
@@ -290,14 +284,10 @@ pub(super) fn declared_as_text(declared_type: &str) -> bool {
 /// contract error rather than folding into "not STRICT".
 pub(super) fn table_is_strict(conn: &Connection, table: &str) -> Result<Option<bool>, DbError> {
     let sql = format!("PRAGMA table_list({})", crate::database::quote_ident(table));
-    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(5)?))
-        })
-        .map_err(DbError::from)?;
-    for row in rows {
-        let (schema, strict) = row.map_err(DbError::from)?;
+    let rows = query_mapped_rows(conn, &sql, [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(5)?))
+    })?;
+    for (schema, strict) in rows {
         if schema == "main" {
             return Ok(Some(strict != 0));
         }

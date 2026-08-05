@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 impl StoreDatabase {
     pub(crate) fn canonical_retained_merge_packages(
@@ -247,15 +248,12 @@ impl StoreDatabase {
     pub(crate) fn remove_retained_replay_ownership_from_snapshot_on(
         conn: &rusqlite::Transaction<'_>,
     ) -> Result<(), DbError> {
-        let mut statement = conn
-            .prepare("SELECT DISTINCT object_id FROM retained_replay_objects ORDER BY object_id")
-            .map_err(DbError::from)?;
-        let object_ids = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+        let object_ids = query_mapped_rows(
+            conn,
+            "SELECT DISTINCT object_id FROM retained_replay_objects ORDER BY object_id",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
         for encoded in object_ids {
             let object_id = encoded.parse().map_err(|error| {
                 DbError::Message(format!("snapshot retained replay object id: {error}"))

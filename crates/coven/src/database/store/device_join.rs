@@ -1,3 +1,4 @@
+use crate::database::query_mapped_rows;
 use crate::database::StoreDatabase;
 use crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError;
 use crate::protocol::store_commit::device_join_journal::{
@@ -90,23 +91,20 @@ impl DeviceJoinJournalStore {
     ) -> Result<Vec<(String, String, String)>, crate::database::DbError> {
         let connection =
             rusqlite::Connection::open(&self.path).map_err(crate::database::DbError::from)?;
-        let mut statement = connection
-            .prepare(
-                "SELECT attempt_id, role, payload FROM device_join_journals
+        query_mapped_rows(
+            &connection,
+            "SELECT attempt_id, role, payload FROM device_join_journals
                  ORDER BY attempt_id, role",
-            )
-            .map_err(crate::database::DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                 ))
-            })
-            .map_err(crate::database::DbError::from)?;
-        rows.map(|row| row.map_err(crate::database::DbError::from))
-            .collect()
+            },
+        )
+        .map_err(crate::database::DbError::from)
     }
 
     pub(crate) fn compare_and_swap(

@@ -1,3 +1,4 @@
+use crate::database::query_mapped_rows;
 use crate::database::*;
 use crate::encryption::EncryptionService;
 use crate::protocol::store_commit::StoreBatchCommitRef;
@@ -902,17 +903,12 @@ impl StoreDatabase {
     pub(crate) fn circle_current_states_on(
         conn: &Connection,
     ) -> Result<Vec<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
-        let mut statement = conn
-            .prepare("SELECT circle_id, state FROM circle_current_state ORDER BY circle_id")
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT circle_id, state FROM circle_current_state ORDER BY circle_id",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
         rows.into_iter()
             .map(|(stored_circle_id, payload)| {
                 Self::parse_circle_current_state(&stored_circle_id, &payload)
@@ -1132,7 +1128,6 @@ pub(super) fn circle_blob_opening_protection_on(
             ))
         })?);
     }
-    drop(statement);
 
     let mut retained_key = None;
     for control in controls {

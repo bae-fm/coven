@@ -1,3 +1,4 @@
+use crate::database::query_mapped_rows;
 use crate::database::StoreDatabase;
 use crate::database::*;
 use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
@@ -17,20 +18,19 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
 
     let column = db
         .call(|conn| {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(blob_make_remote_intents)")
-                .map_err(DbError::from)?;
-            let rows = stmt
-                .query_map([], |row| {
+            let rows = query_mapped_rows(
+                conn,
+                "PRAGMA table_info(blob_make_remote_intents)",
+                [],
+                |row| {
                     Ok((
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, Option<String>>(4)?,
                     ))
-                })
-                .map_err(DbError::from)?;
-            for row in rows {
-                let (name, notnull, default_value) = row.map_err(DbError::from)?;
+                },
+            )?;
+            for (name, notnull, default_value) in rows {
                 if name == "retain_pinned" {
                     return Ok(Some((notnull, default_value)));
                 }
@@ -362,19 +362,13 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
 
     let partitions = db
         .call(move |conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT audience, changeset FROM store_write_partitions
+            let partitions = query_mapped_rows(
+                conn,
+                "SELECT audience, changeset FROM store_write_partitions
                      WHERE write_id = ?1 ORDER BY audience",
-                )
-                .map_err(DbError::from)?;
-            let partitions = statement
-                .query_map([stored_write_id.as_str()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
+                [stored_write_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
             Ok(partitions)
         })
         .await
@@ -495,21 +489,15 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
 
     let partitions = db
         .call(move |conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT audience, changeset
+            let partitions = query_mapped_rows(
+                conn,
+                "SELECT audience, changeset
                      FROM store_write_partitions
                      WHERE write_id = ?1
                      ORDER BY audience",
-                )
-                .map_err(DbError::from)?;
-            let partitions = statement
-                .query_map([stored_move_id.as_str()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(DbError::from)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(DbError::from)?;
+                [stored_move_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
             Ok(partitions)
         })
         .await

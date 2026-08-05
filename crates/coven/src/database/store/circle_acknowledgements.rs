@@ -1,3 +1,4 @@
+use crate::database::query_mapped_rows;
 use crate::database::*;
 use crate::protocol::circle::{
     CircleBootstrapCoverageRef, CircleControlCoord, CircleEpochId, CircleId,
@@ -186,18 +187,13 @@ impl StoreDatabase {
     ) -> Result<Vec<CircleAckRef>, DbError> {
         self.connection
             .call(move |conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT ack_ref FROM activated_circle_acks \
+                let rows = query_mapped_rows(
+                    conn,
+                    "SELECT ack_ref FROM activated_circle_acks \
                          WHERE circle_id = ?1 ORDER BY device_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
-                    .map_err(DbError::from)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(DbError::from)?;
-                drop(statement);
+                    [circle_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )?;
                 rows.into_iter()
                     .map(|raw| {
                         let reference: CircleAckRef =

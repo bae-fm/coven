@@ -1,3 +1,4 @@
+use crate::database::query_mapped_rows;
 use crate::database::*;
 use crate::protocol::objects::PreparedExactObject;
 use crate::protocol::store_commit::{
@@ -171,18 +172,16 @@ impl StoreDatabase {
         exclude_device: Option<&str>,
     ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
         let mut frontier = BTreeMap::new();
-        let mut stmt = conn
-            .prepare(
-                "SELECT m.device_id, m.seq, m.commit_ref,
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT m.device_id, m.seq, m.commit_ref,
                         m.retained_commit_ref, m.retained_input_hash \
                  FROM materialized_commits m \
                  JOIN (SELECT device_id, MAX(seq) AS seq FROM materialized_commits \
                        GROUP BY device_id) latest \
                    ON latest.device_id = m.device_id AND latest.seq = m.seq",
-            )
-            .map_err(DbError::from)?;
-        let rows = stmt
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
@@ -190,11 +189,8 @@ impl StoreDatabase {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                 ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(stmt);
+            },
+        )?;
         for row in rows {
             let (device_id, seq, reference, retained_commit_ref, retained_input_hash) = row;
             if exclude_device == Some(device_id.as_str()) {
@@ -213,20 +209,19 @@ impl StoreDatabase {
             );
         }
 
-        let mut coverage = conn
-            .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
-            .map_err(DbError::from)?;
-        let rows = coverage
-            .query_map([], |row| {
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT device_id, seq, commit_ref FROM snapshot_coverage",
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                 ))
-            })
-            .map_err(DbError::from)?;
-        for row in rows {
-            let (device_id, seq, reference) = row.map_err(DbError::from)?;
+            },
+        )?;
+        for (device_id, seq, reference) in rows {
             if exclude_device == Some(device_id.as_str()) {
                 continue;
             }

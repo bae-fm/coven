@@ -1,5 +1,6 @@
 //! Private accepted-history baselines and deterministic retained replay.
 
+use crate::database::query_mapped_rows;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{types::Value, Connection};
@@ -482,22 +483,19 @@ impl RetainedReplayBaseline {
                 }
                 self.validate_image_metadata(&image)?;
                 let mut actual = BTreeMap::new();
-                let mut statement = image
-                    .prepare(
-                        "SELECT device_id, seq, commit_ref FROM snapshot_coverage ORDER BY device_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
+                let rows = query_mapped_rows(
+                    &image,
+                    "SELECT device_id, seq, commit_ref FROM snapshot_coverage ORDER BY device_id",
+                    [],
+                    |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
                         ))
-                    })
-                    .map_err(DbError::from)?;
-                for row in rows {
-                    let (stream_id, sequence, encoded) = row.map_err(DbError::from)?;
+                    },
+                )?;
+                for (stream_id, sequence, encoded) in rows {
                     let reference: StoreBatchCommitRef =
                         serde_json::from_str(&encoded).map_err(|error| {
                             DbError::Message(format!("snapshot replay coverage reference: {error}"))
@@ -516,7 +514,6 @@ impl RetainedReplayBaseline {
                         ));
                     }
                 }
-                drop(statement);
                 if actual != self.exact_cut.clone().into_refs() {
                     return Err(DbError::Message(
                         "snapshot replay image coverage differs from its baseline".to_string(),
@@ -578,13 +575,7 @@ pub(crate) fn copy_table_with_conflicts(
     ignore_existing: bool,
 ) -> Result<(), DbError> {
     let pragma = format!("PRAGMA table_info({})", crate::database::quote_ident(table));
-    let mut column_statement = source.prepare(&pragma).map_err(DbError::from)?;
-    let columns = column_statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(DbError::from)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(DbError::from)?;
-    drop(column_statement);
+    let columns = query_mapped_rows(source, &pragma, [], |row| row.get::<_, String>(1))?;
     if columns.is_empty() {
         return Err(DbError::Message(format!(
             "retained replay projection table {table:?} is absent"
@@ -599,17 +590,11 @@ pub(crate) fn copy_table_with_conflicts(
         "SELECT {quoted_columns} FROM {}",
         crate::database::quote_ident(table)
     );
-    let mut source_statement = source.prepare(&select).map_err(DbError::from)?;
-    let rows = source_statement
-        .query_map([], |row| {
-            (0..columns.len())
-                .map(|index| row.get::<_, Value>(index))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .map_err(DbError::from)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(DbError::from)?;
-    drop(source_statement);
+    let rows = query_mapped_rows(source, &select, [], |row| {
+        (0..columns.len())
+            .map(|index| row.get::<_, Value>(index))
+            .collect::<rusqlite::Result<Vec<_>>>()
+    })?;
     let placeholders = (1..=columns.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()

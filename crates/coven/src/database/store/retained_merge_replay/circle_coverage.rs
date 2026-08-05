@@ -1,4 +1,5 @@
 use super::*;
+use crate::database::query_mapped_rows;
 
 impl StoreDatabase {
     pub(crate) async fn prepare_circle_restore_selection(
@@ -9,20 +10,13 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 Self::seed_stream_activation_index_from_retained_on(&tx, &root)?;
-                let mut statement = tx
-                    .prepare(
-                        "SELECT circle_id, control_coord FROM circle_control_activations
+                let rows = query_mapped_rows(
+                    &tx,
+                    "SELECT circle_id, control_coord FROM circle_control_activations
                          ORDER BY circle_id, control_coord",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(DbError::from)?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(DbError::from)?;
-                drop(statement);
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?;
                 let mut circles: Vec<(
                     crate::protocol::circle::CircleId,
                     Vec<crate::protocol::circle::CircleControlCoord>,
@@ -293,15 +287,12 @@ impl StoreDatabase {
         conn: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        let mut statement = conn
-            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
-            .map_err(DbError::from)?;
-        let encoded_refs = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+        let encoded_refs = query_mapped_rows(
+            conn,
+            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
         for encoded in encoded_refs {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
@@ -365,15 +356,13 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        let mut statement = conn
-            .prepare(
-                "SELECT circle_id, control_coord, activation_commit, exact_cut,
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT circle_id, control_coord, activation_commit, exact_cut,
                         image_hash, image_bytes, bootstrap_ref
                  FROM circle_bootstrap_coverage ORDER BY circle_id",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -383,11 +372,8 @@ impl StoreDatabase {
                     row.get::<_, Vec<u8>>(5)?,
                     row.get::<_, Vec<u8>>(6)?,
                 ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            },
+        )?;
         let mut bootstraps = Vec::with_capacity(rows.len());
         for (
             circle_id,

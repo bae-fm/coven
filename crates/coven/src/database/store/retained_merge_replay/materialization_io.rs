@@ -1,5 +1,6 @@
 use super::cache::*;
 use super::*;
+use crate::database::query_mapped_rows;
 
 impl StoreDatabase {
     pub(crate) fn open_retained_merge_materialization_input_with_authority_on(
@@ -627,25 +628,20 @@ impl StoreDatabase {
                 "retained replay classifies one write as active and retracted".to_string(),
             ));
         }
-        let mut statement = conn
-            .prepare(
-                "SELECT write_id, status, changeset
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT write_id, status, changeset
                  FROM store_writes
                  ORDER BY ordinal",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                 ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            },
+        )?;
         let mut overlays = Vec::new();
         for (encoded_write_id, raw_status, stored_store_changeset) in rows {
             let write_id = WriteId::from_generated(encoded_write_id.clone());
@@ -796,26 +792,21 @@ impl StoreDatabase {
         conn: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let mut statement = conn
-            .prepare(
-                "SELECT device_id, seq, commit_ref, input_hash
+        let rows = query_mapped_rows(
+            conn,
+            "SELECT device_id, seq, commit_ref, input_hash
                  FROM retained_merge_materializations
                  ORDER BY device_id, seq",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
+            [],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                 ))
-            })
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(DbError::from)?;
-        drop(statement);
+            },
+        )?;
         rows.into_iter()
             .map(|(stream_id, sequence, encoded_ref, input_hash)| {
                 let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;

@@ -9,6 +9,8 @@
 //! runs against the connection it owns during open. The host does not implement
 //! any of this; app SQL goes through `CovenHandle::sql` or `CovenHandle::write`.
 
+use crate::database::query_mapped_rows;
+
 macro_rules! coven_tables {
     ($visit:ident) => {
         $visit!(
@@ -924,14 +926,14 @@ pub(crate) fn is_reserved_table_name(name: &str) -> bool {
 /// internal tables. Snapshot and retained-replay projections share this one
 /// enumeration so a new table cannot be omitted by one image path.
 pub(crate) fn user_table_names(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
-    let mut statement = conn.prepare(
+    let tables = query_mapped_rows(
+        conn,
         "SELECT name FROM main.sqlite_schema
          WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
          ORDER BY name",
+        [],
+        |row| row.get::<_, String>(0),
     )?;
-    let tables = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(tables)
 }
 

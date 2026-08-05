@@ -1,5 +1,6 @@
 //! Canonical signed contract for the schema shape that decides sync routing.
 
+use crate::database::query_mapped_rows;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -444,16 +445,13 @@ fn canonical_unique_parent_keys(
         "PRAGMA index_list({})",
         crate::database::quote_ident(parent_table)
     );
-    let mut statement = conn.prepare(&sql)?;
-    let indexes = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)? != 0,
-                row.get::<_, i64>(4)? != 0,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let indexes = query_mapped_rows(conn, &sql, [], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? != 0,
+            row.get::<_, i64>(4)? != 0,
+        ))
+    })?;
     let mut keys = BTreeSet::new();
     for (index_name, unique, partial) in indexes {
         if !unique || partial {
@@ -463,18 +461,15 @@ fn canonical_unique_parent_keys(
             "PRAGMA index_xinfo({})",
             crate::database::quote_ident(&index_name)
         );
-        let mut statement = conn.prepare(&sql)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)? != 0,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)? != 0,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = query_mapped_rows(conn, &sql, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)? != 0,
+            ))
+        })?;
         let mut index_columns = rows
             .into_iter()
             .filter(|(_, _, _, _, key)| *key)

@@ -404,6 +404,30 @@ impl From<rusqlite::Error> for DbError {
     }
 }
 
+/// Run `sql`, map every row through `mapper`, and collect the results.
+///
+/// It returns the SQLite failure as it happened, so every caller's `?` converts
+/// it into whatever error that caller already returns — one helper, no error
+/// vocabulary of its own.
+pub(crate) fn query_mapped_rows<T, P, F>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mut mapper: F,
+) -> Result<Vec<T>, rusqlite::Error>
+where
+    P: rusqlite::Params,
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(params, |row| mapper(row))?;
+    let mut mapped = Vec::new();
+    for row in rows {
+        mapped.push(row?);
+    }
+    Ok(mapped)
+}
+
 /// Why opening the database failed. Splits a migration-ladder failure from every
 /// other open-time database error so the [`MigrationError`] a host acts on —
 /// [`MigrationError::SchemaTooNew`], whose remedy is "update the app" — stays
