@@ -2862,7 +2862,7 @@ impl TestStore {
         key: &str,
         bytes: Vec<u8>,
     ) -> Result<(), crate::protocol::objects::StorageError> {
-        self.storage().write_blob_tombstone(key, bytes).await
+        self.storage().write_provider_object(key, bytes).await
     }
 
     /// Plants a typed tombstone through the exact plaintext Store layout while
@@ -4539,7 +4539,7 @@ pub(crate) enum ProtocolRead {
 }
 
 #[cfg(test)]
-pub(crate) enum TombstoneExistsInterception {
+pub(crate) enum ProviderObjectExistsInterception {
     Proceed,
     DeleteAndReportAbsent,
 }
@@ -4588,28 +4588,28 @@ pub(crate) trait StorageInterceptor: Send + Sync {
         Ok(())
     }
 
-    async fn before_blob_tombstone_read(
+    async fn before_provider_object_read(
         &self,
         _key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_tombstone_write(
+    async fn before_provider_object_write(
         &self,
         _key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_tombstone_exists(
+    async fn before_provider_object_exists(
         &self,
         _key: &str,
-    ) -> Result<TombstoneExistsInterception, crate::protocol::objects::StorageError> {
-        Ok(TombstoneExistsInterception::Proceed)
+    ) -> Result<ProviderObjectExistsInterception, crate::protocol::objects::StorageError> {
+        Ok(ProviderObjectExistsInterception::Proceed)
     }
 
-    async fn before_blob_tombstone_delete(
+    async fn before_provider_object_delete(
         &self,
         _key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
@@ -4657,32 +4657,32 @@ where
         (**self).before_blob_stage().await
     }
 
-    async fn before_blob_tombstone_read(
+    async fn before_provider_object_read(
         &self,
         key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
-        (**self).before_blob_tombstone_read(key).await
+        (**self).before_provider_object_read(key).await
     }
 
-    async fn before_blob_tombstone_write(
+    async fn before_provider_object_write(
         &self,
         key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
-        (**self).before_blob_tombstone_write(key).await
+        (**self).before_provider_object_write(key).await
     }
 
-    async fn before_blob_tombstone_exists(
+    async fn before_provider_object_exists(
         &self,
         key: &str,
-    ) -> Result<TombstoneExistsInterception, crate::protocol::objects::StorageError> {
-        (**self).before_blob_tombstone_exists(key).await
+    ) -> Result<ProviderObjectExistsInterception, crate::protocol::objects::StorageError> {
+        (**self).before_provider_object_exists(key).await
     }
 
-    async fn before_blob_tombstone_delete(
+    async fn before_provider_object_delete(
         &self,
         key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
-        (**self).before_blob_tombstone_delete(key).await
+        (**self).before_provider_object_delete(key).await
     }
 }
 
@@ -4821,94 +4821,55 @@ where
         self.inner.set_member_access(state).await
     }
 
-    async fn read_blob_tombstone(
+    async fn read_provider_object(
         &self,
         key: &str,
     ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
-        self.interceptor.before_blob_tombstone_read(key).await?;
-        self.inner.read_blob_tombstone(key).await
+        self.interceptor.before_provider_object_read(key).await?;
+        self.inner.read_provider_object(key).await
     }
 
-    async fn write_blob_tombstone(
+    async fn write_provider_object(
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
     ) -> Result<(), crate::protocol::objects::StorageError> {
-        self.interceptor.before_blob_tombstone_write(key).await?;
-        self.inner.write_blob_tombstone(key, stored_bytes).await
+        self.interceptor.before_provider_object_write(key).await?;
+        self.inner.write_provider_object(key, stored_bytes).await
     }
 
-    async fn list_blob_tombstones(
+    async fn list_provider_objects(
         &self,
         prefix: &str,
     ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
-        self.inner.list_blob_tombstones(prefix).await
+        self.inner.list_provider_objects(prefix).await
     }
 
-    async fn blob_tombstone_exists(
+    async fn provider_object_exists(
         &self,
         key: &str,
     ) -> Result<bool, crate::protocol::objects::StorageError> {
-        match self.interceptor.before_blob_tombstone_exists(key).await? {
-            TombstoneExistsInterception::Proceed => self.inner.blob_tombstone_exists(key).await,
-            TombstoneExistsInterception::DeleteAndReportAbsent => {
-                self.inner.delete_blob_tombstone(key).await?;
+        match self.interceptor.before_provider_object_exists(key).await? {
+            ProviderObjectExistsInterception::Proceed => {
+                self.inner.provider_object_exists(key).await
+            }
+            ProviderObjectExistsInterception::DeleteAndReportAbsent => {
+                self.inner.delete_provider_object(key).await?;
                 Ok(false)
             }
         }
     }
 
-    async fn delete_blob_tombstone(
+    async fn delete_provider_object(
         &self,
         key: &str,
     ) -> Result<(), crate::protocol::objects::StorageError> {
-        self.interceptor.before_blob_tombstone_delete(key).await?;
-        self.inner.delete_blob_tombstone(key).await
+        self.interceptor.before_provider_object_delete(key).await?;
+        self.inner.delete_provider_object(key).await
     }
 
-    async fn list_provider_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
-        self.inner.list_provider_objects_for_test(prefix).await
-    }
-
-    async fn read_provider_object_for_test(
-        &self,
-        key: &str,
-    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
-        self.inner.read_provider_object_for_test(key).await
-    }
-
-    async fn provider_object_exists_for_test(
-        &self,
-        key: &str,
-    ) -> Result<bool, crate::protocol::objects::StorageError> {
-        self.inner.provider_object_exists_for_test(key).await
-    }
-
-    async fn probe_exact_slots(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &crate::protocol::objects::ResolvedProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::ExactSlotProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.inner
-            .probe_exact_slots(journal, probe_id, binding)
-            .await
-    }
-
-    async fn reserve_cross_principal_response_slot(
-        &self,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::provider::ProviderProbeError>
-    {
-        self.inner
-            .reserve_cross_principal_response_slot(probe_id)
-            .await
+    fn provider_probes(&self) -> &crate::storage::provider_probe::ProviderProbeStorage {
+        self.inner.provider_probes()
     }
 
     async fn observe_exact_slot(
@@ -4926,98 +4887,6 @@ where
         slot: &crate::protocol::objects::ObjectSlot,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.delete_exact_slot_and_verify_absent(slot).await
-    }
-
-    async fn prepare_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &crate::protocol::objects::StoreProviderBinding,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.inner
-            .prepare_cross_principal_challenge(
-                publication_journal,
-                probe_id,
-                store,
-                context,
-                administrator_signer,
-            )
-            .await
-    }
-
-    async fn settle_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &crate::protocol::objects::StoreProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.inner
-            .settle_cross_principal_challenge(
-                publication_journal,
-                authorization,
-                challenge,
-                context,
-                store,
-            )
-            .await
-    }
-
-    async fn create_cross_principal_response(
-        &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::protocol::objects::StoreProviderBinding,
-        administrator_signing_pubkey: &str,
-        peer_signer: &crate::keys::UserKeypair,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeResponse,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.inner
-            .create_cross_principal_response(
-                challenge,
-                context,
-                store,
-                administrator_signing_pubkey,
-                peer_signer,
-            )
-            .await
-    }
-
-    async fn complete_cross_principal_probe(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::protocol::objects::StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-        peer_signing_pubkey: &str,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.inner
-            .complete_cross_principal_probe(
-                journal,
-                challenge,
-                response,
-                context,
-                store,
-                administrator_signer,
-                peer_signing_pubkey,
-            )
-            .await
     }
 
     fn store_blob_protection(
@@ -5177,15 +5046,6 @@ where
         blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.verify_blob_object(blob).await
-    }
-
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        dest: &std::path::Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
-        self.interceptor.before_blob_stage().await?;
-        self.inner.stage_exact_blob_download(blob, dest).await
     }
 
     async fn stage_verified_blob_plaintext(

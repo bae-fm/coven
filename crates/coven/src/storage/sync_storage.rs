@@ -9,7 +9,6 @@ use std::path::Path;
 use crate::protocol::objects::{
     BlobSpoolProtection, BlobSpoolWrite, BlobWriteAuthority, ExactObjectRef, ObjectSlot,
     PreparedExactObject, ProtocolObjectContext, ResolvedProviderBinding, StorageError,
-    StoreProviderBinding,
 };
 
 #[async_trait]
@@ -26,49 +25,24 @@ pub(crate) trait SyncStorage: Send + Sync {
         state: crate::storage::cloud::CloudAccessState,
     ) -> Result<crate::storage::cloud::CloudAccessOutcome, StorageError>;
 
-    async fn read_blob_tombstone(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+    async fn read_provider_object(&self, key: &str) -> Result<Vec<u8>, StorageError>;
 
-    async fn write_blob_tombstone(
+    async fn write_provider_object(
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
     ) -> Result<(), StorageError>;
 
-    async fn list_blob_tombstones(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
+    async fn list_provider_objects(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
 
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, StorageError>;
+    async fn provider_object_exists(&self, key: &str) -> Result<bool, StorageError>;
 
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), StorageError>;
+    async fn delete_provider_object(&self, key: &str) -> Result<(), StorageError>;
 
-    #[cfg(test)]
-    async fn list_provider_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError>;
-
-    #[cfg(test)]
-    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError>;
-
-    #[cfg(test)]
-    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError>;
-
-    /// Verify the provider's exact-slot behavior through two independent
-    /// clients retained by this storage session.
-    async fn probe_exact_slots(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &ResolvedProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::ExactSlotProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    /// Reserve the joining peer's deterministic cross-principal response slot.
-    async fn reserve_cross_principal_response_slot(
-        &self,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError>;
+    /// The two independent provider clients this session retains for
+    /// cross-principal probing. The probe protocol is a surface of its own: an
+    /// adapter hands it over rather than restating each of its steps.
+    fn provider_probes(&self) -> &crate::storage::provider_probe::ProviderProbeStorage;
 
     /// Observe the exact object identity currently occupying `slot` without
     /// opening its protocol bytes.
@@ -82,56 +56,6 @@ pub(crate) trait SyncStorage: Send + Sync {
         &self,
         slot: &ObjectSlot,
     ) -> Result<(), StorageError>;
-
-    async fn prepare_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &StoreProviderBinding,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    async fn settle_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &StoreProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    async fn create_cross_principal_response(
-        &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signing_pubkey: &str,
-        peer_signer: &crate::keys::UserKeypair,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeResponse,
-        crate::protocol::provider::ProviderProbeError,
-    >;
-
-    async fn complete_cross_principal_probe(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-        peer_signing_pubkey: &str,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    >;
 
     /// Return the cloud home's fixed Store blob opening protection. Circle blobs
     /// use their exact activated Circle key instead.
@@ -237,15 +161,6 @@ pub(crate) trait SyncStorage: Send + Sync {
         blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError>;
 
-    /// Read and verify one exact stored blob body into an unpublished sibling.
-    /// The caller commits it with overwrite semantics for coven-owned paths or
-    /// no-replace semantics for user-owned destinations.
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError>;
-
     /// Download and exact-verify the stored object, open it under the
     /// audience-owned protection, and return an unpublished plaintext file only
     /// after its locator size and hash have also been verified.
@@ -294,49 +209,32 @@ where
         (**self).set_member_access(state).await
     }
 
-    async fn read_blob_tombstone(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        (**self).read_blob_tombstone(key).await
+    async fn read_provider_object(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        (**self).read_provider_object(key).await
     }
 
-    async fn write_blob_tombstone(
+    async fn write_provider_object(
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
     ) -> Result<(), StorageError> {
-        (**self).write_blob_tombstone(key, stored_bytes).await
+        (**self).write_provider_object(key, stored_bytes).await
     }
 
-    async fn list_blob_tombstones(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        (**self).list_blob_tombstones(prefix).await
+    async fn list_provider_objects(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        (**self).list_provider_objects(prefix).await
     }
 
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, StorageError> {
-        (**self).blob_tombstone_exists(key).await
+    async fn provider_object_exists(&self, key: &str) -> Result<bool, StorageError> {
+        (**self).provider_object_exists(key).await
     }
 
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), StorageError> {
-        (**self).delete_blob_tombstone(key).await
+    async fn delete_provider_object(&self, key: &str) -> Result<(), StorageError> {
+        (**self).delete_provider_object(key).await
     }
 
-    async fn probe_exact_slots(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &ResolvedProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::ExactSlotProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self).probe_exact_slots(journal, probe_id, binding).await
-    }
-
-    async fn reserve_cross_principal_response_slot(
-        &self,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError> {
-        (**self)
-            .reserve_cross_principal_response_slot(probe_id)
-            .await
+    fn provider_probes(&self) -> &crate::storage::provider_probe::ProviderProbeStorage {
+        (**self).provider_probes()
     }
 
     async fn observe_exact_slot(
@@ -351,98 +249,6 @@ where
         slot: &ObjectSlot,
     ) -> Result<(), StorageError> {
         (**self).delete_exact_slot_and_verify_absent(slot).await
-    }
-
-    async fn prepare_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &StoreProviderBinding,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .prepare_cross_principal_challenge(
-                publication_journal,
-                probe_id,
-                store,
-                context,
-                administrator_signer,
-            )
-            .await
-    }
-
-    async fn settle_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &StoreProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .settle_cross_principal_challenge(
-                publication_journal,
-                authorization,
-                challenge,
-                context,
-                store,
-            )
-            .await
-    }
-
-    async fn create_cross_principal_response(
-        &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signing_pubkey: &str,
-        peer_signer: &crate::keys::UserKeypair,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeResponse,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .create_cross_principal_response(
-                challenge,
-                context,
-                store,
-                administrator_signing_pubkey,
-                peer_signer,
-            )
-            .await
-    }
-
-    async fn complete_cross_principal_probe(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-        peer_signing_pubkey: &str,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        (**self)
-            .complete_cross_principal_probe(
-                journal,
-                challenge,
-                response,
-                context,
-                store,
-                administrator_signer,
-                peer_signing_pubkey,
-            )
-            .await
     }
 
     fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
@@ -570,14 +376,6 @@ where
         (**self).verify_blob_object(blob).await
     }
 
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
-        (**self).stage_exact_blob_download(blob, dest).await
-    }
-
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &crate::protocol::blob::locator::StoredBlobRef,
@@ -602,23 +400,5 @@ where
         blob: &crate::protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         (**self).delete_blob_object(blob).await
-    }
-
-    #[cfg(test)]
-    async fn list_provider_objects_for_test(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
-        (**self).list_provider_objects_for_test(prefix).await
-    }
-
-    #[cfg(test)]
-    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        (**self).read_provider_object_for_test(key).await
-    }
-
-    #[cfg(test)]
-    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
-        (**self).provider_object_exists_for_test(key).await
     }
 }

@@ -25,8 +25,8 @@ use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
 use crate::store_dir::StoreDir;
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
-    plaintext_cipher, pubkey_hex, InterceptedStorage, StorageInterceptor, TestStore,
-    TombstoneExistsInterception,
+    plaintext_cipher, pubkey_hex, InterceptedStorage, ProviderObjectExistsInterception,
+    StorageInterceptor, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 
@@ -157,7 +157,7 @@ async fn storage_with_chain(
 async fn tombstone_exists(storage: &TestStore, key: &str) -> bool {
     storage
         .storage()
-        .blob_tombstone_exists(key)
+        .provider_object_exists(key)
         .await
         .expect("inspect exact tombstone")
 }
@@ -188,16 +188,16 @@ struct CancelTombstoneOnExists {
 
 #[async_trait]
 impl StorageInterceptor for CancelTombstoneOnExists {
-    async fn before_blob_tombstone_exists(
+    async fn before_provider_object_exists(
         &self,
         key: &str,
-    ) -> Result<TombstoneExistsInterception, StorageError> {
+    ) -> Result<ProviderObjectExistsInterception, StorageError> {
         // The GC's pre-delete re-check: on the first hit for the tombstone key,
         // remove it and report it gone. Any later/other check delegates normally.
         if key == self.tombstone_key && !self.fired.swap(true, Ordering::SeqCst) {
-            return Ok(TombstoneExistsInterception::DeleteAndReportAbsent);
+            return Ok(ProviderObjectExistsInterception::DeleteAndReportAbsent);
         }
-        Ok(TombstoneExistsInterception::Proceed)
+        Ok(ProviderObjectExistsInterception::Proceed)
     }
 }
 
@@ -239,7 +239,7 @@ impl FailStorageOpOnKey {
 
 #[async_trait]
 impl StorageInterceptor for FailStorageOpOnKey {
-    async fn before_blob_tombstone_write(&self, key: &str) -> Result<(), StorageError> {
+    async fn before_provider_object_write(&self, key: &str) -> Result<(), StorageError> {
         if self.should_fail(FailingCloudOp::PutObject, key) {
             return Err(StorageError::Storage(format!(
                 "injected put_object failure for {key}"
@@ -248,7 +248,7 @@ impl StorageInterceptor for FailStorageOpOnKey {
         Ok(())
     }
 
-    async fn before_blob_tombstone_read(&self, key: &str) -> Result<(), StorageError> {
+    async fn before_provider_object_read(&self, key: &str) -> Result<(), StorageError> {
         if self.should_fail(FailingCloudOp::Read, key) {
             return Err(StorageError::Storage(format!(
                 "injected read failure for {key}"
@@ -257,7 +257,7 @@ impl StorageInterceptor for FailStorageOpOnKey {
         Ok(())
     }
 
-    async fn before_blob_tombstone_delete(&self, key: &str) -> Result<(), StorageError> {
+    async fn before_provider_object_delete(&self, key: &str) -> Result<(), StorageError> {
         if self.should_fail(FailingCloudOp::Delete, key) {
             return Err(StorageError::Storage(format!(
                 "injected delete failure for {key}"
@@ -266,16 +266,16 @@ impl StorageInterceptor for FailStorageOpOnKey {
         Ok(())
     }
 
-    async fn before_blob_tombstone_exists(
+    async fn before_provider_object_exists(
         &self,
         key: &str,
-    ) -> Result<TombstoneExistsInterception, StorageError> {
+    ) -> Result<ProviderObjectExistsInterception, StorageError> {
         if self.should_fail(FailingCloudOp::Exists, key) {
             return Err(StorageError::Storage(format!(
                 "injected exists failure for {key}"
             )));
         }
-        Ok(TombstoneExistsInterception::Proceed)
+        Ok(ProviderObjectExistsInterception::Proceed)
     }
 }
 
@@ -1914,7 +1914,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     // Exactly one tombstone, still carrying the first drain's deleted_at.
     let tombstones = storage
         .storage()
-        .list_blob_tombstones("blob_tombstones/")
+        .list_provider_objects("blob_tombstones/")
         .await
         .unwrap();
     assert_eq!(tombstones.len(), 1, "only one tombstone exists for the key");

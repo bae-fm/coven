@@ -455,6 +455,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let reservation = self.durable_descriptor_reservation().await?;
         let authority = &reservation.membership.founder.root.authority;
         let exact_slots = storage
+            .provider_probes()
             .probe_exact_slots(db, authority.probes.exact_slots(), &authority.binding)
             .await
             .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;

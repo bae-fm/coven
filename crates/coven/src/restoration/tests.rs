@@ -1218,7 +1218,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .expect("publish owner snapshot acknowledgement");
 
         let snapshot_before = owner_storage
-            .list_provider_objects_for_test("store-v1/snapshots/")
+            .list_provider_objects("store-v1/snapshots/")
             .await
             .expect("list Store snapshot objects");
 

@@ -19,11 +19,11 @@ impl SyncStorage for CloudSyncStorage {
         self.home.set_access(state).await.map_err(Into::into)
     }
 
-    async fn read_blob_tombstone(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+    async fn read_provider_object(&self, key: &str) -> Result<Vec<u8>, StorageError> {
         self.home.read(key).await.map_err(Into::into)
     }
 
-    async fn write_blob_tombstone(
+    async fn write_provider_object(
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
@@ -38,39 +38,20 @@ impl SyncStorage for CloudSyncStorage {
             .map_err(Into::into)
     }
 
-    async fn list_blob_tombstones(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+    async fn list_provider_objects(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         self.home.list(prefix).await.map_err(Into::into)
     }
 
-    async fn blob_tombstone_exists(&self, key: &str) -> Result<bool, StorageError> {
+    async fn provider_object_exists(&self, key: &str) -> Result<bool, StorageError> {
         self.home.exists(key).await.map_err(Into::into)
     }
 
-    async fn delete_blob_tombstone(&self, key: &str) -> Result<(), StorageError> {
+    async fn delete_provider_object(&self, key: &str) -> Result<(), StorageError> {
         self.home.delete(key).await.map_err(Into::into)
     }
 
-    async fn probe_exact_slots(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        binding: &ResolvedProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::ExactSlotProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.provider_probes
-            .probe_exact_slots(journal, probe_id, binding)
-            .await
-    }
-
-    async fn reserve_cross_principal_response_slot(
-        &self,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-    ) -> Result<ObjectSlot, crate::protocol::provider::ProviderProbeError> {
-        self.provider_probes
-            .reserve_cross_principal_response_slot(probe_id)
-            .await
+    fn provider_probes(&self) -> &crate::storage::provider_probe::ProviderProbeStorage {
+        &self.provider_probes
     }
 
     async fn observe_exact_slot(
@@ -88,98 +69,6 @@ impl SyncStorage for CloudSyncStorage {
             .delete_and_verify_absent(slot)
             .await
             .map_err(Into::into)
-    }
-
-    async fn prepare_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        probe_id: crate::protocol::provider::ProviderProbeId,
-        store: &crate::protocol::objects::StoreProviderBinding,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.provider_probes
-            .prepare_cross_principal_challenge(
-                publication_journal,
-                probe_id,
-                store,
-                context,
-                administrator_signer,
-            )
-            .await
-    }
-
-    async fn settle_cross_principal_challenge(
-        &self,
-        publication_journal: &dyn crate::protocol::provider::DeviceJoinChallengePublicationJournal,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
-        store: &crate::protocol::objects::StoreProviderBinding,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeChallenge,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.provider_probes
-            .settle_cross_principal_challenge(
-                publication_journal,
-                authorization,
-                challenge,
-                context,
-                store,
-            )
-            .await
-    }
-
-    async fn create_cross_principal_response(
-        &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::protocol::objects::StoreProviderBinding,
-        administrator_signing_pubkey: &str,
-        peer_signer: &UserKeypair,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeResponse,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.provider_probes
-            .create_cross_principal_response(
-                challenge,
-                context,
-                store,
-                administrator_signing_pubkey,
-                peer_signer,
-            )
-            .await
-    }
-
-    async fn complete_cross_principal_probe(
-        &self,
-        journal: &dyn crate::protocol::provider::ProviderProbeJournal,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-        response: &crate::protocol::provider::CrossPrincipalProbeResponse,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
-        store: &crate::protocol::objects::StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
-        peer_signing_pubkey: &str,
-    ) -> Result<
-        crate::protocol::provider::CrossPrincipalProbeReceipt,
-        crate::protocol::provider::ProviderProbeError,
-    > {
-        self.provider_probes
-            .complete_cross_principal_probe(
-                journal,
-                challenge,
-                response,
-                context,
-                store,
-                administrator_signer,
-                peer_signing_pubkey,
-            )
-            .await
     }
 
     fn store_blob_protection(
@@ -684,50 +573,6 @@ impl SyncStorage for CloudSyncStorage {
         blob.object().verify(&stored)
     }
 
-    async fn stage_exact_blob_download(
-        &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
-        let locator = blob.locator();
-        let object = blob.object();
-        self.validate_blob_locator_home(locator)?;
-        let expected = locator.semantic_key();
-        if object.slot().logical_key() != expected {
-            return Err(StorageError::Parse(format!(
-                "blob object {:?} does not match locator key {expected:?}",
-                object.slot().logical_key()
-            )));
-        }
-        let mut staged = crate::local_file::AtomicStagedFile::create(dest)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
-        self.exact
-            .read_at_to_file(object.slot(), staged.path_for_atomic_replacement())
-            .await
-            .map_err(|error| match error {
-                CloudFileReadError::Source(error) => StorageError::from(error),
-                CloudFileReadError::SourceCleanup { source, cleanup } => {
-                    StorageError::CleanupFailed {
-                        operation: Box::new(StorageError::from(source)),
-                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
-                    }
-                }
-                CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
-            })?;
-        {
-            let (size, digest) = crate::local_file::file_facts(staged.path())
-                .await
-                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
-            object.verify_stored_facts(
-                staged.path(),
-                size,
-                crate::protocol::store_commit::ObjectHash::from_digest(digest),
-            )?;
-        }
-        Ok(staged)
-    }
-
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &crate::protocol::blob::locator::StoredBlobRef,
@@ -844,22 +689,53 @@ impl SyncStorage for CloudSyncStorage {
         self.delete_protocol_object(object).await?;
         Ok(())
     }
+}
 
-    #[cfg(test)]
-    async fn list_provider_objects_for_test(
+/// Reading a stored blob body into an unpublished sibling is a step of this
+/// adapter's own verified download, not a capability the storage surface
+/// offers: every caller reaches it through `stage_verified_blob_plaintext`.
+impl CloudSyncStorage {
+    async fn stage_exact_blob_download(
         &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
-        self.home.list(prefix).await.map_err(Into::into)
-    }
-
-    #[cfg(test)]
-    async fn read_provider_object_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        self.home.read(key).await.map_err(Into::into)
-    }
-
-    #[cfg(test)]
-    async fn provider_object_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
-        self.home.exists(key).await.map_err(Into::into)
+        blob: &crate::protocol::blob::locator::StoredBlobRef,
+        dest: &Path,
+    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
+        let locator = blob.locator();
+        let object = blob.object();
+        self.validate_blob_locator_home(locator)?;
+        let expected = locator.semantic_key();
+        if object.slot().logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob object {:?} does not match locator key {expected:?}",
+                object.slot().logical_key()
+            )));
+        }
+        let mut staged = crate::local_file::AtomicStagedFile::create(dest)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        self.exact
+            .read_at_to_file(object.slot(), staged.path_for_atomic_replacement())
+            .await
+            .map_err(|error| match error {
+                CloudFileReadError::Source(error) => StorageError::from(error),
+                CloudFileReadError::SourceCleanup { source, cleanup } => {
+                    StorageError::CleanupFailed {
+                        operation: Box::new(StorageError::from(source)),
+                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+                    }
+                }
+                CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
+            })?;
+        {
+            let (size, digest) = crate::local_file::file_facts(staged.path())
+                .await
+                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+            object.verify_stored_facts(
+                staged.path(),
+                size,
+                crate::protocol::store_commit::ObjectHash::from_digest(digest),
+            )?;
+        }
+        Ok(staged)
     }
 }

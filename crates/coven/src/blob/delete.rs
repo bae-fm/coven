@@ -208,7 +208,7 @@ impl<'a> TombstoneDrain<'a> {
         key: &str,
         expected_stored: &StoredBlobRef,
     ) -> Result<ExistingTombstone, String> {
-        let stored = match self.storage.read_blob_tombstone(key).await {
+        let stored = match self.storage.read_provider_object(key).await {
             Ok(stored) => stored,
             Err(StorageError::NotFound(_)) => return Ok(ExistingTombstone::Absent),
             Err(e) => return Err(format!("tombstone read failed: {e}")),
@@ -257,7 +257,7 @@ impl<'a> TombstoneDrain<'a> {
             .map_err(|e| e.to_string())?;
         let sealed = cipher.seal(bytes, &aad_context);
         self.storage
-            .write_blob_tombstone(key, sealed)
+            .write_provider_object(key, sealed)
             .await
             .map_err(|e| format!("tombstone write failed: {e}"))
     }

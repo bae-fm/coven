@@ -1,5 +1,5 @@
 mod objects;
-mod provider_probe;
+pub(crate) mod provider_probe;
 mod remote;
 mod sync_storage;
 

@@ -837,6 +837,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             }
             DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
                 let slot = storage
+                    .provider_probes()
                     .reserve_cross_principal_response_slot(challenge.probe_id)
                     .await
                     .map_err(provider_error)?;

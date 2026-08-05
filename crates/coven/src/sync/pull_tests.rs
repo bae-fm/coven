@@ -4513,14 +4513,14 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     );
     assert!(
         storage
-            .provider_object_exists_for_test(&blob_key)
+            .provider_object_exists(&blob_key)
             .await
             .expect("exists at exact readable version"),
         "the exact readable blob version exists",
     );
     assert!(
         !storage
-            .provider_object_exists_for_test("photos/n1/cover-p1cover.jpg")
+            .provider_object_exists("photos/n1/cover-p1cover.jpg")
             .await
             .expect("check obsolete mutable readable key"),
         "no mutable object occupies the bare readable path",
@@ -5279,7 +5279,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         .slot()
         .logical_key();
     let at_rest = storage
-        .read_provider_object_for_test(blob_key)
+        .read_provider_object(blob_key)
         .await
         .expect("blob present in cloud");
     assert_ne!(

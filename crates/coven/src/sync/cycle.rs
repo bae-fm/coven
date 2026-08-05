@@ -1179,7 +1179,7 @@ impl SyncComponents {
         &self,
         prefix: &str,
     ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
-        self.storage.list_provider_objects_for_test(prefix).await
+        self.storage.list_provider_objects(prefix).await
     }
 
     #[cfg(test)]

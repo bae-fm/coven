@@ -48,7 +48,7 @@ impl AuthorizedWriterOperation<'_> {
         let suffix = cipher.snapshot().suffix();
         let keys = self
             .storage
-            .list_blob_tombstones(crate::blob::delete::TOMBSTONE_PREFIX)
+            .list_provider_objects(crate::blob::delete::TOMBSTONE_PREFIX)
             .await
             .map_err(|error| format!("Failed to list tombstones: {error}"))?;
         let is_owner = self.membership.is_owner_now(&self_pubkey);
@@ -70,7 +70,7 @@ impl AuthorizedWriterOperation<'_> {
 
             let stored = self
                 .storage
-                .read_blob_tombstone(&key)
+                .read_provider_object(&key)
                 .await
                 .map_err(|error| format!("Failed to read tombstone {key}: {error}"))?;
             let aad_context = crate::storage::cloud_aad_context(&store_id, &key);
@@ -137,7 +137,7 @@ impl AuthorizedWriterOperation<'_> {
             {
                 StoredBlobReferenceState::LiveRemote => {
                     self.storage
-                        .delete_blob_tombstone(&key)
+                        .delete_provider_object(&key)
                         .await
                         .map_err(|error| {
                             format!("Failed to cancel stale tombstone {key}: {error}")
@@ -176,7 +176,7 @@ impl AuthorizedWriterOperation<'_> {
                 continue;
             }
 
-            match self.storage.blob_tombstone_exists(&key).await {
+            match self.storage.provider_object_exists(&key).await {
                 Ok(true) => {}
                 Ok(false) => {
                     debug!("tombstone {key} disappeared before reclaim; skipping");
@@ -220,7 +220,7 @@ impl AuthorizedWriterOperation<'_> {
             }
 
             self.storage
-                .delete_blob_tombstone(&key)
+                .delete_provider_object(&key)
                 .await
                 .map_err(|error| {
                     format!("Failed to delete tombstone {key} after reclaim: {error}")
