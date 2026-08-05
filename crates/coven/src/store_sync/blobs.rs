@@ -53,12 +53,15 @@ impl StoreSync {
     pub(crate) fn host_write_blob_staging(
         &self,
     ) -> Option<crate::sync::store::HostWriteBlobStaging> {
-        Some(self.connected()?.host_write_blob_staging())
+        Some(
+            self.connected()?
+                .host_write_blob_staging(tokio::runtime::Handle::current()),
+        )
     }
 
     pub(crate) fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
         let (scheme, uploader) = match self.connected() {
-            Some(connection) => (connection.blob_path_scheme(), Some(connection.uploader())),
+            Some(sync) => (sync.blob_path_scheme(), Some(sync.self_uploader())),
             None => {
                 let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
                 let uploader = self

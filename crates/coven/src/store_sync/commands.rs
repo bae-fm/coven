@@ -1,19 +1,28 @@
 use super::*;
 
 impl StoreSync {
+    /// The Store authority `ensure_command_store` installed for a connection
+    /// that has no cloud attached.
+    fn command_only_store(&self) -> Result<Arc<Store>, SyncError> {
+        match &*self.state.read().expect("read Store sync connection") {
+            SyncConnection::CommandOnly { store } => Ok(Arc::clone(store)),
+            _ => Err(SyncError::NotConfigured),
+        }
+    }
+
     pub(crate) async fn members(
         &self,
     ) -> Result<Vec<crate::protocol::membership::MemberInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.ensure_command_store().await?;
-        if let Some(connection) = self.connected() {
-            return connection.members().await.map_err(Into::into);
+        match self.connected() {
+            Some(sync) => sync.members().await.map_err(Into::into),
+            None => self
+                .command_only_store()?
+                .members()
+                .await
+                .map_err(Into::into),
         }
-        let store = match &*self.state.read().expect("read Store sync connection") {
-            SyncConnection::CommandOnly { store } => Arc::clone(store),
-            _ => return Err(SyncError::NotConfigured),
-        };
-        store.members().await.map_err(Into::into)
     }
 
     pub(crate) async fn membership_conflict(
@@ -21,14 +30,14 @@ impl StoreSync {
     ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.ensure_command_store().await?;
-        if let Some(connection) = self.connected() {
-            return connection.membership_conflict().await.map_err(Into::into);
+        match self.connected() {
+            Some(sync) => sync.membership_conflict().await.map_err(Into::into),
+            None => self
+                .command_only_store()?
+                .membership_conflict()
+                .await
+                .map_err(Into::into),
         }
-        let store = match &*self.state.read().expect("read Store sync connection") {
-            SyncConnection::CommandOnly { store } => Arc::clone(store),
-            _ => return Err(SyncError::NotConfigured),
-        };
-        store.membership_conflict().await.map_err(Into::into)
     }
 
     pub(crate) async fn restore_membership(
@@ -36,14 +45,14 @@ impl StoreSync {
     ) -> Result<crate::sync::store::owner::StoreRestoreMembership, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.ensure_command_store().await?;
-        if let Some(connection) = self.connected() {
-            return connection.restore_membership().await.map_err(Into::into);
+        match self.connected() {
+            Some(sync) => sync.restore_membership().await.map_err(Into::into),
+            None => self
+                .command_only_store()?
+                .restore_membership()
+                .await
+                .map_err(Into::into),
         }
-        let store = match &*self.state.read().expect("read Store sync connection") {
-            SyncConnection::CommandOnly { store } => Arc::clone(store),
-            _ => return Err(SyncError::NotConfigured),
-        };
-        store.restore_membership().await.map_err(Into::into)
     }
 
     pub(crate) async fn invite_member(
@@ -57,7 +66,12 @@ impl StoreSync {
             return Err(SyncError::NotEncryptedHome);
         }
         active
-            .invite(public_key_hex, invitee_email, role)
+            .invite_member(
+                public_key_hex,
+                invitee_email,
+                role,
+                &active.config().store_name,
+            )
             .await
             .map_err(Into::into)
     }
@@ -70,7 +84,10 @@ impl StoreSync {
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);
         }
-        active.remove(public_key_hex).await.map_err(Into::into)
+        active
+            .remove_member(public_key_hex)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn resolve_membership_conflict(
@@ -79,7 +96,7 @@ impl StoreSync {
     ) -> Result<(), SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
-            .resolve(choice)
+            .resolve_membership_conflict(choice)
             .await
             .map_err(Into::into)
     }
@@ -92,6 +109,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .propose_device_exclusion(device_id)
             .await
+            .map_err(SyncError::DeviceExclusion)
     }
 
     pub(crate) async fn cancel_device_exclusion(
@@ -102,6 +120,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_exclusion(proposal)
             .await
+            .map_err(SyncError::DeviceExclusion)
     }
 
     pub(crate) async fn finalize_device_exclusion(
@@ -112,6 +131,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_device_exclusion(proposal)
             .await
+            .map_err(SyncError::DeviceExclusion)
     }
 
     pub(crate) async fn begin_owner_promotion(
@@ -122,6 +142,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .begin_owner_promotion(device_id)
             .await
+            .map_err(SyncError::OwnerPromotion)
     }
 
     pub(crate) async fn accept_owner_promotion(
@@ -132,6 +153,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .accept_owner_promotion(request)
             .await
+            .map_err(SyncError::OwnerPromotion)
     }
 
     pub(crate) async fn finalize_owner_promotion(
@@ -142,6 +164,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_owner_promotion(acceptance)
             .await
+            .map_err(SyncError::OwnerPromotion)
     }
 
     pub(crate) async fn create_circle(
@@ -194,7 +217,7 @@ impl StoreSync {
         chosen: crate::CircleControlCoord,
     ) -> Result<(), crate::CircleError> {
         self.active_circle_operation()?
-            .resolve_circle(circle_id, chosen)
+            .resolve_circle_control(circle_id, chosen)
             .await
             .map_err(Into::into)
     }
@@ -204,7 +227,7 @@ impl StoreSync {
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleOperationId, crate::CircleError> {
         self.active_circle_operation()?
-            .cancel_circle_close(circle_id)
+            .cancel_circle_epoch_close(circle_id)
             .await
             .map_err(Into::into)
     }

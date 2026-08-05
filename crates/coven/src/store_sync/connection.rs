@@ -87,14 +87,13 @@ impl StoreSync {
 
     pub(crate) fn trigger(&self) {
         match self.connected() {
-            Some(connection) => connection.trigger(),
+            Some(sync) => sync.trigger(),
             None => debug!("sync_now: no cloud connection; sync wake ignored"),
         }
     }
 
     pub(crate) fn is_syncing(&self) -> bool {
-        self.connected()
-            .is_some_and(|connection| connection.is_running())
+        self.connected().is_some_and(|sync| sync.is_running())
     }
 
     pub(super) fn has_cloud(&self) -> bool {
@@ -304,7 +303,7 @@ impl StoreSync {
 
     pub(crate) fn command_config(&self) -> Config {
         self.connected()
-            .map(|connection| connection.config())
+            .map(|sync| sync.config().clone())
             .unwrap_or_else(|| self.config())
     }
 

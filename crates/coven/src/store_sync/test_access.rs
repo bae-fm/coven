@@ -89,7 +89,7 @@ impl StoreSync {
     #[cfg(test)]
     pub(crate) async fn latest_materialized_commit_coordinate_for_test(
         &self,
-    ) -> Result<(String, u64), DbError> {
+    ) -> Result<(String, u64), crate::database::DbError> {
         self.database
             .latest_materialized_commit_coordinate_for_test()
             .await
@@ -128,7 +128,7 @@ impl StoreSync {
 
     #[cfg(test)]
     pub(crate) fn connected_store_id_for_test(&self) -> Option<String> {
-        Some(self.connected()?.config().store_id)
+        Some(self.connected()?.config().store_id.clone())
     }
 
     #[cfg(test)]
@@ -137,7 +137,7 @@ impl StoreSync {
         store_dir: &crate::store_dir::StoreDir,
     ) -> bool {
         self.connected()
-            .is_some_and(|connection| connection.uses_store_dir(store_dir))
+            .is_some_and(|sync| sync.uses_store_dir_for_test(store_dir))
     }
 
     #[cfg(test)]
@@ -152,12 +152,14 @@ impl StoreSync {
     ) -> Result<(), SyncError> {
         self.connected()
             .ok_or(SyncError::LoopNotRunning)?
-            .adopt_key_rotation(encryption)
+            .adopt_key_rotation_for_test(encryption)
+            .map(|_| ())
+            .map_err(SyncError::from)
     }
 
     #[cfg(test)]
     pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
-        self.connected()?.encryption_generation()
+        self.connected()?.encryption_generation_for_test()
     }
 
     #[cfg(test)]
@@ -168,7 +170,8 @@ impl StoreSync {
     ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), StorageError> {
         self.connected()
             .ok_or_else(|| StorageError::Storage("sync connection is not installed".to_string()))?
-            .open_sealed_blob(bytes, context)
+            .open_sealed_blob_for_test(bytes, context)
+            .map_err(StorageError::Storage)
     }
 
     #[cfg(test)]

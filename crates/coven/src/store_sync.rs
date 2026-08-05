@@ -8,7 +8,7 @@ use tracing::{debug, error, info};
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::clock::ClockRef;
 use crate::config::Config;
-use crate::database::{DbError, StoreDatabase};
+use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
 use crate::protocol::blob::{BlobRef, BlobTransitionObserver};
 use crate::protocol::objects::StorageError;
@@ -34,9 +34,7 @@ pub(crate) use crate::sync::SyncError;
 mod blobs;
 mod commands;
 mod connection;
-mod operations;
 mod test_access;
-use operations::{ActiveSyncOperation, ConnectedSyncOperation};
 
 /// Who runs sync cycles for a connected cloud.
 ///
@@ -97,20 +95,22 @@ pub(crate) struct StoreSync {
     stopped_loops: Arc<std::sync::atomic::AtomicU64>,
 }
 
-impl StoreSync {}
-
 impl StoreSync {
-    fn connected(&self) -> Option<ConnectedSyncOperation> {
+    /// The loop handle of an installed cloud connection, whoever drives its
+    /// cycles. Enough for anything the connection already knows — its config,
+    /// path scheme, uploader — and for waking a cycle that may or may not run.
+    fn connected(&self) -> Option<Arc<SyncLoopHandle>> {
         let connection = self.state.read().expect("read Store sync connection");
         match &*connection {
-            SyncConnection::WithCloud { sync, .. } => Some(ConnectedSyncOperation {
-                loop_handle: Arc::clone(sync),
-            }),
+            SyncConnection::WithCloud { sync, .. } => Some(Arc::clone(sync)),
             _ => None,
         }
     }
 
-    fn active(&self) -> Option<ActiveSyncOperation> {
+    /// The loop handle of a connection whose cycles someone is actually
+    /// driving. Required by anything that queues work for a cycle to carry out,
+    /// which a connection with no driver would never complete.
+    fn active(&self) -> Option<Arc<SyncLoopHandle>> {
         let connection = self.state.read().expect("read Store sync connection");
         match &*connection {
             SyncConnection::WithCloud { sync, driver, .. } => {
@@ -119,9 +119,7 @@ impl StoreSync {
                     #[cfg(any(test, feature = "test-utils"))]
                     SyncDriver::Caller => true,
                 };
-                driven.then(|| ActiveSyncOperation {
-                    loop_handle: Arc::clone(sync),
-                })
+                driven.then(|| Arc::clone(sync))
             }
             _ => None,
         }
@@ -179,9 +177,12 @@ impl StoreSync {
         ))
     }
 
-    fn active_circle_operation(&self) -> Result<ActiveSyncOperation, crate::CircleError> {
+    /// A Circle write command needs the loop *thread* itself, because that
+    /// thread services the command channel a caller-driven connection has none
+    /// of.
+    fn active_circle_operation(&self) -> Result<Arc<SyncLoopHandle>, crate::CircleError> {
         let active = self.active().ok_or(crate::CircleError::NotConfigured)?;
-        if !active.loop_handle.is_running() {
+        if !active.is_running() {
             return Err(crate::CircleError::LoopNotRunning);
         }
         Ok(active)

@@ -174,8 +174,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         crates: &[],
         path_patterns: &[&["Handle", "current"], &["Handle", "try_current"]],
         allowed: &[
-            "crates/coven/src/store_sync.rs",
-            "crates/coven/src/store_sync/operations.rs",
+            "crates/coven/src/store_sync/blobs.rs",
             "crates/coven/src/database/database_connection.rs",
         ],
     },
