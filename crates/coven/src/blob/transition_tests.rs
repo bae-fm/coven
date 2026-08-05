@@ -113,6 +113,27 @@ async fn create_store(
         .expect("create exact test Store for the test database")
 }
 
+/// A photo-carrying test database, the Store that publishes for it, a fresh
+/// Store directory, and the owner graph over both.
+async fn photo_transition_fixture() -> (
+    Database,
+    std::sync::Arc<TestStore>,
+    tempfile::TempDir,
+    StoreDir,
+    TestOwnerGraph,
+) {
+    let db = open_test_db_with_blob(photo_decl());
+    let storage = create_store(
+        &db,
+        UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    let (tmp, lib) = temp_store_dir();
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    (db, storage, tmp, lib, owners)
+}
+
 async fn photo_ref(db: &Database, id: &str) -> RowBlobRef {
     db.row_blob_ref("note_photos", id)
         .await
@@ -481,15 +502,7 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
 /// value, so the drained upload pins.
 #[tokio::test]
 async fn re_enqueue_updates_the_pending_upload_pin() {
-    let db = open_test_db_with_blob(photo_decl());
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
     let bytes = b"PHOTO-repin".to_vec();
 
     owners
@@ -539,15 +552,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 /// removed) one it would otherwise retry forever.
 #[tokio::test]
 async fn re_enqueue_updates_the_pending_upload_source_path() {
-    let db = open_test_db_with_blob(photo_decl());
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
     let bytes = b"PHOTO-relocate".to_vec();
     let user_dir = tmp.path().join("user");
 
@@ -602,16 +607,8 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
 
 #[tokio::test]
 async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
 
     owners
@@ -2122,15 +2119,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
 /// the cloud and fail deep in materialization with a misleading cloud-read error.
 #[tokio::test]
 async fn make_local_rejects_already_local_root() {
-    let db = open_test_db_with_blob(photo_decl());
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let bytes = b"already-local".to_vec();
 
     // A Local release (gate off) with its blob at a registered external file.
@@ -2182,16 +2171,8 @@ async fn make_local_rejects_already_local_root() {
 /// exact-deletes any object that already landed. The gate never flips.
 #[tokio::test]
 async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let user = tmp.path().join("user");
 
     // Two photos under one release.
@@ -2501,16 +2482,8 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
 /// leaves the release Remote with nothing tombstoned.
 #[tokio::test]
 async fn cancel_make_local_before_commit_stays_remote() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"still-managed".to_vec();
 
     owners
@@ -2548,16 +2521,8 @@ async fn cancel_make_local_before_commit_stays_remote() {
 /// stays Remote, the cloud blob is untouched, and no delete is queued.
 #[tokio::test]
 async fn make_local_dest_failure_stays_remote_no_tombstones() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"managed-bytes".to_vec();
 
     owners
@@ -2609,16 +2574,8 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
 /// operation. The root remains Remote and the cloud blob remains authoritative.
 #[tokio::test]
 async fn make_local_commit_failure_removes_materialized_files() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"materialized-before-commit-failure".to_vec();
 
     owners
@@ -2685,16 +2642,8 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"managed-bytes".to_vec();
 
     owners
@@ -2751,16 +2700,8 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
 /// write once the remaining exact object lands.
 #[tokio::test]
 async fn make_remote_crash_before_flip_redrain_converges() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let user = tmp.path().join("user");
 
     owners
@@ -2913,16 +2854,8 @@ async fn make_local_abort_then_retry_converges() {
 /// reclaim the replacement.
 #[tokio::test]
 async fn round_trip_make_remote_make_local_make_remote() {
-    let db = open_test_db_with_blob(photo_decl());
+    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db);
-    let storage = create_store(
-        &db,
-        UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"round-trip-photo".to_vec();
 
     // Start Local, make it Remote.
