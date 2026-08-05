@@ -191,11 +191,6 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(context, object, &prefix)
                 .await
                 .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            if ObjectHash::digest(&bytes) != coord.entry_hash {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle roster entry bytes differ from the signed coordinate".to_string(),
-                ));
-            }
             let entry: crate::protocol::circle::CircleRosterEntry = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -203,6 +198,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     ))
                 })?;
             let declared_coord = entry.coord();
+            if declared_coord.entry_hash != coord.entry_hash {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle roster entry identifies itself as another entry".to_string(),
+                ));
+            }
             if !entry.verify()
                 || verify_circle_semantic_prefix(
                     &prefix,
@@ -262,16 +262,17 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(&context, object, &prefix)
                 .await
                 .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            if ObjectHash::digest(&bytes) != reference.resolution_hash {
+            let resolution: crate::protocol::circle::CircleRosterConflictResolution =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    CircleOperationError::InvalidState(format!(
+                        "parse Circle roster resolution: {error}"
+                    ))
+                })?;
+            if resolution.resolution_hash() != reference.resolution_hash {
                 return Err(CircleOperationError::InvalidState(
-                    "Circle roster resolution bytes differ from the signed reference".to_string(),
+                    "Circle roster resolution identifies itself as another resolution".to_string(),
                 ));
             }
-            let resolution = serde_json::from_slice(&bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse Circle roster resolution: {error}"
-                ))
-            })?;
             loaded_resolutions.push(resolution);
         }
         Ok(loaded_resolutions)

@@ -533,15 +533,15 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &control_prefix,
             )
             .await?;
-            if ObjectHash::digest(&control_bytes) != reference.control().control_hash() {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle control bytes differ from the signed control hash".to_string(),
-                ));
-            }
             let control_value: CircleControl =
                 serde_json::from_slice(&control_bytes).map_err(|error| {
                     CircleOperationError::InvalidState(format!("parse Circle control: {error}"))
                 })?;
+            if control_value.control_hash() != reference.control().control_hash() {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle control identifies itself as another control".to_string(),
+                ));
+            }
             let declared_coord = control_value.coord();
             if !control_value.verify()
                 || verify_circle_semantic_prefix(

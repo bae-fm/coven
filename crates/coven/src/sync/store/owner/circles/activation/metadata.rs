@@ -10,7 +10,7 @@ use crate::protocol::circle::{
 };
 use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
-    CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
+    CircleActivationObjects, GrantStreamAnchor, StoreBatchCommit, StoreBatchCommitRef,
     StreamActivationId,
 };
 use crate::sync::store::circle_controls::CircleOperationError;
@@ -193,17 +193,17 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(&exact_context, &object.object, &prefix)
                 .await
                 .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            if ObjectHash::digest(&bytes) != coord.metadata_hash {
-                return Err(CircleOperationError::InvalidState(
-                    "Circle metadata bytes differ from the signed coordinate".to_string(),
-                ));
-            }
             let entry: CircleMetadata = serde_json::from_slice(&bytes).map_err(|error| {
                 CircleOperationError::InvalidState(format!(
                     "parse exact Circle metadata entry: {error}"
                 ))
             })?;
             let declared_coord = entry.coord();
+            if declared_coord.metadata_hash != coord.metadata_hash {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle metadata identifies itself as another entry".to_string(),
+                ));
+            }
             if !entry.verify()
                 || verify_circle_semantic_prefix(
                     &prefix,
