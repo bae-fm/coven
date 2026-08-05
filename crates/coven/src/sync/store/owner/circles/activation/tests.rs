@@ -440,7 +440,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
             order,
             state: control_state,
             ..
-        } = &mut current.value.value;
+        } = &mut current.value.body_mut().value;
         let active_epoch = control_state
             .active_epoch_mut()
             .expect("test branch has an active epoch");
@@ -450,7 +450,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         order.previous_control_hash = None;
         order.dependencies = vec![predecessor.coordinate().clone()];
         active_epoch.covered_control_heads = vec![control_head_ref(device_id, &predecessor)];
-        current.value.signature = keys::sign_hex(owner, &current.value.canonical_bytes()).1;
+        current.value.resign(owner);
         current.coord = current.value.coord();
         current.bytes = serde_json::to_vec(&current.value).expect("serialize branch control");
         assert!(state.verify(), "branch current state must verify");
@@ -472,7 +472,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
             order,
             state: control_state,
             ..
-        } = &mut current.value.value;
+        } = &mut current.value.body_mut().value;
         let active_epoch = control_state
             .active_epoch_mut()
             .expect("test successor has an active epoch");
@@ -496,7 +496,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
             .map(|head| head.coord.clone())
             .collect();
         active_epoch.covered_control_heads = frontier;
-        current.value.signature = keys::sign_hex(owner, &current.value.canonical_bytes()).1;
+        current.value.resign(owner);
         current.coord = current.value.coord();
         current.bytes = serde_json::to_vec(&current.value).expect("serialize successor control");
         assert!(state.verify(), "successor current state must verify");

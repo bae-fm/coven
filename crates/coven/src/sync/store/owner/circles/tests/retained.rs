@@ -284,7 +284,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     );
 
     let mut tampered_envelope = local_access.envelope.clone();
-    tampered_envelope.signature.push('0');
+    tampered_envelope.corrupt_signature_for_test();
     let tampered_envelope = serde_json::to_vec(&tampered_envelope)
         .expect("serialize tampered retained Circle envelope");
     let tampered = replace_once(&retained, &envelope_bytes, &tampered_envelope);

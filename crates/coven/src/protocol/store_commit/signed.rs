@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{domain_json, ObjectHash, StoreProtocolError, STORE_PROTOCOL_VERSION};
-use crate::keys::{self, UserKeypair};
+use crate::keys;
 
 /// A value that travels signed. The body names the domain its signature is
 /// bound to, so a signature over one artifact can never be replayed as another.
@@ -36,13 +36,13 @@ struct SignedFields<'a, T> {
 
 impl<T: SignedBody> Signed<T> {
     /// Sign `body` under this build's protocol version.
-    pub(crate) fn sign(body: T, signer: &UserKeypair) -> Self {
+    pub(crate) fn sign<A: keys::IdentityKeyAuthority + ?Sized>(body: T, signer: &A) -> Self {
         let mut value = Self {
             version: STORE_PROTOCOL_VERSION,
             body,
             signature: String::new(),
         };
-        value.signature = keys::sign_hex(signer, value.digest().as_bytes()).1;
+        value.resign(signer);
         value
     }
 
@@ -83,18 +83,19 @@ impl<T: SignedBody> Signed<T> {
         &self.body
     }
 
-    /// Replace the signature over the body this value currently holds. A test
-    /// uses it to forge the encodings a verifier must refuse.
-    #[cfg(test)]
-    pub(crate) fn resign_for_test(&mut self, signer: &UserKeypair) {
-        self.signature = keys::sign_hex(signer, self.digest().as_bytes()).1;
+    /// The body, mutable, leaving the signature over whatever it held before.
+    /// A draft artifact is built against objects whose slots are only allocated
+    /// later, so its body is edited into final form and then [`Self::resign`]ed;
+    /// a test uses this to build the tampered forms a verifier has to reject.
+    /// Every reader of the value between the two calls sees a signature that
+    /// does not check out.
+    pub(crate) fn body_mut(&mut self) -> &mut T {
+        &mut self.body
     }
 
-    /// The body, mutable, without re-signing — for tests that build the
-    /// tampered forms a verifier has to reject.
-    #[cfg(test)]
-    pub(crate) fn body_mut_for_test(&mut self) -> &mut T {
-        &mut self.body
+    /// Sign the body this value now holds, replacing any earlier signature.
+    pub(crate) fn resign<A: keys::IdentityKeyAuthority + ?Sized>(&mut self, signer: &A) {
+        self.signature = keys::sign_hex(signer, self.digest().as_bytes()).1;
     }
 
     /// Damage the signature so verification fails, for tests that assert a

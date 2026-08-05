@@ -172,8 +172,7 @@ impl<'identity> CircleAccessDraft<'identity> {
                 } else {
                     CircleAccessDisposition::Inactive
                 };
-                let mut value = CircleAccessLeaf {
-                    version: STORE_PROTOCOL_VERSION,
+                let value = CircleAccessLeafBody {
                     store_root_hash,
                     candidate_family,
                     circle_id,
@@ -184,9 +183,8 @@ impl<'identity> CircleAccessDraft<'identity> {
                     recipient_slot,
                     disposition,
                     store_membership: store_membership.clone(),
-                    signature: String::new(),
                 };
-                value.signature = keys::sign_hex(signer, &value.canonical_bytes()).1;
+                let value = Signed::sign(value, signer);
                 let recipient_x25519 = keys::ed25519_hex_to_x25519_public_key(recipient_pubkey)
                     .map_err(|_| {
                         CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
@@ -236,8 +234,7 @@ impl<'identity> CircleAccessDraft<'identity> {
             .into_iter()
             .zip(self.proofs)
             .map(|(leaf, proof)| {
-                let mut envelope = AccessEnvelope {
-                    version: STORE_PROTOCOL_VERSION,
+                let envelope = AccessEnvelopeBody {
                     store_root_hash: self.store_root_hash,
                     candidate_family: self.candidate_family,
                     circle_id: self.circle_id,
@@ -251,10 +248,11 @@ impl<'identity> CircleAccessDraft<'identity> {
                             .expect("circle access leaf serialization cannot fail"),
                     ),
                     proof,
-                    signature: String::new(),
                 };
-                envelope.signature = keys::sign_hex(self.signer, &envelope.canonical_bytes()).1;
-                PreparedCircleAccess { leaf, envelope }
+                PreparedCircleAccess {
+                    leaf,
+                    envelope: Signed::sign(envelope, self.signer),
+                }
             })
             .collect())
     }

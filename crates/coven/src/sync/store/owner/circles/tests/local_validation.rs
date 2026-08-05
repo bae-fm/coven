@@ -12,18 +12,17 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         .iter_mut()
         .find(|access| access.leaf.value.recipient_pubkey == author)
         .expect("founder access");
-    let CircleAccessDisposition::Active { keyring, .. } = &mut own_access.leaf.value.disposition
+    let CircleAccessDisposition::Active { keyring, .. } =
+        &mut own_access.leaf.value.body_mut().disposition
     else {
         panic!("founder access must be active")
     };
     *keyring = MasterKeyring::generate().to_serialized();
-    own_access.leaf.value.signature =
-        keys::sign_hex(&signer, &own_access.leaf.value.canonical_bytes()).1;
-    own_access.envelope.value_hash = ObjectHash::digest(
+    own_access.leaf.value.resign(&signer);
+    own_access.envelope.body_mut().value_hash = ObjectHash::digest(
         &serde_json::to_vec(&own_access.leaf.value).expect("serialize mismatched access leaf"),
     );
-    own_access.envelope.signature =
-        keys::sign_hex(&signer, &own_access.envelope.canonical_bytes()).1;
+    own_access.envelope.resign(&signer);
     crate::database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
@@ -431,15 +430,16 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .clone();
     let creation = &mut journal.operation_mut().creation;
     let CircleTransitionPolicyObjects { control_head, .. } = &mut creation.policy_objects;
-    control_head.successor.predecessor = Some(crate::protocol::objects::ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(
-            "store-v1/test-circle-controls/unreserved-predecessor.json".to_string(),
-        )
-        .expect("construct arbitrary predecessor slot"),
-        1,
-        ObjectHash::digest(b"unreserved Circle predecessor"),
-    ));
-    control_head.signature = keys::sign_hex(&device_signer, &control_head.canonical_bytes()).1;
+    control_head.body_mut().successor.predecessor =
+        Some(crate::protocol::objects::ExactObjectRef::new(
+            crate::protocol::objects::ObjectSlot::logical(
+                "store-v1/test-circle-controls/unreserved-predecessor.json".to_string(),
+            )
+            .expect("construct arbitrary predecessor slot"),
+            1,
+            ObjectHash::digest(b"unreserved Circle predecessor"),
+        ));
+    control_head.resign(&device_signer);
     let head_prefix = circle_semantic_prefix(CircleSemanticSlot::ControlHead {
         circle_id,
         control: &control_head.control,

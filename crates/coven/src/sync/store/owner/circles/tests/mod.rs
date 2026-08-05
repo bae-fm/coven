@@ -80,13 +80,13 @@ fn promote_store_member_access_without_adding_to_circle_roster(
         .iter_mut()
         .find(|access| access.leaf.value.recipient_pubkey == recipient_pubkey)
         .expect("Store member has a prepared inactive access leaf");
-    access.leaf.value.disposition = CircleAccessDisposition::Active {
+    access.leaf.value.body_mut().disposition = CircleAccessDisposition::Active {
         keyring: creation.keyring.clone(),
         key_fingerprint: creation.control.value.key_fingerprint(),
         roster: creation.control.value.roster_state_ref(),
         bootstrap: None,
     };
-    access.leaf.value.signature = keys::sign_hex(owner, &access.leaf.value.canonical_bytes()).1;
+    access.leaf.value.resign(owner);
     let recipient_key =
         keys::ed25519_to_x25519_public_key(&recipient.public_key()).expect("convert recipient key");
     access.leaf.bytes = keys::seal_box_encrypt(
@@ -105,25 +105,27 @@ fn promote_store_member_access_without_adding_to_circle_roster(
     creation
         .control
         .value
+        .body_mut()
         .value
         .state
         .active_epoch_mut()
         .expect("test transition has an active epoch")
         .common
         .access_root = access_root;
-    creation.control.value.signature =
-        keys::sign_hex(owner, &creation.control.value.canonical_bytes()).1;
+    creation.control.value.resign(owner);
     creation.control.coord = creation.control.value.coord();
     creation.control.bytes =
         serde_json::to_vec(&creation.control.value).expect("serialize promoted control");
     for (access, proof) in creation.access.iter_mut().zip(proofs) {
-        access.envelope.control_hash = creation.control.coord.control_hash();
-        access.envelope.leaf_hash = access.leaf.leaf_hash;
-        access.envelope.value_hash = ObjectHash::digest(
+        let value_hash = ObjectHash::digest(
             &serde_json::to_vec(&access.leaf.value).expect("serialize access leaf value"),
         );
-        access.envelope.proof = proof;
-        access.envelope.signature = keys::sign_hex(owner, &access.envelope.canonical_bytes()).1;
+        let envelope = access.envelope.body_mut();
+        envelope.control_hash = creation.control.coord.control_hash();
+        envelope.leaf_hash = access.leaf.leaf_hash;
+        envelope.value_hash = value_hash;
+        envelope.proof = proof;
+        access.envelope.resign(owner);
     }
 }
 

@@ -550,7 +550,12 @@ async fn a_forged_deletion_control_is_held_invalid() {
 
     // Forge the terminal deletion control's signature. Verification rejects it
     // exactly as it rejects any other forged control state.
-    journal.operation_mut().creation.control.value.signature = "0".repeat(128);
+    journal
+        .operation_mut()
+        .creation
+        .control
+        .value
+        .corrupt_signature_for_test();
     crate::database::StoreDatabase::new(&db)
         .update_circle_operation(journal)
         .await
@@ -999,7 +1004,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let CircleAccessDisposition::Active {
         bootstrap: Some(bootstrap),
         ..
-    } = current.access.disposition
+    } = current.access.disposition.clone()
     else {
         panic!("successor access must carry its bootstrap image");
     };
@@ -1958,7 +1963,7 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
         own_access.leaf.value.disposition,
         CircleAccessDisposition::Active { .. }
     ));
-    own_access.leaf.value.disposition = CircleAccessDisposition::Inactive;
+    own_access.leaf.value.body_mut().disposition = CircleAccessDisposition::Inactive;
     let error = crate::database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await

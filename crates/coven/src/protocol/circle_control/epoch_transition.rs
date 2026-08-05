@@ -50,8 +50,7 @@ impl CircleTransitionDraft {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
         let roster_state = active_epoch.roster.clone();
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let mut control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value: CircleControlValue {
@@ -102,7 +101,6 @@ impl CircleTransitionDraft {
                 membership_authority,
             },
             author_pubkey,
-            signature: String::new(),
         };
         let access = CircleAccessDraft::prepare(
             store_root_hash,
@@ -125,7 +123,7 @@ impl CircleTransitionDraft {
             .access_epoch_mut()
             .common
             .access_root = access.access_root();
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
@@ -297,8 +295,7 @@ impl CircleTransitionDraft {
             selected: metadata.coord(),
             state_hash: metadata.metadata_hash(),
         };
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let mut control_value = CircleControlBody {
             store_root_hash: close_control.value.store_root_hash,
             circle_id: close_control.value.circle_id,
             value: CircleControlValue {
@@ -331,7 +328,6 @@ impl CircleTransitionDraft {
                 membership_authority,
             },
             author_pubkey,
-            signature: String::new(),
         };
         let access = CircleAccessDraft::prepare(
             control_value.store_root_hash,
@@ -355,6 +351,7 @@ impl CircleTransitionDraft {
             .expect("Circle finalization constructs an active epoch")
             .common
             .access_root = access.access_root();
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
@@ -459,8 +456,7 @@ impl CircleTransitionDraft {
         }
         let epoch_id = frozen.common.epoch_id;
         let roster_state = frozen.roster.clone();
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let mut control_value = CircleControlBody {
             store_root_hash: close_control.value.store_root_hash,
             circle_id: close_control.value.circle_id,
             value: CircleControlValue {
@@ -493,7 +489,6 @@ impl CircleTransitionDraft {
                 membership_authority,
             },
             author_pubkey,
-            signature: String::new(),
         };
         let access = CircleAccessDraft::prepare(
             control_value.store_root_hash,
@@ -517,7 +512,7 @@ impl CircleTransitionDraft {
             .expect("Circle reopen constructs an active epoch")
             .common
             .access_root = access.access_root();
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)

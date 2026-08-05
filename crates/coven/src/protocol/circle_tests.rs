@@ -329,16 +329,16 @@ fn founder_payload_is_complete_and_acyclic() {
     ));
 
     let mut seized = creation.control.value.clone();
-    seized.circle_id = CircleId::from_bytes([0x5a; 16]);
-    seized.signature = keys::sign_hex(&owner, &seized.canonical_bytes()).1;
+    seized.body_mut().circle_id = CircleId::from_bytes([0x5a; 16]);
+    seized.resign(&owner);
     assert!(
         !seized.verify(),
         "a founder control must not choose an arbitrary Circle ID"
     );
 
     let mut discontinuous = creation.control.value.clone();
-    discontinuous.value.order.seq = 2;
-    discontinuous.signature = keys::sign_hex(&owner, &discontinuous.canonical_bytes()).1;
+    discontinuous.body_mut().value.order.seq = 2;
+    discontinuous.resign(&owner);
     assert!(
         !discontinuous.verify(),
         "a control without a predecessor must be genesis"
@@ -373,39 +373,35 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
     .expect("construct founder circle");
 
     let mut wrong_store = creation.access[0].envelope.clone();
-    wrong_store.store_root_hash = ObjectHash::digest(b"other-store");
-
-    wrong_store.signature = keys::sign_hex(&owner, &wrong_store.canonical_bytes()).1;
+    wrong_store.body_mut().store_root_hash = ObjectHash::digest(b"other-store");
+    wrong_store.resign(&owner);
     assert!(!wrong_store.verify(&creation.control, candidate_family));
 
     let mut wrong_family_envelope = creation.access[0].envelope.clone();
-    wrong_family_envelope.candidate_family =
+    wrong_family_envelope.body_mut().candidate_family =
         store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(b"other access family"));
-    wrong_family_envelope.signature =
-        keys::sign_hex(&owner, &wrong_family_envelope.canonical_bytes()).1;
+    wrong_family_envelope.resign(&owner);
     assert!(!wrong_family_envelope.verify(&creation.control, candidate_family));
 
     let mut wrong_family_leaf = creation.access[0].leaf.clone();
-    wrong_family_leaf.value.candidate_family =
+    wrong_family_leaf.value.body_mut().candidate_family =
         store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(b"other leaf family"));
-    wrong_family_leaf.value.signature =
-        keys::sign_hex(&owner, &wrong_family_leaf.value.canonical_bytes()).1;
+    wrong_family_leaf.value.resign(&owner);
     assert!(!wrong_family_leaf.verify(&creation.control, candidate_family));
 
     let mut non_owner = creation.access[0].envelope.clone();
-    non_owner.owner_pubkey = peer_pubkey;
-    non_owner.signature = keys::sign_hex(&peer, &non_owner.canonical_bytes()).1;
+    non_owner.body_mut().owner_pubkey = peer_pubkey;
+    non_owner.resign(&peer);
     assert!(!non_owner.verify(&creation.control, candidate_family));
 
     let mut substituted_proof = creation.access[0].envelope.clone();
-    substituted_proof.proof = creation.access[1].envelope.proof.clone();
-    substituted_proof.signature = keys::sign_hex(&owner, &substituted_proof.canonical_bytes()).1;
+    substituted_proof.body_mut().proof = creation.access[1].envelope.proof.clone();
+    substituted_proof.resign(&owner);
     assert!(!substituted_proof.verify(&creation.control, candidate_family));
 
     let mut substituted_leaf_id = creation.access[0].envelope.clone();
-    substituted_leaf_id.leaf_id = creation.access[1].leaf.value.leaf_id;
-    substituted_leaf_id.signature =
-        keys::sign_hex(&owner, &substituted_leaf_id.canonical_bytes()).1;
+    substituted_leaf_id.body_mut().leaf_id = creation.access[1].leaf.value.leaf_id;
+    substituted_leaf_id.resign(&owner);
     assert!(substituted_leaf_id.verify(&creation.control, candidate_family));
     assert!(!creation.access[0].leaf.verify_envelope(
         &creation.control,
@@ -414,10 +410,9 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
     ));
 
     let mut wrong_membership_leaf = creation.access[0].leaf.value.clone();
-    wrong_membership_leaf.store_membership =
+    wrong_membership_leaf.body_mut().store_membership =
         merge_membership_ref(&owner, &members, "wrong-membership-leaf").0;
-    wrong_membership_leaf.signature =
-        keys::sign_hex(&owner, &wrong_membership_leaf.canonical_bytes()).1;
+    wrong_membership_leaf.resign(&owner);
     let recipient_key =
         keys::ed25519_to_x25519_public_key(&owner.public_key()).expect("convert recipient key");
     let bytes = keys::seal_box_encrypt(
@@ -444,12 +439,13 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
         .leaf
         .value
         .clone();
-    let CircleAccessDisposition::Active { keyring, .. } = &mut wrong_keyring_leaf.disposition
+    let CircleAccessDisposition::Active { keyring, .. } =
+        &mut wrong_keyring_leaf.body_mut().disposition
     else {
         panic!("founder access must be active")
     };
     *keyring = crate::encryption::MasterKeyring::generate().to_serialized();
-    wrong_keyring_leaf.signature = keys::sign_hex(&owner, &wrong_keyring_leaf.canonical_bytes()).1;
+    wrong_keyring_leaf.resign(&owner);
     let bytes = keys::seal_box_encrypt(
         &serde_json::to_vec(&wrong_keyring_leaf).expect("serialize wrong-keyring leaf"),
         &recipient_key,
@@ -577,15 +573,17 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     )
     .expect("construct founder circle");
     let mut control = creation.control.value.clone();
+    let control_author_pubkey = control.author_pubkey.clone();
     let active_epoch = control
+        .body_mut()
         .value
         .state
         .active_epoch_mut()
         .expect("test control has an active epoch");
     active_epoch.common.owners = vec![earlier_owner_pubkey, author_pubkey.clone()];
     active_epoch.common.owners.sort();
-    assert_ne!(active_epoch.common.owners[0], control.author_pubkey);
-    control.signature = keys::sign_hex(&author, &control.canonical_bytes()).1;
+    assert_ne!(active_epoch.common.owners[0], control_author_pubkey);
+    control.resign(&author);
     let control = PreparedCircleControl {
         coord: control.coord(),
         bytes: serde_json::to_vec(&control).expect("serialize control"),
@@ -708,12 +706,13 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
 
     let mut second_value = control.value.clone();
     let active_epoch = second_value
+        .body_mut()
         .value
         .state
         .active_epoch_mut()
         .expect("test control has an active epoch");
     active_epoch.common.access_root = ObjectHash::digest(b"different founder access root");
-    second_value.signature = keys::sign_hex(&author, &second_value.canonical_bytes()).1;
+    second_value.resign(&author);
     let second_control = PreparedCircleControl {
         coord: second_value.coord(),
         bytes: serde_json::to_vec(&second_value).expect("serialize second founder control"),

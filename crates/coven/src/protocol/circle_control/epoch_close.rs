@@ -40,10 +40,11 @@ pub(crate) struct CircleEpochCloseParticipant {
     pub response_slot: ObjectSlot,
 }
 
+/// The wire body of an Owner's intent to close an epoch. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleEpochCloseIntent {
-    pub version: u32,
+pub(crate) struct CircleEpochCloseIntentBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub close_id: CircleEpochCloseId,
@@ -52,7 +53,25 @@ pub(crate) struct CircleEpochCloseIntent {
     pub removal: CircleRosterEntry,
     pub remaining_roster_state_hash: ObjectHash,
     pub owner_pubkey: String,
-    pub signature: String,
+}
+
+impl SignedBody for CircleEpochCloseIntentBody {
+    const DOMAIN: &'static [u8] = CLOSE_INTENT_DOMAIN;
+}
+
+pub(crate) type CircleEpochCloseIntent = Signed<CircleEpochCloseIntentBody>;
+
+impl CircleEpochCloseIntentBody {
+    pub(super) fn verify_shape(&self) -> bool {
+        self.removal.verify()
+            && self.removal.store_root_hash == self.store_root_hash
+            && self.removal.circle_id == self.circle_id
+            && self.removal.author_pubkey == self.owner_pubkey
+            && matches!(
+                self.removal.change,
+                crate::protocol::circle_roster::CircleRosterChange::RemoveMember { .. }
+            )
+    }
 }
 
 impl CircleEpochCloseIntent {
@@ -67,9 +86,7 @@ impl CircleEpochCloseIntent {
         remaining_roster_state_hash: ObjectHash,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
-        let owner_pubkey = keys::public_key_hex(signer);
-        let mut intent = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = CircleEpochCloseIntentBody {
             store_root_hash,
             circle_id,
             close_id,
@@ -77,70 +94,20 @@ impl CircleEpochCloseIntent {
             predecessor_roster,
             removal,
             remaining_roster_state_hash,
-            owner_pubkey,
-            signature: String::new(),
+            owner_pubkey: keys::public_key_hex(signer),
         };
-        if !intent.verify_shape() {
+        if !body.verify_shape() {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
-        intent.signature = keys::sign_hex(signer, &intent.canonical_bytes()).1;
-        Ok(intent)
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            close_id: CircleEpochCloseId,
-            epoch_id: CircleEpochId,
-            predecessor_roster: &'a MergeCircleRosterStateRef,
-            removal: &'a CircleRosterEntry,
-            remaining_roster_state_hash: ObjectHash,
-            owner_pubkey: &'a str,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-epoch-close-intent.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            close_id: self.close_id,
-            epoch_id: self.epoch_id,
-            predecessor_roster: &self.predecessor_roster,
-            removal: &self.removal,
-            remaining_roster_state_hash: self.remaining_roster_state_hash,
-            owner_pubkey: &self.owner_pubkey,
-        })
-        .expect("Circle epoch-close intent serialization cannot fail")
-    }
-
-    pub(super) fn verify_shape(&self) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self.removal.verify()
-            && self.removal.store_root_hash == self.store_root_hash
-            && self.removal.circle_id == self.circle_id
-            && self.removal.author_pubkey == self.owner_pubkey
-            && matches!(
-                self.removal.change,
-                crate::protocol::circle_roster::CircleRosterChange::RemoveMember { .. }
-            )
+        Ok(Signed::sign(body, signer))
     }
 
     pub(crate) fn verify(&self) -> bool {
-        self.verify_shape()
-            && keys::verify_signature_hex(
-                &self.owner_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+        self.body().verify_shape() && self.verify_by(&self.owner_pubkey).is_ok()
     }
 
     pub(crate) fn intent_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("Circle epoch-close intent serialization cannot fail"),
-        )
+        self.hash()
     }
 }
 
@@ -218,18 +185,24 @@ impl CircleEpochClose {
     }
 }
 
+/// The wire body of one participant device's close response. Every field here
+/// is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleEpochCloseResponse {
-    pub version: u32,
+pub(crate) struct CircleEpochCloseResponseBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub close_id: CircleEpochCloseId,
     pub close_control: CircleControlCoord,
     pub registration: StoreDeviceRegistrationRef,
     pub frontier: CommitFrontier,
-    pub signature: String,
 }
+
+impl SignedBody for CircleEpochCloseResponseBody {
+    const DOMAIN: &'static [u8] = CLOSE_RESPONSE_DOMAIN;
+}
+
+pub(crate) type CircleEpochCloseResponse = Signed<CircleEpochCloseResponseBody>;
 
 impl CircleEpochCloseResponse {
     pub(crate) fn signed(
@@ -242,46 +215,21 @@ impl CircleEpochCloseResponse {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
         };
-        let mut response = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: control.value.store_root_hash,
-            circle_id: control.value.circle_id,
-            close_id: close.close_id,
-            close_control: control.coord.clone(),
-            registration,
-            frontier,
-            signature: String::new(),
-        };
-        response.signature = keys::sign_hex(signer, &response.canonical_bytes()).1;
+        let response = Signed::sign(
+            CircleEpochCloseResponseBody {
+                store_root_hash: control.value.store_root_hash,
+                circle_id: control.value.circle_id,
+                close_id: close.close_id,
+                close_control: control.coord.clone(),
+                registration,
+                frontier,
+            },
+            signer,
+        );
         if !response.verify_for(control, author) {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
         Ok(response)
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            close_id: CircleEpochCloseId,
-            close_control: &'a CircleControlCoord,
-            registration: &'a StoreDeviceRegistrationRef,
-            frontier: &'a CommitFrontier,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-epoch-close-response.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            close_id: self.close_id,
-            close_control: &self.close_control,
-            registration: &self.registration,
-            frontier: &self.frontier,
-        })
-        .expect("Circle epoch-close response serialization cannot fail")
     }
 
     pub(crate) fn verify_for(
@@ -292,8 +240,7 @@ impl CircleEpochCloseResponse {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return false;
         };
-        self.version == STORE_PROTOCOL_VERSION
-            && control.verify()
+        control.verify()
             && self.store_root_hash == control.value.store_root_hash
             && self.circle_id == control.value.circle_id
             && self.close_id == close.close_id
@@ -306,18 +253,11 @@ impl CircleEpochCloseResponse {
                 .participants
                 .iter()
                 .any(|participant| participant.registration == self.registration)
-            && keys::verify_signature_hex(
-                &author.device_signing_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&author.device_signing_pubkey).is_ok()
     }
 
     pub(crate) fn response_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self)
-                .expect("Circle epoch-close response serialization cannot fail"),
-        )
+        self.hash()
     }
 }
 
@@ -365,18 +305,24 @@ impl CircleEpochCloseResponseRef {
 /// One Owner-signed exclusion of an unavailable participant device. It competes
 /// at that device's create-once response slot; activating it excludes the device
 /// from the close cutoff and forces it to reset from the successor bootstrap.
+/// The wire body of an Owner's exclusion of an unavailable participant. Every
+/// field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleEpochCloseExclusion {
-    pub version: u32,
+pub(crate) struct CircleEpochCloseExclusionBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub close_id: CircleEpochCloseId,
     pub close_control: CircleControlCoord,
     pub excluded: StoreDeviceRegistrationRef,
     pub owner_pubkey: String,
-    pub signature: String,
 }
+
+impl SignedBody for CircleEpochCloseExclusionBody {
+    const DOMAIN: &'static [u8] = CLOSE_EXCLUSION_DOMAIN;
+}
+
+pub(crate) type CircleEpochCloseExclusion = Signed<CircleEpochCloseExclusionBody>;
 
 impl CircleEpochCloseExclusion {
     pub(crate) fn signed(
@@ -387,54 +333,28 @@ impl CircleEpochCloseExclusion {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
         };
-        let mut exclusion = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: control.value.store_root_hash,
-            circle_id: control.value.circle_id,
-            close_id: close.close_id,
-            close_control: control.coord.clone(),
-            excluded,
-            owner_pubkey: keys::public_key_hex(signer),
-            signature: String::new(),
-        };
+        let exclusion = Signed::sign(
+            CircleEpochCloseExclusionBody {
+                store_root_hash: control.value.store_root_hash,
+                circle_id: control.value.circle_id,
+                close_id: close.close_id,
+                close_control: control.coord.clone(),
+                excluded,
+                owner_pubkey: keys::public_key_hex(signer),
+            },
+            signer,
+        );
         if !exclusion.verify_shape(control) {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
-        exclusion.signature = keys::sign_hex(signer, &exclusion.canonical_bytes()).1;
         Ok(exclusion)
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            close_id: CircleEpochCloseId,
-            close_control: &'a CircleControlCoord,
-            excluded: &'a StoreDeviceRegistrationRef,
-            owner_pubkey: &'a str,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-epoch-close-exclusion.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            close_id: self.close_id,
-            close_control: &self.close_control,
-            excluded: &self.excluded,
-            owner_pubkey: &self.owner_pubkey,
-        })
-        .expect("Circle epoch-close exclusion serialization cannot fail")
     }
 
     pub(super) fn verify_shape(&self, control: &PreparedCircleControl) -> bool {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return false;
         };
-        self.version == STORE_PROTOCOL_VERSION
-            && control.verify()
+        control.verify()
             && self.store_root_hash == control.value.store_root_hash
             && self.circle_id == control.value.circle_id
             && self.close_id == close.close_id
@@ -451,19 +371,11 @@ impl CircleEpochCloseExclusion {
     }
 
     pub(crate) fn verify_for(&self, control: &PreparedCircleControl) -> bool {
-        self.verify_shape(control)
-            && keys::verify_signature_hex(
-                &self.owner_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+        self.verify_shape(control) && self.verify_by(&self.owner_pubkey).is_ok()
     }
 
     pub(crate) fn exclusion_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self)
-                .expect("Circle epoch-close exclusion serialization cannot fail"),
-        )
+        self.hash()
     }
 }
 
@@ -574,10 +486,10 @@ pub(crate) struct CircleEpochSuccessor {
     pub store_membership: StoreMembershipStateRef,
 }
 
+/// The wire body of an epoch close's outcome. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleEpochCloseOutcome {
-    pub version: u32,
+pub(crate) struct CircleEpochCloseOutcomeBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub close_id: CircleEpochCloseId,
@@ -587,8 +499,13 @@ pub(crate) struct CircleEpochCloseOutcome {
     pub cutoff: CommitFrontier,
     pub successor: CircleEpochSuccessor,
     pub owner_pubkey: String,
-    pub signature: String,
 }
+
+impl SignedBody for CircleEpochCloseOutcomeBody {
+    const DOMAIN: &'static [u8] = CLOSE_OUTCOME_DOMAIN;
+}
+
+pub(crate) type CircleEpochCloseOutcome = Signed<CircleEpochCloseOutcomeBody>;
 
 impl CircleEpochCloseOutcome {
     pub(crate) fn signed(
@@ -608,55 +525,24 @@ impl CircleEpochCloseOutcome {
                 cutoff.join(frontier.clone())
             })
             .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
-        let mut outcome = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: control.value.store_root_hash,
-            circle_id: control.value.circle_id,
-            close_id: close.close_id,
-            close_control: control.coord.clone(),
-            intent: close.intent.clone(),
-            responses,
-            cutoff,
-            successor,
-            owner_pubkey: keys::public_key_hex(signer),
-            signature: String::new(),
-        };
+        let outcome = Signed::sign(
+            CircleEpochCloseOutcomeBody {
+                store_root_hash: control.value.store_root_hash,
+                circle_id: control.value.circle_id,
+                close_id: close.close_id,
+                close_control: control.coord.clone(),
+                intent: close.intent.clone(),
+                responses,
+                cutoff,
+                successor,
+                owner_pubkey: keys::public_key_hex(signer),
+            },
+            signer,
+        );
         if !outcome.verify_shape(control) || !outcome.verify_intent(intent) {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
-        outcome.signature = keys::sign_hex(signer, &outcome.canonical_bytes()).1;
         Ok(outcome)
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            close_id: CircleEpochCloseId,
-            close_control: &'a CircleControlCoord,
-            intent: &'a CircleEpochCloseIntentRef,
-            responses: &'a [CircleEpochCloseSettlement],
-            cutoff: &'a CommitFrontier,
-            successor: &'a CircleEpochSuccessor,
-            owner_pubkey: &'a str,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-epoch-close-outcome.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            close_id: self.close_id,
-            close_control: &self.close_control,
-            intent: &self.intent,
-            responses: &self.responses,
-            cutoff: &self.cutoff,
-            successor: &self.successor,
-            owner_pubkey: &self.owner_pubkey,
-        })
-        .expect("Circle epoch-close outcome serialization cannot fail")
     }
 
     pub(super) fn verify_shape(&self, control: &PreparedCircleControl) -> bool {
@@ -685,8 +571,7 @@ impl CircleEpochCloseOutcome {
             .try_fold(close.provisional_frontier.clone(), |cutoff, frontier| {
                 cutoff.join(frontier.clone())
             });
-        self.version == STORE_PROTOCOL_VERSION
-            && control.verify()
+        control.verify()
             && self.store_root_hash == control.value.store_root_hash
             && self.circle_id == control.value.circle_id
             && self.close_id == close.close_id
@@ -757,22 +642,15 @@ impl CircleEpochCloseOutcome {
                             _ => false,
                         }
                 })
-            && keys::verify_signature_hex(
-                &self.owner_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_signature()
     }
 
     pub(crate) fn verify_signature(&self) -> bool {
-        keys::verify_signature_hex(&self.owner_pubkey, &self.signature, &self.canonical_bytes())
+        self.verify_by(&self.owner_pubkey).is_ok()
     }
 
     pub(crate) fn outcome_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self)
-                .expect("Circle epoch-close outcome serialization cannot fail"),
-        )
+        self.hash()
     }
 }
 
@@ -808,18 +686,24 @@ impl CircleEpochCloseOutcomeRef {
 /// One Owner-signed cancellation of an epoch close. It competes at the same
 /// create-once outcome slot as the final outcome; activating it reopens the
 /// frozen epoch instead of rotating to a successor epoch.
+/// The wire body of an Owner's cancellation of an epoch close. Every field here
+/// is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleEpochCloseCancellation {
-    pub version: u32,
+pub(crate) struct CircleEpochCloseCancellationBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub close_id: CircleEpochCloseId,
     pub close_control: CircleControlCoord,
     pub intent: CircleEpochCloseIntentRef,
     pub owner_pubkey: String,
-    pub signature: String,
 }
+
+impl SignedBody for CircleEpochCloseCancellationBody {
+    const DOMAIN: &'static [u8] = CLOSE_CANCELLATION_DOMAIN;
+}
+
+pub(crate) type CircleEpochCloseCancellation = Signed<CircleEpochCloseCancellationBody>;
 
 impl CircleEpochCloseCancellation {
     pub(crate) fn signed(
@@ -829,54 +713,28 @@ impl CircleEpochCloseCancellation {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
         };
-        let mut cancellation = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: control.value.store_root_hash,
-            circle_id: control.value.circle_id,
-            close_id: close.close_id,
-            close_control: control.coord.clone(),
-            intent: close.intent.clone(),
-            owner_pubkey: keys::public_key_hex(signer),
-            signature: String::new(),
-        };
+        let cancellation = Signed::sign(
+            CircleEpochCloseCancellationBody {
+                store_root_hash: control.value.store_root_hash,
+                circle_id: control.value.circle_id,
+                close_id: close.close_id,
+                close_control: control.coord.clone(),
+                intent: close.intent.clone(),
+                owner_pubkey: keys::public_key_hex(signer),
+            },
+            signer,
+        );
         if !cancellation.verify_shape(control) {
             return Err(CircleTransitionError::InvalidCurrentState);
         }
-        cancellation.signature = keys::sign_hex(signer, &cancellation.canonical_bytes()).1;
         Ok(cancellation)
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            close_id: CircleEpochCloseId,
-            close_control: &'a CircleControlCoord,
-            intent: &'a CircleEpochCloseIntentRef,
-            owner_pubkey: &'a str,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-epoch-close-cancellation.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            close_id: self.close_id,
-            close_control: &self.close_control,
-            intent: &self.intent,
-            owner_pubkey: &self.owner_pubkey,
-        })
-        .expect("Circle epoch-close cancellation serialization cannot fail")
     }
 
     pub(super) fn verify_shape(&self, control: &PreparedCircleControl) -> bool {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return false;
         };
-        self.version == STORE_PROTOCOL_VERSION
-            && control.verify()
+        control.verify()
             && self.store_root_hash == control.value.store_root_hash
             && self.circle_id == control.value.circle_id
             && self.close_id == close.close_id
@@ -890,23 +748,15 @@ impl CircleEpochCloseCancellation {
     }
 
     pub(crate) fn verify_for(&self, control: &PreparedCircleControl) -> bool {
-        self.verify_shape(control)
-            && keys::verify_signature_hex(
-                &self.owner_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+        self.verify_shape(control) && self.verify_signature()
     }
 
     pub(crate) fn verify_signature(&self) -> bool {
-        keys::verify_signature_hex(&self.owner_pubkey, &self.signature, &self.canonical_bytes())
+        self.verify_by(&self.owner_pubkey).is_ok()
     }
 
     pub(crate) fn cancellation_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self)
-                .expect("Circle epoch-close cancellation serialization cannot fail"),
-        )
+        self.hash()
     }
 }
 

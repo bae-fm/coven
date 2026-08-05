@@ -295,7 +295,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     else {
         panic!("interrupted request remains RequestPrepared")
     };
-    request.body_mut_for_test().member_grant =
+    request.body_mut().member_grant =
         MembershipGrantId(ObjectHash::digest(b"another exact Member grant"));
     let encoded =
         serde_json::to_string(&substituted_request).expect("serialize corrupt request journal");

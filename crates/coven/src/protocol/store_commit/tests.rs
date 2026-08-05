@@ -417,7 +417,7 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
     .is_err());
 
     let mut substituted = request;
-    substituted.body_mut_for_test().member_grant =
+    substituted.body_mut().member_grant =
         MembershipGrantId(ObjectHash::digest(b"other Member grant"));
     assert!(matches!(
         substituted.verify(&fixture.root_ref, &fixture.registration),
@@ -1944,8 +1944,8 @@ fn a_cleanup_receipt_with_unsorted_deleted_slots_is_refused() {
     // The same receipt, re-encoded with its slot list out of canonical order and
     // signed over those exact bytes. Only one encoding of a receipt may verify.
     let mut reordered = receipt.clone();
-    reordered.body_mut_for_test().deleted_slots.reverse();
-    reordered.resign_for_test(&owner_device_signer);
+    reordered.body_mut().deleted_slots.reverse();
+    reordered.resign(&owner_device_signer);
 
     assert!(
         reordered
@@ -1988,8 +1988,8 @@ fn a_write_revocation_with_unsorted_protected_slots_is_refused() {
     assert!(revocation.verify(&fixture.registration).is_ok());
 
     let mut reordered = revocation.clone();
-    reordered.body_mut_for_test().protected_slots.reverse();
-    reordered.resign_for_test(&owner_device_signer);
+    reordered.body_mut().protected_slots.reverse();
+    reordered.resign(&owner_device_signer);
 
     assert!(
         reordered.verify(&fixture.registration).is_err(),

@@ -147,18 +147,23 @@ pub(crate) struct CircleControlValue {
     pub membership_authority: MembershipGrantCreationAuthority,
 }
 
+/// The wire body of one Circle control. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleControl {
-    pub version: u32,
+pub(crate) struct CircleControlBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub value: CircleControlValue,
     pub author_pubkey: String,
-    pub signature: String,
 }
 
-impl CircleControl {
+impl SignedBody for CircleControlBody {
+    const DOMAIN: &'static [u8] = CONTROL_DOMAIN;
+}
+
+pub(crate) type CircleControl = Signed<CircleControlBody>;
+
+impl CircleControlBody {
     pub(crate) fn state(&self) -> &CircleControlState {
         &self.value.state
     }
@@ -213,6 +218,25 @@ impl CircleControl {
             && self.value.order.dependencies.is_empty()
     }
 
+    pub(crate) fn ordinal(&self) -> u64 {
+        self.value.order.seq
+    }
+
+    pub(crate) fn author_grant_id(&self) -> MembershipGrantId {
+        self.value.author_authority.grant_id(&self.author_pubkey)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn membership_authority(&self) -> &MembershipGrantCreationAuthority {
+        &self.value.membership_authority
+    }
+}
+
+impl CircleControl {
+    pub(crate) fn control_hash(&self) -> ObjectHash {
+        self.hash()
+    }
+
     pub(crate) fn causally_covers(&self, prior: &Self) -> bool {
         if self.store_root_hash != prior.store_root_hash || self.circle_id != prior.circle_id {
             return false;
@@ -224,41 +248,6 @@ impl CircleControl {
                 .dependencies
                 .binary_search(&prior.coord())
                 .is_ok()
-    }
-
-    pub(crate) fn ordinal(&self) -> u64 {
-        self.value.order.seq
-    }
-
-    pub(crate) fn author_grant_id(&self) -> MembershipGrantId {
-        self.value.author_authority.grant_id(&self.author_pubkey)
-    }
-
-    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            value: &'a CircleControlValue,
-            author_pubkey: &'a str,
-        }
-        serde_json::to_vec(&Signed {
-            domain: CONTROL_DOMAIN,
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            value: &self.value,
-            author_pubkey: &self.author_pubkey,
-        })
-        .expect("circle control serialization cannot fail")
-    }
-
-    pub(crate) fn control_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("circle control serialization cannot fail"),
-        )
     }
 
     pub(crate) fn verify(&self) -> bool {
@@ -326,18 +315,13 @@ impl CircleControl {
             // above.
             CircleControlState::Deleted(_) => !founder,
         };
-        self.version == STORE_PROTOCOL_VERSION
-            && owners_are_canonical
+        owners_are_canonical
             && origin_is_valid
             && state_is_valid
             && order_is_valid
             && continuity_is_valid
             && founder_identity_is_valid
-            && keys::verify_signature_hex(
-                &self.author_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&self.author_pubkey).is_ok()
     }
 
     pub(crate) fn coord(&self) -> CircleControlCoord {
@@ -351,24 +335,24 @@ impl CircleControl {
             control_hash: self.control_hash(),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn membership_authority(&self) -> &MembershipGrantCreationAuthority {
-        &self.value.membership_authority
-    }
 }
 
+/// The wire body of one Circle control head. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleControlHead {
-    pub version: u32,
+pub(crate) struct CircleControlHeadBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub control: CircleControlCoord,
     pub entry: ExactObjectRef,
     pub successor: SuccessorLink,
-    pub signature: String,
 }
+
+impl SignedBody for CircleControlHeadBody {
+    const DOMAIN: &'static [u8] = CONTROL_HEAD_DOMAIN;
+}
+
+pub(crate) type CircleControlHead = Signed<CircleControlHeadBody>;
 
 impl CircleControlHead {
     pub(crate) fn signed(
@@ -377,64 +361,34 @@ impl CircleControlHead {
         successor: SuccessorLink,
         signer: &UserKeypair,
     ) -> Self {
-        let mut head = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: control.store_root_hash,
-            circle_id: control.circle_id,
-            control: control.coord(),
-            entry,
-            successor,
-            signature: String::new(),
-        };
-        head.signature = keys::sign_hex(signer, &head.canonical_bytes()).1;
-        head
-    }
-
-    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            circle_id: CircleId,
-            control: &'a CircleControlCoord,
-            entry: &'a ExactObjectRef,
-            successor: &'a SuccessorLink,
-        }
-        serde_json::to_vec(&Signed {
-            domain: "coven.circle-control-head.v1",
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            circle_id: self.circle_id,
-            control: &self.control,
-            entry: &self.entry,
-            successor: &self.successor,
-        })
-        .expect("circle control head serialization cannot fail")
-    }
-
-    pub(crate) fn head_hash(&self) -> ObjectHash {
-        ObjectHash::digest(
-            &serde_json::to_vec(self).expect("circle control head serialization cannot fail"),
+        Signed::sign(
+            CircleControlHeadBody {
+                store_root_hash: control.store_root_hash,
+                circle_id: control.circle_id,
+                control: control.coord(),
+                entry,
+                successor,
+            },
+            signer,
         )
     }
 
+    pub(crate) fn head_hash(&self) -> ObjectHash {
+        self.hash()
+    }
+
     pub(crate) fn verify(&self, registration: &StoreDeviceRegistration) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self.control.validate().is_ok()
+        self.control.validate().is_ok()
             && self.control.device_id == registration.device_id.to_string()
-            && keys::verify_signature_hex(
-                &registration.device_signing_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&registration.device_signing_pubkey).is_ok()
     }
 }
 
+/// The wire body of one recipient's access envelope. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AccessEnvelope {
-    pub version: u32,
+pub(crate) struct AccessEnvelopeBody {
     pub store_root_hash: ObjectHash,
     pub candidate_family: crate::protocol::store_commit::CandidateFamilyId,
     pub circle_id: CircleId,
@@ -445,59 +399,26 @@ pub(crate) struct AccessEnvelope {
     pub leaf_hash: ObjectHash,
     pub value_hash: ObjectHash,
     pub proof: Vec<MerkleStep>,
-    pub signature: String,
 }
 
-impl AccessEnvelope {
-    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            candidate_family: crate::protocol::store_commit::CandidateFamilyId,
-            circle_id: CircleId,
-            owner_pubkey: &'a str,
-            recipient_slot: &'a str,
-            control_hash: ObjectHash,
-            leaf_id: AccessLeafId,
-            leaf_hash: ObjectHash,
-            value_hash: ObjectHash,
-            proof: &'a [MerkleStep],
-        }
-        serde_json::to_vec(&Signed {
-            domain: ENVELOPE_DOMAIN,
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            candidate_family: self.candidate_family,
-            circle_id: self.circle_id,
-            owner_pubkey: &self.owner_pubkey,
-            recipient_slot: &self.recipient_slot,
-            control_hash: self.control_hash,
-            leaf_id: self.leaf_id,
-            leaf_hash: self.leaf_hash,
-            value_hash: self.value_hash,
-            proof: &self.proof,
-        })
-        .expect("access envelope serialization cannot fail")
-    }
+impl SignedBody for AccessEnvelopeBody {
+    const DOMAIN: &'static [u8] = ENVELOPE_DOMAIN;
+}
 
+pub(crate) type AccessEnvelope = Signed<AccessEnvelopeBody>;
+
+impl AccessEnvelope {
     pub(crate) fn verify(
         &self,
         control: &PreparedCircleControl,
         candidate_family: crate::protocol::store_commit::CandidateFamilyId,
     ) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && self.store_root_hash == control.value.store_root_hash
+        self.store_root_hash == control.value.store_root_hash
             && self.candidate_family == candidate_family
             && self.circle_id == control.value.circle_id
             && self.owner_pubkey == control.value.author_pubkey
             && self.control_hash == control.coord.control_hash()
-            && keys::verify_signature_hex(
-                &self.owner_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+            && self.verify_by(&self.owner_pubkey).is_ok()
             && verify_merkle_proof(self.leaf_hash, &self.proof, control.value.access_root())
     }
 }

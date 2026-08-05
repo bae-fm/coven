@@ -314,11 +314,7 @@ pub(super) fn validate_circle_access_envelope_identity(
     let parsed_bytes = serde_json::to_vec(&envelope)
         .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
     if parsed_bytes != canonical_semantic_bytes
-        || !crate::keys::verify_signature_hex(
-            &envelope.owner_pubkey,
-            &envelope.signature,
-            &envelope.canonical_bytes(),
-        )
+        || envelope.verify_by(&envelope.owner_pubkey).is_err()
         || envelope.candidate_family != family
         || envelope.circle_id != circle_id
         || envelope.owner_pubkey != reference.owner_pubkey

@@ -77,10 +77,11 @@ pub(crate) enum CircleAccessDisposition {
     Inactive,
 }
 
+/// The wire body of one recipient's Circle access leaf. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleAccessLeaf {
-    pub version: u32,
+pub(crate) struct CircleAccessLeafBody {
     pub store_root_hash: ObjectHash,
     pub candidate_family: crate::protocol::store_commit::CandidateFamilyId,
     pub circle_id: CircleId,
@@ -91,50 +92,17 @@ pub(crate) struct CircleAccessLeaf {
     pub recipient_slot: String,
     pub disposition: CircleAccessDisposition,
     pub store_membership: StoreMembershipStateRef,
-    pub signature: String,
 }
 
-impl CircleAccessLeaf {
-    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            domain: &'static str,
-            version: u32,
-            store_root_hash: ObjectHash,
-            candidate_family: crate::protocol::store_commit::CandidateFamilyId,
-            circle_id: CircleId,
-            epoch_id: CircleEpochId,
-            leaf_id: AccessLeafId,
-            owner_pubkey: &'a str,
-            recipient_pubkey: &'a str,
-            recipient_slot: &'a str,
-            disposition: &'a CircleAccessDisposition,
-            store_membership: &'a StoreMembershipStateRef,
-        }
-        serde_json::to_vec(&Signed {
-            domain: ACCESS_DOMAIN,
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            candidate_family: self.candidate_family,
-            circle_id: self.circle_id,
-            epoch_id: self.epoch_id,
-            leaf_id: self.leaf_id,
-            owner_pubkey: &self.owner_pubkey,
-            recipient_pubkey: &self.recipient_pubkey,
-            recipient_slot: &self.recipient_slot,
-            disposition: &self.disposition,
-            store_membership: &self.store_membership,
-        })
-        .expect("circle access serialization cannot fail")
-    }
+impl SignedBody for CircleAccessLeafBody {
+    const DOMAIN: &'static [u8] = ACCESS_DOMAIN;
+}
 
+pub(crate) type CircleAccessLeaf = Signed<CircleAccessLeafBody>;
+
+impl CircleAccessLeaf {
     pub(crate) fn verify_signature(&self) -> bool {
-        self.version == STORE_PROTOCOL_VERSION
-            && keys::verify_signature_hex(
-                &self.owner_pubkey,
-                &self.signature,
-                &self.canonical_bytes(),
-            )
+        self.verify_by(&self.owner_pubkey).is_ok()
     }
 
     pub(crate) fn verify_for_control(

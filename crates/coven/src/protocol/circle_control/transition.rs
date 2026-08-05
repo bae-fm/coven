@@ -116,15 +116,13 @@ impl CircleTransitionDraft {
             },
             membership_authority,
         };
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value,
             author_pubkey: author_pubkey.clone(),
-            signature: String::new(),
         };
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
@@ -213,8 +211,7 @@ impl CircleTransitionDraft {
         let store_root_hash = current_control.value.store_root_hash;
         let circle_id = current_control.value.circle_id;
         let epoch_id = current_control.value.epoch_id();
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let mut control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value: CircleControlValue {
@@ -241,7 +238,6 @@ impl CircleTransitionDraft {
                 membership_authority,
             },
             author_pubkey,
-            signature: String::new(),
         };
         let bootstraps =
             std::collections::BTreeMap::from([(member_pubkey.clone(), bootstrap.clone())]);
@@ -272,7 +268,7 @@ impl CircleTransitionDraft {
             .expect("member addition constructs an active epoch")
             .common
             .access_root = access.access_root();
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
@@ -456,15 +452,13 @@ impl CircleTransitionDraft {
             .expect("rename constructs an active epoch");
         active_epoch.common.access_root = access.access_root();
         active_epoch.metadata = metadata_state;
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value: control_value,
             author_pubkey,
-            signature: String::new(),
         };
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
@@ -602,8 +596,7 @@ impl CircleTransitionDraft {
         metadata.selected = selected_metadata.coord();
         metadata.state_hash = selected_metadata.metadata_hash();
 
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let mut control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value: CircleControlValue {
@@ -642,7 +635,6 @@ impl CircleTransitionDraft {
                 membership_authority,
             },
             author_pubkey,
-            signature: String::new(),
         };
         let access = CircleAccessDraft::prepare(
             store_root_hash,
@@ -671,7 +663,7 @@ impl CircleTransitionDraft {
             .expect("control resolution constructs an active epoch")
             .common
             .access_root = access.access_root();
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)
@@ -754,8 +746,7 @@ impl CircleTransitionDraft {
                 },
                 |head| head.coord.stream_id,
             );
-        let mut control_value = CircleControl {
-            version: STORE_PROTOCOL_VERSION,
+        let control_value = CircleControlBody {
             store_root_hash,
             circle_id,
             value: CircleControlValue {
@@ -776,9 +767,8 @@ impl CircleTransitionDraft {
                 membership_authority,
             },
             author_pubkey,
-            signature: String::new(),
         };
-        control_value.signature = keys::sign_hex(signer, &control_value.canonical_bytes()).1;
+        let control_value = Signed::sign(control_value, signer);
         let control = PreparedCircleControl {
             coord: control_value.coord(),
             bytes: serde_json::to_vec(&control_value)

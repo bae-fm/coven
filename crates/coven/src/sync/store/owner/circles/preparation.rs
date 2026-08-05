@@ -613,12 +613,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 
             for access in &mut draft.access {
                 if let CircleAccessDisposition::Active { roster, .. } =
-                    &mut access.leaf.value.disposition
+                    &mut access.leaf.value.body_mut().disposition
                 {
                     *roster = roster_state.clone();
                 }
-                access.leaf.value.signature =
-                    keys::sign_hex(identity_signer, &access.leaf.value.canonical_bytes()).1;
+                access.leaf.value.resign(identity_signer);
                 let recipient_x25519 =
                     keys::ed25519_hex_to_x25519_public_key(&access.leaf.value.recipient_pubkey)
                         .map_err(|error| {
@@ -726,7 +725,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 state,
                 author_authority,
                 membership_authority: _,
-            } = &mut draft.control.value.value;
+            } = &mut draft.control.value.body_mut().value;
             let access_epoch = state.access_epoch_mut();
             order.device_id = local_writer.circle_device_id();
             order.stream_id = control_stream;
@@ -843,22 +842,22 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 );
                 close_cancellation = Some((cancellation, cancellation_ref));
             }
-            draft.control.value.signature =
-                keys::sign_hex(identity_signer, &draft.control.value.canonical_bytes()).1;
+            draft.control.value.resign(identity_signer);
             draft.control.coord = draft.control.value.coord();
             draft.control.bytes = serde_json::to_vec(&draft.control.value)
                 .expect("Circle control serialization cannot fail");
 
             for (access, proof) in draft.access.iter_mut().zip(proofs) {
-                access.envelope.control_hash = draft.control.coord.control_hash();
-                access.envelope.leaf_hash = access.leaf.leaf_hash;
-                access.envelope.value_hash = ObjectHash::digest(
+                let value_hash = ObjectHash::digest(
                     &serde_json::to_vec(&access.leaf.value)
                         .expect("Circle access leaf serialization cannot fail"),
                 );
-                access.envelope.proof = proof;
-                access.envelope.signature =
-                    keys::sign_hex(identity_signer, &access.envelope.canonical_bytes()).1;
+                let envelope = access.envelope.body_mut();
+                envelope.control_hash = draft.control.coord.control_hash();
+                envelope.leaf_hash = access.leaf.leaf_hash;
+                envelope.value_hash = value_hash;
+                envelope.proof = proof;
+                access.envelope.resign(identity_signer);
             }
 
             let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
@@ -1697,12 +1696,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     );
                     let mut bootstrap_objects = Vec::new();
                     for (index, access) in draft.access.iter_mut().enumerate() {
-                        if let CircleAccessDisposition::Active {
-                            bootstrap: active_bootstrap,
-                            ..
-                        } = &mut access.leaf.value.disposition
-                        {
-                            let image_prefix =
+                        let image_prefix =
                             crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
                                 request.circle_id,
                                 candidate_family,
@@ -1711,6 +1705,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                 &access.leaf.value.recipient_slot,
                                 image_hash,
                             );
+                        if let CircleAccessDisposition::Active {
+                            bootstrap: active_bootstrap,
+                            ..
+                        } = &mut access.leaf.value.body_mut().disposition
+                        {
                             let bootstrap_prepared = self
                                 .prepare_circle_object(
                                     &ProtocolObjectContext::circle(

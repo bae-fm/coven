@@ -50,7 +50,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .load_verified_epoch_close_intent(control, objects, encryption)
             .await?;
         let remaining = roster_chain
-            .resolved_with_successor(intent.removal)
+            .resolved_with_successor(intent.removal.clone())
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if remaining.state_hash() != intent.remaining_roster_state_hash {
             return Err(CircleOperationError::InvalidState(

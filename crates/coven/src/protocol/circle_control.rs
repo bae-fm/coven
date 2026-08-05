@@ -15,9 +15,9 @@ use super::circle_roster::{
 use super::membership::{MemberRole, MembershipGrantCreationAuthority, MembershipGrantId};
 use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef};
 use super::store_commit::{
-    CommitFrontier, ObjectHash, OwnerRecoveryCursor, SnapshotImageRef, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, SuccessorLink,
-    STORE_PROTOCOL_VERSION,
+    CommitFrontier, ObjectHash, OwnerRecoveryCursor, Signed, SignedBody, SnapshotImageRef,
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    SuccessorLink, STORE_PROTOCOL_VERSION,
 };
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
@@ -27,9 +27,15 @@ use crate::protocol::objects::ObjectSlot;
 const RECIPIENT_SLOT_DOMAIN: &[u8] = b"coven.circle-recipient-slot.v1\0";
 const METADATA_DOMAIN: &str = "coven.circle-metadata.v1";
 const METADATA_HEAD_DOMAIN: &str = "coven.circle-metadata-head.v1";
-const ACCESS_DOMAIN: &str = "coven.circle-access-leaf.v1";
-const CONTROL_DOMAIN: &str = "coven.circle-control.v1";
-const ENVELOPE_DOMAIN: &str = "coven.circle-access-envelope.v1";
+const ACCESS_DOMAIN: &[u8] = b"coven.circle-access-leaf.v1\0";
+const CONTROL_DOMAIN: &[u8] = b"coven.circle-control.v1\0";
+const CONTROL_HEAD_DOMAIN: &[u8] = b"coven.circle-control-head.v1\0";
+const CLOSE_INTENT_DOMAIN: &[u8] = b"coven.circle-epoch-close-intent.v1\0";
+const CLOSE_RESPONSE_DOMAIN: &[u8] = b"coven.circle-epoch-close-response.v1\0";
+const CLOSE_EXCLUSION_DOMAIN: &[u8] = b"coven.circle-epoch-close-exclusion.v1\0";
+const CLOSE_OUTCOME_DOMAIN: &[u8] = b"coven.circle-epoch-close-outcome.v1\0";
+const CLOSE_CANCELLATION_DOMAIN: &[u8] = b"coven.circle-epoch-close-cancellation.v1\0";
+const ENVELOPE_DOMAIN: &[u8] = b"coven.circle-access-envelope.v1\0";
 const OWNER_GRANT_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-owner-grant-id-generation.v1\0";
 
 mod access;
@@ -43,13 +49,14 @@ mod transition;
 
 pub(crate) use access::{
     merkle_root_and_proofs, verify_merkle_proof, CircleAccessDisposition, CircleAccessLeaf,
-    MerkleStep,
+    CircleAccessLeafBody, MerkleStep,
 };
 pub(crate) use access::{CircleBootstrapCoverageRef, CircleBootstrapRef};
 pub(crate) use control::{
-    merge_frontier_head, AccessEnvelope, CircleControl, CircleControlHead, CircleControlState,
-    CircleControlValue, DeletedCircle, MergeCircleControlHeadRef, MergeCircleControlOrder,
-    MergeCircleOwnerAuthorityRef, ResolvedConflictBranch,
+    merge_frontier_head, AccessEnvelope, AccessEnvelopeBody, CircleControl, CircleControlBody,
+    CircleControlHead, CircleControlState, CircleControlValue, DeletedCircle,
+    MergeCircleControlHeadRef, MergeCircleControlOrder, MergeCircleOwnerAuthorityRef,
+    ResolvedConflictBranch,
 };
 #[cfg(test)]
 pub(crate) use drafts::CircleTransitionDraftPolicy;
