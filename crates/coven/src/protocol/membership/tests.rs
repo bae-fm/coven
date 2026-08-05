@@ -177,7 +177,7 @@ fn conflict_acceptance(
         .collect::<Vec<_>>();
     recovery.sort();
     recovery.dedup_by(|left, right| left.owner_grant == right.owner_grant);
-    OwnerConflictResolutionAcceptance {
+    OwnerConflictResolutionAcceptance::unsigned_for_test(OwnerConflictResolutionAcceptanceBody {
         store_root_hash,
         owner_grant: derive_store_resolution_grant(conflict_hash, &resolver_pubkey),
         owner_registration,
@@ -193,8 +193,7 @@ fn conflict_acceptance(
             },
         )
         .expect("construct conflict-resolution device state"),
-        signature: String::new(),
-    }
+    })
 }
 
 fn exact_head(entry: &MembershipEntry, signer: &UserKeypair) -> (MembershipHeadRef, AuthorHead) {

@@ -46,10 +46,17 @@ impl<T: SignedBody> Signed<T> {
         value
     }
 
+    /// Refuse an artifact written under a version this build does not read.
+    /// [`Self::verify_by`] runs this first; a shape check that has no signer to
+    /// verify against calls it on its own.
+    pub(crate) fn require_version(&self) -> Result<(), StoreProtocolError> {
+        super::require_version(self.version)
+    }
+
     /// Check the signature against `public_key`, refusing a version this build
     /// does not read before spending a verification on it.
     pub(crate) fn verify_by(&self, public_key: &str) -> Result<(), StoreProtocolError> {
-        super::require_version(self.version)?;
+        self.require_version()?;
         if keys::verify_signature_hex(public_key, &self.signature, self.digest().as_bytes()) {
             Ok(())
         } else {
@@ -95,6 +102,19 @@ impl<T: SignedBody> Signed<T> {
     #[cfg(test)]
     pub(crate) fn corrupt_signature_for_test(&mut self) {
         self.signature.push('0');
+    }
+}
+
+impl<T> Signed<T> {
+    /// An envelope carrying no signature, for tests that need an artifact's
+    /// shape somewhere no verifier reads it.
+    #[cfg(test)]
+    pub(crate) fn unsigned_for_test(body: T) -> Self {
+        Self {
+            version: STORE_PROTOCOL_VERSION,
+            body,
+            signature: String::new(),
+        }
     }
 }
 

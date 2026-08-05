@@ -338,7 +338,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 | OwnerPromotionJournalState::MergeHeadPrepared { acceptance, .. }
                 | OwnerPromotionJournalState::Finalized { acceptance, .. }
                 | OwnerPromotionJournalState::Stale { acceptance, .. } => {
-                    return Ok(*acceptance.request);
+                    return Ok(acceptance.request.as_ref().clone());
                 }
             }
         }

@@ -1,4 +1,3 @@
-use super::validation::require_version;
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -198,10 +197,10 @@ pub struct OwnerPromotionFinalization {
     pub previous_hash: Option<ObjectHash>,
 }
 
+/// The wire body of an owner-promotion request. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnerPromotionRequest {
-    pub version: u32,
+pub struct OwnerPromotionRequestBody {
     pub promotion_id: OwnerPromotionId,
     pub store_root_hash: ObjectHash,
     pub promoter_registration: StoreDeviceRegistrationRef,
@@ -213,8 +212,13 @@ pub struct OwnerPromotionRequest {
     pub predecessor_membership: StoreMembershipStateRef,
     pub predecessor_devices: StoreDeviceStateRef,
     pub finalization: OwnerPromotionFinalization,
-    pub signature: String,
 }
+
+impl SignedBody for OwnerPromotionRequestBody {
+    const DOMAIN: &'static [u8] = b"coven.owner-promotion-request.v1\0";
+}
+
+pub(crate) type OwnerPromotionRequest = Signed<OwnerPromotionRequestBody>;
 
 impl OwnerPromotionRequest {
     #[allow(clippy::too_many_arguments)]
@@ -234,8 +238,7 @@ impl OwnerPromotionRequest {
     ) -> Result<Self, StoreProtocolError> {
         let intended_owner_grant =
             derive_owner_promotion_grant(root.store_root_hash, promotion_id, &member_pubkey);
-        let mut request = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = OwnerPromotionRequestBody {
             promotion_id,
             store_root_hash: root.store_root_hash,
             promoter_registration,
@@ -247,12 +250,10 @@ impl OwnerPromotionRequest {
             predecessor_membership,
             predecessor_devices,
             finalization,
-            signature: String::new(),
         };
-        request.validate_shape(root, promoter)?;
+        body.validate_shape(root, promoter)?;
         let device_signer = promoter.device_signer(signer)?;
-        request.signature = keys::sign_hex(&device_signer, &request.canonical_bytes()).1;
-        Ok(request)
+        Ok(Signed::sign(body, &device_signer))
     }
 
     pub fn verify(
@@ -260,23 +261,17 @@ impl OwnerPromotionRequest {
         root: &StoreRootRef,
         promoter: &StoreDeviceRegistration,
     ) -> Result<(), StoreProtocolError> {
-        self.validate_shape(root, promoter)?;
-        if !keys::verify_signature_hex(
-            &promoter.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        self.body().validate_shape(root, promoter)?;
+        self.verify_by(&promoter.device_signing_pubkey)
     }
+}
 
+impl OwnerPromotionRequestBody {
     fn validate_shape(
         &self,
         root: &StoreRootRef,
         promoter: &StoreDeviceRegistration,
     ) -> Result<(), StoreProtocolError> {
-        require_version(self.version)?;
         self.promoter_registration.verify_registration(promoter)?;
         crate::protocol::objects::verify_store_root(root.store_root_hash, self.store_root_hash)?;
         if promoter.store_root != *root
@@ -293,41 +288,6 @@ impl OwnerPromotionRequest {
             return Err(StoreProtocolError::OwnerPromotionMismatch);
         }
         Ok(())
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Signed<'a> {
-            version: u32,
-            promotion_id: OwnerPromotionId,
-            store_root_hash: ObjectHash,
-            promoter_registration: &'a StoreDeviceRegistrationRef,
-            promoter_owner_grant: &'a MembershipGrantId,
-            member_pubkey: &'a str,
-            member_grant: &'a MembershipGrantId,
-            member_registration: &'a StoreDeviceRegistrationRef,
-            intended_owner_grant: &'a MembershipGrantId,
-            predecessor_membership: &'a StoreMembershipStateRef,
-            predecessor_devices: &'a StoreDeviceStateRef,
-            finalization: &'a OwnerPromotionFinalization,
-        }
-        domain_json(
-            b"coven.owner-promotion-request.v1\0",
-            &Signed {
-                version: self.version,
-                promotion_id: self.promotion_id,
-                store_root_hash: self.store_root_hash,
-                promoter_registration: &self.promoter_registration,
-                promoter_owner_grant: &self.promoter_owner_grant,
-                member_pubkey: &self.member_pubkey,
-                member_grant: &self.member_grant,
-                member_registration: &self.member_registration,
-                intended_owner_grant: &self.intended_owner_grant,
-                predecessor_membership: &self.predecessor_membership,
-                predecessor_devices: &self.predecessor_devices,
-                finalization: &self.finalization,
-            },
-        )
     }
 }
 
@@ -368,14 +328,20 @@ impl OwnerPromotionAnchors {
     }
 }
 
+/// The wire body of a promoted member's acceptance. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnerPromotionAcceptance {
+pub struct OwnerPromotionAcceptanceBody {
     pub request: Box<OwnerPromotionRequest>,
     pub activation: OwnerPromotionRequestActivation,
     pub anchors: OwnerPromotionAnchors,
-    pub signature: String,
 }
+
+impl SignedBody for OwnerPromotionAcceptanceBody {
+    const DOMAIN: &'static [u8] = b"coven.owner-promotion-acceptance.v1\0";
+}
+
+pub(crate) type OwnerPromotionAcceptance = Signed<OwnerPromotionAcceptanceBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -392,30 +358,23 @@ impl OwnerPromotionAcceptance {
         candidate: &StoreDeviceRegistration,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let mut acceptance = Self {
+        let body = OwnerPromotionAcceptanceBody {
             request: Box::new(request),
             activation,
             anchors,
-            signature: String::new(),
         };
-        acceptance.validate_shape(candidate)?;
+        body.validate_shape(candidate)?;
         let device_signer = candidate.device_signer(signer)?;
-        acceptance.signature = keys::sign_hex(&device_signer, &acceptance.canonical_bytes()).1;
-        Ok(acceptance)
+        Ok(Signed::sign(body, &device_signer))
     }
 
     pub fn verify(&self, candidate: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
-        self.validate_shape(candidate)?;
-        if !keys::verify_signature_hex(
-            &candidate.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        self.body().validate_shape(candidate)?;
+        self.verify_by(&candidate.device_signing_pubkey)
     }
+}
 
+impl OwnerPromotionAcceptanceBody {
     fn validate_shape(
         &self,
         candidate: &StoreDeviceRegistration,
@@ -476,18 +435,13 @@ impl OwnerPromotionAcceptance {
         }
         Ok(())
     }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        domain_json(
-            b"coven.owner-promotion-acceptance.v1\0",
-            &(&self.request, &self.activation, &self.anchors),
-        )
-    }
 }
 
+/// The wire body of an owner's acceptance of a resolved conflict. Every field
+/// here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OwnerConflictResolutionAcceptance {
+pub struct OwnerConflictResolutionAcceptanceBody {
     pub store_root_hash: ObjectHash,
     pub owner_grant: MembershipGrantId,
     pub owner_registration: StoreDeviceRegistrationRef,
@@ -495,8 +449,13 @@ pub struct OwnerConflictResolutionAcceptance {
     pub membership: GrantStreamAnchor,
     pub recovery: GrantStreamAnchor,
     pub device_state: StoreDeviceStateRef,
-    pub signature: String,
 }
+
+impl SignedBody for OwnerConflictResolutionAcceptanceBody {
+    const DOMAIN: &'static [u8] = b"coven.owner-conflict-resolution-acceptance.v1\0";
+}
+
+pub(crate) type OwnerConflictResolutionAcceptance = Signed<OwnerConflictResolutionAcceptanceBody>;
 
 impl OwnerConflictResolutionAcceptance {
     #[allow(clippy::too_many_arguments)]
@@ -510,7 +469,7 @@ impl OwnerConflictResolutionAcceptance {
         registration: &StoreDeviceRegistration,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let mut acceptance = Self {
+        let body = OwnerConflictResolutionAcceptanceBody {
             store_root_hash,
             owner_grant,
             owner_registration,
@@ -518,26 +477,19 @@ impl OwnerConflictResolutionAcceptance {
             membership,
             recovery,
             device_state,
-            signature: String::new(),
         };
-        acceptance.validate_shape(registration)?;
+        body.validate_shape(registration)?;
         let device_signer = registration.device_signer(signer)?;
-        acceptance.signature = keys::sign_hex(&device_signer, &acceptance.canonical_bytes()).1;
-        Ok(acceptance)
+        Ok(Signed::sign(body, &device_signer))
     }
 
     pub fn verify(&self, registration: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
-        self.validate_shape(registration)?;
-        if !keys::verify_signature_hex(
-            &registration.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        self.body().validate_shape(registration)?;
+        self.verify_by(&registration.device_signing_pubkey)
     }
+}
 
+impl OwnerConflictResolutionAcceptanceBody {
     fn validate_shape(
         &self,
         registration: &StoreDeviceRegistration,
@@ -555,21 +507,6 @@ impl OwnerConflictResolutionAcceptance {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
         Ok(())
-    }
-
-    fn canonical_bytes(&self) -> Vec<u8> {
-        domain_json(
-            b"coven.owner-conflict-resolution-acceptance.v1\0",
-            &(
-                self.store_root_hash,
-                &self.owner_grant,
-                &self.owner_registration,
-                &self.provider,
-                &self.membership,
-                &self.recovery,
-                &self.device_state,
-            ),
-        )
     }
 }
 

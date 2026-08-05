@@ -22,8 +22,9 @@ use super::store_commit::{
 };
 #[cfg(test)]
 use super::store_commit::{
-    OwnerPromotionAnchors, OwnerPromotionId, OwnerPromotionRequest,
-    OwnerPromotionRequestActivation, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
+    OwnerConflictResolutionAcceptanceBody, OwnerPromotionAcceptanceBody, OwnerPromotionAnchors,
+    OwnerPromotionId, OwnerPromotionRequest, OwnerPromotionRequestActivation,
+    OwnerPromotionRequestBody, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
 };
 use super::wrapped_store_key::WrappedStoreKeyRef;
 use crate::keys::{self, UserKeypair};

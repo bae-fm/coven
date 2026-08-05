@@ -576,8 +576,7 @@ impl MembershipChain {
             ))
             .expect("test membership head slot is valid"),
         };
-        let request = OwnerPromotionRequest {
-            version: STORE_PROTOCOL_VERSION,
+        let request = OwnerPromotionRequest::unsigned_for_test(OwnerPromotionRequestBody {
             promotion_id,
             store_root_hash,
             promoter_registration: registration("promoter"),
@@ -608,28 +607,27 @@ impl MembershipChain {
                 seq,
                 previous_hash,
             },
-            signature: String::new(),
-        };
-        let acceptance = OwnerPromotionAcceptance {
-            request: Box::new(request),
-            activation: OwnerPromotionRequestActivation {
-                commit: activation_commit,
-                head: crate::protocol::store_commit::StoreDeviceHeadRef {
-                    head_hash: ObjectHash::digest(b"test Owner-promotion activation head"),
-                    object: object("activation-head"),
+        });
+        let acceptance =
+            OwnerPromotionAcceptance::unsigned_for_test(OwnerPromotionAcceptanceBody {
+                request: Box::new(request),
+                activation: OwnerPromotionRequestActivation {
+                    commit: activation_commit,
+                    head: crate::protocol::store_commit::StoreDeviceHeadRef {
+                        head_hash: ObjectHash::digest(b"test Owner-promotion activation head"),
+                        object: object("activation-head"),
+                    },
                 },
-            },
-            anchors: OwnerPromotionAnchors {
-                membership: membership.clone(),
-                recovery: GrantStreamAnchor::OwnerRecovery {
-                    first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
-                        "test/owner-promotion/{promotion_id:?}/recovery/1.json"
-                    ))
-                    .expect("test recovery slot is valid"),
+                anchors: OwnerPromotionAnchors {
+                    membership: membership.clone(),
+                    recovery: GrantStreamAnchor::OwnerRecovery {
+                        first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
+                            "test/owner-promotion/{promotion_id:?}/recovery/1.json"
+                        ))
+                        .expect("test recovery slot is valid"),
+                    },
                 },
-            },
-            signature: String::new(),
-        };
+            });
         self.signed_set_role_grant_with_anchor_and_wrapped_key_in_stream(
             signer,
             stream_id,

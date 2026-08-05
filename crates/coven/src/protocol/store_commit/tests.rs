@@ -417,7 +417,8 @@ fn owner_promotion_request_and_acceptance_bind_both_exact_devices() {
     .is_err());
 
     let mut substituted = request;
-    substituted.member_grant = MembershipGrantId(ObjectHash::digest(b"other Member grant"));
+    substituted.body_mut_for_test().member_grant =
+        MembershipGrantId(ObjectHash::digest(b"other Member grant"));
     assert!(matches!(
         substituted.verify(&fixture.root_ref, &fixture.registration),
         Err(StoreProtocolError::InvalidSignature)

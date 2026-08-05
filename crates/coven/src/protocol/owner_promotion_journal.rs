@@ -382,7 +382,7 @@ fn receipt_matches_merge_preparation(
 
 impl OwnerPromotionJournal {
     fn request_has_closed_shape(&self, request: &OwnerPromotionRequest) -> bool {
-        request.version == crate::protocol::store_commit::STORE_PROTOCOL_VERSION
+        request.require_version().is_ok()
             && request.promotion_id == self.promotion_id
             && request.member_registration == self.target
             && !request.member_pubkey.is_empty()
