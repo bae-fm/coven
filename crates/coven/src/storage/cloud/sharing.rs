@@ -106,6 +106,92 @@ pub(super) async fn ensure_absent_by_email(
     Ok(())
 }
 
+/// One backend's permission surface for a shared folder, bundling the
+/// list/grant/delete request shapes so the absolute-state reconciliation
+/// (read → revoke a wrong-role entry → grant → verify) lives here once.
+pub(super) struct SharedFolderAccess<'a, EmailOf, NextPage, DeleteUrl, HasRole> {
+    pub(super) session: &'a OAuthSession,
+    pub(super) list_url: String,
+    pub(super) permissions_field: &'static str,
+    pub(super) email_of: EmailOf,
+    pub(super) next_page: NextPage,
+    pub(super) delete_url: DeleteUrl,
+    pub(super) has_role: HasRole,
+    /// The provider's name for the granted role, for the verification error.
+    pub(super) role_name: &'static str,
+    pub(super) grant_url: String,
+    pub(super) grant_body: serde_json::Value,
+}
+
+impl<EmailOf, NextPage, DeleteUrl, HasRole>
+    SharedFolderAccess<'_, EmailOf, NextPage, DeleteUrl, HasRole>
+where
+    EmailOf: Fn(&serde_json::Value) -> Option<String>,
+    NextPage: Fn(&serde_json::Value) -> Result<Option<String>, CloudHomeError>,
+    DeleteUrl: Fn(&str) -> String,
+    HasRole: Fn(&serde_json::Value) -> bool,
+{
+    async fn current(&self, member_id: &str) -> Result<Option<serde_json::Value>, CloudHomeError> {
+        permission_by_email(
+            self.session,
+            member_id,
+            &self.list_url,
+            self.permissions_field,
+            &self.email_of,
+            &self.next_page,
+        )
+        .await
+    }
+
+    /// Drive the member's permission to present-with-role: keep an entry that
+    /// already carries the role, replace one that doesn't, and verify the
+    /// granted role is visible afterwards.
+    pub(super) async fn ensure_present(&self, member_id: &str) -> Result<(), CloudHomeError> {
+        let current = self.current(member_id).await?;
+        if current.as_ref().is_some_and(&self.has_role) {
+            return Ok(());
+        }
+        if current.is_some() {
+            self.ensure_absent(member_id).await?;
+        }
+        let resp = self
+            .session
+            .api_call(|oauth| oauth.post(&self.grant_url).json(&self.grant_body))
+            .await?;
+        ensure_ok(
+            resp,
+            &format!("grant access to {member_id}"),
+            NotFound::Status,
+        )
+        .await?;
+        if !self
+            .current(member_id)
+            .await?
+            .as_ref()
+            .is_some_and(&self.has_role)
+        {
+            return Err(CloudHomeError::Transport(format!(
+                "{} permission for {member_id} is not visible after creation",
+                self.role_name
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn ensure_absent(&self, member_id: &str) -> Result<(), CloudHomeError> {
+        ensure_absent_by_email(
+            self.session,
+            member_id,
+            &self.list_url,
+            self.permissions_field,
+            &self.email_of,
+            &self.delete_url,
+            &self.next_page,
+        )
+        .await
+    }
+}
+
 #[cfg(all(test, feature = "oauth-providers"))]
 mod tests {
     use super::*;

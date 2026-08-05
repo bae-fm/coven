@@ -500,101 +500,53 @@ impl CloudHome for OneDriveCloudHome {
         &self,
         desired: CloudAccessState,
     ) -> Result<CloudAccessOutcome, CloudHomeError> {
-        let email = desired.require_provider_email("OneDrive")?.to_string();
+        let email = desired.require_provider_email("OneDrive")?;
         let perms_url = format!(
             "{}/drives/{}/items/{}/permissions",
             self.graph_api, self.drive_id, self.folder_id
         );
-        let email_of = |permission: &serde_json::Value| {
-            permission["grantedToV2"]["user"]["email"]
-                .as_str()
-                .or_else(|| permission["grantedTo"]["user"]["email"].as_str())
-                .map(String::from)
-        };
-        let next_page = |page: &serde_json::Value| {
-            Ok(page["@odata.nextLink"]
-                .as_str()
-                .map(std::string::ToString::to_string))
-        };
-        let delete_url = |permission_id: &str| format!("{perms_url}/{permission_id}");
-        let can_write = |permission: &serde_json::Value| {
-            permission["roles"]
-                .as_array()
-                .is_some_and(|roles| roles.iter().any(|role| role.as_str() == Some("write")))
+        let access = sharing::SharedFolderAccess {
+            session: &self.session,
+            list_url: perms_url.clone(),
+            permissions_field: "value",
+            email_of: |permission: &serde_json::Value| {
+                permission["grantedToV2"]["user"]["email"]
+                    .as_str()
+                    .or_else(|| permission["grantedTo"]["user"]["email"].as_str())
+                    .map(String::from)
+            },
+            next_page: |page: &serde_json::Value| {
+                Ok(page["@odata.nextLink"]
+                    .as_str()
+                    .map(std::string::ToString::to_string))
+            },
+            delete_url: |permission_id: &str| format!("{perms_url}/{permission_id}"),
+            has_role: |permission: &serde_json::Value| {
+                permission["roles"]
+                    .as_array()
+                    .is_some_and(|roles| roles.iter().any(|role| role.as_str() == Some("write")))
+            },
+            role_name: "write",
+            grant_url: format!(
+                "{}/drives/{}/items/{}/invite",
+                self.graph_api, self.drive_id, self.folder_id
+            ),
+            grant_body: serde_json::json!({
+                "recipients": [{"email": email}],
+                "roles": ["write"],
+                "requireSignIn": true,
+            }),
         };
         match desired {
             CloudAccessState::Present { .. } => {
-                let current = sharing::permission_by_email(
-                    &self.session,
-                    &email,
-                    &perms_url,
-                    "value",
-                    &email_of,
-                    &next_page,
-                )
-                .await?;
-                if current.as_ref().is_some_and(can_write) {
-                    return Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::OneDrive {
-                        drive_id: self.drive_id.clone(),
-                        folder_id: self.folder_id.clone(),
-                    }));
-                }
-                if current.is_some() {
-                    sharing::ensure_absent_by_email(
-                        &self.session,
-                        &email,
-                        &perms_url,
-                        "value",
-                        &email_of,
-                        &delete_url,
-                        &next_page,
-                    )
-                    .await?;
-                }
-                let url = format!(
-                    "{}/drives/{}/items/{}/invite",
-                    self.graph_api, self.drive_id, self.folder_id
-                );
-                let invite = serde_json::json!({
-                    "recipients": [{"email": email}],
-                    "roles": ["write"],
-                    "requireSignIn": true,
-                });
-                let resp = self
-                    .session
-                    .api_call(|oauth| oauth.post(&url).json(&invite))
-                    .await?;
-                ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
-                let verified = sharing::permission_by_email(
-                    &self.session,
-                    &email,
-                    &perms_url,
-                    "value",
-                    &email_of,
-                    &next_page,
-                )
-                .await?;
-                if !verified.as_ref().is_some_and(can_write) {
-                    return Err(CloudHomeError::Transport(format!(
-                        "write permission for {email} is not visible after creation"
-                    )));
-                }
+                access.ensure_present(email).await?;
                 Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::OneDrive {
                     drive_id: self.drive_id.clone(),
                     folder_id: self.folder_id.clone(),
                 }))
             }
             CloudAccessState::Absent { .. } => {
-                sharing::ensure_absent_by_email(
-                    &self.session,
-                    &email,
-                    &perms_url,
-                    "value",
-                    &email_of,
-                    &delete_url,
-                    &next_page,
-                )
-                .await?;
+                access.ensure_absent(email).await?;
                 Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
             }
         }

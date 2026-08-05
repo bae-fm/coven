@@ -380,77 +380,37 @@ impl CloudHome for GoogleDriveCloudHome {
             "{}/files/{}/permissions?fields=permissions(id,emailAddress,role),nextPageToken&supportsAllDrives=true",
             self.drive_api, self.folder_id
         );
-        let email_of =
-            |permission: &serde_json::Value| permission["emailAddress"].as_str().map(String::from);
-        let next_page = |page: &serde_json::Value| drive_permissions_next_page_url(&list_url, page);
-        let delete_url = |permission_id: &str| {
-            format!(
-                "{}/files/{}/permissions/{}?supportsAllDrives=true",
-                self.drive_api, self.folder_id, permission_id
-            )
+        let access = sharing::SharedFolderAccess {
+            session: &self.session,
+            list_url: list_url.clone(),
+            permissions_field: "permissions",
+            email_of: |permission: &serde_json::Value| {
+                permission["emailAddress"].as_str().map(String::from)
+            },
+            next_page: |page: &serde_json::Value| drive_permissions_next_page_url(&list_url, page),
+            delete_url: |permission_id: &str| {
+                format!(
+                    "{}/files/{}/permissions/{}?supportsAllDrives=true",
+                    self.drive_api, self.folder_id, permission_id
+                )
+            },
+            has_role: |permission: &serde_json::Value| {
+                permission["role"].as_str() == Some("writer")
+            },
+            role_name: "writer",
+            grant_url: format!(
+                "{}/files/{}/permissions?supportsAllDrives=true",
+                self.drive_api, self.folder_id
+            ),
+            grant_body: serde_json::json!({
+                "type": "user",
+                "role": "writer",
+                "emailAddress": email,
+            }),
         };
-        let is_writer =
-            |permission: &serde_json::Value| permission["role"].as_str() == Some("writer");
         match desired {
             CloudAccessState::Present { .. } => {
-                let current = sharing::permission_by_email(
-                    &self.session,
-                    email,
-                    &list_url,
-                    "permissions",
-                    &email_of,
-                    &next_page,
-                )
-                .await?;
-                if current.as_ref().is_some_and(is_writer) {
-                    return Ok(CloudAccessOutcome::Present(
-                        CloudHomeJoinInfo::GoogleDrive {
-                            folder_id: self.folder_id.clone(),
-                        },
-                    ));
-                }
-                if current.is_some() {
-                    sharing::ensure_absent_by_email(
-                        &self.session,
-                        email,
-                        &list_url,
-                        "permissions",
-                        &email_of,
-                        &delete_url,
-                        &next_page,
-                    )
-                    .await?;
-                }
-                let permission = serde_json::json!({
-                    "type": "user",
-                    "role": "writer",
-                    "emailAddress": email,
-                });
-                let resp = self
-                    .session
-                    .api_call(|oauth| {
-                        supports_all_drives(oauth.post(format!(
-                            "{}/files/{}/permissions",
-                            self.drive_api, self.folder_id
-                        )))
-                        .json(&permission)
-                    })
-                    .await?;
-                ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
-                let verified = sharing::permission_by_email(
-                    &self.session,
-                    email,
-                    &list_url,
-                    "permissions",
-                    &email_of,
-                    &next_page,
-                )
-                .await?;
-                if !verified.as_ref().is_some_and(is_writer) {
-                    return Err(CloudHomeError::Transport(format!(
-                        "writer permission for {email} is not visible after creation"
-                    )));
-                }
+                access.ensure_present(email).await?;
                 Ok(CloudAccessOutcome::Present(
                     CloudHomeJoinInfo::GoogleDrive {
                         folder_id: self.folder_id.clone(),
@@ -458,16 +418,7 @@ impl CloudHome for GoogleDriveCloudHome {
                 ))
             }
             CloudAccessState::Absent { .. } => {
-                sharing::ensure_absent_by_email(
-                    &self.session,
-                    email,
-                    &list_url,
-                    "permissions",
-                    &email_of,
-                    &delete_url,
-                    &next_page,
-                )
-                .await?;
+                access.ensure_absent(email).await?;
                 Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
             }
         }

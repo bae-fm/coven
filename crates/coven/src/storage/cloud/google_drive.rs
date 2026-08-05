@@ -738,7 +738,7 @@ impl GoogleDriveCloudHome {
     async fn create_at_slot(
         &self,
         slot: &ObjectSlot,
-        mut body: BlobBody,
+        body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
         let file_id = self.validate_slot(slot)?.to_string();
@@ -754,18 +754,14 @@ impl GoogleDriveCloudHome {
             file_id,
             create_token: format!("exact:{}", slot.logical_key()),
         };
-        let session_url = match self
+        let session_url = self
             .open_resumable_create_session(slot.logical_key(), &attempt)
-            .await
-        {
-            Ok(session_url) => session_url,
-            Err(operation) => return Err(operation),
-        };
+            .await?;
         let key = slot.logical_key().to_string();
         let classify = Box::new(move |status, response: &str| {
             classify_write_error(status, response, &key, "create exact")
         });
-        let mut uploader = self.session.range_put_uploader(
+        let sink = self.session.range_put_sink(
             session_url,
             308,
             body.len(),
@@ -774,46 +770,9 @@ impl GoogleDriveCloudHome {
             classify,
             drive_upload_cancellation_succeeded,
         );
-        let total = body.len();
-        let mut offset = 0u64;
-        loop {
-            let part = match body.next_part(uploader.part_size()).await {
-                Ok(Some(part)) => part,
-                Ok(None) => {
-                    let operation = CloudHomeError::Transport(format!(
-                        "create {:?}: upload body ended before the final part",
-                        slot.logical_key()
-                    ));
-                    return Err(match uploader.abort().await {
-                        Ok(()) => operation,
-                        Err(cleanup) => CloudHomeError::CleanupFailed {
-                            operation: Box::new(operation),
-                            cleanup: Box::new(cleanup),
-                        },
-                    });
-                }
-                Err(operation) => {
-                    return Err(match uploader.abort().await {
-                        Ok(()) => operation,
-                        Err(cleanup) => CloudHomeError::CleanupFailed {
-                            operation: Box::new(operation),
-                            cleanup: Box::new(cleanup),
-                        },
-                    });
-                }
-            };
-            let length = part.len() as u64;
-            let is_last = offset + length >= total;
-            let completion = match uploader.send_part(part, offset, is_last).await {
-                Ok(completion) => completion,
-                Err(operation) => return Err(operation),
-            };
-            offset += length;
-            progress(offset);
-            if completion.is_some() {
-                return Ok(());
-            }
-        }
+        super::blob_body::MultipartUpload::new(slot.logical_key(), body, Box::new(sink), progress)
+            .run()
+            .await
     }
 
     /// Verify the slot, issue the exact-read GET (`alt=media`, optionally with a

@@ -19,8 +19,7 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     combine_cleanup_failure, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, PartSink, RevokeOutcome,
-    UploadProgress,
+    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::oauth::OAuthConfig;
 use crate::protocol::objects::ObjectSlot;
@@ -1171,7 +1170,7 @@ impl ExactSlotStorage for DropboxCloudHome {
     async fn create_at(
         &self,
         slot: &ObjectSlot,
-        mut body: BlobBody,
+        body: BlobBody,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("Dropbox")?;
@@ -1185,7 +1184,7 @@ impl ExactSlotStorage for DropboxCloudHome {
         }
 
         let session_id = self.start_upload_session(key).await?;
-        let mut sink = DropboxSessionSink {
+        let sink = DropboxSessionSink {
             home: self,
             session_id,
             key: key.to_string(),
@@ -1193,41 +1192,9 @@ impl ExactSlotStorage for DropboxCloudHome {
             confirmed_offset: 0,
             settled: false,
         };
-        let total = body.len();
-        let mut offset = 0;
-        loop {
-            let part = match body.next_part(DROPBOX_CHUNK_SIZE).await {
-                Ok(Some(part)) => part,
-                Ok(None) if offset == total => break,
-                Ok(None) => {
-                    let operation = CloudHomeError::Transport(format!(
-                        "create {key}: upload body ended after {offset} of {total} bytes"
-                    ));
-                    let cleanup = sink.abort().await;
-                    return Err(combine_cleanup_failure(operation, cleanup));
-                }
-                Err(operation) => {
-                    let cleanup = sink.abort().await;
-                    return Err(combine_cleanup_failure(operation, cleanup));
-                }
-            };
-            let length = part.len() as u64;
-            let is_last = offset + length >= total;
-            if let Err(operation) = sink.send_part(part, offset, is_last).await {
-                let cleanup = sink.abort().await;
-                return Err(combine_cleanup_failure(operation, cleanup));
-            }
-            offset += length;
-            progress(offset);
-            if is_last {
-                return Ok(());
-            }
-        }
-        let operation = CloudHomeError::Transport(format!(
-            "create {key}: upload session ended without committing its final part"
-        ));
-        let cleanup = sink.abort().await;
-        Err(combine_cleanup_failure(operation, cleanup))
+        super::blob_body::MultipartUpload::new(key, body, Box::new(sink), progress)
+            .run()
+            .await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

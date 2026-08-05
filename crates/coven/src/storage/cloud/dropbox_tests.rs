@@ -1,4 +1,6 @@
 use super::*;
+use crate::storage::cloud::PartSink;
+
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
