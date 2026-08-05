@@ -1,0 +1,719 @@
+use super::validation::*;
+use super::*;
+
+impl StoreBatchCommit {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_reclaim_authorization(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        authorization: crate::protocol::reclaim::ReclaimAuthorizationRef,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            StoreCommitBody::ReclaimAuthorization {
+                authorization: Box::new(authorization),
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_reclaim_receipt(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        receipt: crate::protocol::reclaim::ReclaimReceiptRef,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            StoreCommitBody::ReclaimReceipt {
+                receipt: Box::new(receipt),
+            },
+            signer,
+        )
+    }
+
+    pub fn merge_dependencies(&self) -> &BTreeMap<AuthorStreamId, StoreBatchCommitRef> {
+        &self.order.dependencies
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        package: StorePackageInput<'_>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: Some(package),
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_registrations(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                device_registrations,
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_owner_promotion_request(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        request: OwnerPromotionRequest,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let membership_authority = membership_authority.into_commit_authority();
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            Some(&membership_authority),
+            signer,
+        )?;
+        validate_owner_promotion_request_for_commit(
+            &request,
+            store_root_hash,
+            &author_registration,
+            author,
+            &membership_state,
+            &device_state,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            Some(membership_authority),
+            StoreCommitBody::OwnerPromotionRequest {
+                request: Box::new(request),
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_candidate_abandonment(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        mut manifests: Vec<CandidateCleanupManifest>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        manifests.sort();
+        validate_candidate_abandonment(
+            &manifests,
+            store_root_hash,
+            &author_registration,
+            &coord,
+            &order,
+            author,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            StoreCommitBody::AbandonCandidates { manifests },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_join_attempts(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        attempts: Vec<DeviceJoinAttemptRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: attempts
+                    .into_iter()
+                    .map(DeviceJoinAttemptDecisionRef::Attempt)
+                    .collect(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_join_outcomes(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
+        device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes,
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                device_registrations,
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_join_abandonments(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        abandonments: Vec<crate::protocol::store_commit::DeviceJoinAbandonmentRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: abandonments
+                    .into_iter()
+                    .map(DeviceJoinAttemptDecisionRef::Abandoned)
+                    .collect(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_join_cleanup_receipts(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        receipts: Vec<crate::protocol::store_commit::DeviceJoinCleanupReceiptRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: receipts,
+                provider_access_grants: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_device_exclusions(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        proposals: Vec<StoreDeviceExclusionProposalRef>,
+        outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: proposals,
+                device_exclusion_outcomes: outcomes,
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_provider_access(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        provider_access_grants: Vec<crate::protocol::provider::StoreMemberProviderAccessGrantRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                circle_acknowledgements: Vec::new(),
+                control: None,
+                device_join_attempt_decisions: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants,
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                stream_activations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_operations(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: StoreOperationMembershipAuthority,
+        input: StoreCommitOperationsInput<'_>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let membership_authority = membership_authority.into_commit_authority();
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            Some(&membership_authority),
+            signer,
+        )?;
+        let StoreCommitOperationsInput {
+            acknowledgement,
+            circle_acknowledgements,
+            control,
+            device_join_attempt_decisions,
+            device_join_outcomes,
+            device_join_cleanup_receipts,
+            provider_access_grants,
+            device_registrations,
+            device_exclusion_proposals,
+            device_exclusion_outcomes,
+            stream_activations,
+            circle_controls,
+            store_package,
+            circle_packages,
+        } = input;
+        validate_control(
+            &author_registration,
+            &author.author_pubkey,
+            &membership_state,
+            control.as_ref(),
+        )?;
+        validate_commit_acknowledgement(&acknowledgement, &author_registration)?;
+        validate_commit_circle_acknowledgements(&circle_acknowledgements, &author_registration)?;
+        let stream_id = commit_stream_id(&coord);
+        let seq = order.seq();
+        let candidate_family =
+            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
+        let store_package = store_package
+            .map(|input| {
+                if input.candidate_family != candidate_family {
+                    return Err(StoreProtocolError::Malformed(
+                        "Store package candidate family differs from its commit".to_string(),
+                    ));
+                }
+                let semantic_prefix = package_semantic_prefix(
+                    candidate_family,
+                    &stream_id,
+                    seq,
+                    ObjectHash::digest(input.bytes),
+                );
+                package_ref(&semantic_prefix, &input)
+            })
+            .transpose()?;
+        validate_device_join_attempt_decision_refs(&device_join_attempt_decisions)?;
+        validate_device_join_outcome_refs(&device_join_outcomes)?;
+        validate_device_join_cleanup_receipt_refs(&device_join_cleanup_receipts)?;
+        validate_provider_access_refs(&provider_access_grants)?;
+        validate_device_registration_refs(&device_registrations)?;
+        validate_device_exclusion_refs(&device_exclusion_proposals, &device_exclusion_outcomes)?;
+        validate_stream_activations(
+            store_root_hash,
+            &author_registration,
+            control.as_ref(),
+            &stream_activations,
+        )?;
+        let mut seen_circles = BTreeSet::new();
+        let circle_packages = circle_packages
+            .iter()
+            .map(|input| {
+                if !seen_circles.insert(input.circle_id) {
+                    return Err(StoreProtocolError::DuplicateCirclePackage(input.circle_id));
+                }
+                validate_circle_control_coord(&input.control)?;
+                if input.package.candidate_family != candidate_family {
+                    return Err(StoreProtocolError::Malformed(
+                        "Circle package candidate family differs from its commit".to_string(),
+                    ));
+                }
+                let semantic_prefix = circle_package_semantic_prefix(
+                    input.circle_id,
+                    candidate_family,
+                    &stream_id,
+                    seq,
+                    ObjectHash::digest(input.package.bytes),
+                );
+                let package = package_ref(&semantic_prefix, &input.package)?;
+                Ok(CirclePackageRef {
+                    circle_id: input.circle_id,
+                    control: input.control.clone(),
+                    package,
+                    key_fingerprint: input.key_fingerprint,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreProtocolError>>()?;
+        validate_circle_control_refs(&circle_controls)?;
+        let operations = StoreCommitOperations {
+            acknowledgement,
+            circle_acknowledgements,
+            control,
+            device_join_attempt_decisions,
+            device_join_outcomes,
+            device_join_cleanup_receipts,
+            provider_access_grants,
+            device_registrations,
+            device_exclusion_proposals,
+            device_exclusion_outcomes,
+            stream_activations,
+            circle_controls,
+            store_package,
+            circle_packages,
+        };
+        if operations.is_empty() {
+            return Err(StoreProtocolError::EmptyBatch);
+        }
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            Some(membership_authority),
+            StoreCommitBody::Operations(operations),
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_signed_body(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        author_registration: StoreDeviceRegistrationRef,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
+        body: StoreCommitBody,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let family =
+            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
+        validate_commit_body(store_root_hash, &body, &author_registration)?;
+        let candidate_objects = candidate_manifest(family, &body)?;
+        let mut commit = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            candidate_objects,
+            body,
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &commit.canonical_signed_bytes());
+        commit.signature = signature;
+        Ok(commit)
+    }
+}
