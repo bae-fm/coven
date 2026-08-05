@@ -92,12 +92,14 @@ impl PreparedStoreOperationCommit {
         Ok(objects)
     }
 
-    pub(crate) fn merge_membership_activation_remote_objects(
+    /// Validate the frame every Merge membership-activation candidate shares:
+    /// a closed commit, valid transition and publication, the commit's control
+    /// naming the transition, and the published head activating this candidate.
+    fn validate_merge_membership_activation(
         &self,
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
-        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
-    ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<(), PreparedCommitError> {
         self.validate_closed_shape().map_err(PreparedCommitError)?;
         transition
             .validate()
@@ -123,6 +125,16 @@ impl PreparedStoreOperationCommit {
                     .to_string(),
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) fn merge_membership_activation_remote_objects(
+        &self,
+        transition: &PreparedMembershipTransition,
+        publication: &PreparedMembershipPublication,
+        wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
+    ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+        self.validate_merge_membership_activation(transition, publication)?;
         let expected_wraps = match &transition.entry.change {
             super::membership::MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
             _ => {
@@ -152,32 +164,13 @@ impl PreparedStoreOperationCommit {
         reference: &super::membership::StoreMembershipConflictResolutionRef,
         prepared: &PreparedExactObject,
     ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, PreparedCommitError> {
-        self.validate_closed_shape().map_err(PreparedCommitError)?;
-        transition
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        publication
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        if self.commit.control()
-            != Some(&StoreControl {
-                transition: transition.transition.clone(),
-            })
-            || !transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            || !matches!(
-                &publication.head.activation,
-                super::membership::MembershipHeadActivation::StoreCommit { commit }
-                    if commit == &self.reference
-            )
-            || !matches!(
-                &transition.entry.change,
-                super::membership::MembershipChange::ResolutionActivation {
-                    resolution: introduced,
-                } if introduced == reference
-            )
-            || reference.object != *prepared.reference()
+        self.validate_merge_membership_activation(transition, publication)?;
+        if !matches!(
+            &transition.entry.change,
+            super::membership::MembershipChange::ResolutionActivation {
+                resolution: introduced,
+            } if introduced == reference
+        ) || reference.object != *prepared.reference()
             || reference.resolution_hash != resolution.resolution_hash()
             || reference.conflict_hash != resolution.conflict_hash
             || reference.resolver_pubkey != resolution.resolver_pubkey
@@ -212,31 +205,12 @@ impl PreparedStoreOperationCommit {
         publication: &PreparedMembershipPublication,
         wrapped_key: &super::wrapped_store_key::PreparedWrappedStoreKey,
     ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, PreparedCommitError> {
-        self.validate_closed_shape().map_err(PreparedCommitError)?;
-        transition
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        publication
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        if self.commit.control()
-            != Some(&StoreControl {
-                transition: transition.transition.clone(),
-            })
-            || !transition
-                .transition
-                .matches_head(&publication.head, &publication.head_ref)
-            || !matches!(
-                &publication.head.activation,
-                super::membership::MembershipHeadActivation::StoreCommit { commit }
-                    if commit == &self.reference
-            )
-            || !matches!(
-                &transition.entry.change,
-                super::membership::MembershipChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
-                    if expected == &wrapped_key.reference
-            )
-        {
+        self.validate_merge_membership_activation(transition, publication)?;
+        if !matches!(
+            &transition.entry.change,
+            super::membership::MembershipChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
+                if expected == &wrapped_key.reference
+        ) {
             return Err(PreparedCommitError(
                 "Merge Owner-promotion graph differs from its activating Store candidate"
                     .to_string(),

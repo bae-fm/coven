@@ -14,6 +14,28 @@ impl<'store> StoreCircleCommands<'store> {
         Self { store }
     }
 
+    /// Every Circle mutation requires protected blob paths: a browsable layout
+    /// would leak Circle structure through object names.
+    fn require_protected_paths(&self) -> Result<(), CircleOperationError> {
+        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(CircleOperationError::BrowsableStorage);
+        }
+        Ok(())
+    }
+
+    async fn writer(
+        &self,
+    ) -> Result<
+        crate::sync::store::owner::writer::AuthorizedWriterOperation<'store>,
+        CircleOperationError,
+    > {
+        self.require_protected_paths()?;
+        self.store
+            .authorize_writer()
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+    }
+
     /// The read-only settlement status of a Circle's in-flight epoch close: for
     /// each participant device, whether its create-once response slot holds a
     /// response, an Owner exclusion, or is still empty. Reports each slot's
@@ -32,14 +54,7 @@ impl<'store> StoreCircleCommands<'store> {
         metadata_stamp: &str,
         name: &str,
     ) -> Result<CircleId, CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer.circles().create_circle(metadata_stamp, name).await
     }
 
@@ -49,14 +64,7 @@ impl<'store> StoreCircleCommands<'store> {
         circle_id: CircleId,
         name: &str,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer
             .circles()
             .rename_circle(metadata_stamp, circle_id, name)
@@ -68,14 +76,7 @@ impl<'store> StoreCircleCommands<'store> {
         circle_id: CircleId,
         member_pubkey: String,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer
             .circles()
             .remove_circle_member(circle_id, member_pubkey)
@@ -95,14 +96,7 @@ impl<'store> StoreCircleCommands<'store> {
         circle_id: CircleId,
         chosen: crate::protocol::circle::CircleControlCoord,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer
             .circles()
             .resolve_circle_control(circle_id, chosen)
@@ -121,14 +115,7 @@ impl<'store> StoreCircleCommands<'store> {
         &self,
         circle_id: CircleId,
     ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer.circles().cancel_circle_epoch_close(circle_id).await
     }
 
@@ -141,14 +128,7 @@ impl<'store> StoreCircleCommands<'store> {
         circle_id: CircleId,
         excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer
             .circles()
             .exclude_circle_close_device(circle_id, excluded_device_id)
@@ -165,14 +145,7 @@ impl<'store> StoreCircleCommands<'store> {
         operation_id: &crate::protocol::circle::CircleOperationId,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer
             .circles()
             .retry_circle_operation(operation_id, routing_encryption)
@@ -192,9 +165,7 @@ impl<'store> StoreCircleCommands<'store> {
         &self,
         operation_id: &crate::protocol::circle::CircleOperationId,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
+        self.require_protected_paths()?;
         let mut authorized = self
             .store
             .authorize()
@@ -213,14 +184,7 @@ impl<'store> StoreCircleCommands<'store> {
         &self,
         circle_id: CircleId,
     ) -> Result<(), CircleOperationError> {
-        if matches!(self.store.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(CircleOperationError::BrowsableStorage);
-        }
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let mut writer = self.writer().await?;
         writer.circles().delete_circle(circle_id).await
     }
 }
@@ -346,30 +310,17 @@ impl CircleOperationRequest {
     }
 
     pub(super) fn history(&self) -> CircleTransitionHistory {
-        match self {
-            Self::Create { .. } => CircleTransitionHistory::Founder,
-            Self::Rename(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-            Self::AddMember(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-            Self::RemoveMember(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-            Self::ResolveControl(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-            Self::Delete(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-            Self::FinalizeEpochClose(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-            Self::CancelEpochClose(request) => {
-                CircleTransitionHistory::Successor(Box::new(request.previous_control.clone()))
-            }
-        }
+        let previous_control = match self {
+            Self::Create { .. } => return CircleTransitionHistory::Founder,
+            Self::Rename(request) => &request.previous_control,
+            Self::AddMember(request) => &request.previous_control,
+            Self::RemoveMember(request) => &request.previous_control,
+            Self::ResolveControl(request) => &request.previous_control,
+            Self::Delete(request) => &request.previous_control,
+            Self::FinalizeEpochClose(request) => &request.previous_control,
+            Self::CancelEpochClose(request) => &request.previous_control,
+        };
+        CircleTransitionHistory::Successor(Box::new(previous_control.clone()))
     }
 
     /// The stable operation id and derived write identity for a close settlement.
