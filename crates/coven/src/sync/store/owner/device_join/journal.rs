@@ -158,8 +158,18 @@ impl DeviceJoinJournalDatabase {
         next: DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinError> {
         previous.validate_successor(&next)?;
+        self.swap(previous, &next)
+    }
+
+    /// Replace `previous` with `next` only if the stored row still holds
+    /// `previous` exactly.
+    fn swap(
+        &self,
+        previous: &DeviceJoinJournalRecord,
+        next: &DeviceJoinJournalRecord,
+    ) -> Result<(), DeviceJoinError> {
         let previous_payload = serde_json::to_string(previous)?;
-        let next_payload = serde_json::to_string(&next)?;
+        let next_payload = serde_json::to_string(next)?;
         if !self
             .store
             .compare_and_swap(
@@ -195,17 +205,7 @@ impl DeviceJoinJournalDatabase {
         if previous.attempt_id != next.attempt_id
             || !matches!(
                 &*previous.progress,
-                DeviceJoinRoleProgress::Joiner(
-                    JoinerJoinProgress::RegistrationPrepared(_)
-                        | JoinerJoinProgress::ProviderReady(_)
-                        | JoinerJoinProgress::RegistrationCreateIntent(_)
-                        | JoinerJoinProgress::RegistrationCreated(_)
-                        | JoinerJoinProgress::AckCreateIntent(_)
-                        | JoinerJoinProgress::AckCreated(_)
-                        | JoinerJoinProgress::ResponseCreateIntent(_)
-                        | JoinerJoinProgress::Ready(_)
-                        | JoinerJoinProgress::CleanupIntent { .. }
-                )
+                DeviceJoinRoleProgress::Joiner(progress) if progress.holds_staged_work()
             )
             || !matches!(
                 &*next.progress,
@@ -214,21 +214,7 @@ impl DeviceJoinJournalDatabase {
         {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let previous_payload = serde_json::to_string(previous)?;
-        let next_payload = serde_json::to_string(&next)?;
-        if !self
-            .store
-            .compare_and_swap(
-                &attempt_key(previous.attempt_id),
-                DeviceJoinRole::Joiner.as_str(),
-                &previous_payload,
-                &next_payload,
-            )
-            .map_err(database_error)?
-        {
-            return Err(DeviceJoinError::JournalConflict);
-        }
-        Ok(())
+        self.swap(previous, &next)
     }
 
     pub fn complete_joiner_cleanup(

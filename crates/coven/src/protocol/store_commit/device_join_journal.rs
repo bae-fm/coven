@@ -270,6 +270,27 @@ pub(crate) enum JoinerJoinProgress {
     CancelledComplete(DeviceJoinCleanupActivation),
 }
 
+impl JoinerJoinProgress {
+    /// Whether the joiner holds staged join work a cancellation has to retract:
+    /// every state that can enter a cleanup intent, and the cleanup intent
+    /// itself. Before these the joiner published nothing to retract; after them
+    /// the attempt has reached a terminal the cleanup cannot revisit.
+    pub(crate) fn holds_staged_work(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistrationPrepared(_)
+                | Self::ProviderReady(_)
+                | Self::RegistrationCreateIntent(_)
+                | Self::RegistrationCreated(_)
+                | Self::AckCreateIntent(_)
+                | Self::AckCreated(_)
+                | Self::ResponseCreateIntent(_)
+                | Self::Ready(_)
+                | Self::CleanupIntent { .. }
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum DeviceJoinRoleProgress {

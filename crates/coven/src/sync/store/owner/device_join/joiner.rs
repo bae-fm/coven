@@ -962,17 +962,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         }
         if !matches!(
             &*current.progress,
-            DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::RegistrationPrepared(_)
-                    | JoinerJoinProgress::ProviderReady(_)
-                    | JoinerJoinProgress::RegistrationCreateIntent(_)
-                    | JoinerJoinProgress::RegistrationCreated(_)
-                    | JoinerJoinProgress::AckCreateIntent(_)
-                    | JoinerJoinProgress::AckCreated(_)
-                    | JoinerJoinProgress::ResponseCreateIntent(_)
-                    | JoinerJoinProgress::Ready(_)
-                    | JoinerJoinProgress::CleanupIntent { .. }
-            )
+            DeviceJoinRoleProgress::Joiner(progress) if progress.holds_staged_work()
         ) {
             return Err(DeviceJoinError::JournalConflict);
         }
@@ -1129,17 +1119,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
                 Some(JoinerJoinTerminal::WriteRevoked(revocation.clone()))
             }
-            DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::RegistrationPrepared(_)
-                | JoinerJoinProgress::ProviderReady(_)
-                | JoinerJoinProgress::RegistrationCreateIntent(_)
-                | JoinerJoinProgress::RegistrationCreated(_)
-                | JoinerJoinProgress::AckCreateIntent(_)
-                | JoinerJoinProgress::AckCreated(_)
-                | JoinerJoinProgress::ResponseCreateIntent(_)
-                | JoinerJoinProgress::Ready(_)
-                | JoinerJoinProgress::CleanupIntent { .. },
-            ) => None,
+            DeviceJoinRoleProgress::Joiner(progress) if progress.holds_staged_work() => None,
             _ => return Err(DeviceJoinError::JournalConflict),
         };
         let evidence = self
