@@ -142,13 +142,14 @@ impl CircleMetadata {
     }
 
     pub(crate) fn verify(&self) -> bool {
-        let position_is_valid = (self.seq == 1
-            && self.previous_hash.is_none()
-            && self
-                .dependencies
+        let position_is_valid = crate::protocol::causal_grants::author_stream_position_is_valid(
+            self.seq,
+            self.previous_hash,
+            &self.coord().stream_key(),
+            self.dependencies
                 .iter()
-                .all(|dependency| dependency.stream_key() != self.coord().stream_key()))
-            || (self.seq > 1 && self.previous_hash.is_some());
+                .map(CircleMetadataCoord::stream_key),
+        );
         self.version == STORE_PROTOCOL_VERSION
             && !self.name.trim().is_empty()
             && position_is_valid

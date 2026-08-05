@@ -179,14 +179,12 @@ pub(crate) fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserK
 
 pub(crate) fn verify_membership_entry(entry: &MembershipEntry) -> bool {
     let activation_position_is_valid = match &entry.change {
-        MembershipChange::ResolutionActivation { .. } => {
-            entry.seq == 1
-                && entry.previous_hash.is_none()
-                && entry
-                    .dependencies
-                    .iter()
-                    .all(|dependency| dependency.stream_key() != entry.coord().stream_key())
-        }
+        MembershipChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
+            entry.seq,
+            entry.previous_hash,
+            &entry.coord().stream_key(),
+            entry.dependencies.iter().map(MembershipCoord::stream_key),
+        ),
         _ => true,
     };
     activation_position_is_valid

@@ -238,33 +238,35 @@ impl CircleRosterEntry {
     }
 
     pub(crate) fn verify(&self) -> bool {
-        let position_is_valid = match (&self.change, self.seq, self.previous_hash) {
-            (
-                CircleRosterChange::Founder {
-                    member_pubkey,
-                    grant_id,
-                    ..
-                },
-                1,
-                None,
-            ) => {
-                self.dependencies.is_empty()
+        let own_stream = self.coord().stream_key();
+        let dependency_streams = || self.dependencies.iter().map(CircleRosterCoord::stream_key);
+        let position_is_valid = match &self.change {
+            CircleRosterChange::Founder {
+                member_pubkey,
+                grant_id,
+                ..
+            } => {
+                self.seq == 1
+                    && self.previous_hash.is_none()
+                    && self.dependencies.is_empty()
                     && self.resolution_dependencies.is_empty()
                     && member_pubkey == &self.author_pubkey
                     && grant_id == &self.author_owner_grant
             }
-            (CircleRosterChange::Founder { .. }, _, _) => false,
-            (CircleRosterChange::ResolutionActivation { .. }, 1, None) => self
-                .dependencies
-                .iter()
-                .all(|dependency| dependency.stream_key() != self.coord().stream_key()),
-            (CircleRosterChange::ResolutionActivation { .. }, _, _) => false,
-            (_, 1, None) => self
-                .dependencies
-                .iter()
-                .all(|dependency| dependency.stream_key() != self.coord().stream_key()),
-            (_, seq, Some(_)) => seq > 1,
-            (_, _, None) => false,
+            CircleRosterChange::ResolutionActivation { .. } => causal_grants::starts_author_stream(
+                self.seq,
+                self.previous_hash,
+                &own_stream,
+                dependency_streams(),
+            ),
+            CircleRosterChange::SetMember { .. } | CircleRosterChange::RemoveMember { .. } => {
+                causal_grants::author_stream_position_is_valid(
+                    self.seq,
+                    self.previous_hash,
+                    &own_stream,
+                    dependency_streams(),
+                )
+            }
         };
         self.version == STORE_PROTOCOL_VERSION
             && !self.author_pubkey.is_empty()

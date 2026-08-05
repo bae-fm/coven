@@ -532,6 +532,36 @@ where
     Ok(common_frontier(&selected))
 }
 
+/// An entry that begins its author stream: sequence one, no predecessor, and no
+/// dependency on the very stream it opens.
+pub(crate) fn starts_author_stream<K: Eq>(
+    seq: u64,
+    previous_hash: Option<ObjectHash>,
+    own_stream: &K,
+    dependency_streams: impl IntoIterator<Item = K>,
+) -> bool {
+    seq == 1
+        && previous_hash.is_none()
+        && dependency_streams
+            .into_iter()
+            .all(|stream| stream != *own_stream)
+}
+
+/// An entry sits where its sequence says it does: sequence one begins the
+/// author stream, every later sequence continues it from a predecessor.
+pub(crate) fn author_stream_position_is_valid<K: Eq>(
+    seq: u64,
+    previous_hash: Option<ObjectHash>,
+    own_stream: &K,
+    dependency_streams: impl IntoIterator<Item = K>,
+) -> bool {
+    match (seq, previous_hash) {
+        (1, _) => starts_author_stream(seq, previous_hash, own_stream, dependency_streams),
+        (0, _) | (_, None) => false,
+        (_, Some(_)) => true,
+    }
+}
+
 pub(crate) trait CausalAssignment: Clone + Debug + Eq {
     fn is_owner(&self) -> bool;
 }
