@@ -323,14 +323,12 @@ fn test_exact_receipt() -> ExactSlotProbeReceipt {
                 &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
             ),
         },
-        delete_verified_absent: true,
         lost_response: LostResponseProbeReceipt {
             logical_key: "store-v1/probes/lost".to_string(),
             slot: lost_slot,
             payload_hash: ObjectHash::digest(&lost_payload),
             settled: lost_ref,
             readback_hash: ObjectHash::digest(&lost_payload),
-            delete_verified_absent: true,
         },
     };
     ExactSlotProbeReceipt::from_transcript(

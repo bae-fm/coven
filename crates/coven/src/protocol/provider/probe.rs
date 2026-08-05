@@ -162,7 +162,6 @@ impl ExactSlotProbeReceipt {
             || t.range.end != PROBE_RANGE_END
             || t.range.bytes_hash
                 != ObjectHash::digest(&winner[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize])
-            || !t.delete_verified_absent
         {
             return invalid("exact-slot read, range, reference, or deletion evidence is invalid");
         }
@@ -174,7 +173,6 @@ impl ExactSlotProbeReceipt {
             || t.lost_response.settled.stored_size() != lost.len() as u64
             || t.lost_response.settled.stored_hash() != lost_hash
             || t.lost_response.readback_hash != lost_hash
-            || !t.lost_response.delete_verified_absent
         {
             return invalid("lost-response exact-slot evidence is invalid");
         }
@@ -192,7 +190,6 @@ pub struct ExactSlotProbeTranscript {
     pub accepted: ExactObjectRef,
     pub full_read_hash: ObjectHash,
     pub range: ProbeRangeReceipt,
-    pub delete_verified_absent: bool,
     pub lost_response: LostResponseProbeReceipt,
 }
 
@@ -218,7 +215,6 @@ pub struct LostResponseProbeReceipt {
     pub payload_hash: ObjectHash,
     pub settled: ExactObjectRef,
     pub readback_hash: ObjectHash,
-    pub delete_verified_absent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

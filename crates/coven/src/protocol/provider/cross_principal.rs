@@ -26,8 +26,6 @@ pub struct CrossPrincipalProbeTranscript {
     pub challenge: CrossPrincipalProbeChallenge,
     pub response: CrossPrincipalProbeResponse,
     pub administrator_read_peer_hash: ObjectHash,
-    pub administrator_delete_peer_verified_absent: bool,
-    pub administrator_delete_own_verified_absent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,10 +253,7 @@ pub(crate) fn validate_cross_transcript_payloads(
     validate_cross_challenge_payload(&transcript.challenge)?;
     validate_cross_response_payload(&transcript.response, &transcript.challenge, context)?;
     let peer = probe_payload(&transcript.challenge.probe_id, ProbePayloadLabel::CrossPeer);
-    if transcript.administrator_read_peer_hash != ObjectHash::digest(&peer)
-        || !transcript.administrator_delete_peer_verified_absent
-        || !transcript.administrator_delete_own_verified_absent
-    {
+    if transcript.administrator_read_peer_hash != ObjectHash::digest(&peer) {
         return invalid("cross-principal object, read, or deletion evidence is invalid");
     }
     Ok(())

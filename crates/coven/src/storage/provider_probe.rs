@@ -341,8 +341,6 @@ impl ProviderProbeStorage {
             challenge: challenge.clone(),
             response: response.clone(),
             administrator_read_peer_hash,
-            administrator_delete_peer_verified_absent: true,
-            administrator_delete_own_verified_absent: true,
         };
         let receipt =
             CrossPrincipalProbeReceipt::signed(transcript, context, store, administrator_signer)?;
@@ -624,14 +622,12 @@ impl ProviderProbeStorage {
                 end: PROBE_RANGE_END,
                 bytes_hash: ObjectHash::digest(&range),
             },
-            delete_verified_absent: true,
             lost_response: LostResponseProbeReceipt {
                 logical_key: lost_logical_key,
                 slot: lost_slot,
                 payload_hash: ObjectHash::digest(&lost_payload),
                 settled,
                 readback_hash: ObjectHash::digest(&lost_readback),
-                delete_verified_absent: true,
             },
         };
         let receipt =
