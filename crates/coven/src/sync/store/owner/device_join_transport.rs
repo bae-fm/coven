@@ -698,34 +698,109 @@ impl<'store> StoreDeviceJoinTransport<'store> {
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
-        retrying_activation_conflicts(|| {
-            self.drive_once(bundle, &policy, access_administrator, timing)
+        retrying_activation_conflicts(|| async {
+            AttemptTransport::open(self.store, bundle)
+                .await?
+                .drive_once(&policy, access_administrator, timing)
+                .await
         })
         .await
     }
 
-    async fn drive_once(
+    pub(crate) async fn abandon(
         &self,
         bundle: &DeviceJoinOfferBundle,
+    ) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
+        let attempt = AttemptTransport::open(self.store, bundle).await?;
+        let abandonment = self.store.abandon_device_join(bundle.offer.clone()).await?;
+        attempt
+            .publish(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+            .await?;
+        Ok(abandonment)
+    }
+
+    pub(crate) async fn cancel(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
+        retrying_activation_conflicts(|| async {
+            AttemptTransport::open(self.store, bundle)
+                .await?
+                .cancel_once(timing)
+                .await
+        })
+        .await
+    }
+}
+
+/// One attempt in flight: the bundle naming its transport slots, the roles this
+/// device holds in it, and the attempt every status read addresses. Every step
+/// of a drive shares all three, and a fresh pass re-reads the roles.
+struct AttemptTransport<'attempt> {
+    store: &'attempt Store,
+    bundle: &'attempt DeviceJoinOfferBundle,
+    roles: DeviceJoinRoles,
+    attempt_id: DeviceJoinAttemptId,
+}
+
+impl<'attempt> AttemptTransport<'attempt> {
+    async fn open(
+        store: &'attempt Store,
+        bundle: &'attempt DeviceJoinOfferBundle,
+    ) -> Result<Self, DeviceJoinTransportError> {
+        Ok(Self {
+            store,
+            bundle,
+            roles: store.device_join_transport_roles(&bundle.offer).await?,
+            attempt_id: bundle.offer.attempt_id,
+        })
+    }
+
+    /// Put an artifact at its transport slot. An artifact already at its slot is
+    /// the same transfer, so a step that produced its artifact and died before
+    /// publishing it republishes here for nothing.
+    async fn publish(&self, action: DeviceJoinAction) -> Result<(), DeviceJoinTransportError> {
+        self.store
+            .publish_device_join_transport_artifact(self.bundle, self.roles, &action)
+            .await
+    }
+
+    /// Read the artifact the other side owes this step, waiting for it to appear.
+    async fn await_artifact<T: DeviceJoinArtifact>(
+        &self,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<T, DeviceJoinTransportError> {
+        self.store
+            .await_device_join_transport_artifact::<T>(self.bundle, self.roles, timing)
+            .await
+    }
+
+    async fn admin_status(&self) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
+        self.store
+            .device_join_transport_status(self.attempt_id, DeviceJoinRole::ProviderAdministrator)
+            .await
+    }
+
+    async fn owner_status(&self) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
+        self.store
+            .device_join_transport_status(self.attempt_id, DeviceJoinRole::Owner)
+            .await
+    }
+
+    async fn drive_once(
+        &self,
         policy: &DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
-        let roles = self.roles(&bundle.offer).await?;
-        let attempt_id = bundle.offer.attempt_id;
+        let roles = self.roles;
 
         // An abandoned attempt has no further step to drive. Publishing it here is
         // what lets a driver started after the abandonment still deliver it to a
         // joining device that has not seen it yet.
-        if let Some(DeviceJoinStatus::Abandoned { abandonment }) =
-            self.owner_status(attempt_id).await?
-        {
-            self.store
-                .publish_device_join_transport_artifact(
-                    bundle,
-                    roles,
-                    &DeviceJoinAction::TransferAbandonment(abandonment.clone()),
-                )
+        if let Some(DeviceJoinStatus::Abandoned { abandonment }) = self.owner_status().await? {
+            self.publish(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
                 .await?;
             return Ok(DeviceJoinDriveOutcome::Abandoned(abandonment));
         }
@@ -737,7 +812,7 @@ impl<'store> StoreDeviceJoinTransport<'store> {
         // and a journal past it does nothing (its artifact was published, which is
         // how the journal got past it).
         if roles.provider_administrator {
-            let approval = match self.admin_status(attempt_id).await? {
+            let approval = match self.admin_status().await? {
                 Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => Some(approval),
                 Some(
                     DeviceJoinStatus::AwaitingChallengePublication { .. }
@@ -747,13 +822,9 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 ) => None,
                 _ => {
                     let request = self
-                        .store
-                        .await_device_join_transport_artifact::<DeviceProviderAccessRequest>(
-                            bundle, roles, timing,
-                        )
+                        .await_artifact::<DeviceProviderAccessRequest>(timing)
                         .await?;
-                    self.approve_access_request(roles, &bundle.offer, &request, policy)
-                        .await?;
+                    self.approve_access_request(&request, policy).await?;
                     Some(
                         self.store
                             .authorize_device_provider_access(request, access_administrator)
@@ -762,18 +833,15 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 }
             };
             if let Some(approval) = approval {
-                self.store
-                    .publish_device_join_transport_artifact(
-                        bundle,
-                        roles,
-                        &DeviceJoinAction::TransferProviderAdmissionApproval(approval),
-                    )
-                    .await?;
+                self.publish(DeviceJoinAction::TransferProviderAdmissionApproval(
+                    approval,
+                ))
+                .await?;
             }
         }
 
         if roles.owner {
-            let provisional = match self.owner_status(attempt_id).await? {
+            let provisional = match self.owner_status().await? {
                 Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
                     Some(bootstrap)
                 }
@@ -788,10 +856,7 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 ),
                 _ => {
                     let request = self
-                        .store
-                        .await_device_join_transport_artifact::<DeviceRegistrationRequest>(
-                            bundle, roles, timing,
-                        )
+                        .await_artifact::<DeviceRegistrationRequest>(timing)
                         .await?;
                     Some(
                         self.store
@@ -801,18 +866,13 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 }
             };
             if let Some(provisional) = provisional {
-                self.store
-                    .publish_device_join_transport_artifact(
-                        bundle,
-                        roles,
-                        &DeviceJoinAction::TransferProvisionalBootstrap(provisional),
-                    )
+                self.publish(DeviceJoinAction::TransferProvisionalBootstrap(provisional))
                     .await?;
             }
         }
 
         if roles.provider_administrator {
-            let ready = match self.admin_status(attempt_id).await? {
+            let ready = match self.admin_status().await? {
                 Some(DeviceJoinStatus::AwaitingReadiness { bootstrap }) => Some(bootstrap),
                 Some(
                     DeviceJoinStatus::AwaitingProviderCompletion { .. }
@@ -825,10 +885,7 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 ),
                 _ => {
                     let provisional = self
-                        .store
-                        .await_device_join_transport_artifact::<ProvisionalDeviceBootstrap>(
-                            bundle, roles, timing,
-                        )
+                        .await_artifact::<ProvisionalDeviceBootstrap>(timing)
                         .await?;
                     Some(
                         self.store
@@ -838,16 +895,11 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 }
             };
             if let Some(ready) = ready {
-                self.store
-                    .publish_device_join_transport_artifact(
-                        bundle,
-                        roles,
-                        &DeviceJoinAction::TransferProviderReadyBootstrap(ready),
-                    )
+                self.publish(DeviceJoinAction::TransferProviderReadyBootstrap(ready))
                     .await?;
             }
 
-            let completion = match self.admin_status(attempt_id).await? {
+            let completion = match self.admin_status().await? {
                 Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
                 Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
                     self.store
@@ -855,121 +907,52 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                         .await?
                 }
                 _ => {
-                    let readiness = self
-                        .store
-                        .await_device_join_transport_artifact::<DeviceJoinReadiness>(
-                            bundle, roles, timing,
-                        )
-                        .await?;
+                    let readiness = self.await_artifact::<DeviceJoinReadiness>(timing).await?;
                     self.store
                         .complete_device_provider_admission(readiness)
                         .await?
                 }
             };
-            self.store
-                .publish_device_join_transport_artifact(
-                    bundle,
-                    roles,
-                    &DeviceJoinAction::TransferProviderAdmissionCompletion(completion),
-                )
-                .await?;
+            self.publish(DeviceJoinAction::TransferProviderAdmissionCompletion(
+                completion,
+            ))
+            .await?;
         }
 
         if !roles.owner {
             return Ok(DeviceJoinDriveOutcome::Activated(
-                self.store
-                    .await_device_join_transport_artifact::<DeviceJoinActivation>(
-                        bundle, roles, timing,
-                    )
-                    .await?,
+                self.await_artifact::<DeviceJoinActivation>(timing).await?,
             ));
         }
 
-        let activation = match self.owner_status(attempt_id).await? {
+        let activation = match self.owner_status().await? {
             Some(DeviceJoinStatus::AwaitingCompletion { activation }) => activation,
             Some(DeviceJoinStatus::AwaitingActivation { completion }) => {
                 self.store.finalize_device_join(completion).await?
             }
             _ => {
                 let completion = self
-                    .store
-                    .await_device_join_transport_artifact::<DeviceProviderAdmissionCompletion>(
-                        bundle, roles, timing,
-                    )
+                    .await_artifact::<DeviceProviderAdmissionCompletion>(timing)
                     .await?;
                 self.store.finalize_device_join(completion).await?
             }
         };
-        self.store
-            .publish_device_join_transport_artifact(
-                bundle,
-                roles,
-                &DeviceJoinAction::TransferActivation(activation.clone()),
-            )
+        self.publish(DeviceJoinAction::TransferActivation(activation.clone()))
             .await?;
         Ok(DeviceJoinDriveOutcome::Activated(activation))
     }
 
-    pub(crate) async fn abandon(
-        &self,
-        bundle: &DeviceJoinOfferBundle,
-    ) -> Result<DeviceJoinAbandonment, DeviceJoinTransportError> {
-        let roles = self.roles(&bundle.offer).await?;
-        let abandonment = self.store.abandon_device_join(bundle.offer.clone()).await?;
-        self.store
-            .publish_device_join_transport_artifact(
-                bundle,
-                roles,
-                &DeviceJoinAction::TransferAbandonment(abandonment.clone()),
-            )
-            .await?;
-        Ok(abandonment)
-    }
-
-    async fn admin_status(
-        &self,
-        attempt_id: DeviceJoinAttemptId,
-    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
-        self.store
-            .device_join_transport_status(attempt_id, DeviceJoinRole::ProviderAdministrator)
-            .await
-    }
-
-    async fn owner_status(
-        &self,
-        attempt_id: DeviceJoinAttemptId,
-    ) -> Result<Option<DeviceJoinStatus>, DeviceJoinTransportError> {
-        self.store
-            .device_join_transport_status(attempt_id, DeviceJoinRole::Owner)
-            .await
-    }
-
-    pub(crate) async fn cancel(
-        &self,
-        bundle: &DeviceJoinOfferBundle,
-        timing: DeviceJoinTransportTiming,
-    ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-        retrying_activation_conflicts(|| self.cancel_once(bundle, timing)).await
-    }
-
     async fn cancel_once(
         &self,
-        bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinTransportError> {
-        let roles = self.roles(&bundle.offer).await?;
-        let attempt_id = bundle.offer.attempt_id;
-
-        let receipt = match self.owner_status(attempt_id).await? {
+        let receipt = match self.owner_status().await? {
             // The unwind already reached its end; republish what it settled on.
             Some(DeviceJoinStatus::CleanupActivated { activation }) => {
-                self.store
-                    .publish_device_join_transport_artifact(
-                        bundle,
-                        roles,
-                        &DeviceJoinAction::TransferCleanupActivation(activation.clone()),
-                    )
-                    .await?;
+                self.publish(DeviceJoinAction::TransferCleanupActivation(
+                    activation.clone(),
+                ))
+                .await?;
                 self.store
                     .complete_owner_device_join_cleanup(activation.clone())
                     .await?;
@@ -977,26 +960,16 @@ impl<'store> StoreDeviceJoinTransport<'store> {
             }
             Some(DeviceJoinStatus::AwaitingCleanupActivation { receipt }) => receipt,
             _ => {
-                let cancellation = self.cancel_and_publish(bundle, roles, attempt_id).await?;
+                let cancellation = self.cancel_and_publish().await?;
                 let administrator_terminal = self
                     .store
                     .close_device_provider_admission(cancellation.clone())
                     .await?;
-                self.store
-                    .publish_device_join_transport_artifact(
-                        bundle,
-                        roles,
-                        &DeviceJoinAction::TransferProviderAdminTerminal(
-                            administrator_terminal.clone(),
-                        ),
-                    )
-                    .await?;
-                let joiner_terminal = self
-                    .store
-                    .await_device_join_transport_artifact::<JoinerJoinTerminal>(
-                        bundle, roles, timing,
-                    )
-                    .await?;
+                self.publish(DeviceJoinAction::TransferProviderAdminTerminal(
+                    administrator_terminal.clone(),
+                ))
+                .await?;
+                let joiner_terminal = self.await_artifact::<JoinerJoinTerminal>(timing).await?;
                 self.store
                     .prepare_device_join_cleanup(
                         cancellation,
@@ -1006,22 +979,14 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                     .await?
             }
         };
-        self.store
-            .publish_device_join_transport_artifact(
-                bundle,
-                roles,
-                &DeviceJoinAction::TransferCleanupReceipt(receipt.clone()),
-            )
+        self.publish(DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
             .await?;
 
         let activation = self.store.activate_device_join_cleanup(receipt).await?;
-        self.store
-            .publish_device_join_transport_artifact(
-                bundle,
-                roles,
-                &DeviceJoinAction::TransferCleanupActivation(activation.clone()),
-            )
-            .await?;
+        self.publish(DeviceJoinAction::TransferCleanupActivation(
+            activation.clone(),
+        ))
+        .await?;
         self.store
             .complete_owner_device_join_cleanup(activation.clone())
             .await?;
@@ -1036,13 +1001,9 @@ impl<'store> StoreDeviceJoinTransport<'store> {
     /// too, rather than from a caller: the journal is what decided which attempt
     /// this join activated, so a supplied reference could only agree with it or be
     /// wrong.
-    async fn cancel_and_publish(
-        &self,
-        bundle: &DeviceJoinOfferBundle,
-        roles: DeviceJoinRoles,
-        attempt_id: DeviceJoinAttemptId,
-    ) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
-        let cancellation = match self.owner_status(attempt_id).await? {
+    async fn cancel_and_publish(&self) -> Result<DeviceJoinCancellation, DeviceJoinTransportError> {
+        let attempt_id = self.attempt_id;
+        let cancellation = match self.owner_status().await? {
             Some(
                 DeviceJoinStatus::CleanupPending { cancellation, .. }
                 | DeviceJoinStatus::CleanupReceiptCreatePending { cancellation, .. },
@@ -1059,33 +1020,20 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 .into())
             }
         };
-        self.store
-            .publish_device_join_transport_artifact(
-                bundle,
-                roles,
-                &DeviceJoinAction::TransferCancellation(cancellation.clone()),
-            )
+        self.publish(DeviceJoinAction::TransferCancellation(cancellation.clone()))
             .await?;
         Ok(cancellation)
     }
 
-    async fn roles(
-        &self,
-        offer: &DeviceJoinOffer,
-    ) -> Result<DeviceJoinRoles, DeviceJoinTransportError> {
-        self.store.device_join_transport_roles(offer).await
-    }
-
     async fn approve_access_request(
         &self,
-        roles: DeviceJoinRoles,
-        offer: &DeviceJoinOffer,
         request: &DeviceProviderAccessRequest,
         policy: &DeviceJoinApprovalPolicy<'_>,
     ) -> Result<(), DeviceJoinTransportError> {
+        let offer = &self.bundle.offer;
         let approval = match policy {
             DeviceJoinApprovalPolicy::AutoApproveSelfIssued => {
-                if self.self_issued(roles, offer).await? && request.offer.as_ref() == offer {
+                if self.self_issued().await? && request.offer.as_ref() == offer {
                     DeviceJoinApproval::Approve
                 } else {
                     DeviceJoinApproval::Refuse
@@ -1107,15 +1055,11 @@ impl<'store> StoreDeviceJoinTransport<'store> {
     /// exists only because this device ran `begin_device_join` for it. A provider
     /// administrator that is a *different* device never satisfies this, so it
     /// prompts rather than admitting an offer it did not make.
-    async fn self_issued(
-        &self,
-        roles: DeviceJoinRoles,
-        offer: &DeviceJoinOffer,
-    ) -> Result<bool, DeviceJoinTransportError> {
-        if !roles.owner {
+    async fn self_issued(&self) -> Result<bool, DeviceJoinTransportError> {
+        if !self.roles.owner {
             return Ok(false);
         }
-        Ok(self.owner_status(offer.attempt_id).await?.is_some())
+        Ok(self.owner_status().await?.is_some())
     }
 }
 
