@@ -778,31 +778,25 @@ impl MembershipChain {
                 heads,
                 maximal_valid_branches,
                 ..
-            }) => {
-                let selected = resolutions
+            }) => (
+                heads
                     .iter()
-                    .map(|(_, resolution)| {
-                        let MembershipConflictSelection::RevocationBranch {
-                            heads: selected_heads,
-                        } = &resolution.selection
-                        else {
-                            return Err(MembershipError::InvalidConflictResolution);
-                        };
-                        maximal_valid_branches
-                            .iter()
-                            .find(|branch| branch.heads == *selected_heads)
-                            .map(|branch| branch.effective_frontier.as_slice())
-                            .ok_or(MembershipError::InvalidConflictResolution)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                (
-                    heads
+                    .map(|reference| reference.coord.clone())
+                    .collect(),
+                causal_grants::selected_branch_frontier(resolutions, |(_, resolution)| {
+                    let MembershipConflictSelection::RevocationBranch {
+                        heads: selected_heads,
+                    } = &resolution.selection
+                    else {
+                        return Err(MembershipError::InvalidConflictResolution);
+                    };
+                    maximal_valid_branches
                         .iter()
-                        .map(|reference| reference.coord.clone())
-                        .collect(),
-                    causal_grants::common_frontier(&selected),
-                )
-            }
+                        .find(|branch| branch.heads == *selected_heads)
+                        .map(|branch| branch.effective_frontier.as_slice())
+                        .ok_or(MembershipError::InvalidConflictResolution)
+                })?,
+            ),
             _ => return Err(MembershipError::InvalidConflictResolution),
         };
         let resolved = self.resolved_with(store_root_hash, resolutions)?;
@@ -837,20 +831,18 @@ impl MembershipChain {
             );
         }
         let included = causal_grants::history_closure(&self.entries, &effective_frontier);
-        let mut resolution_refs = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or_else(Vec::new, |checkpoint| checkpoint.resolutions.clone());
-        resolution_refs.extend(resolutions.iter().map(|(reference, _)| reference.clone()));
-        resolution_refs.sort();
-        resolution_refs.dedup();
         self.resolution_checkpoint = Some(MembershipResolutionCheckpoint {
             raw_heads,
             effective_frontier: effective_frontier.clone(),
             grants: grants.clone(),
             grant_anchors,
             included: included.clone(),
-            resolutions: resolution_refs,
+            resolutions: causal_grants::checkpoint_resolution_refs(
+                self.resolution_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.resolutions.as_slice()),
+                resolutions.iter().map(|(reference, _)| reference.clone()),
+            ),
             provider_admin: resolved.provider_admin.combined_state().clone(),
         });
         self.state = CausalState { grants };

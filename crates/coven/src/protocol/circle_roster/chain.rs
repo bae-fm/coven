@@ -190,12 +190,14 @@ impl CircleRosterChain {
             .collect::<Vec<_>>();
         let reduction = match &resolution_checkpoint {
             Some(checkpoint) => {
-                let seeds = causal_grants::checkpoint_seed_grants(&checkpoint.grants, |record| {
-                    causal_grants::CausalSeedGrant {
+                let seeds = causal_grants::map_checkpoint_grants(
+                    &checkpoint.grants,
+                    |record| causal_grants::CausalSeedGrant {
                         member_pubkey: record.member_pubkey.clone(),
                         assignment: record.role,
-                    }
-                });
+                    },
+                    || (),
+                );
                 causal_grants::reduce_from_checkpoint(
                     &normalized,
                     &checkpoint.raw_heads,
@@ -482,72 +484,48 @@ impl CircleRosterChain {
                 heads,
                 maximal_valid_branches,
                 ..
-            }) => {
-                let selected = resolutions
+            }) => (
+                heads
                     .iter()
-                    .map(|resolution| {
-                        maximal_valid_branches
-                            .iter()
-                            .find(|branch| branch.heads == resolution.resolver_branch_heads)
-                            .map(|branch| branch.effective_frontier.as_slice())
-                            .ok_or(CircleRosterError::InvalidConflictResolution)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                (
-                    heads
+                    .map(|reference| reference.coord.clone())
+                    .collect(),
+                causal_grants::selected_branch_frontier(resolutions, |resolution| {
+                    maximal_valid_branches
                         .iter()
-                        .map(|reference| reference.coord.clone())
-                        .collect(),
-                    causal_grants::common_frontier(&selected),
-                )
-            }
+                        .find(|branch| branch.heads == resolution.resolver_branch_heads)
+                        .map(|branch| branch.effective_frontier.as_slice())
+                        .ok_or(CircleRosterError::InvalidConflictResolution)
+                })?,
+            ),
             _ => return Err(CircleRosterError::InvalidConflictResolution),
         };
         let resolved = self.resolved_with(resolutions)?;
         let grants = resolved.grants.clone();
         let included = causal_grants::history_closure(&self.entries, &effective_frontier);
-        let mut resolution_refs = self
-            .resolution_checkpoint
-            .as_ref()
-            .map_or_else(Vec::new, |checkpoint| checkpoint.resolutions.clone());
-        resolution_refs.extend(
-            resolutions
-                .iter()
-                .map(CircleRosterConflictResolution::resolution_ref),
-        );
-        resolution_refs.sort();
-        resolution_refs.dedup();
         let checkpoint = CircleRosterResolutionCheckpoint {
             raw_heads,
             effective_frontier: effective_frontier.clone(),
             grants: grants.clone(),
             included: included.clone(),
-            resolutions: resolution_refs,
+            resolutions: causal_grants::checkpoint_resolution_refs(
+                self.resolution_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.resolutions.as_slice()),
+                resolutions
+                    .iter()
+                    .map(CircleRosterConflictResolution::resolution_ref),
+            ),
         };
         self.reduced = Some(causal_grants::ReducedGrants {
-            grants: grants
-                .iter()
-                .map(|(grant, state)| {
-                    let concrete = state.record();
-                    let record = causal_grants::GrantRecord {
-                        member_pubkey: concrete.member_pubkey.clone(),
-                        assignment: concrete.role,
-                        creation: causal_grants::CausalGrantCreation::Checkpoint,
-                    };
-                    (
-                        grant.clone(),
-                        match state {
-                            GrantState::Active { .. } => GrantState::Active { record },
-                            GrantState::Tombstoned { .. } => GrantState::Tombstoned {
-                                record,
-                                retirements: GrantRetirements::new(
-                                    causal_grants::CausalGrantRetirement::Checkpoint,
-                                ),
-                            },
-                        },
-                    )
-                })
-                .collect(),
+            grants: causal_grants::map_checkpoint_grants(
+                &grants,
+                |record| causal_grants::GrantRecord {
+                    member_pubkey: record.member_pubkey.clone(),
+                    assignment: record.role,
+                    creation: causal_grants::CausalGrantCreation::Checkpoint,
+                },
+                || causal_grants::CausalGrantRetirement::Checkpoint,
+            ),
             included: included.clone(),
         });
         self.status = CircleRosterStatus::Resolved(resolved);

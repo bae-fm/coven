@@ -198,15 +198,17 @@ pub(super) fn reduce_store_membership_from_checkpoint(
         .cloned()
         .collect::<Vec<_>>();
     let normalized = normalize_store_membership(&suffix);
-    let seeds = causal_grants::checkpoint_seed_grants(&checkpoint.grants, |record| {
-        causal_grants::CausalSeedGrant {
+    let seeds = causal_grants::map_checkpoint_grants(
+        &checkpoint.grants,
+        |record| causal_grants::CausalSeedGrant {
             member_pubkey: record.member_pubkey.clone(),
             assignment: StoreAssignment {
                 role: record.role.clone(),
                 provider_account_email: record.provider_account_email.clone(),
             },
-        }
-    });
+        },
+        || (),
+    );
     causal_grants::reduce_from_checkpoint(
         &normalized,
         &checkpoint.raw_heads,

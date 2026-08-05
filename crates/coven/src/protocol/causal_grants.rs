@@ -494,6 +494,25 @@ pub(crate) fn common_frontier<C: CausalCoordinate>(frontiers: &[&[C]]) -> Vec<C>
         .collect()
 }
 
+/// The frontier a resolved revocation cycle advances to: the coordinates every
+/// branch its resolvers selected has reached.
+///
+/// `branch_frontier` states how one domain's resolution names the branch it
+/// selected.
+pub(crate) fn selected_branch_frontier<'branch, C, R, E>(
+    resolutions: &[R],
+    branch_frontier: impl Fn(&R) -> Result<&'branch [C], E>,
+) -> Result<Vec<C>, E>
+where
+    C: CausalCoordinate + 'branch,
+{
+    let selected = resolutions
+        .iter()
+        .map(branch_frontier)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(common_frontier(&selected))
+}
+
 pub(crate) trait CausalAssignment: Clone + Debug + Eq {
     fn is_owner(&self) -> bool;
 }
@@ -528,32 +547,47 @@ pub(crate) fn entries_beyond_checkpoint<'a, E: CausalHistoryEntry>(
     })
 }
 
-/// Turn a checkpoint's own grant records into reducer seeds.
+/// Re-state a checkpoint's own grants under new record and retirement types.
 ///
-/// `seed` states how one domain's record names its member and assignment; the
-/// rest is the rule both callers must agree on — a grant the checkpoint had
-/// already retired seeds as retired, carrying the checkpoint itself as its
-/// evidence, so replaying a suffix can never resurrect it.
-pub(crate) fn checkpoint_seed_grants<R, T: Ord, A: CausalAssignment>(
-    grants: &BTreeMap<MembershipGrantId, GrantState<R, T>>,
-    seed: impl Fn(&R) -> CausalSeedGrant<A>,
-) -> BTreeMap<MembershipGrantId, GrantState<CausalSeedGrant<A>, ()>> {
+/// `record` states how one domain's record maps across; the rest is the rule
+/// every caller must agree on — a grant the checkpoint had already retired
+/// stays retired, carrying the checkpoint itself as its evidence, so replaying
+/// a suffix can never resurrect it.
+pub(crate) fn map_checkpoint_grants<R, T: Ord, MappedRecord, MappedRetirement: Ord>(
+    grants: &CausalGrants<R, T>,
+    record: impl Fn(&R) -> MappedRecord,
+    retirement: impl Fn() -> MappedRetirement,
+) -> CausalGrants<MappedRecord, MappedRetirement> {
     grants
         .iter()
         .map(|(grant, state)| {
-            let record = seed(state.record());
+            let record = record(state.record());
             (
                 grant.clone(),
                 match state {
                     GrantState::Active { .. } => GrantState::Active { record },
                     GrantState::Tombstoned { .. } => GrantState::Tombstoned {
                         record,
-                        retirements: GrantRetirements::new(()),
+                        retirements: GrantRetirements::new(retirement()),
                     },
                 },
             )
         })
         .collect()
+}
+
+/// The resolution references a new checkpoint carries: everything the previous
+/// checkpoint recorded plus the resolutions just applied, canonically ordered
+/// and each named once.
+pub(crate) fn checkpoint_resolution_refs<R: Clone + Ord>(
+    previous: Option<&[R]>,
+    applied: impl IntoIterator<Item = R>,
+) -> Vec<R> {
+    let mut references = previous.map_or_else(Vec::new, <[R]>::to_vec);
+    references.extend(applied);
+    references.sort();
+    references.dedup();
+    references
 }
 
 /// Every coordinate reachable from `frontier` by walking dependencies.

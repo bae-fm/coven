@@ -343,27 +343,15 @@ fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
     let mut remaining = (0..entries.len()).collect::<BTreeSet<_>>();
     let mut states = BTreeMap::<C, CausalState<C, A>>::new();
     let seed_state = CausalState {
-        grants: seed_grants
-            .iter()
-            .map(|(grant, state)| {
-                let record = state.record();
-                let record = GrantRecord {
-                    member_pubkey: record.member_pubkey.clone(),
-                    assignment: record.assignment.clone(),
-                    creation: CausalGrantCreation::Checkpoint,
-                };
-                (
-                    grant.clone(),
-                    match state {
-                        GrantState::Active { .. } => GrantState::Active { record },
-                        GrantState::Tombstoned { .. } => GrantState::Tombstoned {
-                            record,
-                            retirements: GrantRetirements::new(CausalGrantRetirement::Checkpoint),
-                        },
-                    },
-                )
-            })
-            .collect(),
+        grants: map_checkpoint_grants(
+            seed_grants,
+            |record| GrantRecord {
+                member_pubkey: record.member_pubkey.clone(),
+                assignment: record.assignment.clone(),
+                creation: CausalGrantCreation::Checkpoint,
+            },
+            || CausalGrantRetirement::Checkpoint,
+        ),
     };
     for head in effective_checkpoint_frontier {
         states.insert(head.clone(), seed_state.clone());
