@@ -8,6 +8,7 @@ use rusqlite::ffi;
 use rusqlite::Connection;
 use tracing::{debug, warn};
 
+use super::audience::live_row_audience;
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{
     foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates, TableGate,
@@ -90,10 +91,9 @@ unsafe fn gate_outbound_raw(
 
     // Every deleted row's old values, so a DELETE's keep test can resolve the gate
     // against the row's pre-deletion state (its terminus may be gone from the live
-    // db). Memo + cycle guard span the whole pass.
+    // db). The resolution's memo + cycle guard span the whole pass.
     let deleted = collect_deletes(changeset)?;
-    let mut shared_memo: HashMap<(String, String), bool> = HashMap::new();
-    let mut shared_visiting: HashSet<(String, String)> = HashSet::new();
+    let mut resolution = DeletedAudiences::default();
 
     // Pass 1: walk the captured changeset, keep gated-true rows, note flips.
     for_each_change(changeset, |iter, row| {
@@ -157,16 +157,16 @@ unsafe fn gate_outbound_raw(
         // keeps the live-state gate.
         let keep = if row.op == ffi::SQLITE_DELETE {
             match row.pk() {
-                Some(pk) => was_shared(
-                    conn,
-                    gates,
-                    &deleted,
-                    &row.table,
-                    pk,
-                    &mut shared_memo,
-                    &mut shared_visiting,
-                    scope,
-                )?,
+                Some(pk) => {
+                    deleted_row_audience(
+                        conn,
+                        gates,
+                        &deleted,
+                        &(row.table.clone(), pk.to_string()),
+                        &mut resolution,
+                        UnresolvedAudience::Local,
+                    )? != Audience::Local
+                }
                 None => {
                     debug!(table = %row.table, "gate: delete row has no primary key; treating as not shared");
                     false
@@ -720,192 +720,244 @@ pub(super) fn effective_gate(
         }
     }
 }
-/// Whether the row `(table, id)` was shared to peers *before* this changeset's
-/// deletions — the keep test for a DELETE. The gate evaluates "shared" against the
-/// live db, but a deleted row's gate terminus is gone from it (an album whose last
-/// release was deleted, a track whose release was deleted), so a live evaluation
-/// always reads "not shared" and the deletion is wrongly cut, stranding a phantom
-/// on every peer. This resolves the gate against the row's pre-deletion state: the
-/// changeset's old values for rows it deleted, falling back to the live db for
-/// rows the changeset left in place (a descendant deleted under a surviving root).
+/// What a resolution answers for a deleted row whose pre-deletion audience
+/// neither the changeset nor the live db establishes — a foreign-key cycle, a
+/// root the live db no longer holds, a parent nothing carries.
+#[derive(Clone, Copy)]
+pub(super) enum UnresolvedAudience {
+    /// Treat the row as never shared. The outbound gate cuts a deletion it
+    /// cannot prove was shared rather than sending peers a row they never had.
+    Local,
+    /// Refuse. Routing a deletion to the wrong audience strands or leaks it, so
+    /// an audience that cannot be established is an error.
+    Rejected,
+}
+
+/// The rows a pre-deletion resolution has already answered, plus the chain it is
+/// currently walking, so a shared parent is resolved once and a foreign-key
+/// cycle is caught rather than followed.
+#[derive(Default)]
+pub(super) struct DeletedAudiences {
+    resolved: HashMap<(String, String), Audience>,
+    visiting: HashSet<(String, String)>,
+}
+
+/// The audience the row `(table, id)` was in *before* this changeset deleted it.
 ///
-/// - A root was shared iff its old gate value is truthy.
-/// - A child was shared iff its FK parent (old FK for a deleted child, live FK
-///   otherwise) was shared — recursively to the gated terminus.
-/// - An ancestor was shared iff it still has a live kept child, or a kept child of
-///   it is being deleted in this same changeset. A never-shared ancestor (only
-///   unmanaged children) stays cut, so its DELETE never leaks old column values to
-///   peers that never had it.
+/// The gate resolves an audience against the live db, but a deleted row's
+/// terminus may be gone from it (an album whose last release was deleted, a
+/// track whose release was deleted), so a live resolution always reads Local:
+/// the deletion is wrongly cut and a phantom is stranded on every peer. This
+/// resolves each step against the row's pre-deletion state instead — the
+/// changeset's old values for rows it deletes, falling back to the live db for
+/// rows the changeset left in place (a descendant deleted under a surviving
+/// root).
 ///
-/// Memoized and cycle-guarded on `(table, id)`.
-unsafe fn was_shared(
+/// - A gated root was in Store iff its old gate value is truthy.
+/// - A scoped root was in the audience its old audience column names.
+/// - A child was in its foreign-key parent's audience — the old foreign key for
+///   a deleted child, the live one otherwise — recursively to the terminus.
+/// - An ancestor is in Store iff it still has a live kept child, or a kept child
+///   of it is being deleted in this same changeset. An ancestor that was never
+///   shared (only unmanaged children) stays Local, so its deletion never leaks
+///   old column values to peers that never had it.
+///
+/// The two callers hold opposite stances on a row they cannot establish, which
+/// `unresolved` names.
+pub(super) fn deleted_row_audience(
     conn: &Connection,
     gates: &Gates,
     deleted: &HashMap<(String, String), ChangeRow>,
-    table: &str,
-    id: &str,
-    memo: &mut HashMap<(String, String), bool>,
-    visiting: &mut HashSet<(String, String)>,
-    scope: OutboundScope,
-) -> Result<bool, GateError> {
-    let key = (table.to_string(), id.to_string());
-    if let Some(&v) = memo.get(&key) {
-        return Ok(v);
+    key: &(String, String),
+    resolution: &mut DeletedAudiences,
+    unresolved: UnresolvedAudience,
+) -> Result<Audience, GateError> {
+    let (table, id) = (key.0.as_str(), key.1.as_str());
+    if let Some(audience) = resolution.resolved.get(key) {
+        return Ok(audience.clone());
     }
-    if !visiting.insert(key.clone()) {
-        // A declared-FK cycle is not a path to a gated terminus. Defensive: the
-        // schema's gated FK graph is a DAG, so this should never fire.
-        debug!(
-            table,
-            id, "gate: FK cycle while resolving pre-delete share; treating as not shared"
-        );
-        return Ok(false);
-    }
-
-    let shared = match gates.tables.get(table) {
-        // Ungated tables always sync, so their deletes always propagate.
-        None => true,
-        // A truthy old gate value means the root was shared. A present-but-NULL
-        // gate is a genuine not-shared value (a gated-false root), not masked data;
-        // a gate column missing from the delete row's old image is malformed.
-        Some(TableGate::Root { gate_col }) => match deleted.get(&key) {
-            Some(row) => match row.old.get(gate_col.index) {
-                Some(Some(v)) => truthy(v),
-                Some(None) => false,
-                None => {
-                    warn!(table, id, "gate: deleted root's old gate value absent from the changeset row; treating as not shared");
-                    false
-                }
-            },
-            None => match query_truth(conn, table, &gate_col.name, id)? {
-                Some(t) => t,
-                None => {
-                    warn!(table, id, "gate: live root absent while resolving a descendant's pre-delete share; treating as not shared");
-                    false
-                }
-            },
-        },
-        Some(TableGate::ScopedRoot { audience_col }) => match scope {
-            #[cfg(test)]
-            OutboundScope::EntireGate => false,
-            OutboundScope::Store => {
-                scoped_root_was_store_shared(conn, deleted, &key, audience_col)?
+    if !resolution.visiting.insert(key.clone()) {
+        // The gated foreign-key graph is a DAG, so a cycle here is a malformed
+        // declaration rather than a shape the walk is meant to handle.
+        return match unresolved {
+            UnresolvedAudience::Local => {
+                debug!(
+                    table,
+                    id,
+                    "gate: FK cycle while resolving a pre-delete audience; treating as never shared"
+                );
+                Ok(Audience::Local)
             }
+            UnresolvedAudience::Rejected => Err(GateError::FkCycle(vec![key.0.clone()])),
+        };
+    }
+    let row = deleted.get(key);
+    let resolved =
+        deleted_row_audience_dispatch(conn, gates, deleted, key, row, resolution, unresolved);
+    resolution.visiting.remove(key);
+    let audience = resolved?;
+    resolution.resolved.insert(key.clone(), audience.clone());
+    Ok(audience)
+}
+
+fn deleted_row_audience_dispatch(
+    conn: &Connection,
+    gates: &Gates,
+    deleted: &HashMap<(String, String), ChangeRow>,
+    key: &(String, String),
+    row: Option<&ChangeRow>,
+    resolution: &mut DeletedAudiences,
+    unresolved: UnresolvedAudience,
+) -> Result<Audience, GateError> {
+    let (table, id) = (key.0.as_str(), key.1.as_str());
+    match gates.tables.get(table) {
+        // An ungated table syncs unconditionally, so its rows are in Store.
+        None | Some(TableGate::RemoteRoot) => Ok(Audience::Store),
+        Some(TableGate::Root { gate_col }) => {
+            let kept = match row {
+                Some(row) => match row.old.get(gate_col.index) {
+                    Some(value) => value.as_deref().is_some_and(truthy),
+                    None => {
+                        warn!(table, id, "gate: deleted root's old gate value absent from the changeset row; treating as never shared");
+                        false
+                    }
+                },
+                None => match query_truth(conn, table, &gate_col.name, id)? {
+                    Some(truth) => truth,
+                    None => {
+                        return unresolved.answer(
+                            table,
+                            id,
+                            "the live root is absent while resolving a descendant's pre-delete audience",
+                            GateError::MissingAudienceRow {
+                                table: key.0.clone(),
+                                row_id: key.1.clone(),
+                            },
+                        )
+                    }
+                },
+            };
+            Ok(if kept {
+                Audience::Store
+            } else {
+                Audience::Local
+            })
+        }
+        Some(TableGate::ScopedRoot { audience_col }) => match row {
+            Some(row) => {
+                let value = row
+                    .old
+                    .get(audience_col.index)
+                    .ok_or_else(|| GateError::MissingAudienceRow {
+                        table: key.0.clone(),
+                        row_id: key.1.clone(),
+                    })?
+                    .clone();
+                Audience::from_column(value.as_deref()).map_err(|error| {
+                    GateError::InvalidAudience {
+                        table: key.0.clone(),
+                        value,
+                        reason: error.to_string(),
+                    }
+                })
+            }
+            None => live_row_audience(conn, gates, table, id),
         },
-        Some(TableGate::RemoteRoot) => true,
         Some(TableGate::Child {
             fk_col,
             parent,
             parent_col,
         }) => {
-            let parent_key = match deleted.get(&key) {
+            let parent_key = match row {
                 Some(row) => row.fk_value(fk_col.index).map(str::to_string),
                 None => query_column_text(conn, table, &fk_col.name, id)?,
             };
-            let parent_row = match parent_key {
+            let parent_row = match &parent_key {
                 Some(parent_key) => {
-                    deleted_or_live_parent(conn, deleted, parent, parent_col, &parent_key)?
+                    deleted_or_live_parent(conn, deleted, parent, parent_col, parent_key)?
                 }
                 None => None,
             };
             match parent_row {
-                Some(parent_row) => was_shared(
+                Some(parent_row) => deleted_row_audience(
                     conn,
                     gates,
                     deleted,
-                    parent,
-                    parent_row.id(),
-                    memo,
-                    visiting,
-                    scope,
-                )?,
-                None => {
-                    warn!(table, id, "gate: child has no FK parent while resolving pre-delete share; treating as not shared");
-                    false
-                }
+                    &(parent.clone(), parent_row.id().to_string()),
+                    resolution,
+                    unresolved,
+                ),
+                None => unresolved.answer(
+                    table,
+                    id,
+                    "the child names no foreign-key parent",
+                    GateError::MissingAudienceParent {
+                        table: key.0.clone(),
+                        row_id: Some(key.1.clone()),
+                        parent: parent.clone(),
+                    },
+                ),
             }
         }
         Some(TableGate::Parent { children }) => {
-            // A live kept child keeps a surviving ancestor shared (a descendant was
-            // deleted but the ancestor and a sibling remain). For a deleted ancestor
-            // the cascade leaves no live child, so the kept child is found among the
-            // changeset's deletes instead.
+            // A live kept child keeps a surviving ancestor shared (a descendant
+            // was deleted but the ancestor and a sibling remain). For a deleted
+            // ancestor the cascade leaves no live child, so the kept child is
+            // found among the changeset's deletions instead.
             if gates.row_kept(conn, table, id)? {
-                true
-            } else {
-                let mut found = false;
-                'children: for (child_table, child_fk_col, parent_col) in children {
-                    let parent_key = deleted
-                        .get(&key)
-                        .and_then(|row| row.old.get(parent_col.index))
-                        .and_then(|value| value.as_deref())
-                        .map(str::to_string)
-                        .or(query_column_text(conn, table, &parent_col.name, id)?);
-                    let Some(parent_key) = parent_key else {
+                return Ok(Audience::Store);
+            }
+            for (child_table, child_fk_col, parent_col) in children {
+                let parent_key = row
+                    .and_then(|row| row.old.get(parent_col.index))
+                    .and_then(|value| value.as_deref())
+                    .map(str::to_string)
+                    .or(query_column_text(conn, table, &parent_col.name, id)?);
+                let Some(parent_key) = parent_key else {
+                    continue;
+                };
+                for (child_key, child_row) in deleted {
+                    if &child_key.0 != child_table
+                        || child_row.fk_value(child_fk_col.index) != Some(parent_key.as_str())
+                    {
                         continue;
-                    };
-                    for ((dt, dpk), drow) in deleted {
-                        if dt == child_table
-                            && drow.fk_value(child_fk_col.index) == Some(parent_key.as_str())
-                            && was_shared(
-                                conn,
-                                gates,
-                                deleted,
-                                child_table,
-                                dpk,
-                                memo,
-                                visiting,
-                                scope,
-                            )?
-                        {
-                            found = true;
-                            break 'children;
-                        }
+                    }
+                    if deleted_row_audience(
+                        conn, gates, deleted, child_key, resolution, unresolved,
+                    )? != Audience::Local
+                    {
+                        return Ok(Audience::Store);
                     }
                 }
-                found
             }
+            Ok(Audience::Local)
         }
-    };
-
-    visiting.remove(&key);
-    memo.insert(key, shared);
-    Ok(shared)
+    }
 }
 
-fn scoped_root_was_store_shared(
-    conn: &Connection,
-    deleted: &HashMap<(String, String), ChangeRow>,
-    key: &(String, String),
-    audience_col: &GateColumn,
-) -> Result<bool, GateError> {
-    let value = if let Some(row) = deleted.get(key) {
-        row.old
-            .get(audience_col.index)
-            .ok_or_else(|| GateError::MissingAudienceRow {
-                table: key.0.clone(),
-                row_id: key.1.clone(),
-            })?
-            .clone()
-    } else {
-        let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1",
-            quote_ident(&audience_col.name),
-            quote_ident(&key.0),
-        );
-        query_row_optional(conn, &sql, [&key.1], |row| row.get::<_, Option<String>>(0))?
-            .ok_or_else(|| GateError::MissingAudienceRow {
-                table: key.0.clone(),
-                row_id: key.1.clone(),
-            })?
-    };
-    let audience =
-        Audience::from_column(value.as_deref()).map_err(|error| GateError::InvalidAudience {
-            table: key.0.clone(),
-            value,
-            reason: error.to_string(),
-        })?;
-    Ok(audience != Audience::Local)
+impl UnresolvedAudience {
+    /// The audience an unestablished row takes, or `refusal` when the caller
+    /// refuses to guess.
+    fn answer(
+        self,
+        table: &str,
+        id: &str,
+        reason: &str,
+        refusal: GateError,
+    ) -> Result<Audience, GateError> {
+        match self {
+            Self::Local => {
+                warn!(
+                    table,
+                    id,
+                    reason,
+                    "gate: cannot establish a pre-delete audience; treating as never shared"
+                );
+                Ok(Audience::Local)
+            }
+            Self::Rejected => Err(refusal),
+        }
+    }
 }
 
 /// The flipped-root key this row belongs to (for re-emit scoping): the

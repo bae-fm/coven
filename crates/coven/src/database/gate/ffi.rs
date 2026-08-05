@@ -181,10 +181,9 @@ pub(super) unsafe fn for_each_change(
 }
 
 /// Every DELETE in the changeset, keyed by `(table, primary key)`, holding the
-/// row's old column values. `was_shared` (in the outbound pass) reads these to
-/// resolve a deleted row's
-/// pre-deletion gate state — its gate terminus is gone from the live db, so the
-/// old values in the changeset are the only record that it was shared.
+/// row's old column values. `deleted_row_audience` reads these to resolve a
+/// deleted row's pre-deletion audience — its gate terminus is gone from the live
+/// db, so the old values in the changeset are the only record of what it was.
 pub(super) unsafe fn collect_deletes(
     changeset: &[u8],
 ) -> Result<HashMap<(String, String), ChangeRow>, GateError> {

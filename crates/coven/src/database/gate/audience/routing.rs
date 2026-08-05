@@ -7,83 +7,22 @@ pub(super) fn captured_deleted_audiences(
     gates: &Gates,
 ) -> Result<BTreeMap<(String, String), Audience>, GateError> {
     let mut audiences = BTreeMap::new();
+    let mut resolution = DeletedAudiences::default();
     for key in deleted
         .keys()
         .filter(|(table, _)| gates.tables.contains_key(table))
     {
-        let audience = resolve_deleted_audience(conn, gates, deleted, key, &mut HashSet::new())?;
+        let audience = deleted_row_audience(
+            conn,
+            gates,
+            deleted,
+            key,
+            &mut resolution,
+            UnresolvedAudience::Rejected,
+        )?;
         audiences.insert(key.clone(), audience);
     }
     Ok(audiences)
-}
-
-pub(super) fn resolve_deleted_audience(
-    conn: &Connection,
-    gates: &Gates,
-    deleted: &HashMap<(String, String), ChangeRow>,
-    key: &(String, String),
-    seen: &mut HashSet<(String, String)>,
-) -> Result<Audience, GateError> {
-    if !seen.insert(key.clone()) {
-        return Err(GateError::FkCycle(vec![key.0.clone()]));
-    }
-    let row = deleted
-        .get(key)
-        .ok_or_else(|| GateError::MissingAudienceRow {
-            table: key.0.clone(),
-            row_id: key.1.clone(),
-        })?;
-    let resolved = match gates.tables.get(&key.0) {
-        Some(TableGate::ScopedRoot { audience_col }) => {
-            let audience = row.old_value(audience_col.index).unwrap_or(None);
-            Audience::from_column(audience).map_err(|error| GateError::InvalidAudience {
-                table: key.0.clone(),
-                value: audience.map(str::to_string),
-                reason: error.to_string(),
-            })
-        }
-        Some(TableGate::Root { gate_col }) => {
-            let kept = row.old_value(gate_col.index).flatten().is_some_and(truthy);
-            Ok(if kept {
-                Audience::Store
-            } else {
-                Audience::Local
-            })
-        }
-        Some(TableGate::RemoteRoot) | Some(TableGate::Parent { .. }) => Ok(Audience::Store),
-        Some(TableGate::Child {
-            fk_col,
-            parent,
-            parent_col,
-        }) => {
-            let parent_key = row.old_value(fk_col.index).flatten().ok_or_else(|| {
-                GateError::MissingAudienceParent {
-                    table: key.0.clone(),
-                    row_id: Some(key.1.clone()),
-                    parent: parent.clone(),
-                }
-            })?;
-            match deleted_or_live_parent(conn, deleted, parent, parent_col, parent_key)? {
-                Some(DeletedParent::Deleted(parent_key)) => {
-                    resolve_deleted_audience(conn, gates, deleted, &parent_key, seen)
-                }
-                Some(DeletedParent::Live(parent_id)) => {
-                    live_row_audience(conn, gates, parent, &parent_id)
-                }
-                None => Err(GateError::MissingAudienceParent {
-                    table: key.0.clone(),
-                    row_id: Some(key.1.clone()),
-                    parent: parent.clone(),
-                }),
-            }
-        }
-        _ => Err(GateError::MissingAudienceRow {
-            table: key.0.clone(),
-            row_id: key.1.clone(),
-        }),
-    };
-    seen.remove(key);
-    resolved
 }
 
 pub(crate) fn capture_routing_changes(
