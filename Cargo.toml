@@ -18,6 +18,10 @@ dead_code = "deny"
 too_many_arguments = "allow"
 new_without_default = "allow"
 large_enum_variant = "allow"
+# `signed` is this crate's constructor vocabulary for signature-carrying
+# artifacts; the lint only fires because those constructors now live on
+# aliases of the `Signed` envelope type.
+self_named_constructors = "allow"
 
 [profile.dev]
 incremental = true
