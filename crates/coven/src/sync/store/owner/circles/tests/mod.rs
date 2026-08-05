@@ -127,6 +127,28 @@ fn promote_store_member_access_without_adding_to_circle_roster(
     }
 }
 
+/// Publishes the owner device's Circle epoch-close response and runs the cycle
+/// that activates the close outcome — the pair every epoch-close case drives
+/// after the operation that opened the close.
+async fn finalize_circle_epoch_close(
+    store: &TestStore,
+    db: &Database,
+    signer: &UserKeypair,
+    components: &crate::sync::cycle::SyncComponents,
+) {
+    store
+        .bind_device(db, signer)
+        .await
+        .expect("bind Circle test Store")
+        .publish_circle_epoch_close_response()
+        .await
+        .expect("publish local Circle epoch-close response");
+    components
+        .run_cycle(&crate::clock::SystemClock, None, None)
+        .await
+        .expect("activate the Circle epoch-close outcome");
+}
+
 fn draft_from_transition(creation: &PreparedCircleTransition) -> CircleTransitionDraft {
     let roster = creation.policy_objects.roster.as_ref().map_or(
         CircleRosterDraftPolicy::Inherited,

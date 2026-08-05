@@ -236,6 +236,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
+        "CircleWithOneMember",
+        "build",
+    ),
+    (
+        "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
         "ActiveMemberCircleSnapshot",
         "build",
     ),
