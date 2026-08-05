@@ -43,16 +43,15 @@ use crate::storage::cloud::CloudHome;
 use crate::storage::CloudCipher;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
-use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_dir::StoreDir;
 use crate::store_dir::StoreOpenGuard;
+use crate::store_foundation::StoreFoundation;
 use crate::store_joining::StoreJoining;
 use crate::store_membership::StoreMembership;
 use crate::store_recovery::StoreRecovery;
 use crate::store_rows::StoreRows;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
-use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::{BlobCacheError, BlobStream};
 use tokio::sync::watch;
@@ -154,32 +153,26 @@ impl CovenHandle {
         open_guard: Arc<StoreOpenGuard>,
         blob_chunking: crate::storage::BlobChunking,
     ) -> Self {
-        let database = StoreDatabase::from_database(db);
-        let read_database = StoreDatabase::from_database(read_db);
-        let cloud_homes =
-            crate::storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
-        let security = StoreSecurity::new(
-            key_service.clone(),
-            key_custody.clone(),
-            identity_custody.clone(),
-        );
-        let cloud_storage = StoreCloudStorage::new(
-            security.clone(),
-            cloud_homes,
+        let StoreFoundation {
+            database,
+            security,
+            cloud_storage,
+            local_blob_access,
+            blob_access,
+        } = StoreFoundation::new(
+            db,
+            &store_dir,
+            config_provider.clone(),
+            key_service,
+            key_custody,
+            identity_custody,
+            oauth_clients,
             clock.clone(),
-            cloudkit_ops.clone(),
+            cloudkit_ops,
             blob_chunking,
         );
-        let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
-        let local_blob_access =
-            LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), blob_cache.clone());
+        let read_database = StoreDatabase::from_database(read_db);
         let local_blob_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
-        let blob_storage = crate::store_blobs::StoreBlobAccess::new(
-            database.clone(),
-            config_provider.clone(),
-            cloud_storage.clone(),
-            local_blob_access.clone(),
-        );
         let sync = StoreSync::new(
             config_provider,
             security.clone(),
@@ -190,7 +183,7 @@ impl CovenHandle {
             open_guard,
             cloud_storage,
             local_blob_access.clone(),
-            blob_storage.clone(),
+            blob_access.clone(),
             local_blob_transitions,
         );
         let rows = StoreRows::new(
@@ -199,7 +192,7 @@ impl CovenHandle {
             security.clone(),
             sync.clone(),
         );
-        let blobs = StoreBlobs::new(database.clone(), blob_storage, local_blob_access);
+        let blobs = StoreBlobs::new(database.clone(), blob_access, local_blob_access);
         let membership = StoreMembership::new(sync.clone());
         let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
         let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());

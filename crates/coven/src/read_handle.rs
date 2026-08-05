@@ -28,13 +28,11 @@ use crate::database::StoreDatabase;
 use crate::encryption::SealError;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::protocol::blob::RowBlobRef;
-use crate::read_store_rows::ReadStoreRows;
-use crate::store_blobs::{ReadStoreBlobs, StoreBlobAccess};
-use crate::store_cloud_storage::StoreCloudStorage;
+use crate::store_blobs::StoreBlobs;
 use crate::store_dir::StoreDir;
+use crate::store_foundation::StoreFoundation;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
-use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use crate::sync::{BlobCacheError, BlobStream};
 
 /// A read-only handle over one coven store, for a same-store secondary reader.
@@ -58,8 +56,8 @@ use crate::sync::{BlobCacheError, BlobStream};
 /// home-less full handle does — there is no sync loop to reuse.
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    rows: ReadStoreRows,
-    blobs: ReadStoreBlobs,
+    database: StoreDatabase,
+    blobs: StoreBlobs,
     security: StoreSecurity,
 }
 
@@ -77,30 +75,27 @@ impl CovenReadHandle {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         blob_chunking: crate::storage::BlobChunking,
     ) -> Self {
-        let database = StoreDatabase::from_database(db);
-        let cloud_homes =
-            crate::storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
-        let security = StoreSecurity::new(key_service, key_custody, identity_custody);
-        let cloud_storage = StoreCloudStorage::new(
-            security.clone(),
-            cloud_homes,
+        let StoreFoundation {
+            database,
+            security,
+            local_blob_access,
+            blob_access,
+            ..
+        } = StoreFoundation::new(
+            db,
+            &store_dir,
+            config_provider,
+            key_service,
+            key_custody,
+            identity_custody,
+            oauth_clients,
             clock,
             cloudkit_ops,
             blob_chunking,
         );
-        let rows = ReadStoreRows::new(database.clone());
-        let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
-        let local_blob_access =
-            LocalStoreBlobAccess::new(database.clone(), store_dir, blob_cache.clone());
-        let blob_storage = StoreBlobAccess::new(
-            database.clone(),
-            config_provider,
-            cloud_storage,
-            local_blob_access,
-        );
-        let blobs = ReadStoreBlobs::new(database.clone(), blob_storage);
+        let blobs = StoreBlobs::new(database.clone(), blob_access, local_blob_access);
         Self {
-            rows,
+            database,
             blobs,
             security,
         }
@@ -119,7 +114,7 @@ impl CovenReadHandle {
             + 'static,
         R: Send + 'static,
     {
-        self.rows.read(f).await
+        crate::store_rows::read_rows(&self.database, f).await
     }
 
     /// Capture the exact current blob-bearing row version from this reader's

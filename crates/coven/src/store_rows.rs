@@ -6,6 +6,20 @@ use crate::store_security::StoreSecurity;
 use crate::store_sync::StoreSync;
 use crate::{CovenError, CovenResult};
 
+/// Run a host read on `database`'s retained read connection.
+///
+/// The connection's own failure to carry the read out and the read's own
+/// failure are separate results; flattening them is the only thing this adds,
+/// and it is the same for every reader. Both the full handle's rows owner and
+/// the read-only handle call it, so a read means one thing across both.
+pub(crate) async fn read_rows<F, R>(database: &StoreDatabase, read: F) -> CovenResult<R>
+where
+    F: for<'connection> FnOnce(SqlReadContext<'connection>) -> CovenResult<R> + Send + 'static,
+    R: Send + 'static,
+{
+    database.read(read).await.map_err(CovenError::from)?
+}
+
 #[derive(Clone)]
 pub(crate) struct StoreRows {
     writes: StoreRowWrites,
@@ -45,10 +59,7 @@ impl StoreRows {
         F: for<'connection> FnOnce(SqlReadContext<'connection>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.read_database
-            .read(read)
-            .await
-            .map_err(CovenError::from)?
+        read_rows(&self.read_database, read).await
     }
 
     pub(crate) async fn write<F, S, R>(&self, build: F, sql: S) -> CovenResult<WriteReceipt<R>>

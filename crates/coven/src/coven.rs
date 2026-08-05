@@ -279,9 +279,8 @@ impl CovenBuilder {
     /// [`CovenHandle::master_key_fingerprint`], and similar).
     pub fn open(self) -> CovenResult<CovenHandle> {
         let config = self.config.current();
-        let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
+        let tables = validated_synced_tables(&config, self.synced_tables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
-        validate_storage_scope(&config, &tables)?;
         if self.blob_tombstone_grace <= chrono::Duration::zero() {
             return Err(CovenError::InvalidBlobTombstoneGrace);
         }
@@ -318,9 +317,8 @@ impl CovenBuilder {
             self.clock.clone(),
             &migrations,
         )?;
-        let key_service = StoreKeys::bind(config.store_id.clone());
-        let key_custody = self.key_custody.resolve(&key_service, &store_dir);
-        let identity_custody = self.identity_custody.resolve(&key_service, &store_dir);
+        let (key_service, key_custody, identity_custody) =
+            resolve_custody(&config, self.key_custody, self.identity_custody);
         Ok(CovenHandle::new(
             db,
             read_db,
@@ -359,9 +357,8 @@ impl CovenBuilder {
     /// synced state.
     pub fn open_read_only(self) -> CovenResult<crate::read_handle::CovenReadHandle> {
         let config = self.config.current();
-        let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
+        let tables = validated_synced_tables(&config, self.synced_tables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
-        validate_storage_scope(&config, &tables)?;
         let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
         let store_dir = config.store_dir.clone();
@@ -380,9 +377,8 @@ impl CovenBuilder {
             self.clock.clone(),
             &migrations,
         )?;
-        let key_service = StoreKeys::bind(config.store_id.clone());
-        let key_custody = self.key_custody.resolve(&key_service, &store_dir);
-        let identity_custody = self.identity_custody.resolve(&key_service, &store_dir);
+        let (key_service, key_custody, identity_custody) =
+            resolve_custody(&config, self.key_custody, self.identity_custody);
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
             store_dir,
@@ -396,6 +392,36 @@ impl CovenBuilder {
             self.blob_chunking,
         ))
     }
+}
+
+/// The host's synced tables, refused when the store's storage mode cannot carry
+/// them. Both kinds of open check this the same way, so a read-only open never
+/// accepts a schema the writer would refuse.
+fn validated_synced_tables(
+    config: &Config,
+    tables: Option<Vec<SyncedTable>>,
+) -> CovenResult<Vec<SyncedTable>> {
+    let tables = tables.ok_or(CovenError::MissingSyncedTables)?;
+    validate_storage_scope(config, &tables)?;
+    Ok(tables)
+}
+
+/// Bind this store's key service and resolve the host's custody selections
+/// against it. A store's keys are the same keys whether or not the handle over
+/// them can write, so both kinds of open resolve them identically.
+fn resolve_custody(
+    config: &Config,
+    key_custody: KeyCustody,
+    identity_custody: IdentityCustody,
+) -> (
+    StoreKeys,
+    Arc<dyn crate::keys::MasterKeyCustody>,
+    Arc<dyn crate::keys::DeviceIdentityCustody>,
+) {
+    let key_service = StoreKeys::bind(config.store_id.clone());
+    let master = key_custody.resolve(&key_service, &config.store_dir);
+    let identity = identity_custody.resolve(&key_service, &config.store_dir);
+    (key_service, master, identity)
 }
 
 fn validate_storage_scope(config: &Config, tables: &[SyncedTable]) -> CovenResult<()> {

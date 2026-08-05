@@ -116,6 +116,13 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ("crates/coven/src/sync/store/owner.rs", "Store", "new"),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
     ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
+    // The owners a full handle and a read-only handle both hold. Both roots
+    // above delegate here so one store is never composed two ways.
+    (
+        "crates/coven/src/store_foundation.rs",
+        "StoreFoundation",
+        "new",
+    ),
     (
         "crates/coven/src/store_blobs.rs",
         "StoreBlobAccess",

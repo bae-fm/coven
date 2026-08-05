@@ -392,41 +392,6 @@ impl StoreBlobs {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ReadStoreBlobs {
-    database: StoreDatabase,
-    storage: StoreBlobAccess,
-}
-
-impl ReadStoreBlobs {
-    pub(crate) fn new(database: StoreDatabase, storage: StoreBlobAccess) -> Self {
-        Self { database, storage }
-    }
-
-    pub(crate) async fn row_blob_ref(
-        &self,
-        table: &str,
-        row_id: &str,
-    ) -> Result<RowBlobRef, crate::database::DbError> {
-        self.database.row_blob_ref(table, row_id).await
-    }
-
-    pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        self.storage.read(blob).await
-    }
-
-    pub(crate) async fn open_stream(
-        &self,
-        blob: &RowBlobRef,
-    ) -> Result<BlobStream, BlobCacheError> {
-        self.storage.open_stream(blob).await
-    }
-
-    pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
-        self.storage.all_pinned(blobs).await
-    }
-}
-
 #[async_trait::async_trait]
 impl crate::blob::transition::VerifiedLocalCopyStaging for StoreBlobAccess {
     async fn stage_verified_local_copy(
