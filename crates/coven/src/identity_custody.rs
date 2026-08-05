@@ -5,9 +5,9 @@
 //! the [`DeviceIdentityCustody`] trait object the identity-establishing call
 //! sites (create, join, restore) drive.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use crate::envelope::PassphraseVault;
+use crate::custody::preset::{self, CustodySecret, InMemoryCustody, PassphraseCustody};
 use crate::keys::{DeviceIdentityCustody, KeyError, StoreKeys, UserKeypair, SIGN_SECRETKEYBYTES};
 use crate::store_dir::StoreDir;
 
@@ -46,89 +46,61 @@ impl IdentityCustody {
         match self {
             IdentityCustody::Keyring => Arc::new(store_keys.clone()),
             IdentityCustody::Passphrase(passphrase) => {
-                Arc::new(PassphraseIdentityCustody::new(passphrase, store_dir))
+                Arc::new(PassphraseCustody::<UserKeypair>::new(passphrase, store_dir))
             }
-            IdentityCustody::InMemory(keypair) => Arc::new(InMemoryIdentityCustody::new(keypair)),
+            IdentityCustody::InMemory(keypair) => Arc::new(InMemoryCustody::new(keypair)),
             IdentityCustody::Custom(custody) => custody,
         }
     }
 }
 
 // =============================================================================
-// InMemory preset
+// The signing identity as a custody secret
 // =============================================================================
 
-/// Supplied for this session, never persisted by coven — the identity
-/// sibling of [`crate::custody::KeyCustody::InMemory`].
-struct InMemoryIdentityCustody {
-    keypair: RwLock<Option<UserKeypair>>,
-}
+impl CustodySecret for UserKeypair {
+    const FILE: &'static str = "identity.envelope";
 
-impl InMemoryIdentityCustody {
-    fn new(seed: UserKeypair) -> Self {
-        Self {
-            keypair: RwLock::new(Some(seed)),
-        }
-    }
-}
-
-impl DeviceIdentityCustody for InMemoryIdentityCustody {
-    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
-        Ok(self.keypair.read().unwrap().clone())
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_keypair_bytes().to_vec()
     }
 
-    fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
-        *self.keypair.write().unwrap() = Some(keypair.clone());
-        Ok(())
-    }
-
-    fn forget(&self) -> Result<(), KeyError> {
-        *self.keypair.write().unwrap() = None;
-        Ok(())
-    }
-}
-
-// =============================================================================
-// Passphrase preset
-// =============================================================================
-
-/// Argon2id over a [`Passphrase`] wraps this store's raw 64-byte signing
-/// keypair, via the shared [`PassphraseVault`] — the same envelope format
-/// [`crate::custody::KeyCustody::Passphrase`] uses for the master keyring,
-/// parameterized here by a different payload and a different file name
-/// (`identity.envelope`) in the same store directory.
-struct PassphraseIdentityCustody {
-    vault: PassphraseVault,
-}
-
-impl PassphraseIdentityCustody {
-    fn new(passphrase: Passphrase, store_dir: &StoreDir) -> Self {
-        Self {
-            vault: PassphraseVault::new(passphrase, store_dir.join("identity.envelope")),
-        }
-    }
-}
-
-impl DeviceIdentityCustody for PassphraseIdentityCustody {
-    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
-        let Some(plaintext) = self.vault.unlock()? else {
-            return Ok(None);
-        };
-        let len = plaintext.len();
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] = plaintext.try_into().map_err(|_| {
+    fn from_bytes(bytes: Vec<u8>) -> Result<Self, KeyError> {
+        let len = bytes.len();
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] = bytes.try_into().map_err(|_| {
             KeyError::Crypto(format!(
                 "decrypted device identity is {len} bytes, expected {SIGN_SECRETKEYBYTES}"
             ))
         })?;
-        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
+        UserKeypair::from_signing_key_bytes(&signing_key)
+    }
+}
+
+impl DeviceIdentityCustody for InMemoryCustody<UserKeypair> {
+    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
+        InMemoryCustody::unlock(self)
     }
 
     fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
-        self.vault.persist(&keypair.to_keypair_bytes())
+        InMemoryCustody::persist(self, keypair)
     }
 
     fn forget(&self) -> Result<(), KeyError> {
-        self.vault.forget()
+        InMemoryCustody::forget(self)
+    }
+}
+
+impl DeviceIdentityCustody for PassphraseCustody<UserKeypair> {
+    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
+        PassphraseCustody::unlock(self)
+    }
+
+    fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
+        PassphraseCustody::persist(self, keypair)
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        PassphraseCustody::forget(self)
     }
 }
 
@@ -145,9 +117,7 @@ pub fn rewrap_passphrase_identity_custody(
     old: Passphrase,
     new: &Passphrase,
 ) -> Result<(), KeyError> {
-    PassphraseIdentityCustody::new(old, store_dir)
-        .vault
-        .rewrap(new)
+    preset::rewrap::<UserKeypair>(store_dir, old, new)
 }
 
 #[cfg(test)]
@@ -223,7 +193,7 @@ mod tests {
     fn in_memory_preset_unlock_returns_the_seeded_keypair() {
         let seed = UserKeypair::generate();
         let expected = seed.public_key();
-        let custody = InMemoryIdentityCustody::new(seed);
+        let custody = InMemoryCustody::new(seed);
 
         let unlocked = custody
             .unlock()
@@ -234,7 +204,7 @@ mod tests {
 
     #[test]
     fn in_memory_preset_persist_replaces_and_forget_clears() {
-        let custody = InMemoryIdentityCustody::new(UserKeypair::generate());
+        let custody = InMemoryCustody::new(UserKeypair::generate());
 
         let rotated = UserKeypair::generate();
         custody.persist(&rotated).expect("persist");
@@ -254,7 +224,7 @@ mod tests {
     #[test]
     fn passphrase_preset_establish_then_unlock_round_trips() {
         let (_tmp, dir) = temp_store_dir();
-        let custody = PassphraseIdentityCustody::new(
+        let custody = PassphraseCustody::<UserKeypair>::new(
             Passphrase::new("correct horse battery staple".to_string()),
             &dir,
         );
@@ -273,12 +243,16 @@ mod tests {
     #[test]
     fn passphrase_preset_wrong_passphrase_is_err_not_none() {
         let (_tmp, dir) = temp_store_dir();
-        let writer =
-            PassphraseIdentityCustody::new(Passphrase::new("right passphrase".to_string()), &dir);
+        let writer = PassphraseCustody::<UserKeypair>::new(
+            Passphrase::new("right passphrase".to_string()),
+            &dir,
+        );
         writer.persist(&UserKeypair::generate()).expect("establish");
 
-        let reader =
-            PassphraseIdentityCustody::new(Passphrase::new("wrong passphrase".to_string()), &dir);
+        let reader = PassphraseCustody::<UserKeypair>::new(
+            Passphrase::new("wrong passphrase".to_string()),
+            &dir,
+        );
         match reader.unlock() {
             Err(error) => assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}"),
             Ok(_) => panic!("wrong passphrase must not unlock"),
@@ -291,7 +265,8 @@ mod tests {
     #[test]
     fn passphrase_preset_lives_inside_the_store_directory() {
         let (_tmp, dir) = temp_store_dir();
-        let custody = PassphraseIdentityCustody::new(Passphrase::new("unused".to_string()), &dir);
+        let custody =
+            PassphraseCustody::<UserKeypair>::new(Passphrase::new("unused".to_string()), &dir);
         custody.persist(&UserKeypair::generate()).expect("persist");
 
         let path = dir.join("identity.envelope");
@@ -325,7 +300,7 @@ mod tests {
     fn rewrap_passphrase_identity_custody_moves_the_identity_to_the_new_passphrase() {
         let (_tmp, dir) = temp_store_dir();
         let keypair = UserKeypair::generate();
-        PassphraseIdentityCustody::new(Passphrase::new("old".to_string()), &dir)
+        PassphraseCustody::<UserKeypair>::new(Passphrase::new("old".to_string()), &dir)
             .persist(&keypair)
             .expect("establish");
 
@@ -336,12 +311,14 @@ mod tests {
         )
         .expect("re-wrap under the new passphrase");
 
-        let with_old = PassphraseIdentityCustody::new(Passphrase::new("old".to_string()), &dir);
+        let with_old =
+            PassphraseCustody::<UserKeypair>::new(Passphrase::new("old".to_string()), &dir);
         assert!(
             with_old.unlock().is_err(),
             "the old passphrase must no longer unlock after a re-wrap",
         );
-        let with_new = PassphraseIdentityCustody::new(Passphrase::new("new".to_string()), &dir);
+        let with_new =
+            PassphraseCustody::<UserKeypair>::new(Passphrase::new("new".to_string()), &dir);
         assert_eq!(
             with_new
                 .unlock()
@@ -358,7 +335,7 @@ mod tests {
         std::fs::write(dir.join("identity.envelope"), V1_FIXTURE_ENVELOPE_JSON)
             .expect("write fixture envelope");
 
-        let custody = PassphraseIdentityCustody::new(
+        let custody = PassphraseCustody::<UserKeypair>::new(
             Passphrase::new(V1_FIXTURE_PASSPHRASE.to_string()),
             &dir,
         );

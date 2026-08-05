@@ -4,13 +4,15 @@
 //! [`KeyCustody::resolve`] turns it into the [`MasterKeyCustody`] trait object
 //! coven drives the rest of the sync engine through.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::encryption::MasterKeyring;
 pub use crate::envelope::Passphrase;
-use crate::envelope::PassphraseVault;
 use crate::keys::{KeyError, MasterKeyCustody, StoreKeys};
 use crate::store_dir::StoreDir;
+
+pub(crate) mod preset;
+use preset::{CustodySecret, InMemoryCustody, PassphraseCustody};
 
 /// How a store's master key is protected. The builder accepts this and never
 /// sees a cipher again — coven resolves the selection into a
@@ -39,9 +41,9 @@ impl KeyCustody {
     ) -> Arc<dyn MasterKeyCustody> {
         match self {
             KeyCustody::Keyring => Arc::new(KeyringCustody::new(store_keys.clone())),
-            KeyCustody::Passphrase(passphrase) => {
-                Arc::new(PassphraseCustody::new(passphrase, store_dir))
-            }
+            KeyCustody::Passphrase(passphrase) => Arc::new(
+                PassphraseCustody::<MasterKeyring>::new(passphrase, store_dir),
+            ),
             KeyCustody::InMemory(keyring) => Arc::new(InMemoryCustody::new(keyring)),
             KeyCustody::Custom(custody) => custody,
         }
@@ -79,75 +81,48 @@ impl MasterKeyCustody for KeyringCustody {
 }
 
 // =============================================================================
-// InMemory preset
+// The keyring as a custody secret
 // =============================================================================
 
-/// Supplied per session and never persisted by coven.
-struct InMemoryCustody {
-    keyring: RwLock<Option<MasterKeyring>>,
-}
+impl CustodySecret for MasterKeyring {
+    const FILE: &'static str = "master.keyring";
 
-impl InMemoryCustody {
-    fn new(seed: MasterKeyring) -> Self {
-        Self {
-            keyring: RwLock::new(Some(seed)),
-        }
-    }
-}
-
-impl MasterKeyCustody for InMemoryCustody {
-    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
-        Ok(self.keyring.read().unwrap().clone())
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_serialized().into_bytes()
     }
 
-    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
-        *self.keyring.write().unwrap() = Some(keyring.clone());
-        Ok(())
-    }
-
-    fn forget(&self) -> Result<(), KeyError> {
-        *self.keyring.write().unwrap() = None;
-        Ok(())
-    }
-}
-
-// =============================================================================
-// Passphrase preset
-// =============================================================================
-
-/// Argon2id over a [`Passphrase`] wraps the master keyring, via the shared
-/// [`PassphraseVault`] — the wrapped blob is a JSON envelope in a file under
-/// the store directory (`<store_dir>/master.keyring`), not a keyring entry.
-struct PassphraseCustody {
-    vault: PassphraseVault,
-}
-
-impl PassphraseCustody {
-    fn new(passphrase: Passphrase, store_dir: &StoreDir) -> Self {
-        Self {
-            vault: PassphraseVault::new(passphrase, store_dir.join("master.keyring")),
-        }
-    }
-}
-
-impl MasterKeyCustody for PassphraseCustody {
-    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
-        let Some(plaintext) = self.vault.unlock()? else {
-            return Ok(None);
-        };
-        let serialized = String::from_utf8(plaintext)
+    fn from_bytes(bytes: Vec<u8>) -> Result<Self, KeyError> {
+        let serialized = String::from_utf8(bytes)
             .map_err(|e| KeyError::Crypto(format!("decrypted master keyring is not UTF-8: {e}")))?;
-        MasterKeyring::from_serialized(&serialized)
-            .map(Some)
-            .map_err(|e| KeyError::Crypto(e.to_string()))
+        MasterKeyring::from_serialized(&serialized).map_err(|e| KeyError::Crypto(e.to_string()))
+    }
+}
+
+impl MasterKeyCustody for InMemoryCustody<MasterKeyring> {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        InMemoryCustody::unlock(self)
     }
 
     fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
-        self.vault.persist(keyring.to_serialized().as_bytes())
+        InMemoryCustody::persist(self, keyring)
     }
 
     fn forget(&self) -> Result<(), KeyError> {
-        self.vault.forget()
+        InMemoryCustody::forget(self)
+    }
+}
+
+impl MasterKeyCustody for PassphraseCustody<MasterKeyring> {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        PassphraseCustody::unlock(self)
+    }
+
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
+        PassphraseCustody::persist(self, keyring)
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        PassphraseCustody::forget(self)
     }
 }
 
@@ -163,7 +138,7 @@ pub fn rewrap_passphrase_custody(
     old: Passphrase,
     new: &Passphrase,
 ) -> Result<(), KeyError> {
-    PassphraseCustody::new(old, store_dir).vault.rewrap(new)
+    preset::rewrap::<MasterKeyring>(store_dir, old, new)
 }
 
 #[cfg(test)]
@@ -283,7 +258,7 @@ mod tests {
     #[test]
     fn passphrase_preset_establish_then_unlock_round_trips() {
         let (_tmp, dir) = temp_store_dir();
-        let custody = PassphraseCustody::new(
+        let custody = PassphraseCustody::<MasterKeyring>::new(
             Passphrase::new("correct horse battery staple".to_string()),
             &dir,
         );
@@ -302,12 +277,18 @@ mod tests {
     #[test]
     fn passphrase_preset_wrong_passphrase_is_err_not_none() {
         let (_tmp, dir) = temp_store_dir();
-        let writer = PassphraseCustody::new(Passphrase::new("right passphrase".to_string()), &dir);
+        let writer = PassphraseCustody::<MasterKeyring>::new(
+            Passphrase::new("right passphrase".to_string()),
+            &dir,
+        );
         writer
             .persist(&MasterKeyring::generate())
             .expect("establish");
 
-        let reader = PassphraseCustody::new(Passphrase::new("wrong passphrase".to_string()), &dir);
+        let reader = PassphraseCustody::<MasterKeyring>::new(
+            Passphrase::new("wrong passphrase".to_string()),
+            &dir,
+        );
         let error = reader
             .unlock()
             .expect_err("wrong passphrase must not unlock");
@@ -320,7 +301,8 @@ mod tests {
     #[test]
     fn passphrase_preset_missing_file_is_none() {
         let (_tmp, dir) = temp_store_dir();
-        let custody = PassphraseCustody::new(Passphrase::new("unused".to_string()), &dir);
+        let custody =
+            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("unused".to_string()), &dir);
         assert!(custody.unlock().expect("unlock with no file").is_none());
     }
 
@@ -350,7 +332,8 @@ mod tests {
     #[test]
     fn rewrap_passphrase_custody_moves_the_master_keyring_to_the_new_passphrase() {
         let (_tmp, dir) = temp_store_dir();
-        let established = PassphraseCustody::new(Passphrase::new("old".to_string()), &dir);
+        let established =
+            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("old".to_string()), &dir);
         let keyring = MasterKeyring::generate();
         established.persist(&keyring).expect("establish");
 
@@ -361,12 +344,14 @@ mod tests {
         )
         .expect("re-wrap under the new passphrase");
 
-        let with_old = PassphraseCustody::new(Passphrase::new("old".to_string()), &dir);
+        let with_old =
+            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("old".to_string()), &dir);
         assert!(
             with_old.unlock().is_err(),
             "the old passphrase must no longer unlock after a re-wrap",
         );
-        let with_new = PassphraseCustody::new(Passphrase::new("new".to_string()), &dir);
+        let with_new =
+            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("new".to_string()), &dir);
         assert_eq!(
             with_new
                 .unlock()
@@ -383,8 +368,10 @@ mod tests {
         std::fs::write(dir.join("master.keyring"), V1_FIXTURE_ENVELOPE_JSON)
             .expect("write fixture envelope");
 
-        let custody =
-            PassphraseCustody::new(Passphrase::new(V1_FIXTURE_PASSPHRASE.to_string()), &dir);
+        let custody = PassphraseCustody::<MasterKeyring>::new(
+            Passphrase::new(V1_FIXTURE_PASSPHRASE.to_string()),
+            &dir,
+        );
         let keyring = custody
             .unlock()
             .expect("the v1 fixture must still unlock")
