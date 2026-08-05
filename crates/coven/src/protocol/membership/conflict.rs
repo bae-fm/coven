@@ -484,10 +484,8 @@ pub(crate) fn resolve_store_membership_conflict(
             return Err(MembershipError::InvalidConflictResolution);
         }
     }
-    let mut members = BTreeSet::new();
-    if !causal_grants::active_grants(&grants).any(|(_, record)| record.role.is_owner())
-        || causal_grants::active_grants(&grants)
-            .any(|(_, record)| !members.insert(record.member_pubkey.clone()))
+    if !causal_grants::has_active_owner(&grants, |record| record.role.is_owner())
+        || causal_grants::has_concurrent_assignments(&grants, |record| &record.member_pubkey)
     {
         return Err(MembershipError::InvalidConflictResolution);
     }

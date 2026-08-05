@@ -712,20 +712,11 @@ fn revocation_cycle_conflict<C: CausalCoordinate, A: CausalAssignment>(
 fn has_concurrent_assignments<C: CausalCoordinate, A: CausalAssignment>(
     state: &CausalState<C, A>,
 ) -> bool {
-    let mut members = BTreeSet::new();
-    state.grants.values().any(|state| {
-        state
-            .active()
-            .is_some_and(|record| !members.insert(record.member_pubkey.clone()))
-    })
+    super::has_concurrent_assignments(&state.grants, |record| &record.member_pubkey)
 }
 
 fn has_owner<C: CausalCoordinate, A: CausalAssignment>(state: &CausalState<C, A>) -> bool {
-    state.grants.values().any(|state| {
-        state
-            .active()
-            .is_some_and(|record| record.assignment.is_owner())
-    })
+    super::has_active_owner(&state.grants, |record| record.assignment.is_owner())
 }
 
 fn cap_sources<C: CausalCoordinate, A: CausalAssignment>(

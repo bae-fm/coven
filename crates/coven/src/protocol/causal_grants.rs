@@ -175,6 +175,25 @@ pub(crate) fn active_grants<R, T: Ord>(
         .filter_map(|(grant, state)| state.active().map(|record| (grant, record)))
 }
 
+/// Some member holds an active Owner grant. Grant state that leaves no Owner
+/// can never be extended, so no reduction may settle on it.
+pub(crate) fn has_active_owner<R, T: Ord>(
+    grants: &CausalGrants<R, T>,
+    is_owner: impl Fn(&R) -> bool,
+) -> bool {
+    active_grants(grants).any(|(_, record)| is_owner(record))
+}
+
+/// Some member holds two active grants at once — the assignment conflict a
+/// reduction reports instead of picking one.
+pub(crate) fn has_concurrent_assignments<R, T: Ord>(
+    grants: &CausalGrants<R, T>,
+    member_pubkey: impl Fn(&R) -> &str,
+) -> bool {
+    let mut members = BTreeSet::new();
+    active_grants(grants).any(|(_, record)| !members.insert(member_pubkey(record).to_string()))
+}
+
 /// Merge one branch's grant state into a conflict result. A grant's record is
 /// immutable; divergent records are an invalid conflict, while retirement
 /// evidence accumulates across every selected branch.

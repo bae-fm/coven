@@ -25,10 +25,8 @@ pub(super) fn roster_authorizes_owner_grant(
 pub(super) fn roster_grants_are_valid(
     grants: &BTreeMap<MembershipGrantId, GrantState<CircleGrantRecord, CircleGrantRetirement>>,
 ) -> bool {
-    causal_grants::active_grants(grants)
-        .map(|(_, record)| record)
-        .any(|record| record.role == CircleRole::Owner)
-        && roster_members(grants).len() == causal_grants::active_grants(grants).count()
+    causal_grants::has_active_owner(grants, |record| record.role == CircleRole::Owner)
+        && !causal_grants::has_concurrent_assignments(grants, |record| &record.member_pubkey)
 }
 
 pub(super) fn circle_roster_state_hash(
