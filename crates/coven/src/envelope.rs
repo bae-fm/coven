@@ -278,16 +278,9 @@ impl PassphraseVault {
 /// unauthenticated (nothing has decrypted yet), so it is untrusted input that
 /// this module must not act on blindly.
 fn validate_envelope_header(envelope: &Envelope) -> Result<(), KeyError> {
-    if envelope.v < ENVELOPE_VERSION {
+    if envelope.v != ENVELOPE_VERSION {
         return Err(KeyError::Persistence(format!(
-            "passphrase envelope is v{}, older than this build's v{ENVELOPE_VERSION}; \
-             re-establish it under the current version",
-            envelope.v
-        )));
-    }
-    if envelope.v > ENVELOPE_VERSION {
-        return Err(KeyError::Persistence(format!(
-            "passphrase envelope is v{}, newer than this build's v{ENVELOPE_VERSION}; \
+            "passphrase envelope is v{}, not this build's v{ENVELOPE_VERSION}; \
              update to a build that understands it",
             envelope.v
         )));
@@ -627,9 +620,9 @@ mod tests {
         assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}");
     }
 
-    /// An envelope naming a version this build does not implement is
-    /// refused, both when it is older (this build no longer knows those
-    /// semantics) and when it is newer (this build doesn't know them yet).
+    /// An envelope naming any version other than this build's is refused —
+    /// the check is on the version being the one implemented, not on which
+    /// side of it the file falls.
     #[test]
     fn an_unknown_envelope_version_is_refused() {
         let (_tmp, vault) = temp_vault("passphrase");
