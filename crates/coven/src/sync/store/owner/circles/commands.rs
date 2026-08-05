@@ -225,7 +225,7 @@ impl<'store> StoreCircleCommands<'store> {
     }
 }
 
-pub(super) struct CircleRenameRequest {
+pub(crate) struct CircleRenameRequest {
     pub(super) circle_id: CircleId,
     pub(super) name: String,
     pub(super) metadata_stamp: String,
@@ -233,7 +233,7 @@ pub(super) struct CircleRenameRequest {
     pub(super) previous_control: CircleControlRef,
 }
 
-pub(super) struct CircleAddMemberRequest {
+pub(crate) struct CircleAddMemberRequest {
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) role: CircleRole,
@@ -243,7 +243,7 @@ pub(super) struct CircleAddMemberRequest {
     pub(super) roster_chain: CircleRosterChain,
 }
 
-pub(super) struct CircleRemoveMemberRequest {
+pub(crate) struct CircleRemoveMemberRequest {
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) current: CircleAuthoringState,
@@ -251,13 +251,13 @@ pub(super) struct CircleRemoveMemberRequest {
     pub(super) roster_chain: CircleRosterChain,
 }
 
-pub(super) struct CircleDeleteRequest {
+pub(crate) struct CircleDeleteRequest {
     pub(super) circle_id: CircleId,
     pub(super) current: CircleAuthoringState,
     pub(super) previous_control: CircleControlRef,
 }
 
-pub(super) struct CircleResolveControlRequest {
+pub(crate) struct CircleResolveControlRequest {
     pub(super) circle_id: CircleId,
     pub(super) chosen: CircleAuthoringState,
     pub(super) previous_control: CircleControlRef,
@@ -273,7 +273,7 @@ pub(super) struct CircleResolveControlRequest {
     pub(super) conflicting_branches: Vec<crate::protocol::circle::CircleControlCoord>,
 }
 
-pub(super) struct CircleResolveLosingBranch {
+pub(crate) struct CircleResolveLosingBranch {
     /// The losing branch's exact activation reference: its control head plus the
     /// full activation objects (metadata and roster head frontiers and their
     /// entries) the resolution covers.
@@ -283,7 +283,7 @@ pub(super) struct CircleResolveLosingBranch {
     pub(super) selected_metadata: crate::protocol::circle::CircleMetadata,
 }
 
-pub(super) struct CircleFinalizeEpochCloseRequest {
+pub(crate) struct CircleFinalizeEpochCloseRequest {
     pub(super) operation_id: crate::protocol::circle::CircleOperationId,
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
@@ -296,7 +296,7 @@ pub(super) struct CircleFinalizeEpochCloseRequest {
     pub(super) bootstrap: crate::sync::store::SnapshotCut,
 }
 
-pub(super) struct CircleCancelEpochCloseRequest {
+pub(crate) struct CircleCancelEpochCloseRequest {
     pub(super) operation_id: crate::protocol::circle::CircleOperationId,
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
@@ -304,7 +304,7 @@ pub(super) struct CircleCancelEpochCloseRequest {
     pub(super) previous_control: CircleControlRef,
 }
 
-pub(super) enum CircleOperationRequest {
+pub(crate) enum CircleOperationRequest {
     Create {
         name: String,
         metadata_stamp: String,
