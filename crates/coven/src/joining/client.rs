@@ -886,18 +886,10 @@ pub(crate) fn build_config(
         store_name.to_string(),
     );
 
-    match cipher {
-        CloudCipher::Encrypted(enc) => {
-            config.cloud_home.storage = HomeStorage::Opaque;
-            config.encryption_key_stored = true;
-            config.encryption_key_fingerprint = Some(enc.fingerprint());
-        }
-        CloudCipher::Plaintext => {
-            config.cloud_home.storage = HomeStorage::Browsable;
-            config.encryption_key_stored = false;
-            config.encryption_key_fingerprint = None;
-        }
-    }
+    config.cloud_home.storage = match cipher {
+        CloudCipher::Encrypted(_) => HomeStorage::Opaque,
+        CloudCipher::Plaintext => HomeStorage::Browsable,
+    };
 
     config.cloud_home.provider = Some(match join_info {
         CloudHomeJoinInfo::S3 { .. } => CloudProvider::S3,

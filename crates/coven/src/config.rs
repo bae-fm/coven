@@ -155,10 +155,6 @@ pub struct Config {
     pub device_id: String,
     pub store_dir: StoreDir,
     pub store_name: String,
-    /// Whether an encryption key is stored in the keyring (hint flag).
-    pub encryption_key_stored: bool,
-    /// SHA-256 fingerprint of the encryption key (detects wrong key without decryption).
-    pub encryption_key_fingerprint: Option<String>,
     /// Cloud home provider + its settings.
     pub cloud_home: CloudHomeConfig,
 }
@@ -176,8 +172,6 @@ impl Config {
             device_id,
             store_dir,
             store_name,
-            encryption_key_stored: false,
-            encryption_key_fingerprint: None,
             cloud_home: CloudHomeConfig::default(),
         }
     }
@@ -216,10 +210,6 @@ pub(crate) struct ConfigYaml {
     pub(crate) store_id: String,
     pub(crate) store_name: String,
     pub(crate) device_id: String,
-    #[serde(default)]
-    pub(crate) encryption_key_stored: bool,
-    #[serde(default)]
-    pub(crate) encryption_key_fingerprint: Option<String>,
     #[serde(default, flatten)]
     pub(crate) cloud_home: CloudHomeConfig,
 }
@@ -230,8 +220,6 @@ impl From<&Config> for ConfigYaml {
             store_id: config.store_id.clone(),
             store_name: config.store_name.clone(),
             device_id: config.device_id.clone(),
-            encryption_key_stored: config.encryption_key_stored,
-            encryption_key_fingerprint: config.encryption_key_fingerprint.clone(),
             cloud_home: config.cloud_home.clone(),
         }
     }
@@ -246,8 +234,6 @@ impl ConfigYaml {
             device_id: self.device_id,
             store_dir,
             store_name: self.store_name,
-            encryption_key_stored: self.encryption_key_stored,
-            encryption_key_fingerprint: self.encryption_key_fingerprint,
             cloud_home: self.cloud_home,
         }
     }
@@ -281,8 +267,6 @@ mod tests {
             store_dir.clone(),
             "My Store".to_string(),
         );
-        config.encryption_key_stored = true;
-        config.encryption_key_fingerprint = Some("abc123".to_string());
         config.cloud_home = CloudHomeConfig {
             provider: Some(CloudProvider::S3),
             s3_bucket: Some("bucket".to_string()),
@@ -339,8 +323,7 @@ mod tests {
         assert_eq!(loaded, config);
     }
 
-    /// A file that omits every field with a designed default
-    /// (`encryption_key_stored`, `encryption_key_fingerprint`, the flattened
+    /// A file that omits every field with a designed default (the flattened
     /// `cloud_home`) still loads — those absences are real inputs, not bugs.
     /// `storage` has no default (the host must pick opaque vs. browsable when
     /// it creates the home), so it is the one `cloud_home` field still spelled
@@ -360,8 +343,6 @@ mod tests {
         assert_eq!(loaded.store_id, "store-1");
         assert_eq!(loaded.store_name, "My Store");
         assert_eq!(loaded.device_id, "device-1");
-        assert!(!loaded.encryption_key_stored);
-        assert_eq!(loaded.encryption_key_fingerprint, None);
         assert_eq!(loaded.cloud_home, CloudHomeConfig::default());
         assert_eq!(loaded.store_dir, store_dir);
     }
