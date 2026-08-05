@@ -560,28 +560,8 @@ pub(super) fn validate_circle_control_refs(
 }
 
 impl StoreBatchCommit {
-    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
-        let fields = CommitSignedFields {
-            version: self.version,
-            store_root_hash: self.store_root_hash,
-            write_id: &self.write_id,
-            author_registration: &self.author_registration,
-            order: &self.order,
-            membership_state: &self.membership_state,
-            device_state: &self.device_state,
-            membership_authority: self.membership_authority.as_ref(),
-            candidate_objects: &self.candidate_objects,
-            body: &self.body,
-        };
-        domain_json(COMMIT_DOMAIN, &fields)
-    }
-
     pub fn commit_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StoreBatchCommit serialization cannot fail")
+        self.hash()
     }
 
     pub fn verify_at(
@@ -590,7 +570,7 @@ impl StoreBatchCommit {
         expected_coord: &StoreCommitCoord,
         author: &StoreDeviceRegistration,
     ) -> Result<(), StoreProtocolError> {
-        require_version(self.version)?;
+        self.require_version()?;
         crate::protocol::objects::verify_store_root(
             expected_store_root_hash,
             self.store_root_hash,
@@ -693,13 +673,7 @@ impl StoreBatchCommit {
             validate_membership_authority(authority)?;
         }
         validate_parsed_control(self, author)?;
-        if !keys::verify_signature_hex(
-            &author.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        self.verify_by(&author.device_signing_pubkey)?;
         Ok(())
     }
 

@@ -635,7 +635,7 @@ fn retained_device_operations_reopen_sources_and_derive_the_accepted_cut() {
     assert!(missing.verify_for(&fixture.root_ref, &commit).is_err());
 
     let mut other_registration = fixture.registration.clone();
-    other_registration.author_pubkey.push('0');
+    other_registration.body_mut().author_pubkey.push('0');
     let mut substituted = serde_json::to_value(&retained).expect("encode retained operations");
     substituted["outcomes"][0]["excluded"]["canonical_owner_registration"] =
         serde_json::to_value(other_registration.to_bytes()).expect("encode registration bytes");

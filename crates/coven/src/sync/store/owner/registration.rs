@@ -271,7 +271,7 @@ mod tests {
                 )
                 .expect("parse interrupted recovery registration");
                 let StoreDeviceRegistrationOrigin::Recovery { recovery_slot, .. } =
-                    registration.origin
+                    registration.origin.clone()
                 else {
                     panic!("interrupted registration is not a Recovery registration");
                 };
@@ -339,7 +339,7 @@ mod tests {
                 )
                 .expect("parse completed recovery registration");
                 let StoreDeviceRegistrationOrigin::Recovery { recovery_slot, .. } =
-                    registration.origin
+                    registration.origin.clone()
                 else {
                     panic!("completed registration is not a Recovery registration");
                 };

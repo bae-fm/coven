@@ -603,7 +603,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
         .expect("load published snapshot")
         .expect("published snapshot is recorded");
     let mut forged = meta;
-    let summary = &mut forged.history_summary;
+    let summary = &mut forged.body_mut().history_summary;
     let removal = summary
         .membership_proofs
         .iter()

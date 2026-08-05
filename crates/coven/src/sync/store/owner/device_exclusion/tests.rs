@@ -102,7 +102,7 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         .stage_acknowledgement(frontier, "2026-07-18T00:00:00Z".to_string())
         .await
         .expect("stage exclusion acknowledgement");
-    let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions;
+    let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions.clone();
     assert!(proposal_freezes.is_empty());
     assert_eq!(
         reopened_store
@@ -483,6 +483,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
                 .expect("stage pre-exclusion snapshot acknowledgement");
             let locator = acknowledgement
                 .snapshot
+                .clone()
                 .expect("acknowledgement selects the stable snapshot candidate");
             assert_eq!(
                 locator.author_registration,
@@ -1830,7 +1831,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             let mut mismatched_head: crate::protocol::store_commit::StoreDeviceHead =
                 serde_json::from_slice(&mismatched.canonical_semantic_bytes)
                     .expect("parse inert candidate head");
-            mismatched_head.commit.object = candidate_head.clone();
+            mismatched_head.body_mut().commit.object = candidate_head.clone();
             let mismatched_bytes = mismatched_head.to_bytes();
             let head_context = ProtocolObjectContext::signed_plaintext(
                 store.root.store_root_hash,

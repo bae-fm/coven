@@ -6,15 +6,14 @@ use super::operation_refs::{
     validate_device_registration_refs, validate_provider_access_refs,
 };
 use super::validation::{
-    require_version, validate_commit_order, validate_commit_predecessor_states,
-    validate_membership_authority, validate_operation_membership_authority,
+    validate_commit_order, validate_commit_predecessor_states, validate_membership_authority,
+    validate_operation_membership_authority,
 };
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreBatchCommit {
-    pub version: u32,
+pub struct StoreBatchCommitBody {
     pub store_root_hash: ObjectHash,
     pub write_id: WriteId,
     pub author_registration: StoreDeviceRegistrationRef,
@@ -24,28 +23,19 @@ pub struct StoreBatchCommit {
     pub membership_authority: Option<MembershipGrantCreationAuthority>,
     pub candidate_objects: CandidateObjectManifest,
     pub body: StoreCommitBody,
-    pub signature: String,
 }
+
+impl SignedBody for StoreBatchCommitBody {
+    const DOMAIN: &'static [u8] = COMMIT_DOMAIN;
+}
+
+pub(crate) type StoreBatchCommit = Signed<StoreBatchCommitBody>;
 
 mod authoring;
 mod validation;
 pub(super) use validation::candidate_manifest;
 #[cfg(test)]
 pub(super) use validation::validate_stream_activations;
-
-#[derive(Serialize)]
-struct CommitSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    write_id: &'a WriteId,
-    author_registration: &'a StoreDeviceRegistrationRef,
-    order: &'a StoreCommitOrder,
-    membership_state: &'a StoreMembershipStateRef,
-    device_state: &'a StoreDeviceStateRef,
-    membership_authority: Option<&'a MembershipGrantCreationAuthority>,
-    candidate_objects: &'a CandidateObjectManifest,
-    body: &'a StoreCommitBody,
-}
 
 impl StoreBatchCommit {
     pub(crate) fn verified_candidate_objects(

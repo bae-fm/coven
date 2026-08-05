@@ -266,7 +266,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(
             snapshot::select_maximal_store_snapshot(candidates).map(|snapshot| {
                 crate::protocol::store_commit::StoreSnapshotLocator {
-                    author_registration: snapshot.meta.author_registration,
+                    author_registration: snapshot.meta.author_registration.clone(),
                     snapshot: snapshot.reference,
                 }
             }),

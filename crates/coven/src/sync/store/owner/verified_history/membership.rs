@@ -232,7 +232,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         if let Some(owner) = owner_pubkey {
             if root_value.descriptor.founder_pubkey != owner {
                 return Err(AnchoredChainError::FounderMismatch {
-                    founder: Some(root_value.descriptor.founder_pubkey),
+                    founder: Some(root_value.descriptor.founder_pubkey.clone()),
                     owner: owner.to_string(),
                 });
             }

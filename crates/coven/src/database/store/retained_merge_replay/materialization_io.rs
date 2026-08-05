@@ -128,7 +128,9 @@ impl StoreDatabase {
         let local_identity = match local_activated_registration_ref_on(conn)? {
             Some(reference) => Some(match introduced_registration(&reference)? {
                 Some(registration) => registration.author_pubkey.clone(),
-                None => load_activated_registration_on(conn, root, &reference)?.author_pubkey,
+                None => load_activated_registration_on(conn, root, &reference)?
+                    .author_pubkey
+                    .clone(),
             }),
             None => None,
         };
@@ -521,7 +523,7 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint has genesis replay authority".to_string(),
                 ));
             };
-            let summary = authority.metadata.history_summary;
+            let summary = authority.metadata.history_summary.clone();
             summary
                 .validate_snapshot_baseline()
                 .map_err(|error| DbError::Message(format!("snapshot Merge checkpoint: {error}")))?;

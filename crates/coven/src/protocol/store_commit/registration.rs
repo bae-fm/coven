@@ -1,4 +1,3 @@
-use super::validation::require_version;
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,8 +10,7 @@ pub(crate) struct DeviceRecoveryReadiness {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct OwnerRecoveryNode {
-    pub version: u32,
+pub(crate) struct OwnerRecoveryNodeBody {
     pub store_root_hash: ObjectHash,
     pub recovery_id: DeviceRecoveryId,
     pub owner_pubkey: String,
@@ -22,8 +20,13 @@ pub(crate) struct OwnerRecoveryNode {
     pub predecessor: Option<OwnerRecoveryNodeRef>,
     pub readiness: DeviceRecoveryReadiness,
     pub next_slot: ObjectSlot,
-    pub signature: String,
 }
+
+impl SignedBody for OwnerRecoveryNodeBody {
+    const DOMAIN: &'static [u8] = OWNER_RECOVERY_NODE_DOMAIN;
+}
+
+pub(crate) type OwnerRecoveryNode = Signed<OwnerRecoveryNodeBody>;
 
 impl OwnerRecoveryNode {
     #[allow(clippy::too_many_arguments)]
@@ -38,24 +41,19 @@ impl OwnerRecoveryNode {
         next_slot: ObjectSlot,
         owner_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let owner_pubkey = keys::public_key_hex(owner_signer);
-        let mut node = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = OwnerRecoveryNodeBody {
             store_root_hash,
             recovery_id,
-            owner_pubkey,
+            owner_pubkey: keys::public_key_hex(owner_signer),
             owner_grant,
             sequence,
             membership,
             predecessor,
             readiness,
             next_slot,
-            signature: String::new(),
         };
-        node.validate_shape()?;
-        let (_, signature) = keys::sign_hex(owner_signer, &node.canonical_signed_bytes());
-        node.signature = signature;
-        Ok(node)
+        body.validate_shape()?;
+        Ok(Signed::sign(body, owner_signer))
     }
 
     pub(crate) fn parse_at(
@@ -64,8 +62,7 @@ impl OwnerRecoveryNode {
         reference: &OwnerRecoveryNodeRef,
     ) -> Result<Self, StoreProtocolError> {
         let node: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(node.version)?;
-        node.validate_shape()?;
+        node.body().validate_shape()?;
         if node.store_root_hash != store_root.store_root_hash
             || node.owner_pubkey != reference.owner_pubkey
             || node.owner_grant != reference.owner_grant
@@ -74,16 +71,17 @@ impl OwnerRecoveryNode {
         {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
-        if !keys::verify_signature_hex(
-            &node.owner_pubkey,
-            &node.signature,
-            &node.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        let owner_pubkey = node.owner_pubkey.clone();
+        node.verify_by(&owner_pubkey)?;
         Ok(node)
     }
 
+    pub(crate) fn node_hash(&self) -> ObjectHash {
+        self.hash()
+    }
+}
+
+impl OwnerRecoveryNodeBody {
     fn validate_shape(&self) -> Result<(), StoreProtocolError> {
         let predecessor_matches = match &self.predecessor {
             None => self.sequence == 1,
@@ -97,32 +95,6 @@ impl OwnerRecoveryNode {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
         Ok(())
-    }
-
-    pub(crate) fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            OWNER_RECOVERY_NODE_DOMAIN,
-            &(
-                self.version,
-                self.store_root_hash,
-                self.recovery_id,
-                &self.owner_pubkey,
-                &self.owner_grant,
-                self.sequence,
-                &self.membership,
-                &self.predecessor,
-                &self.readiness,
-                &self.next_slot,
-            ),
-        )
-    }
-
-    pub(crate) fn node_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("OwnerRecoveryNode serialization cannot fail")
     }
 }
 
@@ -267,8 +239,7 @@ impl GrantStreamAnchor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreDeviceRegistration {
-    pub version: u32,
+pub struct StoreDeviceRegistrationBody {
     pub store_root: StoreRootRef,
     pub device_id: StoreDeviceId,
     pub author_pubkey: String,
@@ -278,8 +249,13 @@ pub struct StoreDeviceRegistration {
     pub store_commits: DeviceStreamAnchor,
     pub acknowledgements: DeviceStreamAnchor,
     pub snapshots: DeviceStreamAnchor,
-    pub identity_signature: String,
 }
+
+impl SignedBody for StoreDeviceRegistrationBody {
+    const DOMAIN: &'static [u8] = REGISTRATION_DOMAIN;
+}
+
+pub(crate) type StoreDeviceRegistration = Signed<StoreDeviceRegistrationBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReferencedStoreDeviceRegistration {
@@ -507,20 +483,6 @@ impl<'de> Deserialize<'de> for ActivatedStoreDeviceRegistration {
     }
 }
 
-#[derive(Serialize)]
-struct RegistrationSignedFields<'a> {
-    version: u32,
-    store_root: &'a StoreRootRef,
-    device_id: StoreDeviceId,
-    author_pubkey: &'a str,
-    device_signing_pubkey: &'a str,
-    origin: &'a StoreDeviceRegistrationOrigin,
-    provider: &'a ProviderDeviceBinding,
-    store_commits: &'a DeviceStreamAnchor,
-    acknowledgements: &'a DeviceStreamAnchor,
-    snapshots: &'a DeviceStreamAnchor,
-}
-
 impl StoreDeviceRegistration {
     fn device_stream_activation(
         &self,
@@ -570,23 +532,20 @@ impl StoreDeviceRegistration {
         let device_signer = derive_device_signer(identity_signer, &store_root, &origin);
         let device_signing_pubkey = keys::public_key_hex(&device_signer);
         let device_id = StoreDeviceId::derive(&store_root, &origin);
-        let mut registration = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root,
-            device_id,
-            author_pubkey,
-            device_signing_pubkey,
-            origin,
-            provider,
-            store_commits,
-            acknowledgements,
-            snapshots,
-            identity_signature: String::new(),
-        };
-        let (_, signature) =
-            keys::sign_hex(identity_signer, &registration.canonical_signed_bytes());
-        registration.identity_signature = signature;
-        Ok(registration)
+        Ok(Signed::sign(
+            StoreDeviceRegistrationBody {
+                store_root,
+                device_id,
+                author_pubkey,
+                device_signing_pubkey,
+                origin,
+                provider,
+                store_commits,
+                acknowledgements,
+                snapshots,
+            },
+            identity_signer,
+        ))
     }
 
     pub(crate) fn device_signer(
@@ -603,30 +562,8 @@ impl StoreDeviceRegistration {
         Ok(signer)
     }
 
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            REGISTRATION_DOMAIN,
-            &RegistrationSignedFields {
-                version: self.version,
-                store_root: &self.store_root,
-                device_id: self.device_id,
-                author_pubkey: &self.author_pubkey,
-                device_signing_pubkey: &self.device_signing_pubkey,
-                origin: &self.origin,
-                provider: &self.provider,
-                store_commits: &self.store_commits,
-                acknowledgements: &self.acknowledgements,
-                snapshots: &self.snapshots,
-            },
-        )
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StoreDeviceRegistration serialization cannot fail")
-    }
-
     pub fn registration_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 
     pub fn parse_at(
@@ -635,7 +572,7 @@ impl StoreDeviceRegistration {
         expected_device: StoreDeviceId,
     ) -> Result<Self, StoreProtocolError> {
         let registration: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(registration.version)?;
+        registration.require_version()?;
         if &registration.store_root != expected_store_root {
             return Err(StoreProtocolError::StoreRootMismatch {
                 expected: expected_store_root.store_root_hash,
@@ -660,13 +597,8 @@ impl StoreDeviceRegistration {
             &registration.acknowledgements,
             &registration.snapshots,
         )?;
-        if !keys::verify_signature_hex(
-            &registration.author_pubkey,
-            &registration.identity_signature,
-            &registration.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        let author_pubkey = registration.author_pubkey.clone();
+        registration.verify_by(&author_pubkey)?;
         Ok(registration)
     }
 }

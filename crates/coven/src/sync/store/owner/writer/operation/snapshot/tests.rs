@@ -238,13 +238,16 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
         .is_err());
 
     let mut wrong_author = published.meta.clone();
-    wrong_author.author_registration.registration_hash = ObjectHash::digest(b"another author");
+    wrong_author
+        .body_mut()
+        .author_registration
+        .registration_hash = ObjectHash::digest(b"another author");
     assert!(writer
         .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_author.to_bytes())
         .is_err());
 
     let mut wrong_successor = published.meta;
-    wrong_successor.successor.next_slot =
+    wrong_successor.body_mut().successor.next_slot =
         crate::protocol::objects::ObjectSlot::logical("wrong-successor.json".to_string())
             .expect("valid wrong successor slot");
     assert!(writer

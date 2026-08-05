@@ -153,7 +153,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
         .insert(latest_ref.sequence, forked_at_same_sequence.clone());
     let higher_sequence = latest_ref.sequence + 1;
     forked_at_same_sequence.0.sequence = higher_sequence;
-    forked_at_same_sequence.1.sequence = higher_sequence;
+    forked_at_same_sequence.1.body_mut().sequence = higher_sequence;
     forged_higher_fork
         .chain
         .insert(higher_sequence, forked_at_same_sequence);

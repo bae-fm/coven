@@ -1608,7 +1608,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let published_snapshot: crate::protocol::store_commit::SnapshotMeta =
             serde_json::from_slice(&published_snapshot_bytes)
                 .expect("parse published snapshot metadata");
-        let snapshot_coverage = published_snapshot.coverage.into_refs();
+        let snapshot_coverage = published_snapshot.coverage.clone().into_refs();
         let snapshot_frontier =
             crate::protocol::store_commit::CommitFrontier::from_refs(snapshot_coverage.clone())
                 .expect("snapshot coverage has valid stream ids");

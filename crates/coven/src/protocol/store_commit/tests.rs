@@ -124,7 +124,7 @@ impl Fixture {
 
     fn resign(&self, commit: &mut StoreBatchCommit) {
         let signer = self.registration.device_signer(&self.signer).unwrap();
-        commit.signature = keys::sign_hex(&signer, &commit.canonical_signed_bytes()).1;
+        commit.resign(&signer);
     }
 
     fn candidate_cleanup_manifest(&self, label: &str) -> CandidateCleanupManifest {
@@ -669,7 +669,6 @@ fn fixture() -> Fixture {
     };
     let store_protocol_root = StoreProtocolRoot::signed(
         StoreCreationDescriptor {
-            version: STORE_PROTOCOL_VERSION,
             creation_id: StoreCreationId::from_nonce("store-a"),
             provider: crate::protocol::objects::StoreProviderBinding::S3 {
                 endpoint: crate::protocol::objects::S3EndpointBinding::Custom {
@@ -903,17 +902,14 @@ fn canonical_commit_round_trip_and_literal_bytes() {
         .verify_store_package(&fixture.package)
         .expect("verify package");
     assert_eq!(parsed.value(), &fixture.commit);
-    assert!(fixture
-        .commit
-        .canonical_signed_bytes()
-        .starts_with(COMMIT_DOMAIN));
+    assert_eq!(fixture.commit.commit_hash(), fixture.commit_ref.commit_hash);
 }
 
 #[test]
 fn commit_rejects_package_signature_and_coordinate_tamper() {
     let fixture = fixture();
     let mut tampered = fixture.commit.clone();
-    tampered.signature.push('0');
+    tampered.corrupt_signature_for_test();
     assert!(matches!(
         tampered.verify_at(
             fixture.root_ref.store_root_hash,
@@ -924,7 +920,7 @@ fn commit_rejects_package_signature_and_coordinate_tamper() {
     ));
 
     let mut tampered = fixture.commit.clone();
-    let StoreCommitBody::Operations(operations) = &mut tampered.body else {
+    let StoreCommitBody::Operations(operations) = &mut tampered.body_mut().body else {
         panic!("fixture commit carries operations")
     };
     operations
@@ -1406,7 +1402,7 @@ fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
     ));
 
     let mut unsigned_candidate = candidate;
-    unsigned_candidate.signature.push('0');
+    unsigned_candidate.corrupt_signature_for_test();
     let mut unsigned = manifest;
     unsigned.candidate.canonical_signed_bytes = unsigned_candidate.to_bytes();
     unsigned.candidate.object = exact(
@@ -1460,7 +1456,7 @@ fn parsed_candidate_abandonment_rejects_noncanonical_manifest_order() {
     let mut commit = fixture
         .sign_candidate_abandonment(vec![first, second])
         .expect("sign candidate abandonment");
-    let StoreCommitBody::AbandonCandidates { manifests } = &mut commit.body else {
+    let StoreCommitBody::AbandonCandidates { manifests } = &mut commit.body_mut().body else {
         panic!("commit carries candidate abandonment")
     };
     manifests.reverse();
@@ -1482,7 +1478,7 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
     let fixture = fixture();
 
     let mut omitted = fixture.commit.clone();
-    omitted.candidate_objects.objects.clear();
+    omitted.body_mut().candidate_objects.objects.clear();
     fixture.resign(&mut omitted);
     assert!(matches!(
         omitted.verify_at(
@@ -1495,10 +1491,8 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
     ));
 
     let mut invented = fixture.commit.clone();
-    invented
-        .candidate_objects
-        .objects
-        .push(invented.candidate_objects.objects[0].clone());
+    let repeated = invented.candidate_objects.objects[0].clone();
+    invented.body_mut().candidate_objects.objects.push(repeated);
     fixture.resign(&mut invented);
     assert!(matches!(
         invented.verify_at(
@@ -1511,7 +1505,7 @@ fn commit_rejects_manifest_omission_invention_and_family_substitution() {
     ));
 
     let mut substituted = fixture.commit.clone();
-    substituted.candidate_objects.family =
+    substituted.body_mut().candidate_objects.family =
         CandidateFamilyId::from_hash(ObjectHash::digest(b"substituted candidate family"));
     fixture.resign(&mut substituted);
     assert!(matches!(

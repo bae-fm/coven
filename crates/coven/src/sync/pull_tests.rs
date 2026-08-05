@@ -1458,9 +1458,8 @@ impl<'storage> ExactPublishedCommit<'storage> {
             package.object.clone(),
         );
         if membership_authority.is_none() {
-            commit.membership_authority = None;
-            commit.signature =
-                crate::keys::sign_hex(&self.device_signer, &commit.canonical_signed_bytes()).1;
+            commit.body_mut().membership_authority = None;
+            commit.resign(&self.device_signer);
         }
         commit
     }

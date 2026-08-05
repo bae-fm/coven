@@ -61,7 +61,6 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
             "required-store-root",
         );
     let descriptor = crate::protocol::store_commit::StoreCreationDescriptor {
-        version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
         creation_id: crate::protocol::store_commit::StoreCreationId::from_nonce(
             "required-store-root",
         ),

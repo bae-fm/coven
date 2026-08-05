@@ -339,21 +339,19 @@ impl StoreBatchCommit {
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
         validate_commit_body(store_root_hash, &body, &author_registration)?;
         let candidate_objects = candidate_manifest(family, &body)?;
-        let mut commit = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            write_id,
-            author_registration,
-            order,
-            membership_state,
-            device_state,
-            membership_authority,
-            candidate_objects,
-            body,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(signer, &commit.canonical_signed_bytes());
-        commit.signature = signature;
-        Ok(commit)
+        Ok(Signed::sign(
+            StoreBatchCommitBody {
+                store_root_hash,
+                write_id,
+                author_registration,
+                order,
+                membership_state,
+                device_state,
+                membership_authority,
+                candidate_objects,
+                body,
+            },
+            signer,
+        ))
     }
 }

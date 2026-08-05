@@ -220,7 +220,8 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .expect("predecessor commit exists")
         .head
         .value
-        .commit;
+        .commit
+        .clone();
     assert_eq!(owner_device.drain_store_writes().await.unwrap(), 1);
 
     let new_member = UserKeypair::generate();

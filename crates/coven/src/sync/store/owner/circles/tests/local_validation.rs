@@ -204,7 +204,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
                 &mut journal,
                 reference.clone(),
                 move |commit| {
-                    let activations = match &mut commit.body {
+                    let activations = match &mut commit.body_mut().body {
                         crate::protocol::store_commit::StoreCommitBody::Operations(operations) => {
                             &mut operations.stream_activations
                         }
@@ -327,7 +327,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
             reference.clone(),
             move |commit| {
                 let crate::protocol::store_commit::StoreCommitBody::Operations(operations) =
-                    &mut commit.body
+                    &mut commit.body_mut().body
                 else {
                     panic!("Circle commit body carries operations")
                 };

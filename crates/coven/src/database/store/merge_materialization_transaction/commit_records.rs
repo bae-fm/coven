@@ -384,7 +384,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
                     owner_grant,
                     ..
-                } = registration.origin
+                } = registration.origin.clone()
                 else {
                     return Err(DbError::Message(
                         "recovery activation author has a non-recovery registration origin"

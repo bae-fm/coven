@@ -1,4 +1,3 @@
-use super::validation::require_version;
 use super::*;
 
 /// Exact coordinate of one signed Circle snapshot on its author's per-Circle
@@ -55,8 +54,7 @@ pub(crate) struct CircleSnapshotSuccessorLink {
 /// image derives from and the per-(device, Circle) snapshot stream position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleSnapshotMeta {
-    pub version: u32,
+pub(crate) struct CircleSnapshotMetaBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub author_registration: StoreDeviceRegistrationRef,
@@ -70,23 +68,13 @@ pub(crate) struct CircleSnapshotMeta {
     pub bootstrap: CircleBootstrapRef,
     pub created_at: String,
     pub successor: CircleSnapshotSuccessorLink,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct CircleSnapshotSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    circle_id: CircleId,
-    author_registration: &'a StoreDeviceRegistrationRef,
-    control: &'a CircleControlCoord,
-    epoch_id: CircleEpochId,
-    key_fingerprint: KeyFingerprint,
-    generation: u64,
-    bootstrap: &'a CircleBootstrapRef,
-    created_at: &'a str,
-    successor: &'a CircleSnapshotSuccessorLink,
+impl SignedBody for CircleSnapshotMetaBody {
+    const DOMAIN: &'static [u8] = CIRCLE_SNAPSHOT_DOMAIN;
 }
+
+pub(crate) type CircleSnapshotMeta = Signed<CircleSnapshotMetaBody>;
 
 impl CircleSnapshotMeta {
     #[allow(clippy::too_many_arguments)]
@@ -105,55 +93,30 @@ impl CircleSnapshotMeta {
     ) -> Result<Self, StoreProtocolError> {
         validate_circle_snapshot_generation(generation, successor.predecessor.as_ref())?;
         validate_circle_snapshot_state(&control, &bootstrap.coverage)?;
-        let mut meta = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            circle_id,
-            author_registration,
-            control,
-            epoch_id,
-            key_fingerprint,
-            generation,
-            bootstrap,
-            created_at,
-            successor,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(device_signer, &meta.canonical_signed_bytes());
-        meta.signature = signature;
-        Ok(meta)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            CIRCLE_SNAPSHOT_DOMAIN,
-            &CircleSnapshotSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                circle_id: self.circle_id,
-                author_registration: &self.author_registration,
-                control: &self.control,
-                epoch_id: self.epoch_id,
-                key_fingerprint: self.key_fingerprint,
-                generation: self.generation,
-                bootstrap: &self.bootstrap,
-                created_at: &self.created_at,
-                successor: &self.successor,
+        Ok(Signed::sign(
+            CircleSnapshotMetaBody {
+                store_root_hash,
+                circle_id,
+                author_registration,
+                control,
+                epoch_id,
+                key_fingerprint,
+                generation,
+                bootstrap,
+                created_at,
+                successor,
             },
-        )
+            device_signer,
+        ))
     }
 
     pub(crate) fn snapshot_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 
     pub(crate) fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
         let meta: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         Ok(meta.snapshot_hash())
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("CircleSnapshotMeta serialization cannot fail")
     }
 
     /// Verify one exact Circle snapshot against its expected reference and author
@@ -169,7 +132,7 @@ impl CircleSnapshotMeta {
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let meta: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(meta.version)?;
+        meta.require_version()?;
         crate::protocol::objects::verify_store_root(
             expected_store_root_hash,
             meta.store_root_hash,
@@ -191,13 +154,7 @@ impl CircleSnapshotMeta {
         }
         validate_circle_snapshot_generation(meta.generation, meta.successor.predecessor.as_ref())?;
         validate_circle_snapshot_state(&meta.control, &meta.bootstrap.coverage)?;
-        if !keys::verify_signature_hex(
-            &author.device_signing_pubkey,
-            &meta.signature,
-            &meta.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        meta.verify_by(&author.device_signing_pubkey)?;
         let actual = meta.snapshot_hash();
         if actual != expected.snapshot_hash {
             return Err(StoreProtocolError::ObjectHashMismatch {

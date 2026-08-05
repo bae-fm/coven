@@ -452,7 +452,7 @@ impl<'storage> RestoringStore<'storage> {
                 "activated Owner recovery node differs from the requested authority".into(),
             ));
         }
-        let initial_ack_ref = node.value.readiness.initial_ack;
+        let initial_ack_ref = node.value.readiness.initial_ack.clone();
         let initial_ack = history
             .load_store_ack(&initial_ack_ref, registration.value())
             .await?;

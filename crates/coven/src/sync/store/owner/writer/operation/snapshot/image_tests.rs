@@ -1219,7 +1219,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
         else {
             panic!("snapshot bootstrap installed a genesis replay baseline")
         };
-        authority.metadata.signature = "00".repeat(64);
+        authority.metadata.corrupt_signature_for_test();
         authority
             .validate()
             .expect_err("retained snapshot authority must re-open its signed metadata");

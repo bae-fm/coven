@@ -134,7 +134,7 @@ impl<'a> StoreCommitVerifier<'a> {
             if is_target && head.commit != *target {
                 return Err(StoreError::MergeAnnouncementOccupied {
                     expected: Box::new(target.clone()),
-                    actual: Box::new(head.commit),
+                    actual: Box::new(head.commit.clone()),
                 });
             }
             commits.push(head.commit.clone());
@@ -144,12 +144,12 @@ impl<'a> StoreCommitVerifier<'a> {
             };
             if is_target {
                 return Ok(ExactAnnouncementPath {
-                    next_slot: head.successor.next_slot,
+                    next_slot: head.successor.next_slot.clone(),
                     accepted_head: Some(reference),
                     commits,
                 });
             }
-            slot = head.successor.next_slot;
+            slot = head.successor.next_slot.clone();
             predecessor = Some(reference);
         }
         Err(StoreError::InvalidOutbound(

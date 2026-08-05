@@ -439,7 +439,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let request = plan.sign_owner_promotion_request(
             promotion_id,
             member_registration.clone(),
-            member.value.author_pubkey,
+            member.value.author_pubkey.clone(),
             member_grant,
             finalization,
         )?;

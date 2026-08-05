@@ -181,7 +181,7 @@ fn conflict_acceptance(
         store_root_hash,
         owner_grant: derive_store_resolution_grant(conflict_hash, &resolver_pubkey),
         owner_registration,
-        provider: registration.provider,
+        provider: registration.provider.clone(),
         membership,
         recovery: recovery_anchor(&format!("conflict-resolution-{resolver_pubkey}")),
         device_state: StoreDeviceStateRef::from_resolved(

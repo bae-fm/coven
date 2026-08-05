@@ -28,7 +28,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         .expect("exact losing candidate is verified");
 
     let mut wrong_head_commit = observation.clone();
-    wrong_head_commit.winner_mut_for_test().commit = batch.head.value.commit.clone();
+    wrong_head_commit.winner_mut_for_test().body_mut().commit = batch.head.value.commit.clone();
     assert!(wrong_head_commit
         .verified_nonactivation(candidate.clone(), &author,)
         .is_err());
@@ -78,12 +78,12 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         }
     };
     let mut wrong_root = batch.commit.value.value().clone();
-    wrong_root.store_root_hash = ObjectHash::digest(b"wrong Store root");
+    wrong_root.body_mut().store_root_hash = ObjectHash::digest(b"wrong Store root");
     assert!(observation
         .verified_nonactivation(exact_target(wrong_root), &author,)
         .is_err());
     let mut wrong_predecessor = batch.commit.value.value().clone();
-    let predecessor = &mut wrong_predecessor.order.predecessor;
+    let predecessor = &mut wrong_predecessor.body_mut().order.predecessor;
     *predecessor = match predecessor.take() {
         Some(_) => None,
         None => Some(observation.winner().commit.clone()),
@@ -92,14 +92,17 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         .verified_nonactivation(exact_target(wrong_predecessor), &author,)
         .is_err());
     let mut wrong_author = batch.commit.value.value().clone();
-    wrong_author.author_registration = observation.winner().author_registration.clone();
-    wrong_author.author_registration.registration_hash =
-        ObjectHash::digest(b"wrong author registration");
+    let author_registration = observation.winner().author_registration.clone();
+    wrong_author.body_mut().author_registration = author_registration;
+    wrong_author
+        .body_mut()
+        .author_registration
+        .registration_hash = ObjectHash::digest(b"wrong author registration");
     assert!(observation
         .verified_nonactivation(exact_target(wrong_author), &author,)
         .is_err());
     let mut unsigned = batch.commit.value.value().clone();
-    unsigned.signature = "00".to_string();
+    unsigned.corrupt_signature_for_test();
     assert!(observation
         .verified_nonactivation(exact_target(unsigned), &author,)
         .is_err());

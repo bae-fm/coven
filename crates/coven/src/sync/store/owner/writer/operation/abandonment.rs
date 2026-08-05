@@ -95,7 +95,7 @@ impl AuthorizedWriterOperation<'_> {
             root.store_root_hash,
             commit_ref,
             history_summary.digest(),
-            candidate.head.value.successor,
+            candidate.head.value.successor.clone(),
         )?;
         let head_context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,

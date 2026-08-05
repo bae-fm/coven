@@ -939,7 +939,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
                 grant_id: grant_id.clone(),
                 membership: membership.clone(),
-                activation_commit: witness_head.commit,
+                activation_commit: witness_head.commit.clone(),
                 activation_head: activation_head.clone(),
             },
         )

@@ -94,7 +94,7 @@ impl<'storage> RestoringStore<'storage> {
                     ));
                 }
                 (
-                    loaded.value.next_slot,
+                    loaded.value.next_slot.clone(),
                     Some(node.clone()),
                     node.sequence.saturating_add(1),
                 )

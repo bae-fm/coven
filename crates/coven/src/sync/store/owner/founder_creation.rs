@@ -472,7 +472,6 @@ impl<'operation> FounderStoreCreation<'operation> {
             first_slot: reservation.recovery_slot.clone(),
         };
         let descriptor = crate::protocol::store_commit::StoreCreationDescriptor {
-            version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
             creation_id: authority.creation_id,
             provider: authority.binding.store.clone(),
             schema_version: authority.schema_version,

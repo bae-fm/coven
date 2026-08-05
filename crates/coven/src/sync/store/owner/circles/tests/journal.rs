@@ -11,7 +11,7 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     let mut replacement = journal.clone();
     replacement.operation_id = CircleOperationId::from_write_id(replacement_write_id.clone());
     let mut replacement_commit = replacement.commit().expect("parse replacement commit");
-    replacement_commit.write_id = replacement_write_id;
+    replacement_commit.body_mut().write_id = replacement_write_id;
     replacement.operation_mut().commit_bytes =
         serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
     let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");

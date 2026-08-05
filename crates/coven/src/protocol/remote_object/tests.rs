@@ -515,28 +515,27 @@ fn deserialized_device_head_rejects_resolution_cleanup_state() {
     let resolution: membership::StoreMembershipConflictResolution =
         serde_json::from_slice(&resolution_bytes).expect("parse resolution fixture");
     let candidate = test_commit_ref("invalid-head-cleanup-state", 1);
-    let head = store_commit::StoreDeviceHead {
-        version: store_commit::STORE_PROTOCOL_VERSION,
-        store_root_hash: resolution.store_root_hash,
-        author_registration: resolution.replacement_acceptance.owner_registration.clone(),
-        commit: candidate.clone(),
-        history_summary: store_commit::ObjectHash::digest(&resolution_bytes),
-        successor: store_commit::SuccessorLink {
-            activation: store_commit::StreamActivation::grant_authorized(
-                resolution.store_root_hash,
-                resolution.replacement_acceptance.owner_registration.clone(),
-                resolution.replacement_grant,
-                resolution.replacement_membership,
-            )
-            .activation_id(),
-            predecessor: None,
-            next_slot: ObjectSlot::logical(
-                "store-v1/heads/invalid-cleanup-successor.json".to_string(),
-            )
-            .expect("valid successor slot"),
-        },
-        signature: "head signature is not checked by remote ownership".to_string(),
-    };
+    let head =
+        store_commit::StoreDeviceHead::unsigned_for_test(store_commit::StoreDeviceHeadBody {
+            store_root_hash: resolution.store_root_hash,
+            author_registration: resolution.replacement_acceptance.owner_registration.clone(),
+            commit: candidate.clone(),
+            history_summary: store_commit::ObjectHash::digest(&resolution_bytes),
+            successor: store_commit::SuccessorLink {
+                activation: store_commit::StreamActivation::grant_authorized(
+                    resolution.store_root_hash,
+                    resolution.replacement_acceptance.owner_registration.clone(),
+                    resolution.replacement_grant,
+                    resolution.replacement_membership,
+                )
+                .activation_id(),
+                predecessor: None,
+                next_slot: ObjectSlot::logical(
+                    "store-v1/heads/invalid-cleanup-successor.json".to_string(),
+                )
+                .expect("valid successor slot"),
+            },
+        });
     let bytes = head.to_bytes();
     let object = ExactObjectRef::new(
         ObjectSlot::logical("store-v1/heads/invalid-cleanup.json".to_string())

@@ -45,8 +45,7 @@ impl LocalStoreWriter {
         &self,
         commit: &mut crate::protocol::store_commit::StoreBatchCommit,
     ) {
-        commit.signature =
-            crate::keys::sign_hex(&self.device_signer, &commit.canonical_signed_bytes()).1;
+        commit.resign(&self.device_signer);
     }
 
     #[cfg(test)]
@@ -80,14 +79,14 @@ impl LocalStoreWriter {
             meta.store_root_hash,
             self.registration.reference().clone(),
             meta.generation,
-            meta.predecessor,
-            meta.image,
-            meta.coverage,
-            meta.state,
-            meta.history_summary,
+            meta.predecessor.clone(),
+            meta.image.clone(),
+            meta.coverage.clone(),
+            meta.state.clone(),
+            meta.history_summary.clone(),
             meta.schema_version,
-            meta.created_at,
-            meta.successor,
+            meta.created_at.clone(),
+            meta.successor.clone(),
             &self.device_signer,
         )
     }

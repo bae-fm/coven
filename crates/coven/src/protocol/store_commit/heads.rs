@@ -1,27 +1,21 @@
-use super::validation::require_version;
 use super::*;
 
+/// The wire body of one device's Store head. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreDeviceHead {
-    pub version: u32,
+pub(crate) struct StoreDeviceHeadBody {
     pub store_root_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
     pub commit: StoreBatchCommitRef,
     pub history_summary: ObjectHash,
     pub successor: SuccessorLink,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct HeadSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    author_registration: &'a StoreDeviceRegistrationRef,
-    commit: &'a StoreBatchCommitRef,
-    history_summary: ObjectHash,
-    successor: &'a SuccessorLink,
+impl SignedBody for StoreDeviceHeadBody {
+    const DOMAIN: &'static [u8] = HEAD_DOMAIN;
 }
+
+pub(crate) type StoreDeviceHead = Signed<StoreDeviceHeadBody>;
 
 impl StoreDeviceHead {
     pub(crate) fn signed(
@@ -35,40 +29,20 @@ impl StoreDeviceHead {
         if commit.coord.sequence() == 0 {
             return Err(StoreProtocolError::InvalidSequence(0));
         }
-        let mut head = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            author_registration,
-            commit,
-            history_summary,
-            successor,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(signer, &head.canonical_signed_bytes());
-        head.signature = signature;
-        Ok(head)
-    }
-
-    pub(crate) fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            HEAD_DOMAIN,
-            &HeadSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                author_registration: &self.author_registration,
-                commit: &self.commit,
-                history_summary: self.history_summary,
-                successor: &self.successor,
+        Ok(Signed::sign(
+            StoreDeviceHeadBody {
+                store_root_hash,
+                author_registration,
+                commit,
+                history_summary,
+                successor,
             },
-        )
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StoreDeviceHead serialization cannot fail")
+            signer,
+        ))
     }
 
     pub(crate) fn head_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 
     pub(crate) fn slot_sequence(&self) -> u64 {
@@ -79,11 +53,8 @@ impl StoreDeviceHead {
         &self,
         expected_registration: &StoreDeviceRegistration,
     ) -> bool {
-        keys::verify_signature_hex(
-            &expected_registration.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_signed_bytes(),
-        )
+        self.verify_by(&expected_registration.device_signing_pubkey)
+            .is_ok()
     }
 
     pub(crate) fn parse_at(
@@ -93,7 +64,7 @@ impl StoreDeviceHead {
         expected_ref: &StoreBatchCommitRef,
     ) -> Result<Self, StoreProtocolError> {
         let head: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(head.version)?;
+        head.require_version()?;
         crate::protocol::objects::verify_store_root(
             expected_store_root_hash,
             head.store_root_hash,

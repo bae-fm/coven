@@ -97,7 +97,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 commit.store_root_hash,
                 commit_ref.clone(),
                 history_summary.digest(),
-                old_head.successor,
+                old_head.successor.clone(),
             )
             .map_err(|error| {
                 CircleOperationError::InvalidState(format!(

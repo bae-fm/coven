@@ -1,10 +1,8 @@
-use super::validation::require_version;
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreCreationDescriptor {
-    pub version: u32,
     pub creation_id: StoreCreationId,
     pub provider: crate::protocol::objects::StoreProviderBinding,
     pub schema_version: u32,
@@ -58,54 +56,41 @@ impl StoreCreationDescriptor {
     }
 }
 
+/// The wire body of a Store's protocol root. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreProtocolRoot {
+pub(crate) struct StoreProtocolRootBody {
     pub descriptor: StoreCreationDescriptor,
-    pub signature: String,
 }
+
+impl SignedBody for StoreProtocolRootBody {
+    const DOMAIN: &'static [u8] = STORE_PROTOCOL_ROOT_DOMAIN;
+}
+
+pub(crate) type StoreProtocolRoot = Signed<StoreProtocolRootBody>;
 
 impl StoreProtocolRoot {
     pub(crate) fn signed(
         descriptor: StoreCreationDescriptor,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let mut store_protocol_root = Self {
-            descriptor,
-            signature: String::new(),
-        };
-        store_protocol_root.validate_descriptor()?;
-        if keys::public_key_hex(signer) != store_protocol_root.descriptor.founder_pubkey {
+        let body = StoreProtocolRootBody { descriptor };
+        body.validate_descriptor()?;
+        if keys::public_key_hex(signer) != body.descriptor.founder_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        let (_, signature) = keys::sign_hex(signer, &store_protocol_root.canonical_signed_bytes());
-        store_protocol_root.signature = signature;
-        Ok(store_protocol_root)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(STORE_PROTOCOL_ROOT_DOMAIN, &self.descriptor)
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StoreProtocolRoot serialization cannot fail")
+        Ok(Signed::sign(body, signer))
     }
 
     pub(crate) fn object_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.to_bytes())
+        self.hash()
     }
 
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, StoreProtocolError> {
         let store_protocol_root: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(store_protocol_root.descriptor.version)?;
-        store_protocol_root.validate_descriptor()?;
-        if !keys::verify_signature_hex(
-            &store_protocol_root.descriptor.founder_pubkey,
-            &store_protocol_root.signature,
-            &store_protocol_root.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        store_protocol_root.body().validate_descriptor()?;
+        let founder_pubkey = store_protocol_root.descriptor.founder_pubkey.clone();
+        store_protocol_root.verify_by(&founder_pubkey)?;
         Ok(store_protocol_root)
     }
 
@@ -148,7 +133,9 @@ impl StoreProtocolRoot {
         }
         Ok(store_protocol_root)
     }
+}
 
+impl StoreProtocolRootBody {
     fn validate_descriptor(&self) -> Result<(), StoreProtocolError> {
         let descriptor = &self.descriptor;
         descriptor
@@ -174,8 +161,7 @@ impl StoreProtocolRoot {
         ) {
             return Err(StoreProtocolError::InvalidFounder);
         }
-        if descriptor.version != STORE_PROTOCOL_VERSION
-            || descriptor.founder_pubkey.is_empty()
+        if descriptor.founder_pubkey.is_empty()
             || descriptor.root_slot.logical_key() != "store-v1/store-protocol-root.json"
             || !matches!(
                 descriptor.founder_membership,

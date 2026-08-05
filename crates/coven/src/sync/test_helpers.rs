@@ -2311,7 +2311,7 @@ mod test_device {
                 .await
                 .expect("stage owner exclusion acknowledgement");
             let crate::protocol::store_commit::StoreAckExclusionState { proposal_freezes } =
-                acknowledgement.exclusions;
+                acknowledgement.exclusions.clone();
             assert_eq!(proposal_freezes, freezes);
             assert_eq!(
                 self.drain_acknowledgements()

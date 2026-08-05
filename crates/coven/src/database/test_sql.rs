@@ -1535,7 +1535,7 @@ impl DatabaseTestSql<'_> {
         use crate::protocol::objects::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
         use crate::protocol::store_commit::{
             GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId,
-            StoreProtocolRoot, STORE_PROTOCOL_VERSION,
+            StoreProtocolRoot,
         };
 
         let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
@@ -1556,7 +1556,6 @@ impl DatabaseTestSql<'_> {
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
         let descriptor = StoreCreationDescriptor {
-            version: STORE_PROTOCOL_VERSION,
             creation_id: StoreCreationId::from_random_bytes(
                 *ObjectHash::digest(label.as_bytes()).as_bytes(),
             ),

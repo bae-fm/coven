@@ -1,13 +1,12 @@
 use super::validation::{
-    require_version, validate_ack_state, validate_commit_frontier, validate_store_device_state_ref,
+    validate_ack_state, validate_commit_frontier, validate_store_device_state_ref,
     validate_successor_sequence,
 };
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StoreAck {
-    pub version: u32,
+pub struct StoreAckBody {
     pub store_root_hash: ObjectHash,
     pub registration: StoreDeviceRegistrationRef,
     pub sequence: u64,
@@ -17,8 +16,13 @@ pub struct StoreAck {
     pub exclusions: StoreAckExclusionState,
     pub last_sync: String,
     pub successor: SuccessorLink,
-    pub signature: String,
 }
+
+impl SignedBody for StoreAckBody {
+    const DOMAIN: &'static [u8] = ACK_DOMAIN;
+}
+
+pub(crate) type StoreAck = Signed<StoreAckBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,20 +80,6 @@ pub struct StoreDeviceProposalAck {
     pub target_cut: StoreHistoryCut,
 }
 
-#[derive(Serialize)]
-struct AckSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    registration: &'a StoreDeviceRegistrationRef,
-    sequence: u64,
-    store_cut: &'a StoreHistoryCut,
-    device_state: &'a StoreDeviceStateRef,
-    snapshot: Option<&'a StoreSnapshotLocator>,
-    exclusions: &'a StoreAckExclusionState,
-    last_sync: &'a str,
-    successor: &'a SuccessorLink,
-}
-
 impl StoreAck {
     pub fn signed(
         store_root_hash: ObjectHash,
@@ -111,48 +101,24 @@ impl StoreAck {
             &device_state,
             &exclusions,
         )?;
-        let mut ack = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            registration,
-            sequence,
-            store_cut,
-            device_state,
-            snapshot,
-            exclusions,
-            last_sync,
-            successor,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(device_signer, &ack.canonical_signed_bytes());
-        ack.signature = signature;
-        Ok(ack)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            ACK_DOMAIN,
-            &AckSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                registration: &self.registration,
-                sequence: self.sequence,
-                store_cut: &self.store_cut,
-                device_state: &self.device_state,
-                snapshot: self.snapshot.as_ref(),
-                exclusions: &self.exclusions,
-                last_sync: &self.last_sync,
-                successor: &self.successor,
+        Ok(Signed::sign(
+            StoreAckBody {
+                store_root_hash,
+                registration,
+                sequence,
+                store_cut,
+                device_state,
+                snapshot,
+                exclusions,
+                last_sync,
+                successor,
             },
-        )
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("StoreAck serialization cannot fail")
+            device_signer,
+        ))
     }
 
     pub fn ack_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 
     pub fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
@@ -167,7 +133,7 @@ impl StoreAck {
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let ack: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(ack.version)?;
+        ack.require_version()?;
         crate::protocol::objects::verify_store_root(
             expected_store_root.store_root_hash,
             ack.store_root_hash,
@@ -202,13 +168,7 @@ impl StoreAck {
                 "Store acknowledgement successor uses another stream activation".to_string(),
             ));
         }
-        if !keys::verify_signature_hex(
-            &author.device_signing_pubkey,
-            &ack.signature,
-            &ack.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        ack.verify_by(&author.device_signing_pubkey)?;
         if ack.ack_hash() != expected.ack_hash {
             return Err(StoreProtocolError::ObjectHashMismatch {
                 expected: expected.ack_hash,
@@ -221,8 +181,7 @@ impl StoreAck {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SnapshotMeta {
-    pub version: u32,
+pub(crate) struct SnapshotMetaBody {
     pub store_root_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
     pub generation: u64,
@@ -234,8 +193,13 @@ pub(crate) struct SnapshotMeta {
     pub schema_version: u32,
     pub created_at: String,
     pub successor: SnapshotSuccessorLink,
-    pub signature: String,
 }
+
+impl SignedBody for SnapshotMetaBody {
+    const DOMAIN: &'static [u8] = SNAPSHOT_DOMAIN;
+}
+
+pub(crate) type SnapshotMeta = Signed<SnapshotMetaBody>;
 
 impl RetainedVerifiedMergeHistorySummary {
     fn validate(
@@ -278,22 +242,6 @@ pub(crate) struct SnapshotSuccessorLink {
     pub next_slot: ObjectSlot,
 }
 
-#[derive(Serialize)]
-struct SnapshotSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    author_registration: &'a StoreDeviceRegistrationRef,
-    generation: u64,
-    predecessor: Option<&'a StoreSnapshotRef>,
-    image: &'a SnapshotImageRef,
-    coverage: &'a CommitFrontier,
-    state: &'a StoreSnapshotState,
-    history_summary: &'a RetainedVerifiedMergeHistorySummary,
-    schema_version: u32,
-    created_at: &'a str,
-    successor: &'a SnapshotSuccessorLink,
-}
-
 impl SnapshotMeta {
     pub(crate) fn signed(
         store_root_hash: ObjectHash,
@@ -313,57 +261,31 @@ impl SnapshotMeta {
         validate_commit_frontier(&coverage)?;
         state.validate(store_root_hash, &coverage)?;
         history_summary.validate(store_root_hash, &coverage, &state)?;
-        let mut meta = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            author_registration,
-            generation,
-            predecessor,
-            image,
-            coverage,
-            state,
-            history_summary,
-            schema_version,
-            created_at,
-            successor,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(device_signer, &meta.canonical_signed_bytes());
-        meta.signature = signature;
-        Ok(meta)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            SNAPSHOT_DOMAIN,
-            &SnapshotSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                author_registration: &self.author_registration,
-                generation: self.generation,
-                predecessor: self.predecessor.as_ref(),
-                image: &self.image,
-                coverage: &self.coverage,
-                state: &self.state,
-                history_summary: &self.history_summary,
-                schema_version: self.schema_version,
-                created_at: &self.created_at,
-                successor: &self.successor,
+        Ok(Signed::sign(
+            SnapshotMetaBody {
+                store_root_hash,
+                author_registration,
+                generation,
+                predecessor,
+                image,
+                coverage,
+                state,
+                history_summary,
+                schema_version,
+                created_at,
+                successor,
             },
-        )
+            device_signer,
+        ))
     }
 
     pub(crate) fn snapshot_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 
     pub(crate) fn semantic_hash_from_bytes(bytes: &[u8]) -> Result<ObjectHash, StoreProtocolError> {
         let meta: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
         Ok(meta.snapshot_hash())
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("SnapshotMeta serialization cannot fail")
     }
 
     pub(crate) fn parse_at(
@@ -373,7 +295,7 @@ impl SnapshotMeta {
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let meta: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(meta.version)?;
+        meta.require_version()?;
         crate::protocol::objects::verify_store_root(
             expected_store_root_hash,
             meta.store_root_hash,
@@ -397,13 +319,7 @@ impl SnapshotMeta {
             .validate(expected_store_root_hash, &meta.coverage)?;
         meta.history_summary
             .validate(expected_store_root_hash, &meta.coverage, &meta.state)?;
-        if !keys::verify_signature_hex(
-            &author.device_signing_pubkey,
-            &meta.signature,
-            &meta.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        meta.verify_by(&author.device_signing_pubkey)?;
         let actual = meta.snapshot_hash();
         if actual != expected.snapshot_hash {
             return Err(StoreProtocolError::ObjectHashMismatch {

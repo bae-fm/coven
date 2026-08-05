@@ -1,4 +1,4 @@
-use super::validation::{require_version, validate_commit_frontier, validate_successor_sequence};
+use super::validation::{validate_commit_frontier, validate_successor_sequence};
 use super::*;
 
 /// One device's signed acknowledgement of the exact private Circle history it
@@ -6,8 +6,7 @@ use super::*;
 /// outside the Circle observe only the object's shape and timing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CircleAck {
-    pub version: u32,
+pub(crate) struct CircleAckBody {
     pub store_root_hash: ObjectHash,
     pub circle_id: CircleId,
     pub registration: StoreDeviceRegistrationRef,
@@ -27,8 +26,13 @@ pub(crate) struct CircleAck {
     pub seeded_from: Option<CircleBootstrapCoverageRef>,
     pub last_sync: String,
     pub successor: SuccessorLink,
-    pub signature: String,
 }
+
+impl SignedBody for CircleAckBody {
+    const DOMAIN: &'static [u8] = CIRCLE_ACK_DOMAIN;
+}
+
+pub(crate) type CircleAck = Signed<CircleAckBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,22 +43,6 @@ pub struct CircleAckRef {
     pub sequence: u64,
     pub ack_hash: ObjectHash,
     pub object: ExactObjectRef,
-}
-
-#[derive(Serialize)]
-struct CircleAckSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    circle_id: CircleId,
-    registration: &'a StoreDeviceRegistrationRef,
-    sequence: u64,
-    store_cut: &'a CommitFrontier,
-    control: &'a CircleControlCoord,
-    epoch_id: CircleEpochId,
-    key_fingerprint: KeyFingerprint,
-    seeded_from: Option<&'a CircleBootstrapCoverageRef>,
-    last_sync: &'a str,
-    successor: &'a SuccessorLink,
 }
 
 impl CircleAck {
@@ -75,52 +63,26 @@ impl CircleAck {
     ) -> Result<Self, StoreProtocolError> {
         validate_successor_sequence(sequence, &successor)?;
         validate_circle_ack_state(&store_cut, &control, &seeded_from, circle_id)?;
-        let mut ack = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash,
-            circle_id,
-            registration,
-            sequence,
-            store_cut,
-            control,
-            epoch_id,
-            key_fingerprint,
-            seeded_from,
-            last_sync,
-            successor,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(device_signer, &ack.canonical_signed_bytes());
-        ack.signature = signature;
-        Ok(ack)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            CIRCLE_ACK_DOMAIN,
-            &CircleAckSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                circle_id: self.circle_id,
-                registration: &self.registration,
-                sequence: self.sequence,
-                store_cut: &self.store_cut,
-                control: &self.control,
-                epoch_id: self.epoch_id,
-                key_fingerprint: self.key_fingerprint,
-                seeded_from: self.seeded_from.as_ref(),
-                last_sync: &self.last_sync,
-                successor: &self.successor,
+        Ok(Signed::sign(
+            CircleAckBody {
+                store_root_hash,
+                circle_id,
+                registration,
+                sequence,
+                store_cut,
+                control,
+                epoch_id,
+                key_fingerprint,
+                seeded_from,
+                last_sync,
+                successor,
             },
-        )
-    }
-
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("CircleAck serialization cannot fail")
+            device_signer,
+        ))
     }
 
     pub(crate) fn ack_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
+        self.hash()
     }
 
     /// Verify one exact Circle acknowledgement against its expected reference and
@@ -137,7 +99,7 @@ impl CircleAck {
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let ack: Self = crate::protocol::objects::decode_protocol_object(bytes)?;
-        require_version(ack.version)?;
+        ack.require_version()?;
         crate::protocol::objects::verify_store_root(
             expected_store_root.store_root_hash,
             ack.store_root_hash,
@@ -181,13 +143,7 @@ impl CircleAck {
             &ack.seeded_from,
             ack.circle_id,
         )?;
-        if !keys::verify_signature_hex(
-            &author.device_signing_pubkey,
-            &ack.signature,
-            &ack.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        ack.verify_by(&author.device_signing_pubkey)?;
         if ack.ack_hash() != expected.ack_hash {
             return Err(StoreProtocolError::ObjectHashMismatch {
                 expected: expected.ack_hash,
