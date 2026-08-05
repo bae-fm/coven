@@ -1,3 +1,4 @@
+use super::fixed_sets::*;
 use super::*;
 
 #[test]
