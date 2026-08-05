@@ -2051,6 +2051,19 @@ mod test_device {
                 .await
         }
 
+        /// The writer authority every Circle helper below has to take before it
+        /// can name its operation, with the one error shape they all report.
+        async fn circle_writer(
+            &self,
+        ) -> Result<
+            crate::sync::store::AuthorizedWriterOperation<'_>,
+            crate::sync::store::CircleOperationError,
+        > {
+            self.store.authorize_writer().await.map_err(|error| {
+                crate::sync::store::CircleOperationError::InvalidState(error.to_string())
+            })
+        }
+
         pub(crate) async fn prepare_circle_operation(
             &self,
             metadata_stamp: &str,
@@ -2059,12 +2072,8 @@ mod test_device {
             crate::protocol::circle_journal::CircleOperationJournal,
             crate::sync::store::CircleOperationError,
         > {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .prepare_create_for_test(metadata_stamp, name)
                 .await
@@ -2073,12 +2082,8 @@ mod test_device {
         pub(crate) async fn publish_circle_epoch_close_response(
             &self,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .publish_circle_epoch_close_responses()
                 .await
@@ -2093,12 +2098,8 @@ mod test_device {
                 self.store.store_root().store_root_hash,
             )
             .expect("derive Circle test routing key");
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .publish_prepared_operation_for_test(operation_id, Some(&routing_key))
                 .await
@@ -2112,12 +2113,8 @@ mod test_device {
                 self.store.store_root().store_root_hash,
             )
             .expect("derive Circle test routing key");
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .resume_circle_operations(Some(&routing_key))
                 .await
@@ -2346,12 +2343,8 @@ mod test_device {
             crate::protocol::objects::PreparedExactObject,
             crate::sync::store::CircleOperationError,
         > {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .prepare_circle_object_for_test(context, semantic_prefix, extension, bytes)
                 .await
@@ -2367,12 +2360,8 @@ mod test_device {
             crate::protocol::objects::PreparedExactObject,
             crate::sync::store::CircleOperationError,
         > {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .prepare_circle_object_at_for_test(context, slot, semantic_prefix, bytes)
         }
@@ -2392,12 +2381,8 @@ mod test_device {
             ),
             crate::sync::store::CircleOperationError,
         > {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .prepare_circle_activation_objects_for_test(draft, history, candidate_family)
                 .await
@@ -2413,12 +2398,8 @@ mod test_device {
             crate::protocol::store_commit::StoreBatchCommit,
             crate::sync::store::CircleOperationError,
         > {
-            self.store
-                .authorize_writer()
-                .await
-                .map_err(|error| {
-                    crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-                })?
+            self.circle_writer()
+                .await?
                 .circles()
                 .sign_circle_commit_for_test(old_commit, coord, reference, stream_activations)
         }
