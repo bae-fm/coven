@@ -109,7 +109,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "open_read_only",
     ),
     (
-        "crates/coven/src/sync/store/owner/authorized_history.rs",
+        "crates/coven/src/sync/store/owner/authorized_history/construction.rs",
         "AuthorizedStoreHistory",
         "authorize_writer",
     ),
@@ -130,7 +130,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ("crates/coven/src/sync/store/owner.rs", "Store", "open"),
     ("crates/coven/src/sync/store/owner.rs", "Store", "load"),
     (
-        "crates/coven/src/sync/store/owner/authorized_history.rs",
+        "crates/coven/src/sync/store/owner/authorized_history/construction.rs",
         "AuthorizedStoreHistory",
         "finish_initialization",
     ),

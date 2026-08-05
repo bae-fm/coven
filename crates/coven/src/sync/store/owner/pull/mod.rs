@@ -46,7 +46,7 @@ pub(super) struct MergeCandidate {
     pub(super) membership_prefix: VerifiedMergeMembershipPrefix,
 }
 
-pub(super) struct VerifiedPullCandidate {
+pub(crate) struct VerifiedPullCandidate {
     pub(super) verified: VerifiedStoreBatchCommit,
     pub(super) predecessor_membership: MembershipChain,
     pub(super) registrations: Vec<ActivatedStoreDeviceRegistration>,
@@ -54,11 +54,11 @@ pub(super) struct VerifiedPullCandidate {
     pub(super) membership_control: Option<VerifiedCircleActivations>,
 }
 
-pub(super) struct LoadedMergePredecessorMemberships {
+pub(crate) struct LoadedMergePredecessorMemberships {
     pub(super) by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
 }
 
-pub(super) enum MaterializedCheck {
+pub(crate) enum MaterializedCheck {
     Yes,
     Missing,
     Held(HeldStorePositionReason),

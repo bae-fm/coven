@@ -1,0 +1,332 @@
+use super::*;
+
+impl<'storage> AuthorizedStoreHistory<'storage> {
+    pub(crate) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
+        self.history_verifier.membership_objects()
+    }
+
+    pub(crate) fn new(
+        database: StoreDatabase,
+        storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
+        history_verifier: MergeHistoryVerifier<'storage>,
+        blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
+        keyrings: crate::sync::store::owner::keyring::StoreKeyrings<'storage>,
+    ) -> Self {
+        Self {
+            database,
+            storage,
+            store_dir,
+            blob_cache,
+            history_verifier,
+            blob_source,
+            keyrings: Arc::new(keyrings),
+        }
+    }
+
+    pub(crate) async fn finish_initialization(
+        mut self,
+        identity: &UserKeypair,
+    ) -> Result<InitializedStore, StoreInitializationError> {
+        let database = self.database.clone();
+        let mut device_id = database
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        let identity_is_founder = self
+            .history_verifier
+            .verified_root()
+            .protocol()
+            .descriptor
+            .founder_pubkey
+            == crate::keys::public_key_hex(identity);
+        if device_id.is_none() && !identity_is_founder {
+            return Err(StoreInitializationError::ProtocolRoot(
+                "opening a Store for a non-founder requires an installed local device".to_string(),
+            ));
+        }
+        let founder_pubkey = self
+            .history_verifier
+            .verified_root()
+            .protocol()
+            .descriptor
+            .founder_pubkey
+            .clone();
+        self.load_and_install_owner_membership(&founder_pubkey)
+            .await
+            .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
+        if device_id.is_none() && identity_is_founder {
+            self.install_existing_founder_device(identity)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            device_id = database
+                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .await
+                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        }
+        let device_id = device_id.ok_or_else(|| {
+            StoreInitializationError::ProtocolRoot(
+                "initialized Store has no local device registration id".to_string(),
+            )
+        })?;
+        let store = Store::new(
+            database,
+            Arc::clone(self.storage),
+            self.store_dir.clone(),
+            identity.clone(),
+            Some(device_id.clone()),
+            self.history_verifier.verified_root().clone(),
+        );
+        Ok(InitializedStore { store, device_id })
+    }
+
+    pub(crate) async fn install_existing_founder_device(
+        &self,
+        signer: &UserKeypair,
+    ) -> Result<(), crate::sync::store::owner::registration::StoreRegistrationError> {
+        use crate::protocol::objects::ProtocolObjectDomain;
+        use crate::protocol::store_commit::{
+            ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckRef,
+            StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+        };
+
+        let storage = self.storage;
+        let root = self.history_verifier.verified_root().reference();
+        let founder = self.history_verifier.load_founder_registration().await?;
+        if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
+            return Err(
+                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                    "Store founder registration belongs to another identity".to_string(),
+                ),
+            );
+        }
+        if founder.value.provider
+            != storage
+                .provider_binding()
+                .await
+                .map_err(crate::protocol::objects::StoreObjectError::from)?
+                .device
+        {
+            return Err(
+                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                    "Store founder registration belongs to another provider principal".to_string(),
+                ),
+            );
+        }
+        founder.value.device_signer(signer).map_err(|error| {
+            crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                error.to_string(),
+            )
+        })?;
+
+        let registration_context =
+            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                root.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            );
+        let registration_prefix =
+            crate::protocol::store_commit::founder_registration_semantic_prefix(
+                match founder.value.origin {
+                    StoreDeviceRegistrationOrigin::Founder { creation_id } => creation_id,
+                    _ => return Err(
+                        crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                            "Store founder registration has a non-founder origin".to_string(),
+                        ),
+                    ),
+                },
+            );
+        let (registration_bytes, registration_prepared) = storage
+            .read_prepared_protocol_slot(
+                &registration_context,
+                founder.object.slot(),
+                &registration_prefix,
+            )
+            .await
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+        if registration_bytes != founder.bytes
+            || registration_prepared.reference() != &founder.object
+        {
+            return Err(
+                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                    "prepared founder registration differs from its verified exact object"
+                        .to_string(),
+                ),
+            );
+        }
+        let registration_ref =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
+            &founder.value.acknowledgements
+        else {
+            return Err(
+                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                    "Store founder registration has no acknowledgement anchor".to_string(),
+                ),
+            );
+        };
+        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreAck,
+        );
+        let ack_prefix = ack_slot_prefix(&founder.value.device_id.to_string(), 1);
+        let (ack_bytes, ack_prepared) = storage
+            .read_prepared_protocol_slot(&ack_context, first_slot, &ack_prefix)
+            .await
+            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+        let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes).map_err(|error| {
+            crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                error.to_string(),
+            )
+        })?;
+        let ack_ref = StoreAckRef {
+            registration: registration_ref.clone(),
+            sequence: unverified_ack.sequence,
+            ack_hash: unverified_ack.ack_hash(),
+            object: ack_prepared.reference().clone(),
+        };
+        let ack =
+            StoreAck::parse_at(&ack_bytes, root, &ack_ref, &founder.value).map_err(|error| {
+                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                    error.to_string(),
+                )
+            })?;
+        if ack.registration != registration_ref {
+            return Err(
+                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                    "Store founder acknowledgement names another registration".to_string(),
+                ),
+            );
+        }
+        self.database
+            .install_existing_local_founder_device(
+                crate::protocol::objects::ExactProtocolObject {
+                    value: founder.value,
+                    bytes: registration_bytes,
+                    object: registration_prepared.reference().clone(),
+                    prepared: registration_prepared,
+                },
+                ack_ref,
+                crate::protocol::objects::ExactProtocolObject {
+                    value: ack,
+                    bytes: ack_bytes,
+                    object: ack_prepared.reference().clone(),
+                    prepared: ack_prepared,
+                },
+            )
+            .await
+            .map_err(|error| {
+                crate::sync::store::owner::registration::StoreRegistrationError::Database(
+                    error.to_string(),
+                )
+            })
+    }
+
+    pub(crate) async fn authorize_store(
+        mut self,
+        identity: &'storage UserKeypair,
+        device_id: Option<&str>,
+    ) -> Result<AuthorizedStore<'storage>, SyncCycleFailure> {
+        let owner = self
+            .database
+            .validated_store_owner(self.history_verifier.verified_root().reference())
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("validate Store owner authority", error)
+            })?;
+        let membership = self
+            .load_current_membership(&owner)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("load membership chain", error))?;
+        let local_device = match device_id {
+            Some(device_id) => Some(
+                LocalStoreDevice::load(
+                    &self.database,
+                    self.history_verifier.verified_root().reference(),
+                    device_id,
+                )
+                .await
+                .map_err(|error| {
+                    SyncCycleFailure::operation("load local Store device authority", error)
+                })?,
+            ),
+            None => None,
+        };
+        Ok(AuthorizedStore::new(
+            self,
+            identity,
+            local_device,
+            membership,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn authorize_writer(
+        self,
+        membership: crate::protocol::membership::MembershipChain,
+        identity: &'storage UserKeypair,
+        registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
+        device_signer: UserKeypair,
+    ) -> crate::sync::store::owner::writer::AuthorizedWriterOperation<'storage> {
+        let database = self.database.clone();
+        let storage = self.storage;
+        let store_dir = self.store_dir;
+        let keyrings = Arc::clone(&self.keyrings);
+        let writer = Arc::new(
+            crate::sync::store::owner::writer::LocalStoreWriter::from_verified_parts(
+                identity.clone(),
+                registration,
+                device_signer,
+            ),
+        );
+        let keyrings = crate::sync::store::owner::writer::LocalWriterKeyrings::new(
+            Arc::clone(&writer),
+            keyrings,
+        );
+        crate::sync::store::owner::writer::AuthorizedWriterOperation::from_parts(
+            database, self, storage, store_dir, membership, writer, keyrings,
+        )
+    }
+
+    pub(crate) fn from_pending_device_join(
+        _authority: crate::sync::store::owner::device_join::PendingDeviceJoinHistoryConstruction,
+        database: StoreDatabase,
+        storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
+        history_verifier: MergeHistoryVerifier<'storage>,
+        blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
+        keyrings: crate::sync::store::owner::keyring::StoreKeyrings<'storage>,
+    ) -> Self {
+        Self::new(
+            database,
+            storage,
+            store_dir,
+            blob_cache,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
+    }
+
+    pub(crate) fn from_snapshot(
+        _authority: crate::sync::store::owner::writer::SnapshotHistoryConstruction,
+        database: StoreDatabase,
+        storage: &'storage Arc<dyn SyncStorage>,
+        store_dir: &'storage crate::store_dir::StoreDir,
+        blob_cache: crate::sync::store::blob::StoreBlobCache,
+        history_verifier: MergeHistoryVerifier<'storage>,
+        blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
+        keyrings: crate::sync::store::owner::keyring::StoreKeyrings<'storage>,
+    ) -> Self {
+        Self::new(
+            database,
+            storage,
+            store_dir,
+            blob_cache,
+            history_verifier,
+            blob_source,
+            keyrings,
+        )
+    }
+}

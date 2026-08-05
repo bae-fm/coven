@@ -39,7 +39,7 @@ mod journal;
 pub(super) use authorized_join::{AuthorizedJoin, AuthorizedProviderAdministratorJoin};
 
 #[derive(Clone, Copy)]
-pub(super) struct PendingDeviceJoinHistoryConstruction;
+pub(crate) struct PendingDeviceJoinHistoryConstruction;
 
 pub use crate::protocol::store_commit::device_join_exchange::*;
 pub use authorized_join::DeviceProviderAccessAdministrator;

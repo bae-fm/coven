@@ -13,7 +13,7 @@ pub(super) use operation::StoreWriterAuthorizationError;
 pub(crate) use operation::{operations, reclaim, snapshot};
 
 #[derive(Clone, Copy)]
-pub(super) struct SnapshotHistoryConstruction;
+pub(crate) struct SnapshotHistoryConstruction;
 
 pub(crate) struct AuthorizedWriterOperation<'storage> {
     database: StoreDatabase,
