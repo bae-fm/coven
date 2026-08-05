@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn local_device_id(&self) -> &crate::protocol::store_commit::StoreDeviceId {
@@ -76,15 +77,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .create_protocol_object(&batch.commit.prepared)
                     .await
                     .map_err(StoreObjectError::from)?;
-                let opened_commit = storage
-                    .read_protocol_object(&commit_context, &batch.commit.object, &commit_prefix)
+                storage
+                    .verify_readback(
+                        &commit_context,
+                        &batch.commit.object,
+                        &commit_prefix,
+                        &batch.commit.bytes,
+                    )
                     .await
-                    .map_err(StoreObjectError::from)?;
-                if opened_commit != batch.commit.bytes {
-                    return Err(StoreError::InvalidOutbound(
-                        "prepared commit exact readback differs from its signed bytes".to_string(),
-                    ));
-                }
+                    .map_err(StoreError::readback)?;
                 database
                     .mark_candidate_commit_uploaded(head.commit.clone())
                     .await?;
@@ -402,16 +403,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             .await
                             .map_err(StoreObjectError::from)?;
                     }
-                    let opened = storage
-                        .read_protocol_object(&context, object, &prefix)
+                    storage
+                        .verify_readback(
+                            &context,
+                            object,
+                            &prefix,
+                            remote.bytes().canonical_semantic_bytes(),
+                        )
                         .await
-                        .map_err(StoreObjectError::from)?;
-                    if opened != remote.bytes().canonical_semantic_bytes() {
-                        return Err(StoreError::InvalidOutbound(format!(
-                            "remote package {} exact readback differs from its canonical bytes",
-                            remote.object_id()
-                        )));
-                    }
+                        .map_err(StoreError::readback)?;
                 }
                 crate::protocol::remote_object::RemoteStoredRepresentation::Blob { object } => {
                     let locator = crate::protocol::blob::locator::BlobLocator::parse(

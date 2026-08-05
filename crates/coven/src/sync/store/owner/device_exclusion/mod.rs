@@ -23,7 +23,7 @@ use crate::protocol::store_commit::{
     StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError,
 };
-use crate::storage::SyncStorage;
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StoreDeviceExclusionResult {
@@ -299,23 +299,21 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         &self,
         operation: &DurableStoreDeviceExclusionOperation,
     ) -> Result<(), StoreDeviceExclusionJournalError> {
+        let context = operation.object().context();
+        let prefix = operation.object().semantic_prefix()?;
         self.storage
             .create_protocol_object(operation.object().prepared())
             .await
             .map_err(StoreDeviceExclusionJournalError::Storage)?;
-        let context = operation.object().context();
-        let prefix = operation.object().semantic_prefix()?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, operation.object().object(), prefix)
+        self.storage
+            .verify_readback(
+                &context,
+                operation.object().object(),
+                prefix,
+                &operation.object().semantic_bytes(),
+            )
             .await
-            .map_err(StoreDeviceExclusionJournalError::Storage)?;
-        if opened != operation.object().semantic_bytes() {
-            return Err(StoreDeviceExclusionJournalError::Invalid(
-                "exclusion exact readback differs from its signed bytes".to_string(),
-            ));
-        }
-        Ok(())
+            .map_err(StoreDeviceExclusionJournalError::Storage)
     }
 
     pub(super) async fn resume(

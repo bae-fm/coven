@@ -2,6 +2,7 @@ use super::journal::{database_error, provider_error};
 use super::*;
 use crate::protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 use crate::protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
+use crate::storage::VerifiedObjectWrites;
 
 mod provider_administrator;
 
@@ -273,14 +274,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 && durable_prepared == &PreparedDeviceJoinObject::from_prepared(&prepared) => {}
             _ => return Err(DeviceJoinError::JournalConflict),
         }
-        self.storage.create_protocol_object(&prepared).await?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, prepared.reference(), &prefix)
-            .await?;
-        if opened != abandonment_object.to_bytes() {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        self.storage
+            .create_and_verify(&context, &prepared, &prefix, &abandonment_object.to_bytes())
+            .await
+            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         self.local_writer
             .verify_device_join_abandonment(&abandonment_ref, &abandonment_object)?;
         let plan = self.writer.prepare_plan().await?;
@@ -413,14 +410,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             &prefix,
             attempt.to_bytes(),
         )?;
-        self.storage.create_protocol_object(&prepared).await?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, prepared.reference(), &prefix)
-            .await?;
-        if opened != attempt.to_bytes() {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        self.storage
+            .create_and_verify(&context, &prepared, &prefix, &attempt.to_bytes())
+            .await
+            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         let attempt_ref = DeviceJoinAttemptRef {
             attempt_id: offer.attempt_id,
             attempt_hash: attempt.attempt_hash(),
@@ -545,14 +538,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 && durable_prepared == &PreparedDeviceJoinObject::from_prepared(&prepared) => {}
             _ => return Err(DeviceJoinError::JournalConflict),
         }
-        self.storage.create_protocol_object(&prepared).await?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, prepared.reference(), &prefix)
-            .await?;
-        if opened != outcome.to_bytes() {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        self.storage
+            .create_and_verify(&context, &prepared, &prefix, &outcome.to_bytes())
+            .await
+            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let verified_outcome = local_writer
             .load_own_device_join_outcome(&self.history(), &outcome_ref)
@@ -761,14 +750,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        self.storage.create_protocol_object(&prepared).await?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, prepared.reference(), &prefix)
-            .await?;
-        if opened != outcome.to_bytes() {
-            return Err(DeviceJoinError::AttemptMismatch);
-        }
+        self.storage
+            .create_and_verify(&context, &prepared, &prefix, &outcome.to_bytes())
+            .await
+            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         let activated_registration =
             crate::protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                 crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
@@ -1017,14 +1002,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 .await
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }
-        self.storage.create_protocol_object(&prepared).await?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, prepared.reference(), &prefix)
-            .await?;
-        if opened != receipt_object.to_bytes() {
-            return Err(DeviceJoinError::CleanupMismatch);
-        }
+        self.storage
+            .create_and_verify(&context, &prepared, &prefix, &receipt_object.to_bytes())
+            .await
+            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::CleanupMismatch))?;
         let receipt = DeviceJoinCleanupReceipt {
             receipt: receipt_ref,
         };

@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
@@ -249,18 +250,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .create_protocol_object(&candidate.prepared)
             .await
             .map_err(crate::protocol::objects::StoreObjectError::from)?;
-        let opened = self
-            .storage
-            .as_ref()
-            .read_protocol_object(&context, &candidate.reference.object, &prefix)
+        self.storage
+            .verify_readback(
+                &context,
+                &candidate.reference.object,
+                &prefix,
+                &candidate.commit.to_bytes(),
+            )
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
-        if opened != candidate.commit.to_bytes() {
-            return Err(StoreError::InvalidOutbound(
-                "Store operation commit exact readback differs from its signed bytes".to_string(),
-            ));
-        }
-        Ok(())
+            .map_err(StoreError::readback)
     }
 
     pub(crate) async fn pull(

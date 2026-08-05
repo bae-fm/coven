@@ -224,16 +224,18 @@ impl<'operation, 'storage>
         );
         let prefix =
             crate::protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
-        self.storage.create_protocol_object(&prepared).await?;
-        let opened = self
-            .storage
-            .read_protocol_object(&context, prepared.reference(), &prefix)
-            .await?;
-        if opened != grant.to_bytes() {
-            return Err(DeviceJoinError::Provider(
-                "provider access grant exact readback differs from its signed bytes".to_string(),
-            ));
-        }
+        self.storage
+            .create_and_verify(&context, &prepared, &prefix, &grant.to_bytes())
+            .await
+            .map_err(|error| {
+                DeviceJoinError::readback(
+                    error,
+                    DeviceJoinError::Provider(
+                        "provider access grant exact readback differs from its signed bytes"
+                            .to_string(),
+                    ),
+                )
+            })?;
         let grant_ref =
             StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
         let activation = self

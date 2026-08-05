@@ -335,6 +335,10 @@ pub enum StorageError {
     AlreadyExists(String),
     #[error("reserved storage slot contains different bytes: {0}")]
     SlotCollision(String),
+    /// The object read back from its exact reference opened to bytes other than
+    /// the ones the caller sealed into it.
+    #[error("exact readback differs from the sealed bytes: {0}")]
+    ReadbackMismatch(String),
     #[error("decryption failed: {0}")]
     Decryption(String),
     #[error("remote blob content is invalid: {0}")]

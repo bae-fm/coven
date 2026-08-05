@@ -1,7 +1,6 @@
 //! Proof-gated deletion of exact Store packages covered by exact authority.
 
 use crate::database::StoreReclaimJournalError;
-use crate::protocol::objects::PreparedExactObject;
 use std::sync::Arc;
 
 use crate::database::{
@@ -17,7 +16,7 @@ use crate::protocol::store_commit::{
     snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
     StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
 };
-use crate::storage::SyncStorage;
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use crate::sync::store::owner::history::{
     CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
 };
@@ -686,36 +685,36 @@ pub(crate) async fn create_reclaim_exact_objects(
             authorization_prepared,
             ..
         } => {
-            create_and_verify(
-                storage,
-                &ProtocolObjectContext::store_encrypted(
-                    evidence.store_root_hash,
-                    ProtocolObjectDomain::StoreReclaimEvidence,
-                ),
-                evidence_prepared,
-                &reclaim_evidence_semantic_prefix(evidence.evidence_hash()),
-                &evidence.to_bytes(),
-            )
-            .await?;
-            create_and_verify(
-                storage,
-                &ProtocolObjectContext::signed_plaintext(
-                    authorization.store_root_hash,
-                    ProtocolObjectDomain::StoreReclaimAuthorization,
-                ),
-                authorization_prepared,
-                &reclaim_authorization_semantic_prefix(authorization.authorization_hash()),
-                &authorization.to_bytes(),
-            )
-            .await
+            storage
+                .create_and_verify(
+                    &ProtocolObjectContext::store_encrypted(
+                        evidence.store_root_hash,
+                        ProtocolObjectDomain::StoreReclaimEvidence,
+                    ),
+                    evidence_prepared,
+                    &reclaim_evidence_semantic_prefix(evidence.evidence_hash()),
+                    &evidence.to_bytes(),
+                )
+                .await?;
+            storage
+                .create_and_verify(
+                    &ProtocolObjectContext::signed_plaintext(
+                        authorization.store_root_hash,
+                        ProtocolObjectDomain::StoreReclaimAuthorization,
+                    ),
+                    authorization_prepared,
+                    &reclaim_authorization_semantic_prefix(authorization.authorization_hash()),
+                    &authorization.to_bytes(),
+                )
+                .await
+                .map_err(StoreReclaimJournalError::from)
         }
         crate::database::DurableStoreReclaimObject::Receipt {
             receipt,
             receipt_prepared,
             ..
-        } => {
-            create_and_verify(
-                storage,
+        } => storage
+            .create_and_verify(
                 &ProtocolObjectContext::signed_plaintext(
                     receipt.store_root_hash,
                     ProtocolObjectDomain::StoreReclaimReceipt,
@@ -725,25 +724,6 @@ pub(crate) async fn create_reclaim_exact_objects(
                 &receipt.to_bytes(),
             )
             .await
-        }
+            .map_err(StoreReclaimJournalError::from),
     }
-}
-
-async fn create_and_verify(
-    storage: &dyn SyncStorage,
-    context: &ProtocolObjectContext,
-    prepared: &PreparedExactObject,
-    prefix: &str,
-    expected: &[u8],
-) -> Result<(), StoreReclaimJournalError> {
-    storage.create_protocol_object(prepared).await?;
-    let opened = storage
-        .read_protocol_object(context, prepared.reference(), prefix)
-        .await?;
-    if opened != expected {
-        return Err(StoreReclaimJournalError::Invalid(
-            "reclaim object exact readback differs from its signed bytes".to_string(),
-        ));
-    }
-    Ok(())
 }

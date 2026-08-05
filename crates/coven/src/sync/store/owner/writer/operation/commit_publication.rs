@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn reject_excluded_merge_candidate(
@@ -288,17 +289,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 return Err(crate::protocol::objects::StoreObjectError::from(error).into());
             }
         }
-        let opened_head = self
-            .storage
-            .as_ref()
-            .read_protocol_object(&head_context, prepared_head.reference(), &head_prefix)
+        self.storage
+            .verify_readback(
+                &head_context,
+                prepared_head.reference(),
+                &head_prefix,
+                &head.to_bytes(),
+            )
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
-        if opened_head != head.to_bytes() {
-            return Err(StoreError::InvalidOutbound(
-                "Store operation head exact readback differs from its signed bytes".to_string(),
-            ));
-        }
+            .map_err(StoreError::readback)?;
         let activation_head = crate::protocol::store_commit::StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object: prepared_head.reference().clone(),

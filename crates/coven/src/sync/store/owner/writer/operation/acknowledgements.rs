@@ -3,6 +3,7 @@ use super::*;
 use crate::protocol::objects::StoreObjectError;
 use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
+use crate::storage::VerifiedObjectWrites;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {
@@ -236,20 +237,15 @@ impl AuthorizedWriterOperation<'_> {
                     .await?;
                 continue;
             }
-            let opened = self
-                .storage
-                .read_protocol_object(
+            self.storage
+                .verify_readback(
                     &context,
                     &outbound.reference.object,
                     &ack_slot_prefix(&device_id, outbound.reference.sequence),
+                    &outbound.ack.bytes,
                 )
                 .await
-                .map_err(StoreObjectError::from)?;
-            if opened != outbound.ack.bytes {
-                return Err(StoreAckError::InvalidOutbound(
-                    "Store acknowledgement exact readback differs from prepared bytes".to_string(),
-                ));
-            }
+                .map_err(|error| StoreAckError::Outbound(StoreError::readback(error)))?;
             let acknowledgement_remote = candidate
                 .acknowledgement_remote_objects(&outbound.ack)?
                 .into_iter()

@@ -58,6 +58,18 @@ pub enum DeviceJoinError {
     Serialization(#[from] serde_json::Error),
 }
 
+impl DeviceJoinError {
+    /// Classify an exact create-and-readback failure: an object that opened to
+    /// other bytes is the caller's `mismatch` verdict; every other failure is
+    /// the storage failure itself.
+    pub(crate) fn readback(error: crate::protocol::objects::StorageError, mismatch: Self) -> Self {
+        match error {
+            crate::protocol::objects::StorageError::ReadbackMismatch(_) => mismatch,
+            error => Self::Storage(error),
+        }
+    }
+}
+
 impl From<crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError>
     for DeviceJoinError
 {

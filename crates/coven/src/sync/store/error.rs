@@ -106,6 +106,18 @@ pub enum StoreError {
 }
 
 impl StoreError {
+    /// Classify an exact create-and-readback failure: an object that opened to
+    /// bytes other than the ones sealed into it is an invalid outbound object,
+    /// not a storage failure.
+    pub(crate) fn readback(error: crate::protocol::objects::StorageError) -> Self {
+        match error {
+            crate::protocol::objects::StorageError::ReadbackMismatch(key) => Self::InvalidOutbound(
+                format!("exact readback of {key} differs from its signed bytes"),
+            ),
+            error => StoreObjectError::from(error).into(),
+        }
+    }
+
     pub(crate) fn write_block(&self) -> Option<crate::WriteBlock> {
         match self {
             Self::Database(_)

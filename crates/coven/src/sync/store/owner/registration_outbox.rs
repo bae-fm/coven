@@ -1,11 +1,12 @@
 use super::registration::StoreRegistrationError;
 use crate::database::StoreDatabase;
 use crate::protocol::objects::ProtocolObjectDomain;
+use crate::protocol::objects::StorageError;
 use crate::protocol::objects::StoreObjectError;
 use crate::protocol::store_commit::{
     ack_slot_prefix, registration_semantic_prefix, StoreDeviceRegistration,
 };
-use crate::storage::SyncStorage;
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
 
 pub(super) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,
@@ -48,19 +49,14 @@ impl<'storage> RegistrationOutbox<'storage> {
             );
             let semantic_prefix = registration_semantic_prefix(&outbound.device_id.to_string());
             self.storage
-                .create_protocol_object(&outbound.prepared)
+                .create_and_verify(
+                    &context,
+                    &outbound.prepared,
+                    &semantic_prefix,
+                    &outbound.registration_bytes,
+                )
                 .await
-                .map_err(StoreObjectError::from)?;
-            let opened = self
-                .storage
-                .read_protocol_object(&context, outbound.prepared.reference(), &semantic_prefix)
-                .await
-                .map_err(StoreObjectError::from)?;
-            if opened != outbound.registration_bytes {
-                return Err(StoreRegistrationError::Invalid(
-                    "Store registration exact readback differs from its durable bytes".to_string(),
-                ));
-            }
+                .map_err(publication_error)?;
             let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
                 store_root.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
@@ -69,21 +65,15 @@ impl<'storage> RegistrationOutbox<'storage> {
                 .create_protocol_object(&outbound.initial_ack.prepared)
                 .await
                 .map_err(StoreObjectError::from)?;
-            let opened_ack = self
-                .storage
-                .read_protocol_object(
+            self.storage
+                .verify_readback(
                     &ack_context,
                     &outbound.initial_ack_ref.object,
                     &ack_slot_prefix(&outbound.device_id.to_string(), 1),
+                    &outbound.initial_ack.bytes,
                 )
                 .await
-                .map_err(StoreObjectError::from)?;
-            if opened_ack != outbound.initial_ack.bytes {
-                return Err(StoreRegistrationError::Invalid(
-                    "Store initial acknowledgement exact readback differs from its durable bytes"
-                        .to_string(),
-                ));
-            }
+                .map_err(publication_error)?;
             self.database
                 .mark_local_store_device_registration_created(
                     crate::protocol::objects::ExactProtocolObject {
@@ -109,4 +99,15 @@ impl<'storage> RegistrationOutbox<'storage> {
 
 fn database_error(error: crate::database::DbError) -> StoreRegistrationError {
     StoreRegistrationError::Database(error.to_string())
+}
+
+/// An exact object that opened to bytes other than the durable ones is invalid
+/// durable state, not a transport failure.
+fn publication_error(error: StorageError) -> StoreRegistrationError {
+    match error {
+        StorageError::ReadbackMismatch(key) => StoreRegistrationError::Invalid(format!(
+            "exact readback of {key} differs from its durable bytes"
+        )),
+        error => StoreObjectError::from(error).into(),
+    }
 }

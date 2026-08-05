@@ -2,9 +2,22 @@ use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta, SnapshotMeta,
 };
-use crate::storage::SyncStorage;
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
 
 use super::{remove_snapshot_spool, SnapshotError};
+
+/// A snapshot object that opened to bytes other than the prepared ones is
+/// invalid publication state, not a storage failure.
+fn snapshot_readback_error(error: crate::protocol::objects::StorageError) -> SnapshotError {
+    match error {
+        crate::protocol::objects::StorageError::ReadbackMismatch(key) => {
+            SnapshotError::PublicationState(format!(
+                "exact readback of {key} differs from its prepared bytes"
+            ))
+        }
+        error => SnapshotError::Bucket(error),
+    }
+}
 
 /// One exclusive Store-or-Circle snapshot publication operation.
 ///
@@ -83,16 +96,15 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
             .create_protocol_object(&pending.image.prepared)
             .await
             .map_err(SnapshotError::Bucket)?;
-        let image_readback = self
-            .storage
-            .read_protocol_object(&image_context, &meta.image.object, &image_prefix)
+        self.storage
+            .verify_readback(
+                &image_context,
+                &meta.image.object,
+                &image_prefix,
+                &pending.image.bytes,
+            )
             .await
-            .map_err(SnapshotError::Bucket)?;
-        if image_readback != pending.image.bytes {
-            return Err(SnapshotError::PublicationState(
-                "Store snapshot image exact readback differs from prepared bytes".to_string(),
-            ));
-        }
+            .map_err(snapshot_readback_error)?;
 
         let meta_context = ProtocolObjectContext::signed_plaintext(
             meta.store_root_hash,
@@ -103,16 +115,15 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
             .create_protocol_object(&pending.meta.prepared)
             .await
             .map_err(SnapshotError::Bucket)?;
-        let meta_readback = self
-            .storage
-            .read_protocol_object(&meta_context, &pending.reference.object, &meta_prefix)
+        self.storage
+            .verify_readback(
+                &meta_context,
+                &pending.reference.object,
+                &meta_prefix,
+                &pending.meta.bytes,
+            )
             .await
-            .map_err(SnapshotError::Bucket)?;
-        if meta_readback != pending.meta.bytes {
-            return Err(SnapshotError::PublicationState(
-                "Store snapshot metadata exact readback differs from prepared bytes".to_string(),
-            ));
-        }
+            .map_err(snapshot_readback_error)?;
         self.database
             .complete_snapshot_publication(pending.reference)
             .await
