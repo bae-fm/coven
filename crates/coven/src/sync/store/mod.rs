@@ -40,10 +40,10 @@ pub(crate) use owner::device_exclusion::{
 };
 pub use owner::device_join::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinCleanupProgress, DeviceJoinCleanupReceipt,
-    DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer,
-    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
-    DeviceJoinStatus, DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
+    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinError,
+    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinProducer,
+    DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
+    DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
     DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,

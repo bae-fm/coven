@@ -38,24 +38,9 @@ impl From<serde_json::Error> for DeviceJoinJournalError {
 use super::*;
 use crate::protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DeviceJoinCleanupProgress {
-    AwaitingBoth,
-    AwaitingAdministrator {
-        joiner: JoinerJoinTerminal,
-    },
-    AwaitingJoiner {
-        administrator: ProviderAdminJoinTerminal,
-    },
-    Ready {
-        administrator: ProviderAdminJoinTerminal,
-        joiner: JoinerJoinTerminal,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+/// Derived from a journal record on demand and never stored, so it carries no
+/// wire form of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeviceJoinStatus {
     AwaitingAccessRequest {
         offer: DeviceJoinOffer,
@@ -119,7 +104,6 @@ pub enum DeviceJoinStatus {
     },
     CleanupPending {
         cancellation: DeviceJoinCancellation,
-        progress: DeviceJoinCleanupProgress,
     },
     AwaitingCleanupActivation {
         receipt: DeviceJoinCleanupReceipt,
@@ -574,7 +558,6 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(cancellation)) => {
             DeviceJoinStatus::CleanupPending {
                 cancellation: cancellation.clone(),
-                progress: DeviceJoinCleanupProgress::AwaitingBoth,
             }
         }
         DeviceJoinRoleProgress::ProviderAdministrator(

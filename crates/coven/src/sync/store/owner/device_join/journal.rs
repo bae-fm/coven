@@ -15,8 +15,7 @@ pub(crate) use crate::protocol::store_commit::device_join_journal::{
     ProviderAdminJoinProgress,
 };
 pub use crate::protocol::store_commit::device_join_journal::{
-    DeviceJoinAction, DeviceJoinCleanupProgress, DeviceJoinJournalRecord, DeviceJoinRole,
-    DeviceJoinStatus,
+    DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,
 };
 
 /// One attempt's role journal in the Store database. An operation reads and
