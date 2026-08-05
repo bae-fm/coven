@@ -12,11 +12,7 @@ pub(crate) fn retain_snapshot_audience_rows(
         ));
     };
     let retained = circle_snapshot_retained_rows(conn, gates, *circle_id)?;
-    let mut tables = gates
-        .synced_table_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    tables.sort();
+    let mut tables = gates.sorted_synced_table_names();
     conn.execute_batch(
         "CREATE TEMP TABLE snapshot_retained_rows (
              table_name TEXT NOT NULL,
@@ -73,22 +69,11 @@ pub(super) fn circle_snapshot_retained_rows(
     circle_id: CircleId,
 ) -> Result<BTreeSet<(String, String)>, GateError> {
     let audience = Audience::Circle(circle_id);
-    let mut tables = gates
-        .synced_table_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    tables.sort();
     let mut retained = BTreeSet::<(String, String)>::new();
     let mut pending = VecDeque::new();
-    for table in &tables {
-        let row_ids = query_mapped_rows(
-            conn,
-            &format!("SELECT id FROM {}", quote_ident(table)),
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        for row_id in row_ids {
-            if live_row_audience(conn, gates, table, &row_id)? == audience {
+    for table in gates.sorted_synced_table_names() {
+        for row_id in all_row_ids(conn, &table)? {
+            if live_row_audience(conn, gates, &table, &row_id)? == audience {
                 pending.push_back((table.clone(), row_id));
             }
         }
@@ -120,15 +105,9 @@ pub(crate) fn validate_snapshot_routing_state(
     }
     if let Audience::Circle(circle_id) = snapshot_audience {
         let expected = circle_snapshot_retained_rows(conn, gates, *circle_id)?;
-        for table in gates.synced_table_names() {
-            let row_ids = query_mapped_rows(
-                conn,
-                &format!("SELECT id FROM {}", quote_ident(table)),
-                [],
-                |row| row.get::<_, String>(0),
-            )?;
-            for row_id in row_ids {
-                if expected.contains(&(table.to_string(), row_id.clone())) {
+        for table in gates.sorted_synced_table_names() {
+            for row_id in all_row_ids(conn, &table)? {
+                if expected.contains(&(table.clone(), row_id.clone())) {
                     continue;
                 }
                 return Err(GateError::InvalidMaterializedRouting(format!(
@@ -142,13 +121,6 @@ pub(crate) fn validate_snapshot_routing_state(
         return Ok(());
     }
 
-    let mut scoped_tables = gates
-        .tables
-        .keys()
-        .filter(|table| gates.table_is_scoped(table))
-        .cloned()
-        .collect::<Vec<_>>();
-    scoped_tables.sort();
     let mut materialized_rows = HashSet::new();
     let mut materialized_routing_ids = HashSet::new();
     let mut audience_mirrors = HashMap::new();
@@ -187,19 +159,13 @@ pub(crate) fn validate_snapshot_routing_state(
         audience_mirrors.insert(routing_id, (audience, stamp));
     }
 
-    for table in scoped_tables {
+    for table in gates.scoped_table_names() {
         let identity = gates.row_identity(&table).ok_or_else(|| {
             GateError::InvalidMaterializedRouting(format!(
                 "scoped table {table} has no declared row identity"
             ))
         })?;
-        let sql = format!(
-            "SELECT {id} FROM {table} ORDER BY {id}",
-            id = quote_ident("id"),
-            table = quote_ident(&table),
-        );
-        let rows = query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(0))?;
-        for row_id in rows {
+        for row_id in all_row_ids(conn, &table)? {
             identity.validate(&table, &row_id).map_err(|error| {
                 GateError::InvalidMaterializedRouting(format!(
                     "row identity {table}.{row_id} is invalid: {error}"

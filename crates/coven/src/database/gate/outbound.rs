@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use super::audience::live_row_audience;
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{
-    foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates, TableGate,
+    child_rows, foreign_keys, gated_fk_child_edges, truthy, GateColumn, Gates, TableGate,
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
 use crate::database::{create_table_sql, quote_ident, rewrite_create_into_schema};
@@ -476,21 +476,13 @@ fn connected_component(
         }
         // Down: each gated child referencing this row — filtered to kept children
         // for re-emit, taken structurally (every live FK edge) for retract.
-        if let Some(children) = down_edges.get(table.as_str()) {
-            for edge in children {
-                if !scope.contains(gates, &edge.child_table) {
+        if let Some(edges) = down_edges.get(table.as_str()) {
+            for (child_table, child_id) in child_rows(conn, edges, &table, &id)? {
+                if !scope.contains(gates, &child_table) {
                     continue;
                 }
-                let Some(parent_key) = query_column_text(conn, &table, &edge.parent_column, &id)?
-                else {
-                    continue;
-                };
-                for child_id in
-                    rows_referencing(conn, &edge.child_table, &edge.child_column, &parent_key)?
-                {
-                    if !restrict_to_kept || gates.row_kept(conn, &edge.child_table, &child_id)? {
-                        work.push((edge.child_table.clone(), child_id));
-                    }
+                if !restrict_to_kept || gates.row_kept(conn, &child_table, &child_id)? {
+                    work.push((child_table, child_id));
                 }
             }
         }

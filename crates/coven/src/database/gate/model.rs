@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use rusqlite::Connection;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::outbound::{query_column_text, resolve_root};
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
@@ -535,18 +535,30 @@ impl Gates {
     }
 
     pub(crate) fn table_is_scoped(&self, table: &str) -> bool {
-        let mut current = table;
-        let mut seen = HashSet::new();
-        loop {
-            if !seen.insert(current.to_string()) {
-                return false;
-            }
-            match self.tables.get(current) {
-                Some(TableGate::ScopedRoot { .. }) => return true,
-                Some(TableGate::Child { parent, .. }) => current = parent,
-                _ => return false,
-            }
-        }
+        gate_reaches_scoped_root(&self.tables, table)
+    }
+
+    /// Every scoped table, sorted, so a pass over the scoped graph visits them
+    /// in one order whatever the gate map's iteration order is.
+    pub(super) fn scoped_table_names(&self) -> Vec<String> {
+        let mut tables = self
+            .tables
+            .keys()
+            .filter(|table| self.table_is_scoped(table))
+            .cloned()
+            .collect::<Vec<_>>();
+        tables.sort();
+        tables
+    }
+
+    /// Every synced table, sorted.
+    pub(super) fn sorted_synced_table_names(&self) -> Vec<String> {
+        let mut tables = self
+            .synced_table_names()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        tables.sort();
+        tables
     }
 
     pub(super) fn is_synced_table(&self, table: &str) -> bool {
@@ -878,19 +890,8 @@ impl Gates {
             if !out.insert((table.clone(), id.clone())) {
                 continue; // already visited: cycle-guard and dedup.
             }
-            if let Some(children) = down_edges.get(table.as_str()) {
-                for edge in children {
-                    let Some(parent_key) =
-                        query_column_text(conn, &table, &edge.parent_column, &id)?
-                    else {
-                        continue;
-                    };
-                    for child_id in
-                        rows_referencing(conn, &edge.child_table, &edge.child_column, &parent_key)?
-                    {
-                        work.push((edge.child_table.clone(), child_id));
-                    }
-                }
+            if let Some(edges) = down_edges.get(table.as_str()) {
+                work.extend(child_rows(conn, edges, &table, &id)?);
             }
         }
         Ok(out)
@@ -928,28 +929,36 @@ fn fk_exists_clause(
     )
 }
 
-/// Whether walking `gate_map` from `name` up its declared-FK chain reaches a
-/// gate terminus: a gated root, remote root, or ancestor. Only `Child` links are
-/// followed upward; a terminus stops the walk (a `Parent`'s upward keep over its
-/// own children is a separate relation, not part of this downward chain).
-fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> bool {
-    let mut cur = name;
+/// Whether walking `gate_map` up the declared-FK chain from `table` reaches a
+/// gate `accept` recognizes. Only `Child` links are followed upward, so the walk
+/// ends at the first table `accept` refuses and cannot climb from (a `Parent`'s
+/// upward keep over its own children is a separate relation, not part of this
+/// downward chain). Cycle-guarded: a chain that loops reaches nothing.
+fn chain_reaches(
+    gate_map: &HashMap<String, TableGate>,
+    table: &str,
+    accept: impl Fn(&TableGate) -> bool,
+) -> bool {
+    let mut current = table;
     let mut seen = HashSet::new();
     loop {
-        if !seen.insert(cur.to_string()) {
-            return false; // cycle, defensive
+        if !seen.insert(current.to_string()) {
+            return false;
         }
-        match gate_map.get(cur) {
-            Some(TableGate::Root { .. })
-            | Some(TableGate::ScopedRoot { .. })
-            | Some(TableGate::RemoteRoot)
-            | Some(TableGate::Parent { .. }) => return true,
-            Some(TableGate::Child { parent, .. }) => {
-                cur = parent.as_str();
-            }
-            None => return false,
+        match gate_map.get(current) {
+            Some(gate) if accept(gate) => return true,
+            Some(TableGate::Child { parent, .. }) => current = parent.as_str(),
+            _ => return false,
         }
     }
+}
+
+/// Whether `name`'s chain reaches a gate terminus: a gated root, scoped root,
+/// remote root, or ancestor — every gate but an inheriting `Child`.
+fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> bool {
+    chain_reaches(gate_map, name, |gate| {
+        !matches!(gate, TableGate::Child { .. })
+    })
 }
 
 /// The gated FK edges of the schema, as `parent table -> [(child table, child's
@@ -987,6 +996,37 @@ pub(super) fn gated_fk_child_edges(
         }
     }
     Ok(edges)
+}
+
+/// Every row that references the live row `(table, id)` through `edges` — the
+/// gated children of that row, as `(child table, child row id)`. One step of the
+/// down-walk both the subtree closure and the outbound connected component take;
+/// they differ in what they do with the children, not in how they find them.
+pub(super) fn child_rows(
+    conn: &Connection,
+    edges: &[GatedChildEdge],
+    table: &str,
+    id: &str,
+) -> Result<Vec<(String, String)>, GateError> {
+    let mut rows = Vec::new();
+    for edge in edges {
+        let Some(parent_key) = query_column_text(conn, table, &edge.parent_column, id)? else {
+            // The row does not carry the key its children reference, so no child
+            // can join to it through this edge.
+            debug!(
+                table,
+                id,
+                column = %edge.parent_column,
+                "gate: row has no value for the column its gated children reference; skipping the edge"
+            );
+            continue;
+        };
+        for child_id in rows_referencing(conn, &edge.child_table, &edge.child_column, &parent_key)?
+        {
+            rows.push((edge.child_table.clone(), child_id));
+        }
+    }
+    Ok(rows)
 }
 
 /// The ids of rows in `table` whose `fk` column equals `value`.
@@ -1083,19 +1123,12 @@ pub(super) fn foreign_keys(
         .collect()
 }
 
+/// Whether `table`'s chain ends at an audience root, so its rows inherit an
+/// audience rather than the boolean gate.
 fn gate_reaches_scoped_root(gates: &HashMap<String, TableGate>, table: &str) -> bool {
-    let mut current = table;
-    let mut seen = HashSet::new();
-    loop {
-        if !seen.insert(current.to_string()) {
-            return false;
-        }
-        match gates.get(current) {
-            Some(TableGate::ScopedRoot { .. }) => return true,
-            Some(TableGate::Child { parent, .. }) => current = parent,
-            _ => return false,
-        }
-    }
+    chain_reaches(gates, table, |gate| {
+        matches!(gate, TableGate::ScopedRoot { .. })
+    })
 }
 
 #[cfg(test)]

@@ -63,6 +63,8 @@ use std::ffi::c_int;
 
 use rusqlite::{Connection, OptionalExtension, Params};
 
+use crate::database::quote_ident;
+
 mod audience;
 mod ffi;
 mod model;
@@ -88,6 +90,17 @@ pub(crate) use outbound::query_truth;
 fn gate_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, GateError> {
     crate::database::table_columns(conn, table)
         .map_err(|e| GateError::Sql(format!("read columns of {table}"), e))
+}
+
+/// Every row id in `table`, in id order, for the passes that walk a whole table
+/// row by row.
+fn all_row_ids(conn: &Connection, table: &str) -> Result<Vec<String>, GateError> {
+    let sql = format!(
+        "SELECT {id} FROM {table} ORDER BY {id}",
+        id = quote_ident("id"),
+        table = quote_ident(table),
+    );
+    query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(0))
 }
 
 fn execute_batch(conn: &Connection, sql: &str) -> Result<(), GateError> {

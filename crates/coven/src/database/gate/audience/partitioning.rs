@@ -185,21 +185,8 @@ pub(crate) fn validate_scoped_foreign_key_audiences(
     conn: &Connection,
     gates: &Gates,
 ) -> Result<(), GateError> {
-    let mut tables = gates
-        .tables
-        .keys()
-        .filter(|table| gates.table_is_scoped(table))
-        .cloned()
-        .collect::<Vec<_>>();
-    tables.sort();
-    for table in tables {
-        let row_ids = query_mapped_rows(
-            conn,
-            &format!("SELECT id FROM {}", quote_ident(&table)),
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        for row_id in row_ids {
+    for table in gates.scoped_table_names() {
+        for row_id in all_row_ids(conn, &table)? {
             let row_audience = live_row_audience(conn, gates, &table, &row_id)?;
             compatible_parent_rows(conn, gates, &table, &row_id, &row_audience)?;
         }

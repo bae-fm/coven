@@ -12,7 +12,7 @@ use super::outbound::{
     gate_store_outbound, query_column_present, query_column_text, row_id_for_column_value,
     DeletedAudiences, DeletedParent, FkParentRow, FullStateDirection, UnresolvedAudience,
 };
-use super::{query_mapped_rows, query_row_optional, GateError};
+use super::{all_row_ids, query_mapped_rows, query_row_optional, GateError};
 use crate::database::quote_ident;
 use crate::protocol::circle::{
     row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey,
