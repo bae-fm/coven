@@ -12,6 +12,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     let old_commit = journal.commit().expect("parse prepared Store commit");
     for object in journal.operation().prepared_objects.values() {
         store
+            .storage()
             .create_protocol_object(object)
             .await
             .expect("publish original exact Circle activation object");
@@ -67,10 +68,12 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("prepare invented access envelope path");
     store
+        .storage()
         .create_protocol_object(&leaf)
         .await
         .expect("publish invented access leaf path");
     store
+        .storage()
         .create_protocol_object(&envelope)
         .await
         .expect("publish invented access envelope path");
@@ -126,6 +129,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("prepare re-signed Store commit");
     store
+        .storage()
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish re-signed Store commit");
@@ -187,6 +191,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         ProtocolObjectDomain::StoreHead,
     );
     let forged_head_object = store
+        .storage()
         .prepare_protocol_object(
             &head_context,
             original_head_object.reference().slot().clone(),
@@ -289,6 +294,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .expect("prepare exact promoted access objects");
     for object in prepared.values() {
         store
+            .storage()
             .create_protocol_object(object)
             .await
             .expect("publish exact promoted access object");
@@ -323,6 +329,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .await
         .expect("prepare promoted access Store commit");
     store
+        .storage()
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish promoted access Store commit");
@@ -470,6 +477,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     let baseline_commit = baseline.commit().expect("parse baseline Store commit");
     for object in baseline.operation().prepared_objects.values() {
         baseline_store
+            .storage()
             .create_protocol_object(object)
             .await
             .expect("publish baseline exact Circle activation object");
@@ -540,6 +548,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .expect("prepare forged exact Circle activation objects");
     for object in prepared.values() {
         store
+            .storage()
             .create_protocol_object(object)
             .await
             .expect("publish forged exact Circle activation object");
@@ -573,6 +582,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .await
         .expect("prepare forged exact Store commit");
     store
+        .storage()
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish forged exact Store commit");

@@ -43,6 +43,9 @@ struct TransportFixture {
     /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
     /// commit of the owner's while a join is mid-flight.
     owner_test_store: std::sync::Arc<TestStore>,
+    /// The owner store's storage handle, retained so borrowing transports can
+    /// point into it.
+    owner_storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
     owner_store_dir: crate::store_dir::StoreDir,
     home: Arc<crate::InMemoryCloudHome>,
     member_pubkey: String,
@@ -163,7 +166,7 @@ impl TransportFixture {
         let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
         let layout = crate::store_dir::StoreLayout::new(app.path());
-        let provider_binding = crate::storage::SyncStorage::provider_binding(&store)
+        let provider_binding = crate::storage::SyncStorage::provider_binding(&*store.storage())
             .await
             .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
@@ -186,6 +189,7 @@ impl TransportFixture {
             owner_store,
             owner_db,
             owner_database,
+            owner_storage: store.storage(),
             owner_test_store: store,
             owner_store_dir,
             home,
@@ -305,7 +309,7 @@ impl TransportFixture {
 
     fn transport<'a>(&'a self, bundle: &'a DeviceJoinOfferBundle) -> DeviceJoinTransport<'a> {
         DeviceJoinTransport::open(
-            &self.owner_test_store,
+            &*self.owner_storage,
             bundle,
             DeviceJoinRoles::admitting(true, true),
         )

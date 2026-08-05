@@ -80,7 +80,7 @@ impl ConflictFixture {
     async fn store1(&self) -> Store {
         Store::load(
             StoreDatabase::new(&self.db1),
-            self.store.clone(),
+            self.store.storage(),
             self.dir1.clone(),
             self.founder.clone(),
         )
@@ -91,7 +91,7 @@ impl ConflictFixture {
     async fn store2(&self) -> Store {
         Store::load(
             StoreDatabase::new(&self.db2),
-            self.store.clone(),
+            self.store.storage(),
             self.dir2.clone(),
             self.founder.clone(),
         )
@@ -592,7 +592,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     let (_dir2, dir2) = temp_store_dir();
     Store::load(
         StoreDatabase::new(&db2),
-        store.clone(),
+        store.storage(),
         dir2.clone(),
         founder.clone(),
     )
@@ -609,7 +609,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // without seeing the other's close, producing two concurrent close controls.
     Store::load(
         StoreDatabase::new(&db1),
-        store.clone(),
+        store.storage(),
         store_dir.clone(),
         founder.clone(),
     )
@@ -621,7 +621,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .expect("device 1 authors an epoch close");
     Store::load(
         StoreDatabase::new(&db2),
-        store.clone(),
+        store.storage(),
         dir2,
         founder.clone(),
     )
@@ -634,7 +634,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
 
     Store::load(
         StoreDatabase::new(&db1),
-        store.clone(),
+        store.storage(),
         store_dir.clone(),
         founder.clone(),
     )
@@ -678,7 +678,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // slots.
     let error = Store::load(
         StoreDatabase::new(&db1),
-        store.clone(),
+        store.storage(),
         store_dir.clone(),
         founder.clone(),
     )
@@ -700,7 +700,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // reopened branch.
     Store::load(
         StoreDatabase::new(&db1),
-        store.clone(),
+        store.storage(),
         store_dir.clone(),
         founder.clone(),
     )
@@ -743,7 +743,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     assert_eq!(closing_count, 1, "the concurrent close remains retained");
     Store::load(
         StoreDatabase::new(&db1),
-        store.clone(),
+        store.storage(),
         store_dir,
         founder.clone(),
     )
@@ -829,7 +829,7 @@ async fn non_owner_resolution_is_refused() {
     let (_outsider_dir_temp, outsider_dir) = temp_store_dir();
     Store::load(
         StoreDatabase::new(&outsider_db),
-        fixture.store.clone(),
+        fixture.store.storage(),
         outsider_dir.clone(),
         outsider.clone(),
     )
@@ -852,7 +852,7 @@ async fn non_owner_resolution_is_refused() {
 
     let error = Store::load(
         StoreDatabase::new(&outsider_db),
-        fixture.store.clone(),
+        fixture.store.storage(),
         outsider_dir,
         outsider.clone(),
     )

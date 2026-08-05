@@ -1192,7 +1192,7 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
     let (_joined_temp, joined_dir) = temp_store_dir();
     let joined_store = crate::sync::store::Store::load(
         StoreDatabase::new(&joined_db),
-        fixture.store.clone(),
+        fixture.store.storage(),
         joined_dir,
         fixture.signer.clone(),
     )

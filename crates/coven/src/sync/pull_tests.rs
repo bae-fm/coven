@@ -461,6 +461,7 @@ impl PullTestStoreOps for TestStore {
     ) -> Vec<u8> {
         let temp = tempfile::tempdir().expect("create exact blob read directory");
         let staged = self
+            .storage()
             .stage_verified_blob_plaintext(
                 blob,
                 match blob.locator() {
@@ -827,6 +828,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 1,
             );
             let recovery_slot = storage
+                .storage()
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
                         storage.root.store_root_hash,
@@ -845,6 +847,7 @@ impl<'storage> ExactMembershipChain<'storage> {
             let device_id =
                 crate::protocol::store_commit::StoreDeviceId::derive(&storage.root, &origin);
             let announcement_slot = storage
+                .storage()
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
                         storage.root.store_root_hash,
@@ -856,6 +859,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .await
                 .expect("allocate exact announcement slot");
             let acknowledgement_slot = storage
+                .storage()
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
                         storage.root.store_root_hash,
@@ -867,6 +871,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .await
                 .expect("allocate exact acknowledgement slot");
             let snapshot_slot = storage
+                .storage()
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
                         storage.root.store_root_hash,
@@ -905,13 +910,16 @@ impl<'storage> ExactMembershipChain<'storage> {
                 ProtocolObjectDomain::StoreDeviceRegistration,
             );
             let slot = storage
+                .storage()
                 .allocate_protocol_slot(&context, &semantic_prefix, ".json")
                 .await
                 .expect("allocate exact membership registration object");
             let prepared = storage
+                .storage()
                 .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
                 .expect("prepare exact membership registration object");
             storage
+                .storage()
                 .create_protocol_object(&prepared)
                 .await
                 .expect("publish exact membership registration object");
@@ -957,11 +965,15 @@ impl<'storage> ExactMembershipChain<'storage> {
                 }
             },
         };
-        let (entry_object, entry_ref) =
-            crate::storage::prepare_membership_entry(storage, storage.root.store_root_hash, &entry)
-                .await
-                .expect("prepare exact membership entry");
+        let (entry_object, entry_ref) = crate::storage::prepare_membership_entry(
+            &*storage.storage(),
+            storage.root.store_root_hash,
+            &entry,
+        )
+        .await
+        .expect("prepare exact membership entry");
         storage
+            .storage()
             .create_protocol_object(&entry_object)
             .await
             .expect("publish exact membership entry");
@@ -980,6 +992,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .expect("membership sequence overflow"),
         );
         let next_slot = storage
+            .storage()
             .allocate_protocol_slot(&context, &next_prefix, ".json")
             .await
             .expect("allocate exact membership successor slot");
@@ -1015,6 +1028,7 @@ impl<'storage> ExactMembershipChain<'storage> {
             coord.seq,
         );
         let prepared = storage
+            .storage()
             .prepare_protocol_object(
                 &context,
                 current_slot,
@@ -1023,6 +1037,7 @@ impl<'storage> ExactMembershipChain<'storage> {
             )
             .expect("prepare exact membership head");
         storage
+            .storage()
             .create_protocol_object(&prepared)
             .await
             .expect("publish exact membership head");
@@ -1137,6 +1152,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         let (head, head_object) = loop {
             let prefix = head_slot_prefix(&registration.device_id.to_string(), sequence);
             let (bytes, object) = storage
+                .storage()
                 .read_protocol_slot(&head_context, &slot, &prefix)
                 .await
                 .expect("read exact published Store head");
@@ -1233,14 +1249,17 @@ impl<'storage> ExactPublishedCommit<'storage> {
         );
         let slot = self
             .storage
+            .storage()
             .allocate_protocol_slot(&commit_context, &semantic_prefix, ".json")
             .await
             .expect("allocate replacement exact Store commit slot");
         let commit_prepared = self
             .storage
+            .storage()
             .prepare_protocol_object(&commit_context, slot, &semantic_prefix, commit_bytes)
             .expect("prepare replacement exact Store commit");
         self.storage
+            .storage()
             .create_protocol_object(&commit_prepared)
             .await
             .expect("publish replacement exact Store commit");
@@ -1266,6 +1285,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             ProtocolObjectDomain::StoreHead,
         );
         self.storage
+            .storage()
             .delete_protocol_object(&self.head_object)
             .await
             .expect("delete replaced exact Store head");
@@ -1284,6 +1304,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         );
         let head_prepared = self
             .storage
+            .storage()
             .prepare_protocol_object(
                 &head_context,
                 self.head_object.slot().clone(),
@@ -1292,6 +1313,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             )
             .expect("prepare replacement exact Store head");
         self.storage
+            .storage()
             .create_protocol_object(&head_prepared)
             .await
             .expect("publish replacement exact Store head");
@@ -1330,6 +1352,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             ProtocolObjectDomain::StoreHead,
         );
         self.storage
+            .storage()
             .delete_protocol_object(&self.head_object)
             .await
             .expect("delete replaced exact Store head");
@@ -1348,6 +1371,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         );
         let prepared = self
             .storage
+            .storage()
             .prepare_protocol_object(
                 &context,
                 self.head_object.slot().clone(),
@@ -1356,6 +1380,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             )
             .expect("prepare replacement exact Store head");
         self.storage
+            .storage()
             .create_protocol_object(&prepared)
             .await
             .expect("publish replacement exact Store head");
@@ -1421,14 +1446,17 @@ impl<'storage> ExactPublishedCommit<'storage> {
             ProtocolObjectDomain::StorePackage,
         );
         self.storage
+            .storage()
             .delete_protocol_object(&package.object)
             .await
             .expect("delete replaced exact Store package");
         let prepared = self
             .storage
+            .storage()
             .prepare_protocol_object(&context, package.object.slot().clone(), &prefix, bytes)
             .expect("prepare replacement exact Store package");
         self.storage
+            .storage()
             .create_protocol_object(&prepared)
             .await
             .expect("publish replacement exact Store package");
@@ -2313,6 +2341,7 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
         .store_package()
         .expect("Store commit carries a Store package");
     storage
+        .storage()
         .delete_protocol_object(&package.object)
         .await
         .expect("delete exact Store package");
@@ -3021,6 +3050,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .cloned()
         .expect("published row carries exact blob authority");
     storage
+        .storage()
         .delete_blob_object(&stored)
         .await
         .expect("remove exact remote blob fixture");
@@ -3662,7 +3692,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .expect("open exact Store before failed lazy verification");
     let failing: Arc<dyn SyncStorage> =
         Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-            storage.clone(),
+            storage.storage(),
             FaultingStorage::blob(),
         ));
     let error = storage
@@ -5388,6 +5418,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
         .await
         .expect("load exact eager row blob reference");
     storage
+        .storage()
         .verify_blob_object(eager.stored().expect("eager blob was published"))
         .await
         .expect("verify exact eager blob object");
@@ -5396,6 +5427,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
         .await
         .expect("load exact lazy row blob reference");
     storage
+        .storage()
         .verify_blob_object(lazy.stored().expect("lazy blob was published"))
         .await
         .expect("verify exact lazy blob object");
@@ -5450,7 +5482,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         crate::database::StoreDatabase::new(&db1),
         source_store_dir.clone(),
     )
-    .connected_blob_transitions(storage.clone(), None, None)
+    .connected_blob_transitions(storage.storage(), None, None)
     .make_local("notes", "n1", &HashMap::new(), &cancel)
     .await
     .expect("make exact blob root Local");
@@ -5980,6 +6012,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .unwrap();
     storage
+        .storage()
         .delete_protocol_object(&founder_head.object)
         .await
         .expect("remove exact founder membership head");
@@ -6119,6 +6152,7 @@ async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
     let fixture = PersistedCycleRemoval::build().await;
     fixture
         .storage
+        .storage()
         .delete_protocol_object(&fixture.second_owner_head.object)
         .await
         .expect("delete exact persisted membership head");
@@ -6254,7 +6288,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .await
         .expect("open exact Store before fault injection");
     let failing = std::sync::Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.clone(),
+        storage.storage(),
         FaultingStorage::membership(1),
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
@@ -6547,6 +6581,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .expect("publish second exact device graph");
     let other = ExactPublishedCommit::load(&storage, other_reference, &owner).await;
     storage
+        .storage()
         .delete_protocol_object(&graph.head_object)
         .await
         .expect("remove original stream head");
@@ -6667,7 +6702,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .unwrap();
 
     let lagging = Arc::new(InterceptedStorage::new(
-        storage.clone(),
+        storage.storage(),
         MissingProtocolSlot {
             semantic_prefix: hidden_head,
         },
@@ -7165,7 +7200,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         .expect("membership head slot key has a .json suffix")
         .to_string();
     let lagging = std::sync::Arc::new(InterceptedStorage::new(
-        storage.clone(),
+        storage.storage(),
         MissingProtocolSlot {
             semantic_prefix: hidden,
         },
@@ -7219,13 +7254,14 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         .expect("active Owner signs membership grant");
     let grant = add_member.coord();
     let (prepared, _) = crate::storage::prepare_membership_entry(
-        &storage,
+        &*storage.storage(),
         storage.root.store_root_hash,
         &add_member,
     )
     .await
     .expect("prepare uncommitted exact membership entry");
     storage
+        .storage()
         .create_protocol_object(&prepared)
         .await
         .expect("publish uncommitted exact membership entry");
@@ -7298,13 +7334,16 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         crate::protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
     );
     let slot = storage
+        .storage()
         .allocate_protocol_slot(&context, &relocated_prefix, ".json")
         .await
         .expect("allocate relocated exact membership grant slot");
     let prepared = storage
+        .storage()
         .prepare_protocol_object(&context, slot, &relocated_prefix, grant_bytes)
         .expect("prepare relocated exact membership grant");
     storage
+        .storage()
         .create_protocol_object(&prepared)
         .await
         .expect("relocate the grant to another author's coordinate");
@@ -7380,7 +7419,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .await
         .expect("load exact committed membership prefix");
     let failing = Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.clone(),
+        storage.storage(),
         FaultingStorage::membership(0),
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
@@ -7510,6 +7549,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     storage.pull_into(&db2, &temp_store_dir().1).await;
 
     storage
+        .storage()
         .delete_protocol_object(&remove_head.object)
         .await
         .expect("hide exact remove head to serve the predecessor as terminal");
@@ -7561,10 +7601,12 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         coord.entry_hash,
     );
     storage
+        .storage()
         .delete_protocol_object(&head.body.entry.object)
         .await
         .expect("delete exact founder entry before corruption");
     let prepared = storage
+        .storage()
         .prepare_protocol_object(
             &context,
             head.body.entry.object.slot().clone(),
@@ -7573,6 +7615,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         )
         .expect("prepare corrupt exact founder entry");
     storage
+        .storage()
         .create_protocol_object(&prepared)
         .await
         .expect("publish corrupt exact founder entry");

@@ -812,7 +812,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .bind_store_device(owner_db, owner)
             .await
             .expect("bind owner Store");
-        let owner_binding = crate::storage::SyncStorage::provider_binding(&*storage)
+        let owner_binding = crate::storage::SyncStorage::provider_binding(&*storage.storage())
             .await
             .expect("resolve owner provider binding");
         let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
@@ -1289,6 +1289,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         .await
         .expect("the snapshot activates its exact host blob binding");
     storage
+        .storage()
         .verify_blob_object(&stored)
         .await
         .expect("the blob referenced by the initial snapshot exists");
@@ -1386,7 +1387,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .as_ref()
         .is_some_and(|path| path.is_file()));
     assert!(matches!(
-        storage.verify_blob_object(&rejected[0]).await,
+        storage.storage().verify_blob_object(&rejected[0]).await,
         Err(StorageError::NotFound(_))
     ));
     assert!(
@@ -1435,6 +1436,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     ));
     assert!(live.stored().is_none());
     storage
+        .storage()
         .verify_blob_object(&rejected[0])
         .await
         .expect("retry publishes exact retained blob");
@@ -1663,7 +1665,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let reopened = open();
     let store = crate::sync::store::Store::load(
         crate::database::StoreDatabase::new(&reopened),
-        storage.clone(),
+        storage.storage(),
         store_dir.clone(),
         keypair,
     )
@@ -1939,6 +1941,7 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
         .expect("founder graph exists");
     let crate::database::DurableFounderMembership { head, .. } = graph.membership;
     storage
+        .storage()
         .delete_protocol_object(&head.object)
         .await
         .expect("delete exact founder head");
@@ -2036,7 +2039,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
     assert!(
         crate::sync::store::Store::open(
             store_database(&fresh_db),
-            seeded.clone(),
+            seeded.storage(),
             foreign_store_dir,
             &seeded.root,
             &owner,
@@ -3072,7 +3075,11 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     assert_eq!(prepared.audiences.blobs.len(), 1);
     assert_eq!(prepared.audiences.blobs[0].blob(), &prepared_blob);
     assert!(
-        storage.verify_blob_object(&prepared_blob).await.is_err(),
+        storage
+            .storage()
+            .verify_blob_object(&prepared_blob)
+            .await
+            .is_err(),
         "the failed blob upload did not publish the blob"
     );
 
@@ -3094,6 +3101,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         .expect("retry activates the exact row blob binding");
     assert_eq!(activated_blob, prepared_blob);
     storage
+        .storage()
         .verify_blob_object(&activated_blob)
         .await
         .expect("retry uploads and reads back the exact host-provided blob");
@@ -3179,6 +3187,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
             .expect("parse exact audience package");
         for binding in package.blob_bindings() {
             storage
+                .storage()
                 .verify_blob_object(binding.blob())
                 .await
                 .expect("committed blob object exists exactly");
@@ -3325,6 +3334,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .await
         .expect("adoption activates the exact host-blob binding");
     storage
+        .storage()
         .verify_blob_object(&activated)
         .await
         .expect("the activated host blob reads back exactly");
@@ -3552,10 +3562,12 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     let attempted_blobs = reject_second_blob.rejected_blobs();
     assert_eq!(attempted_blobs.len(), 2);
     storage
+        .storage()
         .verify_blob_object(&attempted_blobs[0])
         .await
         .expect("the first exact blob reached cloud before the second failed");
     assert!(storage
+        .storage()
         .verify_blob_object(&attempted_blobs[1])
         .await
         .is_err());
@@ -3599,10 +3611,12 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     assert_eq!(&activated_first, attempted_first);
     assert_eq!(&activated_second, attempted_second);
     storage
+        .storage()
         .verify_blob_object(&activated_first)
         .await
         .expect("the first exact blob remains readable after retry");
     storage
+        .storage()
         .verify_blob_object(&activated_second)
         .await
         .expect("the second exact blob is readable after retry");
@@ -3660,6 +3674,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .cloned()
         .expect("first publication installs an exact remote blob binding");
     storage
+        .storage()
         .verify_blob_object(&published_blob)
         .await
         .expect("read back the first exact remote blob object");
@@ -3698,6 +3713,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .expect("re-emission retains an exact remote blob binding");
     assert_eq!(republished_blob, published_blob);
     storage
+        .storage()
         .verify_blob_object(&republished_blob)
         .await
         .expect("read back the re-emitted exact remote blob object");
@@ -3824,6 +3840,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .await
         .expect("retry activates the exact cache-lazy blob binding");
     storage
+        .storage()
         .verify_blob_object(&activated_blob)
         .await
         .expect("retry leaves the exact cache-lazy blob readable");
@@ -4222,6 +4239,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     assert!(!storage.local_store_package_exists(&db, 2).await);
 
     storage
+        .storage()
         .delete_blob_object(&planted)
         .await
         .expect("delete exact user-provided blob");
@@ -4983,7 +5001,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     {
         let store = crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(&owner_db),
-            storage.clone(),
+            storage.storage(),
             store_dir.clone(),
             owner.clone(),
         )
@@ -5022,7 +5040,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     let drain = tokio::spawn(async move {
         let store = crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(&drain_db),
-            drain_storage.clone(),
+            drain_storage.storage(),
             drain_store_dir,
             owner.clone(),
         )
@@ -5135,6 +5153,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
     let prefix =
         crate::protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
     let prepared = storage
+        .storage()
         .prepare_protocol_object(
             &context,
             offer.attempt_slot.clone(),
@@ -5143,6 +5162,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         )
         .expect("prepare exact attempt object");
     storage
+        .storage()
         .create_protocol_object(&prepared)
         .await
         .expect("publish exact attempt object");
@@ -5329,6 +5349,7 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
     let later =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &later_member).await;
     storage
+        .storage()
         .delete_protocol_object(&later.approval.access_grant.activation.object)
         .await
         .expect("remove the commit body behind its authenticated head");
@@ -5381,9 +5402,11 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         next_sequence,
     );
     let garbage = storage
+        .storage()
         .prepare_protocol_object(&context, next_slot, &prefix, b"not a signed head".to_vec())
         .expect("prepare unauthenticated next-head bytes");
     storage
+        .storage()
         .create_protocol_object(&garbage)
         .await
         .expect("publish unauthenticated next-head bytes");
@@ -5468,9 +5491,11 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         next_sequence,
     );
     let prepared = storage
+        .storage()
         .prepare_protocol_object(&context, next_slot, &prefix, malformed.to_bytes())
         .expect("prepare authenticated malformed head");
     storage
+        .storage()
         .create_protocol_object(&prepared)
         .await
         .expect("publish authenticated malformed head");

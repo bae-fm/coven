@@ -1455,6 +1455,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     for head in chain.head_refs() {
         if !pre_removal_heads.contains(head) {
             storage
+                .storage()
                 .delete_protocol_object(&head.object)
                 .await
                 .expect("remove post-removal membership head");

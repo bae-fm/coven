@@ -94,7 +94,7 @@ impl<'a> TombstoneCollector<'a> {
         storage: &Arc<TestStore>,
         cipher: &'a RwLock<CloudCipher>,
     ) -> Result<Self, String> {
-        Self::for_founder_with_storage(database, storage, storage.clone(), cipher).await
+        Self::for_founder_with_storage(database, storage, storage.storage(), cipher).await
     }
 
     async fn for_founder_with_storage(
@@ -156,6 +156,7 @@ async fn storage_with_chain(
 
 async fn tombstone_exists(storage: &TestStore, key: &str) -> bool {
     storage
+        .storage()
         .blob_tombstone_exists(key)
         .await
         .expect("inspect exact tombstone")
@@ -303,7 +304,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
     let n = TombstoneDrain::new(
         &store_database,
-        &storage,
+        &*storage.storage(),
         &cipher,
         &PendingRotation::none(),
         "lib",
@@ -374,7 +375,7 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
     let n = TombstoneDrain::new(
         &store_database,
-        &storage,
+        &*storage.storage(),
         &cipher,
         &PendingRotation::none(),
         "lib",
@@ -431,7 +432,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
     let n = TombstoneDrain::new(
         &store_database,
-        &storage,
+        &*storage.storage(),
         &cipher,
         &PendingRotation::none(),
         "lib",
@@ -544,7 +545,7 @@ async fn delete_validation_failure_backs_off_then_retries() {
     let tombstone_key = exact_tombstone_key(&stored);
     let failure = FailStorageOpOnKey::new(FailingCloudOp::Read, &tombstone_key, 1);
     let calls = failure.calls.clone();
-    let intercepted = InterceptedStorage::new(&storage, failure);
+    let intercepted = InterceptedStorage::new(storage.storage(), failure);
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
@@ -654,7 +655,7 @@ async fn delete_write_failure_backs_off_then_retries() {
     let tombstone_key = exact_tombstone_key(&stored);
     let failure = FailStorageOpOnKey::new(FailingCloudOp::PutObject, &tombstone_key, 1);
     let calls = failure.calls.clone();
-    let intercepted = InterceptedStorage::new(&storage, failure);
+    let intercepted = InterceptedStorage::new(storage.storage(), failure);
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
@@ -775,9 +776,10 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
 
                 let clock = FixedClock(at("2024-06-01T00:00:10Z"));
                 let pending_rotation = PendingRotation::none();
+                let drain_storage = storage.storage();
                 let drain = TombstoneDrain::new(
                     &store_database,
-                    &storage,
+                    &*drain_storage,
                     &cipher,
                     &pending_rotation,
                     "lib",
@@ -1166,7 +1168,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
     let collector = TombstoneCollector::load(
         StoreDatabase::new(&member_db),
         &storage,
-        storage.clone(),
+        storage.storage(),
         &cipher,
         &member,
     )
@@ -1275,7 +1277,7 @@ async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
 
     // The cloud home removes the tombstone in GC's re-check window.
     let racing_storage = Arc::new(InterceptedStorage::new(
-        storage.clone(),
+        storage.storage(),
         CancelTombstoneOnExists {
             tombstone_key,
             fired: AtomicBool::new(false),
@@ -1869,7 +1871,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
     let n = TombstoneDrain::new(
         &store_database,
-        &storage,
+        &*storage.storage(),
         &cipher,
         &PendingRotation::none(),
         "lib",
@@ -1897,7 +1899,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     let second = FixedClock(at("2024-06-02T00:00:00Z"));
     let n = TombstoneDrain::new(
         &store_database,
-        &storage,
+        &*storage.storage(),
         &cipher,
         &PendingRotation::none(),
         "lib",
@@ -1911,6 +1913,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
 
     // Exactly one tombstone, still carrying the first drain's deleted_at.
     let tombstones = storage
+        .storage()
         .list_blob_tombstones("blob_tombstones/")
         .await
         .unwrap();
@@ -2047,7 +2050,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     // First GC past the grace: the blob delete succeeds, but the tombstone delete
     // fails (injected). The blob is reclaimed; the tombstone is left behind.
     let failing = FailStorageOpOnKey::new(FailingCloudOp::Delete, &tombstone_key, 1);
-    let failing_storage = Arc::new(InterceptedStorage::new(storage.clone(), failing));
+    let failing_storage = Arc::new(InterceptedStorage::new(storage.storage(), failing));
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let failing_collector = TombstoneCollector::for_founder_with_storage(
         StoreDatabase::new(&db),

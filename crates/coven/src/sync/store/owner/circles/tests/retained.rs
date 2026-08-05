@@ -187,6 +187,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .expect("prepare retained Circle activation");
     for object in journal.operation().prepared_objects.values() {
         store
+            .storage()
             .create_protocol_object(object)
             .await
             .expect("publish retained Circle activation object");

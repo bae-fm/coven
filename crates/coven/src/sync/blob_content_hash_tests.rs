@@ -54,6 +54,7 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("real");
     let staged = store
+        .storage()
         .stage_verified_blob_plaintext(
             &real_blob,
             BlobSpoolProtection::Opaque(protection()),
@@ -107,6 +108,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     let destination = directory.path().join("current");
     assert!(matches!(
         store
+            .storage()
             .stage_verified_blob_plaintext(
                 &current_blob,
                 BlobSpoolProtection::Opaque(protection()),
@@ -119,6 +121,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
 
     home.replace_exact_object(current_blob.object().slot(), current_stored);
     let staged = store
+        .storage()
         .stage_verified_blob_plaintext(
             &current_blob,
             BlobSpoolProtection::Opaque(protection()),

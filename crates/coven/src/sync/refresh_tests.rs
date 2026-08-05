@@ -185,7 +185,8 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .prepare_wrapped_key(&recipient_pubkey, wrapped)
             .await
             .expect("prepare exact wrapped Store key");
-        self.create_protocol_object(&prepared.object)
+        self.storage()
+            .create_protocol_object(&prepared.object)
             .await
             .expect("create exact wrapped Store key");
         prepared.reference
@@ -412,8 +413,9 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         )
         .await
         .expect("publish post-rotation invitation");
+    let pinned_storage = storage.storage();
     let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
-        .open_pinned(&*storage, &invitation.store_root)
+        .open_pinned(&*pinned_storage, &invitation.store_root)
         .await
         .expect("open invitation history");
     let chain = history
@@ -424,7 +426,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .await
         .expect("load invitation membership");
     let invited_keyring =
-        crate::sync::store::StoreKeyrings::new(&*storage, invitation.store_root.clone())
+        crate::sync::store::StoreKeyrings::new(&*pinned_storage, invitation.store_root.clone())
             .open_containing(&invited_member, &chain, &invitation.wrapped_key)
             .await
             .expect("invited member opens the activated exact wrap");
@@ -516,9 +518,13 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         old_key,
         "an unreferenced key must not replace the live cipher",
     );
-    load_wrapped_store_key(&storage, storage.root.store_root_hash, &unreferenced)
-        .await
-        .expect("the ignored exact object remains readable by its exact reference");
+    load_wrapped_store_key(
+        &*storage.storage(),
+        storage.root.store_root_hash,
+        &unreferenced,
+    )
+    .await
+    .expect("the ignored exact object remains readable by its exact reference");
 }
 
 #[tokio::test]
@@ -581,9 +587,13 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         new_key.current_generation()
     );
 
-    load_wrapped_store_key(&storage, storage.root.store_root_hash, &old_reference)
-        .await
-        .expect("the retained pre-rotation object remains readable");
+    load_wrapped_store_key(
+        &*storage.storage(),
+        storage.root.store_root_hash,
+        &old_reference,
+    )
+    .await
+    .expect("the retained pre-rotation object remains readable");
 
     running_b
         .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
@@ -1055,7 +1065,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         forged_key,
         "the attacker's key was rejected",
     );
-    load_wrapped_store_key(&storage, storage.root.store_root_hash, &forged)
+    load_wrapped_store_key(&*storage.storage(), storage.root.store_root_hash, &forged)
         .await
         .expect("the ignored attacker object exists at its exact reference");
 }
@@ -1102,6 +1112,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         .await
         .expect("load exact active membership head");
     storage
+        .storage()
         .delete_protocol_object(&head.body.entry.object)
         .await
         .expect("remove exact membership entry before refresh");

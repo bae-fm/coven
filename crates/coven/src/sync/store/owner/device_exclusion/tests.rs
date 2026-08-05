@@ -1160,6 +1160,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     .expect("derive excluded candidate commit prefix");
     let write_id = candidate.commit.value.write_id.clone();
     store
+        .storage()
         .create_protocol_object(&candidate.commit.prepared)
         .await
         .expect("upload excluded peer candidate commit");
@@ -1481,11 +1482,13 @@ async fn run_excluded_author_candidate_cleanup_case(
             ExcludedCandidateHeadPublication::ExactLate
         ) {
             store
+                .storage()
                 .create_protocol_object(&candidate.head.prepared)
                 .await
                 .expect("publish exact late excluded-author head");
             assert_eq!(
                 store
+                    .storage()
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1503,7 +1506,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     };
     let peer_store = Store::load(
         StoreDatabase::new(&peer_db),
-        store.clone(),
+        store.storage(),
         store_dir.clone(),
         signer.clone(),
     )
@@ -1667,6 +1670,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         match head_publication {
             ExcludedCandidateHeadPublication::AfterAbsentProofExactLate => {
                 post_proof_store
+                    .storage()
                     .create_protocol_object(&candidate.head.prepared)
                     .await
                     .expect("publish candidate head after absent proof");
@@ -1762,7 +1766,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     };
     let retried_store = Store::load(
         StoreDatabase::new(&retried),
-        store.clone(),
+        store.storage(),
         store_dir.clone(),
         signer.clone(),
     )
@@ -1779,6 +1783,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         ExcludedCandidateHeadPublication::Absent => {
             assert!(matches!(
                 store
+                    .storage()
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1798,6 +1803,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         | ExcludedCandidateHeadPublication::AfterHeadReadBack => {
             assert_eq!(
                 store
+                    .storage()
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1835,6 +1841,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                 candidate_ref.coord.sequence(),
             );
             let mismatched_prepared = store
+                .storage()
                 .prepare_protocol_object(
                     &head_context,
                     candidate_head.slot().clone(),
@@ -1863,6 +1870,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         ExcludedCandidateHeadPublication::AfterCommitUpload => {
             assert!(matches!(
                 store
+                    .storage()
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1882,6 +1890,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     }
     assert!(matches!(
         store
+            .storage()
             .read_protocol_object(
                 &candidate_commit_context,
                 &candidate_ref.object,

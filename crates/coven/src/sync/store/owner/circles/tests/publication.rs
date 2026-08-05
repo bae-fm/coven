@@ -1029,12 +1029,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         store_dir.clone(),
     );
     blob_owners
-        .materialize_blob(Some(store.clone()), &historical_blob)
+        .materialize_blob(Some(store.storage()), &historical_blob)
         .await
         .expect("materialize a blob through its retained founder control");
     assert_eq!(
         blob_owners
-            .read_blob(Some(store.clone()), &historical_blob)
+            .read_blob(Some(store.storage()), &historical_blob)
             .await
             .expect("read a blob through its retained founder control"),
         blob_bytes,
@@ -1050,6 +1050,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("new Circle member resolves the founder blob key from its successor grant");
     let opened_destination = member_temp.path().join("new-member-opened-founder-blob");
     let opened = store
+        .storage()
         .stage_verified_blob_plaintext(
             historical_blob
                 .stored()
@@ -1084,7 +1085,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     )
     .expect("construct same-Circle successor-control substitution");
     let substitution_error = blob_owners
-        .read_blob(Some(store.clone()), &substituted)
+        .read_blob(Some(store.storage()), &substituted)
         .await
         .expect_err("row blob binding must reject a substituted Circle control");
     assert!(
@@ -1453,6 +1454,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("publish local Circle epoch-close response");
     let (bytes, response_object) = store
+        .storage()
         .read_protocol_slot(&response_context, &participant.response_slot, &prefix)
         .await
         .expect("read exact Circle epoch-close response");
@@ -1484,6 +1486,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .get(&response_storage_key)
         .expect("read stored Circle epoch-close response fixture");
     let malformed = store
+        .storage()
         .prepare_protocol_object(
             &response_context,
             participant.response_slot.clone(),
@@ -1660,6 +1663,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     );
     assert_eq!(outcome_ref.outcome_hash, *outcome_hash);
     let outcome_bytes = store
+        .storage()
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,
@@ -1776,6 +1780,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         ProtocolObjectDomain::CirclePackage,
     );
     let candidate_package_slot = store
+        .storage()
         .allocate_protocol_slot(
             &candidate_package_context,
             &candidate_package_prefix,
@@ -1784,6 +1789,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("allocate exact old-control package slot");
     let candidate_package_object = store
+        .storage()
         .prepare_protocol_object(
             &candidate_package_context,
             candidate_package_slot,
@@ -1792,6 +1798,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .expect("prepare exact old-control package");
     store
+        .storage()
         .create_protocol_object(&candidate_package_object)
         .await
         .expect("publish exact old-control package");
@@ -1841,10 +1848,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         ProtocolObjectDomain::StoreCommit,
     );
     let candidate_commit_slot = store
+        .storage()
         .allocate_protocol_slot(&candidate_commit_context, &candidate_commit_prefix, ".json")
         .await
         .expect("allocate combined Circle candidate slot");
     let candidate_commit_object = store
+        .storage()
         .prepare_protocol_object(
             &candidate_commit_context,
             candidate_commit_slot,
@@ -2847,6 +2856,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         }
         fixture
             .store
+            .storage()
             .create_protocol_object(object)
             .await
             .expect("publish reopen exact object");
@@ -3117,6 +3127,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
         matches!(
             fixture
                 .store
+                .storage()
                 .read_protocol_slot(&control_context, control_object.slot(), &control_prefix)
                 .await,
             Err(crate::protocol::objects::StorageError::NotFound(_))
@@ -4636,7 +4647,7 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let error = crate::sync::store::Store::load(
         crate::database::StoreDatabase::new(&db),
-        store.clone(),
+        store.storage(),
         store_dir,
         signer.clone(),
     )

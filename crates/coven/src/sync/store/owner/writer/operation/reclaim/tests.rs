@@ -134,6 +134,7 @@ impl ReclaimJourneyFixture {
         );
         match self
             .store
+            .storage()
             .read_protocol_object(&context, &target.package.object, &prefix)
             .await
         {
@@ -306,10 +307,12 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     );
     let evidence_prefix = reclaim_evidence_semantic_prefix(evidence.evidence_hash());
     let evidence_slot = store
+        .storage()
         .allocate_protocol_slot(&evidence_context, &evidence_prefix, ".json")
         .await
         .expect("allocate evidence slot");
     let prepared_evidence = store
+        .storage()
         .prepare_protocol_object(
             &evidence_context,
             evidence_slot,
@@ -318,6 +321,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         )
         .expect("prepare evidence");
     store
+        .storage()
         .create_protocol_object(&prepared_evidence)
         .await
         .expect("create evidence");
@@ -347,10 +351,12 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     let authorization_prefix =
         reclaim_authorization_semantic_prefix(authorization.authorization_hash());
     let authorization_slot = store
+        .storage()
         .allocate_protocol_slot(&authorization_context, &authorization_prefix, ".json")
         .await
         .expect("allocate authorization slot");
     let prepared_authorization = store
+        .storage()
         .prepare_protocol_object(
             &authorization_context,
             authorization_slot,
@@ -359,6 +365,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         )
         .expect("prepare authorization");
     store
+        .storage()
         .create_protocol_object(&prepared_authorization)
         .await
         .expect("create authorization");
@@ -443,6 +450,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     };
     let StoreCommitCoord { stream_id, .. } = target.activation.coord;
     store
+        .storage()
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,
@@ -562,6 +570,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .await
         .expect("activate reclaim authorization");
     store
+        .storage()
         .delete_protocol_object(&activation_head.object)
         .await
         .expect("remove reclaim activation head");
@@ -580,6 +589,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         "a reclaim authorization without its exact Merge activation head must not delete"
     );
     store
+        .storage()
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,
@@ -597,6 +607,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .expect("missing activation authority leaves target readable");
 
     store
+        .storage()
         .create_protocol_object(&activation_head_prepared)
         .await
         .expect("restore exact reclaim activation head");
@@ -613,6 +624,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         "a retracted Merge reclaim activation must not delete"
     );
     store
+        .storage()
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,

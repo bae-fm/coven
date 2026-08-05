@@ -440,7 +440,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         "B receives the release once its blobs are up and the gate flips",
     );
     let fetched = owners_b
-        .read_blob(Some(storage.clone()), &photo_ref(&db_b, "photoaaa").await)
+        .read_blob(Some(storage.storage()), &photo_ref(&db_b, "photoaaa").await)
         .await
         .expect("B fetches the CacheLazy blob");
     assert_eq!(fetched, bytes, "B reads the original photo from the cloud");
@@ -641,6 +641,7 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     );
     let remote = photo_ref(&db, "photoaaa").await;
     storage
+        .storage()
         .verify_blob_object(
             remote
                 .stored()
@@ -659,6 +660,7 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         "a cancel racing after completion must not tombstone published blobs",
     );
     storage
+        .storage()
         .verify_blob_object(
             remote
                 .stored()
@@ -726,7 +728,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let recorder = Arc::new(Recorder::default());
         let reads_before_make_local = home.exact_stream_read_count();
         Box::pin(owners_a.make_local(
-            storage.clone(),
+            storage.storage(),
             None,
             Some(recorder.clone()),
             "notes",
@@ -796,7 +798,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
         // A still reads the photo from its external file (no cloud copy needed).
         let read = owners_a
-            .read_blob(Some(storage.clone()), &photo_ref(&db_a, "photoaaa").await)
+            .read_blob(Some(storage.storage()), &photo_ref(&db_a, "photoaaa").await)
             .await
             .expect("A reads from its external file");
         assert_eq!(read, bytes, "A plays its own local file");
@@ -840,7 +842,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
 
     let error = owners
         .make_local(
-            storage.clone(),
+            storage.storage(),
             None,
             Some(recorder.clone()),
             "notes",
@@ -902,7 +904,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
 
     owners
         .make_local(
-            storage.clone(),
+            storage.storage(),
             Some(routing_encryption),
             Some(recorder.clone()),
             "notes",
@@ -1314,7 +1316,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert_eq!(
         owners_b
-            .read_blob(Some(storage.clone()), &cover_ref(&db_b, "coveraaa").await)
+            .read_blob(Some(storage.storage()), &cover_ref(&db_b, "coveraaa").await)
             .await
             .expect("B reads the cover"),
         cover,
@@ -1327,7 +1329,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     owners_a
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect("make_local");
 
@@ -1409,7 +1411,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         .expect("store host-provided cover");
 
     let before = owners_a
-        .read_blob(Some(storage.clone()), &cover_ref(&db_a, "coverhost").await)
+        .read_blob(
+            Some(storage.storage()),
+            &cover_ref(&db_a, "coverhost").await,
+        )
         .await
         .expect("read Local host-provided cover");
     assert_eq!(before, cover);
@@ -1473,7 +1478,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "after Remote upload the local store no longer holds the blob"
     );
     let after = owners_a
-        .read_blob(Some(storage.clone()), &cover_ref(&db_a, "coverhost").await)
+        .read_blob(
+            Some(storage.storage()),
+            &cover_ref(&db_a, "coverhost").await,
+        )
         .await
         .expect("read Remote host-provided cover");
     assert_eq!(after, cover);
@@ -1865,7 +1873,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     );
     let got = owners_b
         .read_blob(
-            Some(storage.clone()),
+            Some(storage.storage()),
             &db_b
                 .row_blob_ref("note_photos", "coverrrr")
                 .await
@@ -1936,7 +1944,7 @@ async fn make_local_rejects_remote_root() {
 
     let err = owners
         .make_local(
-            storage.clone(),
+            storage.storage(),
             None,
             None,
             "notes",
@@ -2142,7 +2150,7 @@ async fn make_local_rejects_already_local_root() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let err = owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect_err("a root already Local has no make_local transition");
     assert!(
@@ -2214,6 +2222,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     );
     let uploaded = created_upload_blob(&db, "photoaaa").await;
     storage
+        .storage()
         .verify_blob_object(&uploaded)
         .await
         .expect("photoaaa is in the cloud");
@@ -2243,7 +2252,11 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     );
     assert_eq!(pending_uploads(&db).await, 0, "no uploads remain");
     assert!(pending_deletes(&db).await.is_empty());
-    assert!(storage.verify_blob_object(&uploaded).await.is_err());
+    assert!(storage
+        .storage()
+        .verify_blob_object(&uploaded)
+        .await
+        .is_err());
     assert!(
         !lib.pinned_blob_path("photos", uploaded.locator().locator_hash())
             .unwrap()
@@ -2320,6 +2333,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             panic!("new make_remote journal is Pending");
         };
         let protection = storage
+            .storage()
             .store_blob_protection()
             .expect("load blob protection");
         let locator = match &protection {
@@ -2352,14 +2366,17 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .expect("build shared locator");
         let spool = lib.outbound_blob_spool_path(locator.locator_hash());
         storage
+            .storage()
             .seal_blob_to_spool(&locator, &authority, protection, source_path, &spool)
             .await
             .expect("seal shared-locator blob");
         let slot = storage
+            .storage()
             .allocate_blob_slot(&locator, &authority)
             .await
             .expect("allocate distinct exact blob slot");
         let stored = storage
+            .storage()
             .prepare_blob_object(&locator, &authority, slot, &spool)
             .await
             .expect("prepare exact blob");
@@ -2373,6 +2390,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .await
             .expect("record Prepared exact handoff");
         storage
+            .storage()
             .create_blob_object_from_file(
                 &stored,
                 &authority,
@@ -2413,6 +2431,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .expect("inspect make_remote intent"));
     for stored in &created {
         storage
+            .storage()
             .verify_blob_object(stored)
             .await
             .expect_err("each exact object is deleted");
@@ -2466,6 +2485,7 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     assert_eq!(pending_uploads(&db).await, 1);
     let created = created_upload_blob(&db, "photoaaa").await;
     storage
+        .storage()
         .verify_blob_object(&created)
         .await
         .expect("the exact created object is preserved with its journal");
@@ -2503,7 +2523,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
     let (_cancel_tx, cancel) = watch::channel(true);
 
     let err = owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect_err("a cancelled make_local aborts");
     assert!(matches!(
@@ -2552,7 +2572,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let err = owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect_err("the dest write fails");
     assert!(matches!(
@@ -2572,6 +2592,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
     assert!(
         storage
+            .storage()
             .verify_blob_object(
                 photo_ref(&db, "photoaaa")
                     .await
@@ -2623,7 +2644,7 @@ async fn make_local_commit_failure_removes_materialized_files() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let error = owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect_err("the gate update fails after materialization");
 
@@ -2643,6 +2664,7 @@ async fn make_local_commit_failure_removes_materialized_files() {
     );
     assert!(pending_deletes(&db).await.is_empty(), "no delete is queued");
     storage
+        .storage()
         .verify_blob_object(
             photo_ref(&db, "photoaaa")
                 .await
@@ -2687,7 +2709,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let err = owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect_err("a non-UTF-8 dest aborts");
     assert!(matches!(
@@ -2707,6 +2729,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
     assert!(
         storage
+            .storage()
             .verify_blob_object(
                 photo_ref(&db, "photoaaa")
                     .await
@@ -2849,7 +2872,7 @@ async fn make_local_abort_then_retry_converges() {
     let (_cancel_tx, cancelled) = watch::channel(true);
     let err = owners
         .make_local(
-            storage.clone(),
+            storage.storage(),
             None,
             None,
             "notes",
@@ -2873,7 +2896,7 @@ async fn make_local_abort_then_retry_converges() {
     // cloud delete enqueued.
     let (_fresh_tx, fresh) = watch::channel(false);
     owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &fresh)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &fresh)
         .await
         .expect("retry make_local");
     assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Local");
@@ -2932,7 +2955,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     owners
-        .make_local(storage.clone(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
         .await
         .expect("make_local");
     // The retract cycle writes the tombstone.
@@ -2990,6 +3013,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         "the old exact object's tombstone remains valid",
     );
     storage
+        .storage()
         .verify_blob_object(&second_remote)
         .await
         .expect("the replacement exact blob is in the cloud");

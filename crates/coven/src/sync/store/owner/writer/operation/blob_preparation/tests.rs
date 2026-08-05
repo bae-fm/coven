@@ -153,6 +153,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .expect("load exact blob write authority");
     let authority = BlobWriteAuthority::new(authority.referenced_registration());
     let protection = store
+        .storage()
         .store_blob_protection()
         .expect("load Store blob protection");
     let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -186,6 +187,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let spool = store_dir.outbound_blob_spool_path(locator.locator_hash());
     assert_eq!(
         store
+            .storage()
             .seal_blob_to_spool(
                 &locator,
                 &authority,
@@ -229,6 +231,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
             &fact,
             crate::protocol::blob::locator::RemoteAudience::Store,
             store
+                .storage()
                 .store_blob_protection()
                 .expect("reload Store blob protection"),
             &authority,

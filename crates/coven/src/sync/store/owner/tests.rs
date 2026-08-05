@@ -12,7 +12,7 @@ async fn loaded_store_authorization_retains_its_verified_root() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let store = Store::load(
         crate::database::StoreDatabase::new(&db),
-        fixture.clone(),
+        fixture.storage(),
         store_dir,
         signer,
     )

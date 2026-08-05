@@ -626,10 +626,12 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .expect("the operation carries its sealed roster entry");
     assert_eq!(entry_prepared.reference(), &entry_object);
     store
+        .storage()
         .create_protocol_object(entry_prepared)
         .await
         .expect("publish the founder roster entry");
     let entry_plaintext = store
+        .storage()
         .read_protocol_object(&entry_context, &entry_object, &entry_prefix)
         .await
         .expect("open the founder roster entry where it belongs");
@@ -660,10 +662,12 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         resolution: &resolution_ref,
     });
     let resolution_slot = store
+        .storage()
         .allocate_protocol_slot(&resolution_context, &resolution_prefix, ".json")
         .await
         .expect("allocate the roster resolution slot");
     let resolution_object = store
+        .storage()
         .prepare_protocol_object(
             &resolution_context,
             resolution_slot,
@@ -672,11 +676,13 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         )
         .expect("seal the roster resolution");
     store
+        .storage()
         .create_protocol_object(&resolution_object)
         .await
         .expect("publish the roster resolution");
     assert_eq!(
         store
+            .storage()
             .read_protocol_object(
                 &resolution_context,
                 resolution_object.reference(),
@@ -689,10 +695,12 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
 
     // Neither domain accepts the other's path at all.
     store
+        .storage()
         .allocate_protocol_slot(&entry_context, &resolution_prefix, ".json")
         .await
         .expect_err("the roster entry domain must refuse a resolution path");
     store
+        .storage()
         .allocate_protocol_slot(&resolution_context, &entry_prefix, ".json")
         .await
         .expect_err("the roster resolution domain must refuse an entry path");
@@ -719,6 +727,7 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         let moved =
             ExactObjectRef::new(moved_slot, sealed.len() as u64, ObjectHash::digest(&sealed));
         let error = store
+            .storage()
             .read_protocol_object(target_context, &moved, &target_prefix)
             .await
             .expect_err("sealed roster bytes must not open under another kind");

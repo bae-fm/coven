@@ -108,7 +108,7 @@ mod tests {
         .await
         .expect("create registration failure test Store");
 
-        let result = super::RegistrationOutbox::new(database, &store)
+        let result = super::RegistrationOutbox::new(database, &*store.storage())
             .drain()
             .await;
         assert!(
@@ -281,6 +281,7 @@ mod tests {
                 );
                 Some(
                     store
+                        .storage()
                         .read_prepared_protocol_slot(
                             &context,
                             &recovery_slot,
@@ -347,6 +348,7 @@ mod tests {
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 let completed_node = store
+                    .storage()
                     .read_prepared_protocol_slot(
                         &context,
                         &recovery_slot,
