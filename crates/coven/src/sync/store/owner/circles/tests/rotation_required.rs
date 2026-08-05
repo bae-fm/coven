@@ -2,7 +2,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::sync::cycle::{PreparedSyncComponents, StoreInitialization, SyncComponents};
+use crate::sync::cycle::SyncComponents;
 use crate::sync::test_helpers::TestDevice;
 
 fn circle_routing_migrations() -> Vec<crate::Migration> {
@@ -153,33 +153,8 @@ impl RotationFixture {
         };
 
         let (store_temp, store_dir) = temp_store_dir();
-        let owner_storage = crate::storage::CloudSyncStorage::new(
-            _home.clone(),
-            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            label,
-            signer.clone(),
-        )
-        .expect("open Circle owner storage");
-        let components = PreparedSyncComponents::prepare(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-            crate::sync::test_owner_graph::local_blob_access(
-                crate::database::StoreDatabase::new(&db),
-                store_dir.clone(),
-            ),
-            owner_storage,
-            signer.clone(),
-            StoreInitialization::OpenStore {
-                expected_store_root: store.root.clone(),
-            },
-            Some(EncryptionService::from_key([42; 32])),
-        )
-        .await
-        .expect("prepare Circle owner sync")
-        .initialize()
-        .await
-        .expect("initialize Circle owner sync");
+        let components =
+            prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, label).await;
         components
             .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
             .await
@@ -1226,33 +1201,8 @@ impl CircleWithOneMember {
             .await
             .expect("invite Store member");
         let (store_temp, store_dir) = temp_store_dir();
-        let owner_storage = crate::storage::CloudSyncStorage::new(
-            home.clone(),
-            crate::storage::CloudCipher::Encrypted(routing.clone()),
-            crate::storage::BlobPathScheme::Hashed,
-            name,
-            signer.clone(),
-        )
-        .expect("open Circle owner storage");
-        let components = PreparedSyncComponents::prepare(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-            crate::sync::test_owner_graph::local_blob_access(
-                crate::database::StoreDatabase::new(&db),
-                store_dir.clone(),
-            ),
-            owner_storage,
-            signer.clone(),
-            StoreInitialization::OpenStore {
-                expected_store_root: store.root.clone(),
-            },
-            Some(routing),
-        )
-        .await
-        .expect("prepare Circle owner sync")
-        .initialize()
-        .await
-        .expect("initialize Circle owner sync");
+        let components =
+            prepare_owner_sync_components(&db, &store, &home, &store_dir, &signer, name).await;
         components
             .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
             .await

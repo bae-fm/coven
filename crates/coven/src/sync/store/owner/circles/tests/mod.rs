@@ -127,6 +127,53 @@ fn promote_store_member_access_without_adding_to_circle_roster(
     }
 }
 
+/// Cloud storage backed by a Circle test's in-memory home, sealed with the fixed
+/// routing key every case in this tree uses.
+fn circle_test_cloud_storage(
+    home: &Arc<crate::InMemoryCloudHome>,
+    store_id: &str,
+    identity: &UserKeypair,
+) -> crate::storage::CloudSyncStorage {
+    crate::storage::CloudSyncStorage::new(
+        home.clone(),
+        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        crate::storage::BlobPathScheme::Hashed,
+        store_id,
+        identity.clone(),
+    )
+    .expect("open Circle test cloud storage")
+}
+
+/// The initialized production sync components a Circle test's owner drives.
+async fn prepare_owner_sync_components(
+    db: &Database,
+    store: &TestStore,
+    home: &Arc<crate::InMemoryCloudHome>,
+    store_dir: &crate::store_dir::StoreDir,
+    signer: &UserKeypair,
+    store_id: &str,
+) -> crate::sync::cycle::SyncComponents {
+    crate::sync::cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(db),
+        store_dir.clone(),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(db),
+            store_dir.clone(),
+        ),
+        circle_test_cloud_storage(home, store_id, signer),
+        signer.clone(),
+        crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_store_root: store.root.clone(),
+        },
+        Some(EncryptionService::from_key([42; 32])),
+    )
+    .await
+    .expect("prepare Circle owner sync")
+    .initialize()
+    .await
+    .expect("initialize Circle owner sync")
+}
+
 /// Publishes the owner device's Circle epoch-close response and runs the cycle
 /// that activates the close outcome — the pair every epoch-close case drives
 /// after the operation that opened the close.

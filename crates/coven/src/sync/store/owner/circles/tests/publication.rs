@@ -42,6 +42,103 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
     .expect("open copied Circle routing database")
 }
 
+/// The Circle operation database on disk, so the restart cases can close it and
+/// open the same file again.
+fn open_persistent_circle_test_db(path: &std::path::Path) -> Database {
+    Database::open(
+        path,
+        test_synced_tables(),
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        "creator".to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+        &test_migrations(),
+    )
+    .expect("open circle database")
+}
+
+/// A Circle-scoped `documents` table whose rows carry a blob.
+fn open_circle_blob_test_db() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        vec![crate::protocol::synced_schema::SyncedTable::new(
+            "documents",
+            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")
+        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
+            "files",
+            crate::protocol::blob::Provenance::HostProvided,
+            crate::protocol::blob::CacheFill::CacheEager,
+        ))],
+        vec![crate::Migration::sql(
+            1,
+            "Circle member bootstrap schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
+/// The materialized `documents` row a recipient installed, as
+/// `(audience, size, hash, stamp)`.
+async fn installed_document_row(
+    db: &Database,
+    row_id: &str,
+) -> Result<(String, i64, String, String), DbError> {
+    let row_id = row_id.to_string();
+    db.test_sql(move |connection| {
+        connection
+            .query_row(
+                "SELECT audience, size, hash, _updated_at
+                 FROM documents WHERE id = ?1",
+                [&row_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(DbError::from)
+    })
+    .await
+}
+
+/// The Circle packages a commit carries that this device's own access applies.
+/// Either read failure is fatal to the caller, reported under `purpose`.
+async fn applicable_circle_packages(
+    device: &crate::sync::test_helpers::TestDevice,
+    verified: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+    activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
+    author: &crate::protocol::store_commit::StoreDeviceRegistration,
+    purpose: &str,
+) -> Vec<crate::sync::store::owner::pull::LoadedCirclePackage> {
+    match device
+        .load_applicable_circle_packages_for_test(
+            verified,
+            activations,
+            author,
+            crate::sync::store::owner::pull::LocalStoreMembership::Current,
+        )
+        .await
+    {
+        Ok(packages) => packages,
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
+            panic!("{purpose}: {error}")
+        }
+        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
+            panic!("{purpose}: {error}")
+        }
+    }
+}
+
 #[tokio::test]
 async fn merge_publication_handles_every_exact_create_failure_boundary() {
     tokio::spawn(async {
@@ -173,16 +270,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
 async fn pending_circle_operation_reopens_with_identical_signed_state() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-restart.sqlite3");
-    let db = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open circle database");
+    let db = open_persistent_circle_test_db(&path);
     let (store, _home, signer, expected) = persist_merge_operation(&db, "circle-restart").await;
     assert_eq!(
         StoreDatabase::new(&db)
@@ -195,16 +283,7 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
         .join()
         .expect("close circle database");
 
-    let reopened = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("reopen circle database");
+    let reopened = open_persistent_circle_test_db(&path);
     assert_eq!(
         StoreDatabase::new(&reopened)
             .get_circle_operations()
@@ -243,16 +322,7 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
 async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-rename-restart.sqlite3");
-    let db = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open circle database");
+    let db = open_persistent_circle_test_db(&path);
     let (store, _home, signer, founder) =
         persist_merge_operation(&db, "circle-rename-restart").await;
     let circle_id = founder.circle_id();
@@ -307,16 +377,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .join()
         .expect("close circle database");
 
-    let reopened = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("reopen circle database");
+    let reopened = open_persistent_circle_test_db(&path);
     let persisted = StoreDatabase::new(&reopened)
         .circle_operation(&operation_id)
         .await
@@ -364,16 +425,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
 async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-delete-restart.sqlite3");
-    let db = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open circle database");
+    let db = open_persistent_circle_test_db(&path);
     let (store, _home, signer, founder) =
         persist_merge_operation(&db, "circle-delete-restart").await;
     let circle_id = founder.circle_id();
@@ -420,16 +472,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         .join()
         .expect("close circle database");
 
-    let reopened = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("reopen circle database");
+    let reopened = open_persistent_circle_test_db(&path);
     let persisted = StoreDatabase::new(&reopened)
         .circle_operation(&operation_id)
         .await
@@ -472,16 +515,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
 async fn a_forged_deletion_control_is_held_invalid() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-delete-forged.sqlite3");
-    let db = Database::open(
-        &path,
-        test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
-        "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
-        &test_migrations(),
-    )
-    .expect("open circle database");
+    let db = open_persistent_circle_test_db(&path);
     let (store, _home, signer, founder) =
         persist_merge_operation(&db, "circle-delete-forged").await;
     let circle_id = founder.circle_id();
@@ -554,30 +588,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
 
 #[tokio::test]
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
-    let blob_decl = crate::protocol::synced_schema::BlobDecl::new(
-        "files",
-        crate::protocol::blob::Provenance::HostProvided,
-        crate::protocol::blob::CacheFill::CacheEager,
-    );
-    let db = crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::protocol::synced_schema::SyncedTable::new(
-            "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
-        )
-        .scoped_by("audience")
-        .carries_blob(blob_decl)],
-        vec![crate::Migration::sql(
-            1,
-            "Circle member bootstrap schema",
-            "CREATE TABLE documents (
-                 id TEXT PRIMARY KEY,
-                 audience TEXT,
-                 size INTEGER NOT NULL,
-                 hash TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )],
-    );
+    let db = open_circle_blob_test_db();
     let (store, _home, signer, founder) =
         persist_merge_operation(&db, "circle-member-bootstrap").await;
     let circle_id = founder.circle_id();
@@ -602,29 +613,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("invite Store member");
-    let member_db = crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::protocol::synced_schema::SyncedTable::new(
-            "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
-        )
-        .scoped_by("audience")
-        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
-            "files",
-            crate::protocol::blob::Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheEager,
-        ))],
-        vec![crate::Migration::sql(
-            1,
-            "Circle member bootstrap schema",
-            "CREATE TABLE documents (
-                 id TEXT PRIMARY KEY,
-                 audience TEXT,
-                 size INTEGER NOT NULL,
-                 hash TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )],
-    );
+    let member_db = open_circle_blob_test_db();
     store
         .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
         .await
@@ -649,33 +638,15 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     crate::store_dir::StoreDir::store_local_blob(&store_dir, "files", blob_id, blob_bytes)
         .await
         .expect("stage Circle blob");
-    let writer = crate::storage::CloudSyncStorage::new(
-        _home.clone(),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::storage::BlobPathScheme::Hashed,
+    let components = prepare_owner_sync_components(
+        &db,
+        &store,
+        &_home,
+        &store_dir,
+        &signer,
         "circle-member-bootstrap",
-        signer.clone(),
     )
-    .expect("construct Circle blob writer");
-    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
-        store_dir.clone(),
-        crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-        ),
-        writer,
-        signer.clone(),
-        crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("prepare scoped Circle Store")
-    .initialize()
-    .await
-    .expect("open scoped Circle Store");
+    .await;
     components
         .run_cycle(&crate::clock::SystemClock, None, None)
         .await
@@ -707,29 +678,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("invite concurrent Store writer");
-    let concurrent_db = crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::protocol::synced_schema::SyncedTable::new(
-            "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
-        )
-        .scoped_by("audience")
-        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
-            "files",
-            crate::protocol::blob::Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheEager,
-        ))],
-        vec![crate::Migration::sql(
-            1,
-            "Circle member bootstrap schema",
-            "CREATE TABLE documents (
-                 id TEXT PRIMARY KEY,
-                 audience TEXT,
-                 size INTEGER NOT NULL,
-                 hash TEXT NOT NULL,
-                 _updated_at TEXT NOT NULL
-             ) STRICT;",
-        )],
-    );
+    let concurrent_db = open_circle_blob_test_db();
     store
         .activate_joined_device(
             &db,
@@ -789,16 +738,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     )
     .await
     .expect("stage late concurrent Circle blob");
-    let concurrent_storage = Arc::new(
-        crate::storage::CloudSyncStorage::new(
-            _home.clone(),
-            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            "circle-member-bootstrap",
-            concurrent_writer.clone(),
-        )
-        .expect("construct concurrent Circle writer storage"),
-    );
+    let concurrent_storage = Arc::new(circle_test_cloud_storage(
+        &_home,
+        "circle-member-bootstrap",
+        &concurrent_writer,
+    ));
     components
         .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
         .await
@@ -914,27 +858,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         installed_ids.iter().any(|installed| installed == blob_id),
         "recipient rows after bootstrap replay: {installed_ids:?}"
     );
-    let installed_row = member_db
-        .test_sql({
-            let blob_id = blob_id.to_string();
-            move |connection| {
-                connection
-                    .query_row(
-                        "SELECT audience, size, hash, _updated_at
-                         FROM documents WHERE id = ?1",
-                        [&blob_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                            ))
-                        },
-                    )
-                    .map_err(DbError::from)
-            }
-        })
+    let installed_row = installed_document_row(&member_db, blob_id)
         .await
         .expect("recipient bootstrap installs the preexisting Circle row");
     assert_eq!(
@@ -946,27 +870,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             "0000000001500-0000-owner".to_string(),
         )
     );
-    let installed_late_row = member_db
-        .test_sql({
-            let late_id = late_id.to_string();
-            move |connection| {
-                connection
-                    .query_row(
-                        "SELECT audience, size, hash, _updated_at
-                         FROM documents WHERE id = ?1",
-                        [&late_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                            ))
-                        },
-                    )
-                    .map_err(DbError::from)
-            }
-        })
+    let installed_late_row = installed_document_row(&member_db, late_id)
         .await
         .expect("recipient replay installs the late concurrent Circle row");
     assert_eq!(
@@ -1229,33 +1133,15 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("activate Store member device");
 
     let (_temp, store_dir) = temp_store_dir();
-    let owner_storage = crate::storage::CloudSyncStorage::new(
-        _home.clone(),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::storage::BlobPathScheme::Hashed,
+    let components = prepare_owner_sync_components(
+        &db,
+        &store,
+        &_home,
+        &store_dir,
+        &signer,
         "circle-member-removal",
-        signer.clone(),
     )
-    .expect("open Circle owner storage");
-    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
-        store_dir.clone(),
-        crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-        ),
-        owner_storage,
-        signer.clone(),
-        crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
-        },
-        Some(EncryptionService::from_key([42; 32])),
-    )
-    .await
-    .expect("prepare Circle owner sync")
-    .initialize()
-    .await
-    .expect("initialize Circle owner sync");
+    .await;
     components
         .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
         .await
@@ -1382,23 +1268,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("load historical pre-close access")
         .expect("historical pre-close access remains retained");
     assert!(historical_access.authorizes_writer(&keys::public_key_hex(&signer)));
-    let loaded_packages = match device
-        .load_applicable_circle_packages_for_test(
-            &package_commit,
-            &[],
-            &package_author,
-            crate::sync::store::owner::pull::LocalStoreMembership::Current,
-        )
-        .await
-    {
-        Ok(packages) => packages,
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
-            panic!("load late pre-close Circle package from retained access: {error}")
-        }
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
-            panic!("load late pre-close Circle package from retained access: {error}")
-        }
-    };
+    let loaded_packages = applicable_circle_packages(
+        &device,
+        &package_commit,
+        &[],
+        &package_author,
+        "load late pre-close Circle package from retained access",
+    )
+    .await;
     assert_eq!(loaded_packages.len(), 1);
     let candidate_base_temp =
         tempfile::tempdir().expect("create candidate base database directory");
@@ -1713,23 +1590,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("read accepted pre-cutoff Circle row after replay"));
 
     _home.clear_exact_reads();
-    let accepted_after_cutoff = match device
-        .load_applicable_circle_packages_for_test(
-            &package_commit,
-            &[],
-            &package_author,
-            crate::sync::store::owner::pull::LocalStoreMembership::Current,
-        )
-        .await
-    {
-        Ok(packages) => packages,
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
-            panic!("load accepted Circle package after cutoff: {error}")
-        }
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
-            panic!("load accepted Circle package after cutoff: {error}")
-        }
-    };
+    let accepted_after_cutoff = applicable_circle_packages(
+        &device,
+        &package_commit,
+        &[],
+        &package_author,
+        "load accepted Circle package after cutoff",
+    )
+    .await;
     assert_eq!(accepted_after_cutoff.len(), 1);
     let package_slot = package_commit.circle_packages()[0]
         .package
@@ -1885,23 +1753,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("bind candidate successor Circle Store");
     _home.clear_exact_reads();
-    let omitted_by_candidate_successor = match candidate_device
-        .load_applicable_circle_packages_for_test(
-            &verified_candidate,
-            std::slice::from_ref(&activation),
-            successor_author,
-            crate::sync::store::owner::pull::LocalStoreMembership::Current,
-        )
-        .await
-    {
-        Ok(packages) => packages,
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
-            panic!("classify package against candidate successor cutoff: {error}")
-        }
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
-            panic!("classify package against candidate successor cutoff: {error}")
-        }
-    };
+    let omitted_by_candidate_successor = applicable_circle_packages(
+        &candidate_device,
+        &verified_candidate,
+        std::slice::from_ref(&activation),
+        successor_author,
+        "classify package against candidate successor cutoff",
+    )
+    .await;
     assert!(omitted_by_candidate_successor.is_empty());
     assert!(!_home
         .exact_reads()
@@ -1969,16 +1828,7 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
         } else {
             "circle-missing-upload.sqlite3"
         });
-        let db = Database::open(
-            &path,
-            test_synced_tables(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
-            "creator".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-            &test_migrations(),
-        )
-        .expect("open circle database");
+        let db = open_persistent_circle_test_db(&path);
         let (store, _home, signer, expected) =
             persist_merge_operation(&db, if corrupt { "corrupt" } else { "missing" }).await;
         _home.fail_exact_create_before_call(2);
@@ -2013,16 +1863,7 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             .join()
             .expect("close circle database");
 
-        let reopened = Database::open(
-            &path,
-            test_synced_tables(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
-            "creator".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
-            &test_migrations(),
-        )
-        .expect("reopen circle database");
+        let reopened = open_persistent_circle_test_db(&path);
         store
             .bind_device(&reopened, &signer)
             .await
@@ -2210,33 +2051,8 @@ impl ClosingFounderCircle {
             .expect("activate Store member device");
 
         let (_temp, store_dir) = temp_store_dir();
-        let owner_storage = crate::storage::CloudSyncStorage::new(
-            _home.clone(),
-            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            name,
-            signer.clone(),
-        )
-        .expect("open Circle owner storage");
-        let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-            crate::sync::test_owner_graph::local_blob_access(
-                crate::database::StoreDatabase::new(&db),
-                store_dir.clone(),
-            ),
-            owner_storage,
-            signer.clone(),
-            crate::sync::cycle::StoreInitialization::OpenStore {
-                expected_store_root: store.root.clone(),
-            },
-            Some(EncryptionService::from_key([42; 32])),
-        )
-        .await
-        .expect("prepare Circle owner sync")
-        .initialize()
-        .await
-        .expect("initialize Circle owner sync");
+        let components =
+            prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, name).await;
         components
             .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
             .await
@@ -2252,16 +2068,7 @@ impl ClosingFounderCircle {
 
         // The member's own device installs the Circle bootstrap and becomes an active
         // effective member holding the epoch key.
-        let member_storage = Arc::new(
-            crate::storage::CloudSyncStorage::new(
-                _home.clone(),
-                crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-                crate::storage::BlobPathScheme::Hashed,
-                name,
-                member.clone(),
-            )
-            .expect("open Circle member storage"),
-        );
+        let member_storage = Arc::new(circle_test_cloud_storage(&_home, name, &member));
         let (_member_temp, member_store_dir) = temp_store_dir();
         crate::sync::store::Store::load(
             StoreDatabase::new(&member_db),
@@ -2590,19 +2397,13 @@ async fn cancelling_a_finalized_close_is_refused() {
 
     // Finalize the close: publish the sole owner-device response, then drive the
     // cycle that activates the exact outcome.
-    fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("bind Circle test Store")
-        .publish_circle_epoch_close_response()
-        .await
-        .expect("publish local Circle epoch-close response");
-    fixture
-        .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
-        .await
-        .expect("activate the exact Circle epoch-close outcome");
+    finalize_circle_epoch_close(
+        &fixture.store,
+        &fixture.db,
+        &fixture.signer,
+        &fixture.components,
+    )
+    .await;
     assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
@@ -2650,19 +2451,13 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
 
     // Finalize the close: publish the owner-device response and drive the cycle
     // that activates the closed-origin successor without the removed member.
-    fixture
-        .store
-        .bind_device(&fixture.db, &fixture.signer)
-        .await
-        .expect("bind Circle test Store")
-        .publish_circle_epoch_close_response()
-        .await
-        .expect("publish local Circle epoch-close response");
-    fixture
-        .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
-        .await
-        .expect("activate the Circle epoch-close outcome");
+    finalize_circle_epoch_close(
+        &fixture.store,
+        &fixture.db,
+        &fixture.signer,
+        &fixture.components,
+    )
+    .await;
     let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
@@ -3250,33 +3045,8 @@ impl SilentParticipantCircle {
             .expect("read silent participant device id");
 
         let (_temp, store_dir) = temp_store_dir();
-        let owner_storage = crate::storage::CloudSyncStorage::new(
-            _home.clone(),
-            crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
-            name,
-            signer.clone(),
-        )
-        .expect("open Circle owner storage");
-        let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-            crate::database::StoreDatabase::new(&db),
-            store_dir.clone(),
-            crate::sync::test_owner_graph::local_blob_access(
-                crate::database::StoreDatabase::new(&db),
-                store_dir.clone(),
-            ),
-            owner_storage,
-            signer.clone(),
-            crate::sync::cycle::StoreInitialization::OpenStore {
-                expected_store_root: store.root.clone(),
-            },
-            Some(EncryptionService::from_key([42; 32])),
-        )
-        .await
-        .expect("prepare Circle owner sync")
-        .initialize()
-        .await
-        .expect("initialize Circle owner sync");
+        let components =
+            prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, name).await;
         components
             .add_circle_member(circle_id, removed_pubkey.clone(), CircleRole::Member)
             .await
@@ -3286,16 +3056,7 @@ impl SilentParticipantCircle {
             .await
             .expect("add silent Circle member");
 
-        let silent_storage = Arc::new(
-            crate::storage::CloudSyncStorage::new(
-                _home.clone(),
-                crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-                crate::storage::BlobPathScheme::Hashed,
-                name,
-                silent.clone(),
-            )
-            .expect("open silent participant storage"),
-        );
+        let silent_storage = Arc::new(circle_test_cloud_storage(&_home, name, &silent));
 
         let prior_epoch = crate::database::StoreDatabase::new(&db)
             .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
