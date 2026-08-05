@@ -94,6 +94,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         self.writer.merge_history()
     }
 
+    fn journal(&self, attempt_id: DeviceJoinAttemptId) -> StoreJoinJournal<OwnerJoinProgress> {
+        StoreJoinJournal::new(&self.database, attempt_id)
+    }
+
     fn verify_device_admission_approval(
         &self,
         approval: &DeviceProviderAdmissionApproval,
@@ -201,11 +205,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         offer: DeviceJoinOffer,
     ) -> Result<DeviceJoinAbandonment, DeviceJoinError> {
-        let database = self.database.clone();
-        let current = database
-            .load_device_join(offer.attempt_id, DeviceJoinRole::Owner)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(offer.attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Abandoned(existing)) =
             &*current.progress
         {
@@ -240,30 +241,21 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             abandonment_hash: abandonment_object.abandonment_hash(),
             object: prepared.reference().clone(),
         };
-        let intent = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Owner(
-                OwnerJoinProgress::AbandonmentCreateIntent {
-                    offer: offer.clone(),
-                    abandonment: abandonment_ref.clone(),
-                    prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
-                },
-            )),
-        };
+        let intent = journal.record(OwnerJoinProgress::AbandonmentCreateIntent {
+            offer: offer.clone(),
+            abandonment: abandonment_ref.clone(),
+            prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
+        });
         match &*current.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(durable))
                 if durable == &offer =>
             {
-                database
-                    .advance_device_join(&current, intent.clone())
-                    .await?;
+                journal.advance_to(&current, &intent).await?;
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(request))
                 if request.approval.request.offer.as_ref() == &offer =>
             {
-                database
-                    .advance_device_join(&current, intent.clone())
-                    .await?;
+                journal.advance_to(&current, &intent).await?;
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AbandonmentCreateIntent {
                 offer: durable_offer,
@@ -294,16 +286,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             abandonment: abandonment_ref,
             abandonment_activation: activation,
         };
-        database
-            .advance_device_join(
-                &intent,
-                DeviceJoinJournalRecord {
-                    attempt_id: offer.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::Abandoned(abandonment.clone()),
-                    )),
-                },
-            )
+        journal
+            .advance(&intent, OwnerJoinProgress::Abandoned(abandonment.clone()))
             .await?;
         Ok(abandonment)
     }
@@ -343,14 +327,9 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if !self.local_writer.is_current_owner(&self.membership) {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
-        let database = self.database.clone();
-        let offered = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(
-                *offer.clone(),
-            ))),
-        };
-        let durable = database.begin_device_join(offered.clone()).await?;
+        let journal = self.journal(offer.attempt_id);
+        let offered = journal.record(OwnerJoinProgress::Offered(*offer.clone()));
+        let durable = journal.begin(&offered).await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) =
             *durable.progress
         {
@@ -364,7 +343,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let plan = self.writer.prepare_plan().await?;
         #[cfg(test)]
-        database
+        self.database
             .reach_test_point(crate::database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
             .await;
         let cut = plan.predecessor_cut()?;
@@ -375,14 +354,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::ApprovalActivationMissing);
         }
-        let requested = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Owner(
+        let requested = journal
+            .advance(
+                &offered,
                 OwnerJoinProgress::RegistrationRequested(request.clone()),
-            )),
-        };
-        database
-            .advance_device_join(&offered, requested.clone())
+            )
             .await?;
         let attempt = self.local_writer.sign_device_join_attempt(
             offer.store_root.clone(),
@@ -426,7 +402,6 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 crate::sync::store::operations::StoreOperationBatch::Attempt(attempt_ref.clone()),
             )
             .await?;
-        let attempt_id = offer.attempt_id;
         let bootstrap = ProvisionalDeviceBootstrap {
             request: Box::new(request),
             publication_authorization: DeviceJoinChallengePublicationAuthorization {
@@ -434,15 +409,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 attempt_activation: activation,
             },
         };
-        database
-            .advance_device_join(
+        journal
+            .advance(
                 &requested,
-                DeviceJoinJournalRecord {
-                    attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::AttemptActivated(bootstrap.clone()),
-                    )),
-                },
+                OwnerJoinProgress::AttemptActivated(bootstrap.clone()),
             )
             .await?;
         Ok(bootstrap)
@@ -452,11 +422,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         attempt_ref: DeviceJoinAttemptRef,
     ) -> Result<DeviceJoinCancellation, DeviceJoinError> {
-        let database = self.database.clone();
-        let current = database
-            .load_device_join(attempt_ref.attempt_id, DeviceJoinRole::Owner)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(attempt_ref.attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(existing)) =
             &*current.progress
         {
@@ -513,21 +480,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             outcome_hash: outcome.outcome_hash(),
             object: prepared.reference().clone(),
         };
-        let intent = DeviceJoinJournalRecord {
-            attempt_id: attempt_ref.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Owner(
-                OwnerJoinProgress::CancellationCreateIntent {
-                    attempt: attempt_ref.clone(),
-                    cancellation: outcome_ref.clone(),
-                    prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
-                },
-            )),
-        };
+        let intent = journal.record(OwnerJoinProgress::CancellationCreateIntent {
+            attempt: attempt_ref.clone(),
+            cancellation: outcome_ref.clone(),
+            prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
+        });
         match &*current.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
-                database
-                    .advance_device_join(&current, intent.clone())
-                    .await?;
+                journal.advance_to(&current, &intent).await?;
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
                 attempt,
@@ -564,16 +524,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             outcome: outcome_ref,
             outcome_activation,
         };
-        database
-            .advance_device_join(
-                &intent,
-                DeviceJoinJournalRecord {
-                    attempt_id: attempt_ref.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::Cancelled(cancellation.clone()),
-                    )),
-                },
-            )
+        journal
+            .advance(&intent, OwnerJoinProgress::Cancelled(cancellation.clone()))
             .await?;
         Ok(cancellation)
     }
@@ -582,13 +534,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         completion: DeviceProviderAdmissionCompletion,
     ) -> Result<DeviceJoinActivation, DeviceJoinError> {
-        let database = self.database.clone();
         let attempt_ref = completion.readiness.proof.attempt.clone();
         let attempt_id = attempt_ref.attempt_id;
-        let current = database
-            .load_device_join(attempt_id, DeviceJoinRole::Owner)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             completion: durable_completion,
             activation,
@@ -713,19 +662,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     outcome_hash,
                     object: prepared.reference().clone(),
                 };
-                let intent = DeviceJoinJournalRecord {
-                    attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
+                let intent = journal
+                    .advance(
+                        &current,
                         OwnerJoinProgress::ActivationCreateIntent {
                             bootstrap: provisional.clone(),
                             completion: completion.clone(),
                             outcome: outcome_ref.clone(),
                             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
                         },
-                    )),
-                };
-                database
-                    .advance_device_join(&current, intent.clone())
+                    )
                     .await?;
                 (prepared, outcome_ref, intent)
             }
@@ -742,11 +688,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 if durable_outcome != &expected {
                     return Err(DeviceJoinError::JournalConflict);
                 }
-                let prepared = crate::protocol::objects::PreparedExactObject::new(
-                    durable_prepared.object.clone(),
-                    durable_prepared.stored_bytes.clone(),
-                )?;
-                (prepared, expected, current.clone())
+                (durable_prepared.restore()?, expected, current.clone())
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
@@ -780,17 +722,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             outcome: outcome_ref,
             outcome_activation: activation_ref,
         };
-        database
-            .advance_device_join(
+        journal
+            .advance(
                 &intent,
-                DeviceJoinJournalRecord {
-                    attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::ActivationPrepared {
-                            completion,
-                            activation: activation.clone(),
-                        },
-                    )),
+                OwnerJoinProgress::ActivationPrepared {
+                    completion,
+                    activation: activation.clone(),
                 },
             )
             .await?;
@@ -801,12 +738,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         activation: DeviceJoinCleanupActivation,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let attempt_id = activation.receipt.attempt_id;
-        let current = self
-            .database
-            .load_device_join(attempt_id, DeviceJoinRole::Owner)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(activation.receipt.attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancelledComplete(existing)) =
             &*current.progress
         {
@@ -823,15 +756,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if durable != &activation {
             return Err(DeviceJoinError::JournalConflict);
         }
-        self.database
-            .advance_device_join(
+        journal
+            .advance(
                 &current,
-                DeviceJoinJournalRecord {
-                    attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::CancelledComplete(activation.clone()),
-                    )),
-                },
+                OwnerJoinProgress::CancelledComplete(activation.clone()),
             )
             .await?;
         Ok(activation)
@@ -845,11 +773,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     ) -> Result<DeviceJoinCleanupReceipt, DeviceJoinError> {
         require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
-        let database = self.database.clone();
-        let current = database
-            .load_device_join(attempt_ref.attempt_id, DeviceJoinRole::Owner)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(attempt_ref.attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceipt(existing)) =
             &*current.progress
         {
@@ -948,19 +873,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     receipt_hash: receipt_object.receipt_hash(),
                     object: prepared.reference().clone(),
                 };
-                let intent = DeviceJoinJournalRecord {
-                    attempt_id: attempt_ref.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
+                let intent = journal
+                    .advance(
+                        &current,
                         OwnerJoinProgress::CleanupReceiptCreateIntent {
                             cancellation: cancellation.clone(),
                             receipt: receipt_ref.clone(),
                             receipt_bytes: receipt_object.to_bytes(),
                             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
                         },
-                    )),
-                };
-                database
-                    .advance_device_join(&current, intent.clone())
+                    )
                     .await?;
                 (Box::new(receipt_object), receipt_ref, prepared, intent)
             }
@@ -985,10 +907,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 (
                     Box::new(receipt_object),
                     receipt.clone(),
-                    crate::protocol::objects::PreparedExactObject::new(
-                        prepared.object.clone(),
-                        prepared.stored_bytes.clone(),
-                    )?,
+                    prepared.restore()?,
                     current.clone(),
                 )
             }
@@ -1012,16 +931,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let receipt = DeviceJoinCleanupReceipt {
             receipt: receipt_ref,
         };
-        database
-            .advance_device_join(
-                &intent,
-                DeviceJoinJournalRecord {
-                    attempt_id: attempt_ref.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::CleanupReceipt(receipt.clone()),
-                    )),
-                },
-            )
+        journal
+            .advance(&intent, OwnerJoinProgress::CleanupReceipt(receipt.clone()))
             .await?;
         Ok(receipt)
     }
@@ -1069,12 +980,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         receipt: DeviceJoinCleanupReceipt,
     ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
-        let attempt_id = receipt.receipt.attempt_id;
-        let database = self.database.clone();
-        let current = database
-            .load_device_join(attempt_id, DeviceJoinRole::Owner)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(receipt.receipt.attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupActivated(existing)) =
             &*current.progress
         {
@@ -1104,7 +1011,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .read_protocol_object(&context, &receipt.receipt.object, &prefix)
             .await?;
         let receipt_object: DeviceJoinCleanupReceiptObject = serde_json::from_slice(&bytes)?;
-        let executor = database
+        let executor = self
+            .database
             .activated_store_device_registration(receipt_object.executor.clone())
             .await
             .map_err(database_error)?;
@@ -1127,15 +1035,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             receipt: receipt.receipt,
             activation: activation_ref,
         };
-        database
-            .advance_device_join(
+        journal
+            .advance(
                 &current,
-                DeviceJoinJournalRecord {
-                    attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Owner(
-                        OwnerJoinProgress::CleanupActivated(activation.clone()),
-                    )),
-                },
+                OwnerJoinProgress::CleanupActivated(activation.clone()),
             )
             .await?;
         Ok(activation)

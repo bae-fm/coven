@@ -10,13 +10,102 @@ use crate::protocol::store_commit::DeviceJoinOutcomeRef;
 
 pub(crate) use crate::protocol::store_commit::device_join_journal::attempt_key;
 pub(crate) use crate::protocol::store_commit::device_join_journal::{
-    device_join_action, validate_initial_progress, DeviceJoinRoleProgress, JoinerJoinProgress,
-    OwnerJoinProgress, PreparedDeviceJoinObject, ProviderAdminJoinProgress,
+    device_join_action, validate_initial_progress, DeviceJoinRoleProgress,
+    DeviceJoinRoleProgressKind, JoinerJoinProgress, OwnerJoinProgress, PreparedDeviceJoinObject,
+    ProviderAdminJoinProgress,
 };
 pub use crate::protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinCleanupProgress, DeviceJoinJournalRecord, DeviceJoinRole,
     DeviceJoinStatus,
 };
+
+/// One attempt's role journal in the Store database. An operation reads and
+/// advances a single attempt under a single role, so the handle carries both and
+/// each call names only the progress it moves to.
+pub(super) struct StoreJoinJournal<Progress> {
+    database: StoreDatabase,
+    attempt_id: DeviceJoinAttemptId,
+    progress: std::marker::PhantomData<Progress>,
+}
+
+impl<Progress: DeviceJoinRoleProgressKind> StoreJoinJournal<Progress> {
+    pub(super) fn new(database: &StoreDatabase, attempt_id: DeviceJoinAttemptId) -> Self {
+        Self {
+            database: database.clone(),
+            attempt_id,
+            progress: std::marker::PhantomData,
+        }
+    }
+
+    /// The durable record for this attempt and role, or `None` when this role has
+    /// never written one.
+    pub(super) async fn load(&self) -> Result<Option<DeviceJoinJournalRecord>, DeviceJoinError> {
+        Ok(self
+            .database
+            .load_device_join(self.attempt_id, Progress::ROLE)
+            .await?)
+    }
+
+    /// The durable record for this attempt and role. A role holding no record has
+    /// nothing to advance from, so its absence is a journal conflict.
+    pub(super) async fn current(&self) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
+        self.load().await?.ok_or(DeviceJoinError::JournalConflict)
+    }
+
+    pub(super) fn record(&self, progress: Progress) -> DeviceJoinJournalRecord {
+        DeviceJoinJournalRecord {
+            attempt_id: self.attempt_id,
+            progress: Box::new(progress.into()),
+        }
+    }
+
+    /// Install `initial` as this role's first record, returning whatever the
+    /// journal durably holds — an attempt that already advanced past the initial
+    /// progress returns that later record for the caller to resume from.
+    pub(super) async fn begin(
+        &self,
+        initial: &DeviceJoinJournalRecord,
+    ) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
+        Ok(self.database.begin_device_join(initial.clone()).await?)
+    }
+
+    /// Advance from `previous`, returning the record now durable so the next step
+    /// advances from it.
+    pub(super) async fn advance(
+        &self,
+        previous: &DeviceJoinJournalRecord,
+        progress: Progress,
+    ) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
+        let next = self.record(progress);
+        self.advance_to(previous, &next).await?;
+        Ok(next)
+    }
+
+    /// Install a terminal record for a role that never opened a journal, so a
+    /// replacement of an attempt this device never ran still records how it ended.
+    pub(super) async fn begin_replacement_terminal(
+        &self,
+        progress: Progress,
+    ) -> Result<(), DeviceJoinError> {
+        Ok(self
+            .database
+            .begin_device_join_replacement_terminal(self.record(progress))
+            .await?)
+    }
+
+    /// Advance from `previous` to a record the caller already built — the shape a
+    /// caller needs when several durable predecessors advance to one successor.
+    pub(super) async fn advance_to(
+        &self,
+        previous: &DeviceJoinJournalRecord,
+        next: &DeviceJoinJournalRecord,
+    ) -> Result<(), DeviceJoinError> {
+        Ok(self
+            .database
+            .advance_device_join(previous, next.clone())
+            .await?)
+    }
+}
 
 /// Durable role journal. Each row stores a closed progress value; SQLite's
 /// compare-and-swap update rejects stale or skipped transitions.

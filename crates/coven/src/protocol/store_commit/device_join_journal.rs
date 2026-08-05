@@ -235,6 +235,19 @@ impl PreparedDeviceJoinObject {
             stored_bytes: prepared.stored_bytes().to_vec(),
         }
     }
+
+    /// The prepared object this journal entry recorded, ready to be created
+    /// again. A resumed write creates these exact bytes rather than preparing a
+    /// second object, so the retry writes what the journal already committed to.
+    pub(crate) fn restore(
+        &self,
+    ) -> Result<crate::protocol::objects::PreparedExactObject, crate::protocol::objects::StorageError>
+    {
+        crate::protocol::objects::PreparedExactObject::new(
+            self.object.clone(),
+            self.stored_bytes.clone(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +310,42 @@ pub(crate) enum DeviceJoinRoleProgress {
     Owner(OwnerJoinProgress),
     ProviderAdministrator(ProviderAdminJoinProgress),
     Joiner(JoinerJoinProgress),
+}
+
+/// A role's own progress type. Each one names the role whose journal rows hold
+/// it, so a journal bound to a role accepts only that role's progress.
+pub(crate) trait DeviceJoinRoleProgressKind: Into<DeviceJoinRoleProgress> {
+    const ROLE: DeviceJoinRole;
+}
+
+impl From<OwnerJoinProgress> for DeviceJoinRoleProgress {
+    fn from(progress: OwnerJoinProgress) -> Self {
+        Self::Owner(progress)
+    }
+}
+
+impl DeviceJoinRoleProgressKind for OwnerJoinProgress {
+    const ROLE: DeviceJoinRole = DeviceJoinRole::Owner;
+}
+
+impl From<ProviderAdminJoinProgress> for DeviceJoinRoleProgress {
+    fn from(progress: ProviderAdminJoinProgress) -> Self {
+        Self::ProviderAdministrator(progress)
+    }
+}
+
+impl DeviceJoinRoleProgressKind for ProviderAdminJoinProgress {
+    const ROLE: DeviceJoinRole = DeviceJoinRole::ProviderAdministrator;
+}
+
+impl From<JoinerJoinProgress> for DeviceJoinRoleProgress {
+    fn from(progress: JoinerJoinProgress) -> Self {
+        Self::Joiner(progress)
+    }
+}
+
+impl DeviceJoinRoleProgressKind for JoinerJoinProgress {
+    const ROLE: DeviceJoinRole = DeviceJoinRole::Joiner;
 }
 
 impl DeviceJoinRoleProgress {

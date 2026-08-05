@@ -48,24 +48,38 @@ impl PendingJoinJournal {
         self.database.load(self.attempt_id, DeviceJoinRole::Joiner)
     }
 
+    fn record(&self, progress: JoinerJoinProgress) -> DeviceJoinJournalRecord {
+        DeviceJoinJournalRecord {
+            attempt_id: self.attempt_id,
+            progress: Box::new(progress.into()),
+        }
+    }
+
+    /// Advance from `previous`, returning the record now durable so the next step
+    /// advances from it.
     fn advance(
         &self,
         previous: &DeviceJoinJournalRecord,
-        next: DeviceJoinJournalRecord,
+        progress: JoinerJoinProgress,
+    ) -> Result<DeviceJoinJournalRecord, DeviceJoinError> {
+        let next = self.record(progress);
+        self.advance_to(previous, &next)?;
+        Ok(next)
+    }
+
+    fn advance_to(
+        &self,
+        previous: &DeviceJoinJournalRecord,
+        next: &DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinError> {
-        self.database.advance(previous, next)
+        self.database.advance(previous, next.clone())
     }
 
     fn accept_offer(&self, offer: &DeviceJoinOffer) -> Result<(), DeviceJoinError> {
         if offer.attempt_id != self.attempt_id {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let initial = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::OfferReceived(offer.clone()),
-            )),
-        };
+        let initial = self.record(JoinerJoinProgress::OfferReceived(offer.clone()));
         match self.load()? {
             None => {
                 if self.database.begin(initial.clone())? != initial {
@@ -142,58 +156,37 @@ impl PendingJoinJournal {
                 }
                 _ => return Err(DeviceJoinError::JournalConflict),
             };
-        let provider_ready = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::ProviderReady(bootstrap.clone()),
-            )),
-        };
-        self.advance(&prepared, provider_ready.clone())?;
-        let registration_intent = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::RegistrationCreateIntent(bootstrap.clone()),
-            )),
-        };
-        self.advance(&provider_ready, registration_intent.clone())?;
-        let registration_created = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::RegistrationCreated(readiness.proof.registration.clone()),
-            )),
-        };
-        self.advance(&registration_intent, registration_created.clone())?;
-        let ack_intent = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::AckCreateIntent(readiness.proof.registration.clone()),
-            )),
-        };
-        self.advance(&registration_created, ack_intent.clone())?;
-        let ack_created = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::AckCreated(readiness.proof.initial_ack.clone()),
-            )),
-        };
-        self.advance(&ack_intent, ack_created.clone())?;
-        let ready_record = DeviceJoinJournalRecord {
-            attempt_id: offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(
-                readiness.clone(),
-            ))),
-        };
+        let provider_ready = self.advance(
+            &prepared,
+            JoinerJoinProgress::ProviderReady(bootstrap.clone()),
+        )?;
+        let registration_intent = self.advance(
+            &provider_ready,
+            JoinerJoinProgress::RegistrationCreateIntent(bootstrap.clone()),
+        )?;
+        let registration_created = self.advance(
+            &registration_intent,
+            JoinerJoinProgress::RegistrationCreated(readiness.proof.registration.clone()),
+        )?;
+        let ack_intent = self.advance(
+            &registration_created,
+            JoinerJoinProgress::AckCreateIntent(readiness.proof.registration.clone()),
+        )?;
+        let ack_created = self.advance(
+            &ack_intent,
+            JoinerJoinProgress::AckCreated(readiness.proof.initial_ack.clone()),
+        )?;
+        let ready = JoinerJoinProgress::Ready(readiness.clone());
         match readiness.provider {
-            DeviceProviderReadiness::SamePrincipal => self.advance(&ack_created, ready_record)?,
+            DeviceProviderReadiness::SamePrincipal => {
+                self.advance(&ack_created, ready)?;
+            }
             DeviceProviderReadiness::CrossPrincipal(_) => {
-                let response_intent = DeviceJoinJournalRecord {
-                    attempt_id: offer.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                        JoinerJoinProgress::ResponseCreateIntent(readiness.clone()),
-                    )),
-                };
-                self.advance(&ack_created, response_intent.clone())?;
-                self.advance(&response_intent, ready_record)?;
+                let response_intent = self.advance(
+                    &ack_created,
+                    JoinerJoinProgress::ResponseCreateIntent(readiness.clone()),
+                )?;
+                self.advance(&response_intent, ready)?;
             }
         }
         Ok(readiness)
@@ -484,12 +477,9 @@ impl<'storage> JoiningStore<'storage> {
         if readiness != &current_readiness || current_activation != &joined.activation {
             return Err(DeviceJoinError::JournalConflict);
         }
-        let activated_record = DeviceJoinJournalRecord {
-            attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::Activated(joined.clone()),
-            )),
-        };
+        let activated_record = self
+            .journal
+            .record(JoinerJoinProgress::Activated(joined.clone()));
         self.history
             .device_join()
             .complete_join(&self.journal, &current, &activated_record)
@@ -703,7 +693,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         let next = current
             .joiner_abandonment_transition(&abandonment)?
             .ok_or(DeviceJoinError::JournalConflict)?;
-        self.journal.advance(&current, next)?;
+        self.journal.advance_to(&current, &next)?;
         Ok(abandonment)
     }
 
@@ -733,12 +723,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                     DeviceProviderAccessRequest::signed(offer.clone(), binding.device, identity)?;
                 self.journal.advance(
                     &record,
-                    DeviceJoinJournalRecord {
-                        attempt_id: request.offer.attempt_id,
-                        progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                            JoinerJoinProgress::AccessRequested(request.clone()),
-                        )),
-                    },
+                    JoinerJoinProgress::AccessRequested(request.clone()),
                 )?;
                 Ok(request)
             }
@@ -819,14 +804,10 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         ) {
             current
         } else {
-            let next = DeviceJoinJournalRecord {
-                attempt_id,
-                progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                    JoinerJoinProgress::ApprovalReceived(approval.clone()),
-                )),
-            };
-            self.journal.advance(&current, next.clone())?;
-            next
+            self.journal.advance(
+                &current,
+                JoinerJoinProgress::ApprovalReceived(approval.clone()),
+            )?
         };
         let origin = crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
             attempt_id,
@@ -927,12 +908,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         )?;
         self.journal.advance(
             &approval_record,
-            DeviceJoinJournalRecord {
-                attempt_id,
-                progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                    JoinerJoinProgress::RegistrationPrepared(request.clone()),
-                )),
-            },
+            JoinerJoinProgress::RegistrationPrepared(request.clone()),
         )?;
         Ok(request)
     }
@@ -1035,19 +1011,16 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                     }
                 };
                 let prior_state_hash = ObjectHash::digest(&serde_json::to_vec(&current.progress)?);
-                let intent = DeviceJoinJournalRecord {
-                    attempt_id: attempt_ref.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                        JoinerJoinProgress::CleanupIntent {
-                            cancellation: cancellation.clone(),
-                            registration: registration.clone(),
-                            initial_ack: initial_ack.clone(),
-                            response: response.clone(),
-                            prior_state_hash,
-                        },
-                    )),
-                };
-                self.journal.advance(&current, intent.clone())?;
+                let intent = self.journal.advance(
+                    &current,
+                    JoinerJoinProgress::CleanupIntent {
+                        cancellation: cancellation.clone(),
+                        registration: registration.clone(),
+                        initial_ack: initial_ack.clone(),
+                        response: response.clone(),
+                        prior_state_hash,
+                    },
+                )?;
                 (
                     registration,
                     initial_ack,
@@ -1072,15 +1045,8 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             prior_state_hash,
             &joining_device_signer,
         )?;
-        self.journal.advance(
-            &intent,
-            DeviceJoinJournalRecord {
-                attempt_id: attempt_ref.attempt_id,
-                progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                    JoinerJoinProgress::Cancelled(closure.clone()),
-                )),
-            },
-        )?;
+        self.journal
+            .advance(&intent, JoinerJoinProgress::Cancelled(closure.clone()))?;
         Ok(JoinerJoinTerminal::Cancelled(closure))
     }
 
@@ -1144,14 +1110,11 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             }
             _ => {}
         }
-        let activated = DeviceJoinJournalRecord {
-            attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                JoinerJoinProgress::CleanupActivated(activation.clone()),
-            )),
-        };
+        let activated = self
+            .journal
+            .record(JoinerJoinProgress::CleanupActivated(activation.clone()));
         if local_terminal.is_some() {
-            self.journal.advance(&current, activated)?;
+            self.journal.advance_to(&current, &activated)?;
         } else {
             self.advance_cleanup_from_replacement(&current, activated)?;
         }

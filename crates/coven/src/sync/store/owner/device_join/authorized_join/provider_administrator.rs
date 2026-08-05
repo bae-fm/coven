@@ -7,6 +7,23 @@ impl<'operation, 'storage>
         self.writer.merge_history()
     }
 
+    fn journal(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> StoreJoinJournal<ProviderAdminJoinProgress> {
+        StoreJoinJournal::new(&self.database, attempt_id)
+    }
+
+    /// The joining device's journal in this Store's database. An administrator
+    /// revoking a joiner's write authority records that terminal on the joiner's
+    /// behalf, since the joining device may never reach the Store again.
+    fn joiner_journal(
+        &self,
+        attempt_id: DeviceJoinAttemptId,
+    ) -> StoreJoinJournal<JoinerJoinProgress> {
+        StoreJoinJournal::new(&self.database, attempt_id)
+    }
+
     fn verify_device_admission_approval(
         &self,
         approval: &DeviceProviderAdmissionApproval,
@@ -126,13 +143,9 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let database = self.database.clone();
-        let initial = DeviceJoinJournalRecord {
-            attempt_id: request.offer.attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::AccessRequested(request.clone()),
-            )),
-        };
-        let durable = database.begin_device_join(initial.clone()).await?;
+        let journal = self.journal(request.offer.attempt_id);
+        let initial = journal.record(ProviderAdminJoinProgress::AccessRequested(request.clone()));
+        let durable = journal.begin(&initial).await?;
         let (grant, prepared, prepared_progress) = match &*durable.progress {
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::ApprovalPrepared(approval),
@@ -143,14 +156,9 @@ impl<'operation, 'storage>
                     grant,
                     prepared,
                 },
-            ) if durable_request == &request => (
-                grant.clone(),
-                crate::protocol::objects::PreparedExactObject::new(
-                    prepared.object.clone(),
-                    prepared.stored_bytes.clone(),
-                )?,
-                durable.clone(),
-            ),
+            ) if durable_request == &request => {
+                (grant.clone(), prepared.restore()?, durable.clone())
+            }
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::AccessRequested(durable_request),
             ) if durable_request == &request => {
@@ -201,18 +209,15 @@ impl<'operation, 'storage>
                     &prefix,
                     grant.to_bytes(),
                 )?;
-                let prepared_progress = DeviceJoinJournalRecord {
-                    attempt_id: request.offer.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
+                let prepared_progress = journal
+                    .advance(
+                        &initial,
                         ProviderAdminJoinProgress::AccessGrantPrepared {
                             request: request.clone(),
                             grant: grant.clone(),
                             prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
                         },
-                    )),
-                };
-                database
-                    .advance_device_join(&initial, prepared_progress.clone())
+                    )
                     .await?;
                 (grant, prepared, prepared_progress)
             }
@@ -274,15 +279,10 @@ impl<'operation, 'storage>
             },
             admission,
         )?;
-        database
-            .advance_device_join(
+        journal
+            .advance(
                 &prepared_progress,
-                DeviceJoinJournalRecord {
-                    attempt_id: approval.request.offer.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                        ProviderAdminJoinProgress::ApprovalPrepared(approval.clone()),
-                    )),
-                },
+                ProviderAdminJoinProgress::ApprovalPrepared(approval.clone()),
             )
             .await?;
         Ok(approval)
@@ -334,11 +334,8 @@ impl<'operation, 'storage>
             bootstrap: Box::new(bootstrap),
             challenge_publication,
         };
-        if let Some(current) = self
-            .database
-            .load_device_join(attempt_id, DeviceJoinRole::ProviderAdministrator)
-            .await?
-        {
+        let journal = self.journal(attempt_id);
+        if let Some(current) = journal.load().await? {
             match &*current.progress {
                 DeviceJoinRoleProgress::ProviderAdministrator(
                     ProviderAdminJoinProgress::ProviderReady(existing),
@@ -346,35 +343,24 @@ impl<'operation, 'storage>
                 DeviceJoinRoleProgress::ProviderAdministrator(
                     ProviderAdminJoinProgress::ApprovalPrepared(approval),
                 ) if approval == &*ready.bootstrap.request.approval => {
-                    let observed = DeviceJoinJournalRecord {
-                        attempt_id,
-                        progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
+                    let observed = journal
+                        .advance(
+                            &current,
                             ProviderAdminJoinProgress::AttemptObserved(*ready.bootstrap.clone()),
-                        )),
-                    };
-                    self.database
-                        .advance_device_join(&current, observed.clone())
+                        )
                         .await?;
-                    let intent = DeviceJoinJournalRecord {
-                        attempt_id,
-                        progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
+                    let intent = journal
+                        .advance(
+                            &observed,
                             ProviderAdminJoinProgress::ChallengeCreateIntent(
                                 *ready.bootstrap.clone(),
                             ),
-                        )),
-                    };
-                    self.database
-                        .advance_device_join(&observed, intent.clone())
+                        )
                         .await?;
-                    self.database
-                        .advance_device_join(
+                    journal
+                        .advance(
                             &intent,
-                            DeviceJoinJournalRecord {
-                                attempt_id,
-                                progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                                    ProviderAdminJoinProgress::ProviderReady(ready.clone()),
-                                )),
-                            },
+                            ProviderAdminJoinProgress::ProviderReady(ready.clone()),
                         )
                         .await?;
                 }
@@ -390,10 +376,8 @@ impl<'operation, 'storage>
     ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
         let attempt_id = readiness.proof.attempt.attempt_id;
         let database = self.database.clone();
-        let current = database
-            .load_device_join(attempt_id, DeviceJoinRole::ProviderAdministrator)
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(attempt_id);
+        let current = journal.current().await?;
         if let DeviceJoinRoleProgress::ProviderAdministrator(
             ProviderAdminJoinProgress::Completed(existing),
         ) = &*current.progress
@@ -467,24 +451,16 @@ impl<'operation, 'storage>
             readiness: Box::new(readiness.clone()),
             admission,
         };
-        let observed = DeviceJoinJournalRecord {
-            attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
+        let observed = journal
+            .advance(
+                &current,
                 ProviderAdminJoinProgress::ResponseObserved(readiness),
-            )),
-        };
-        database
-            .advance_device_join(&current, observed.clone())
+            )
             .await?;
-        database
-            .advance_device_join(
+        journal
+            .advance(
                 &observed,
-                DeviceJoinJournalRecord {
-                    attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                        ProviderAdminJoinProgress::Completed(completion.clone()),
-                    )),
-                },
+                ProviderAdminJoinProgress::Completed(completion.clone()),
             )
             .await?;
         Ok(completion)
@@ -496,14 +472,8 @@ impl<'operation, 'storage>
     ) -> Result<ProviderAdminJoinTerminal, DeviceJoinError> {
         require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
-        let database = self.database.clone();
-        let current = database
-            .load_device_join(
-                attempt_ref.attempt_id,
-                DeviceJoinRole::ProviderAdministrator,
-            )
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let journal = self.journal(attempt_ref.attempt_id);
+        let current = journal.current().await?;
         match &*current.progress {
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::Completed(completion),
@@ -573,17 +543,16 @@ impl<'operation, 'storage>
                     }
                 };
                 let prior_state_hash = ObjectHash::digest(&serde_json::to_vec(&current.progress)?);
-                let intent = DeviceJoinJournalRecord {
-                    attempt_id: attempt_ref.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
+                journal
+                    .advance(
+                        &current,
                         ProviderAdminJoinProgress::CleanupIntent {
                             cancellation: cancellation.clone(),
                             challenge: challenge.clone(),
                             prior_state_hash,
                         },
-                    )),
-                };
-                database.advance_device_join(&current, intent).await?;
+                    )
+                    .await?;
                 (challenge, prior_state_hash)
             }
             _ => return Err(DeviceJoinError::JournalConflict),
@@ -602,22 +571,11 @@ impl<'operation, 'storage>
             challenge,
             prior_state_hash,
         )?;
-        let intent = database
-            .load_device_join(
-                attempt_ref.attempt_id,
-                DeviceJoinRole::ProviderAdministrator,
-            )
-            .await?
-            .ok_or(DeviceJoinError::JournalConflict)?;
-        database
-            .advance_device_join(
+        let intent = journal.current().await?;
+        journal
+            .advance(
                 &intent,
-                DeviceJoinJournalRecord {
-                    attempt_id: attempt_ref.attempt_id,
-                    progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                        ProviderAdminJoinProgress::Cancelled(closure.clone()),
-                    )),
-                },
+                ProviderAdminJoinProgress::Cancelled(closure.clone()),
             )
             .await?;
         Ok(ProviderAdminJoinTerminal::Cancelled(closure))
@@ -734,10 +692,8 @@ impl<'operation, 'storage>
             .grant_id
             .clone();
         let attempt_id = cancellation.outcome.attempt().attempt_id;
-        let database = self.database.clone();
-        let current = database
-            .load_device_join(attempt_id, DeviceJoinRole::ProviderAdministrator)
-            .await?;
+        let journal = self.journal(attempt_id);
+        let current = journal.load().await?;
         if let Some(current) = &current {
             match &*current.progress {
                 DeviceJoinRoleProgress::ProviderAdministrator(
@@ -768,18 +724,12 @@ impl<'operation, 'storage>
                 &executor_grant,
             )
             .await?;
-        let terminal = DeviceJoinJournalRecord {
-            attempt_id,
-            progress: Box::new(DeviceJoinRoleProgress::ProviderAdministrator(
-                ProviderAdminJoinProgress::WriteRevoked(revocation.clone()),
-            )),
-        };
-        if let Some(current) = current {
-            database.advance_device_join(&current, terminal).await?;
-        } else {
-            database
-                .begin_device_join_replacement_terminal(terminal)
-                .await?;
+        let terminal = ProviderAdminJoinProgress::WriteRevoked(revocation.clone());
+        match current {
+            Some(current) => {
+                journal.advance(&current, terminal).await?;
+            }
+            None => journal.begin_replacement_terminal(terminal).await?,
         }
         Ok(ProviderAdminJoinTerminal::WriteRevoked(revocation))
     }
@@ -796,11 +746,8 @@ impl<'operation, 'storage>
             .grant_id
             .clone();
         let attempt_id = cancellation.outcome.attempt().attempt_id;
-        let database = self.database.clone();
-        if let Some(current) = database
-            .load_device_join(attempt_id, DeviceJoinRole::Joiner)
-            .await?
-        {
+        let journal = self.joiner_journal(attempt_id);
+        if let Some(current) = journal.load().await? {
             return match &*current.progress {
                 DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
                     Ok(JoinerJoinTerminal::WriteRevoked(revocation.clone()))
@@ -816,13 +763,8 @@ impl<'operation, 'storage>
                 &executor_grant,
             )
             .await?;
-        database
-            .begin_device_join_replacement_terminal(DeviceJoinJournalRecord {
-                attempt_id,
-                progress: Box::new(DeviceJoinRoleProgress::Joiner(
-                    JoinerJoinProgress::WriteRevoked(revocation.clone()),
-                )),
-            })
+        journal
+            .begin_replacement_terminal(JoinerJoinProgress::WriteRevoked(revocation.clone()))
             .await?;
         Ok(JoinerJoinTerminal::WriteRevoked(revocation))
     }
