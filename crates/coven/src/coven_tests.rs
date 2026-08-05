@@ -403,6 +403,22 @@ async fn merge_test_storage(
         .expect("create exact test Store")
 }
 
+/// Publishes the handle's pending Store writes through a fresh test Store, and
+/// returns that Store so a peer can pull the same history back out of it.
+async fn publish_pending_through_a_test_store(handle: &CovenHandle) -> std::sync::Arc<TestStore> {
+    let storage = merge_test_storage(
+        handle,
+        &crate::keys::UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    handle
+        .publish_test_store(&storage)
+        .await
+        .expect("publish pending Store write");
+    storage
+}
+
 trait CovenHandleWriteTestOps {
     async fn publish_current_writes(&self);
 }
@@ -576,17 +592,7 @@ async fn device_local_transaction_is_local_only_and_never_pending() {
         .expect("count local-only blob leases");
     assert_eq!(lease_count, 0);
 
-    let keypair = crate::keys::UserKeypair::generate();
-    let storage = merge_test_storage(
-        &handle,
-        &keypair,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    handle
-        .publish_test_store(&storage)
-        .await
-        .expect("publish pending Store write");
+    publish_pending_through_a_test_store(&handle).await;
     assert_eq!(
         handle
             .write_status(&receipt.write_id)
@@ -632,17 +638,7 @@ async fn mixed_transaction_tracks_and_publishes_only_shared_rows() {
         }]
     );
 
-    let keypair = crate::keys::UserKeypair::generate();
-    let storage = merge_test_storage(
-        &handle,
-        &keypair,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    handle
-        .publish_test_store(&storage)
-        .await
-        .expect("publish pending Store write");
+    let storage = publish_pending_through_a_test_store(&handle).await;
     assert!(matches!(
         handle
             .write_status(&receipt.write_id)
@@ -680,17 +676,7 @@ async fn delete_survives_reopen_before_sync_cycle() {
         })
         .await
         .expect("insert before first cycle");
-    let keypair = crate::keys::UserKeypair::generate();
-    let storage = merge_test_storage(
-        &handle,
-        &keypair,
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await;
-    handle
-        .publish_test_store(&storage)
-        .await
-        .expect("publish pending Store write");
+    let storage = publish_pending_through_a_test_store(&handle).await;
 
     let (_peer_tmp, peer) = open_files_handle();
     peer.pull_test_store(&storage).await;
@@ -1195,6 +1181,36 @@ struct RemoteOnlyStoreBlob {
 }
 
 impl RemoteOnlyStoreBlob {
+    /// Moves the scoped `circle-file` row into the fixture's destination Circle.
+    async fn move_circle_file_to_its_destination(
+        &self,
+    ) -> crate::CovenResult<crate::WriteReceipt<()>> {
+        let destination_circle_value = self.destination_circle.to_string();
+        self.handle
+            .sql(move |sql| {
+                sql.execute(
+                    "UPDATE files SET audience = ?1, _updated_at = ?2
+                     WHERE id = 'circle-file'",
+                    params![destination_circle_value, sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// The audience the scoped `circle-file` row currently carries.
+    async fn circle_file_audience(&self) -> crate::CovenResult<Option<String>> {
+        self.handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT audience FROM files WHERE id = 'circle-file'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+    }
     async fn create() -> Self {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
@@ -1305,33 +1321,14 @@ async fn audience_move_requires_remote_only_blob_before_committing_sql() {
         .await
         .expect("connect the exact test Store");
 
-    let destination_circle_value = fixture.destination_circle.to_string();
-    let result = fixture
-        .handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE files SET audience = ?1, _updated_at = ?2
-                     WHERE id = 'circle-file'",
-                params![destination_circle_value, sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await;
+    let result = fixture.move_circle_file_to_its_destination().await;
 
     assert!(
         result.is_err(),
         "a missing source blob must abort the audience move before SQLite commit",
     );
     let audience = fixture
-        .handle
-        .sql_read(|conn| {
-            conn.query_row(
-                "SELECT audience FROM files WHERE id = 'circle-file'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(CovenError::from)
-        })
+        .circle_file_audience()
         .await
         .expect("read rolled-back audience");
     assert_eq!(audience, None);
@@ -1361,15 +1358,7 @@ async fn blob_audience_move_without_staging_rejects_and_rolls_back_sql() {
         "{error}",
     );
     let audience = fixture
-        .handle
-        .sql_read(|conn| {
-            conn.query_row(
-                "SELECT audience FROM files WHERE id = 'circle-file'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(CovenError::from)
-        })
+        .circle_file_audience()
         .await
         .expect("read rolled-back audience");
     assert_eq!(audience, None);
@@ -1410,15 +1399,7 @@ async fn missing_authorized_store_only_blocks_a_move_that_needs_it() {
         "{error}",
     );
     let audience = fixture
-        .handle
-        .sql_read(|conn| {
-            conn.query_row(
-                "SELECT audience FROM files WHERE id = 'circle-file'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(CovenError::from)
-        })
+        .circle_file_audience()
         .await
         .expect("read audience after adapter failure");
     assert_eq!(audience, None);
@@ -1442,18 +1423,7 @@ async fn journal_failure_removes_only_the_audience_move_spool_and_rolls_back_sql
         .await
         .expect("install Store write journal fault");
 
-    let destination_circle_value = fixture.destination_circle.to_string();
-    let result = fixture
-        .handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE files SET audience = ?1, _updated_at = ?2
-                     WHERE id = 'circle-file'",
-                params![destination_circle_value, sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await;
+    let result = fixture.move_circle_file_to_its_destination().await;
 
     assert!(result.is_err(), "the injected journal failure must surface");
     assert_eq!(
@@ -1462,15 +1432,7 @@ async fn journal_failure_removes_only_the_audience_move_spool_and_rolls_back_sql
         "rollback removes the destination spool created by this attempt",
     );
     let audience = fixture
-        .handle
-        .sql_read(|conn| {
-            conn.query_row(
-                "SELECT audience FROM files WHERE id = 'circle-file'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(CovenError::from)
-        })
+        .circle_file_audience()
         .await
         .expect("read rolled-back audience");
     assert_eq!(audience, None);
@@ -1525,15 +1487,7 @@ async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() 
         b"unrelated",
     );
     let audience = fixture
-        .handle
-        .sql_read(|conn| {
-            conn.query_row(
-                "SELECT audience FROM files WHERE id = 'circle-file'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(CovenError::from)
-        })
+        .circle_file_audience()
         .await
         .expect("read rolled-back Local audience");
     assert_eq!(audience, None);
