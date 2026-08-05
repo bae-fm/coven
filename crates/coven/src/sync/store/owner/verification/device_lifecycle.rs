@@ -105,13 +105,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 outcome
                     .owner_registration
                     .verify_registration(&expected_owner)?;
-                if !crate::keys::verify_signature_hex(
-                    &expected_owner.device_signing_pubkey,
-                    &outcome.signature,
-                    &outcome.canonical_signed_bytes(),
-                ) {
-                    return Err(StoreProtocolError::InvalidSignature);
-                }
+                outcome.verify_by(&expected_owner.device_signing_pubkey)?;
                 expected.verify_outcome(&outcome)?;
                 Ok(outcome)
             },

@@ -564,8 +564,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                         if outcome == outcome_ref
                 )
             });
-            if matches!(&outcome.body, DeviceJoinOutcomeBody::Activated { .. })
-                != activation.is_some()
+            if matches!(
+                &outcome.disposition,
+                DeviceJoinDisposition::Activated { .. }
+            ) != activation.is_some()
             {
                 return Err(RegistrationLoadError::Invalid(
                     "device join outcome and registration activation are not one closed operation"

@@ -259,7 +259,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                         "join outcome signer differs from its exact attempt authority".to_string(),
                     ));
                 }
-                let DeviceJoinOutcomeBody::Activated { readiness } = &outcome_value.body else {
+                let DeviceJoinDisposition::Activated { readiness } = &outcome_value.disposition
+                else {
                     return Err(RegistrationLoadError::Invalid(
                         "cancelled device join outcome cannot activate a registration".to_string(),
                     ));

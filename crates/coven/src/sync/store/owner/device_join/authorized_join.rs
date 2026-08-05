@@ -459,7 +459,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
-            crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled,
+            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled,
             attempt.owner_grant.clone(),
         )?;
         let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
@@ -638,7 +638,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
-            crate::protocol::store_commit::DeviceJoinOutcomeBody::Activated {
+            crate::protocol::store_commit::DeviceJoinDisposition::Activated {
                 readiness: completion.readiness.proof.clone(),
             },
             offer.owner_grant.clone(),
@@ -801,8 +801,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await?
             .value;
         if !matches!(
-            outcome.body,
-            crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled
+            outcome.disposition,
+            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }

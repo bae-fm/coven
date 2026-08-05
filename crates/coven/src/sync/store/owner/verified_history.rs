@@ -12,7 +12,7 @@ use crate::protocol::objects::{
 use crate::protocol::objects::{StoreObjectError, VerifiedObject};
 use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttempt,
-    DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash,
+    DeviceJoinAttemptDecisionRef, DeviceJoinDisposition, DeviceStreamAnchor, ObjectHash,
     OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
     ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,

@@ -1,4 +1,3 @@
-use super::validation::require_version;
 use super::*;
 
 const STORE_DEVICE_ID_DOMAIN: &[u8] = b"coven.store-device-id.v1\0";
@@ -110,10 +109,10 @@ pub struct DeviceJoinAttemptRef {
     pub object: ExactObjectRef,
 }
 
+/// The wire body of a device-join attempt. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceJoinAttempt {
-    pub version: u32,
+pub struct DeviceJoinAttemptBody {
     pub store_root: StoreRootRef,
     pub attempt_id: DeviceJoinAttemptId,
     pub attempt_slot: ObjectSlot,
@@ -129,8 +128,13 @@ pub struct DeviceJoinAttempt {
         crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub signature: String,
 }
+
+impl SignedBody for DeviceJoinAttemptBody {
+    const DOMAIN: &'static [u8] = DEVICE_JOIN_ATTEMPT_DOMAIN;
+}
+
+pub(crate) type DeviceJoinAttempt = Signed<DeviceJoinAttemptBody>;
 
 pub(crate) struct UnverifiedDeviceJoinAttempt(DeviceJoinAttempt);
 
@@ -141,8 +145,7 @@ impl UnverifiedDeviceJoinAttempt {
         owner: &StoreDeviceRegistration,
     ) -> Result<DeviceJoinAttempt, StoreProtocolError> {
         let attempt = self.0;
-        require_version(attempt.version)?;
-        attempt.validate_shape()?;
+        attempt.body().validate_shape()?;
         if attempt.attempt_id != expected.attempt_id
             || attempt.attempt_hash() != expected.attempt_hash
             || &attempt.attempt_slot != expected.object.slot()
@@ -150,35 +153,9 @@ impl UnverifiedDeviceJoinAttempt {
             return Err(StoreProtocolError::JoinAttemptMismatch);
         }
         attempt.owner_registration.verify_registration(owner)?;
-        if !keys::verify_signature_hex(
-            &owner.device_signing_pubkey,
-            &attempt.signature,
-            &attempt.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
+        attempt.verify_by(&owner.device_signing_pubkey)?;
         Ok(attempt)
     }
-}
-
-#[derive(Serialize)]
-struct DeviceJoinAttemptSignedFields<'a> {
-    version: u32,
-    store_root: &'a StoreRootRef,
-    attempt_id: DeviceJoinAttemptId,
-    attempt_slot: &'a ObjectSlot,
-    expected_registration: &'a StoreDeviceRegistration,
-    registration_slot: &'a ObjectSlot,
-    outcome_slot: &'a ObjectSlot,
-    bootstrap_cut: &'a StoreHistoryCut,
-    membership: &'a StoreMembershipStateRef,
-    provider_admin_grant: &'a crate::protocol::provider::ProviderAdminGrantId,
-    provider_approval:
-        &'a crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-    provider_response:
-        &'a crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
-    owner_registration: &'a StoreDeviceRegistrationRef,
-    owner_grant: &'a MembershipGrantId,
 }
 
 impl DeviceJoinAttempt {
@@ -204,8 +181,7 @@ impl DeviceJoinAttempt {
         if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        let mut attempt = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = DeviceJoinAttemptBody {
             store_root,
             attempt_id,
             attempt_slot,
@@ -219,42 +195,13 @@ impl DeviceJoinAttempt {
             provider_response,
             owner_registration,
             owner_grant,
-            signature: String::new(),
         };
-        attempt.validate_shape()?;
-        let (_, signature) = keys::sign_hex(owner_device_signer, &attempt.canonical_signed_bytes());
-        attempt.signature = signature;
-        Ok(attempt)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            DEVICE_JOIN_ATTEMPT_DOMAIN,
-            &DeviceJoinAttemptSignedFields {
-                version: self.version,
-                store_root: &self.store_root,
-                attempt_id: self.attempt_id,
-                attempt_slot: &self.attempt_slot,
-                expected_registration: &self.expected_registration,
-                registration_slot: &self.registration_slot,
-                outcome_slot: &self.outcome_slot,
-                bootstrap_cut: &self.bootstrap_cut,
-                membership: &self.membership,
-                provider_admin_grant: &self.provider_admin_grant,
-                provider_approval: &self.provider_approval,
-                provider_response: &self.provider_response,
-                owner_registration: &self.owner_registration,
-                owner_grant: &self.owner_grant,
-            },
-        )
+        body.validate_shape()?;
+        Ok(Signed::sign(body, owner_device_signer))
     }
 
     pub fn attempt_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("DeviceJoinAttempt serialization cannot fail")
+        self.hash()
     }
 
     pub fn parse_at(
@@ -272,7 +219,9 @@ impl DeviceJoinAttempt {
             .map(UnverifiedDeviceJoinAttempt)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
     }
+}
 
+impl DeviceJoinAttemptBody {
     fn validate_shape(&self) -> Result<(), StoreProtocolError> {
         validate_store_history_cut(&self.bootstrap_cut)?;
         if self.expected_registration.store_root != self.store_root
@@ -322,27 +271,23 @@ impl DeviceJoinAttempt {
     }
 }
 
+/// The wire body of a joining device's readiness proof. Every field here is
+/// signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceReadinessProof {
-    pub version: u32,
+pub struct DeviceReadinessProofBody {
     pub store_root_hash: ObjectHash,
     pub attempt: DeviceJoinAttemptRef,
     pub registration: StoreDeviceRegistrationRef,
     pub initial_ack: StoreAckRef,
     pub bootstrap_cut: StoreHistoryCut,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct DeviceReadinessSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    attempt: &'a DeviceJoinAttemptRef,
-    registration: &'a StoreDeviceRegistrationRef,
-    initial_ack: &'a StoreAckRef,
-    bootstrap_cut: &'a StoreHistoryCut,
+impl SignedBody for DeviceReadinessProofBody {
+    const DOMAIN: &'static [u8] = DEVICE_READINESS_DOMAIN;
 }
+
+pub(crate) type DeviceReadinessProof = Signed<DeviceReadinessProofBody>;
 
 impl DeviceReadinessProof {
     pub fn signed(
@@ -357,33 +302,15 @@ impl DeviceReadinessProof {
         if keys::public_key_hex(device_signer) != registration_value.device_signing_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        let mut proof = Self {
-            version: STORE_PROTOCOL_VERSION,
+        let body = DeviceReadinessProofBody {
             store_root_hash: registration_value.store_root.store_root_hash,
             attempt,
             registration,
             initial_ack,
             bootstrap_cut,
-            signature: String::new(),
         };
-        validate_store_history_cut(&proof.bootstrap_cut)?;
-        let (_, signature) = keys::sign_hex(device_signer, &proof.canonical_signed_bytes());
-        proof.signature = signature;
-        Ok(proof)
-    }
-
-    fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            DEVICE_READINESS_DOMAIN,
-            &DeviceReadinessSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                attempt: &self.attempt,
-                registration: &self.registration,
-                initial_ack: &self.initial_ack,
-                bootstrap_cut: &self.bootstrap_cut,
-            },
-        )
+        validate_store_history_cut(&body.bootstrap_cut)?;
+        Ok(Signed::sign(body, device_signer))
     }
 
     pub fn verify(
@@ -394,7 +321,6 @@ impl DeviceReadinessProof {
         initial_ack_ref: &StoreAckRef,
         initial_ack: &StoreAck,
     ) -> Result<(), StoreProtocolError> {
-        require_version(self.version)?;
         if &self.attempt != attempt_ref
             || attempt_ref.attempt_id != attempt.attempt_id
             || attempt_ref.attempt_hash != attempt.attempt_hash()
@@ -417,50 +343,39 @@ impl DeviceReadinessProof {
             return Err(StoreProtocolError::DeviceReadinessMismatch);
         }
         validate_store_history_cut(&self.bootstrap_cut)?;
-        if !keys::verify_signature_hex(
-            &registration.device_signing_pubkey,
-            &self.signature,
-            &self.canonical_signed_bytes(),
-        ) {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        Ok(())
+        self.verify_by(&registration.device_signing_pubkey)
     }
 }
 
+/// How a join attempt ended: with the joining device active, or cancelled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DeviceJoinOutcomeBody {
+pub enum DeviceJoinDisposition {
     Activated { readiness: DeviceReadinessProof },
     Cancelled,
 }
 
+/// The wire body of a join attempt's outcome. Every field here is signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceJoinOutcome {
-    pub version: u32,
+pub struct DeviceJoinOutcomeBody {
     pub store_root_hash: ObjectHash,
     pub attempt: DeviceJoinAttemptRef,
-    pub body: DeviceJoinOutcomeBody,
+    pub disposition: DeviceJoinDisposition,
     pub owner_registration: StoreDeviceRegistrationRef,
     pub owner_grant: MembershipGrantId,
-    pub signature: String,
 }
 
-#[derive(Serialize)]
-struct DeviceJoinOutcomeSignedFields<'a> {
-    version: u32,
-    store_root_hash: ObjectHash,
-    attempt: &'a DeviceJoinAttemptRef,
-    body: &'a DeviceJoinOutcomeBody,
-    owner_registration: &'a StoreDeviceRegistrationRef,
-    owner_grant: &'a MembershipGrantId,
+impl SignedBody for DeviceJoinOutcomeBody {
+    const DOMAIN: &'static [u8] = DEVICE_JOIN_OUTCOME_DOMAIN;
 }
+
+pub(crate) type DeviceJoinOutcome = Signed<DeviceJoinOutcomeBody>;
 
 impl DeviceJoinOutcome {
     pub fn signed(
         attempt: DeviceJoinAttemptRef,
-        body: DeviceJoinOutcomeBody,
+        disposition: DeviceJoinDisposition,
         owner_registration: StoreDeviceRegistrationRef,
         owner_grant: MembershipGrantId,
         owner: &StoreDeviceRegistration,
@@ -470,40 +385,20 @@ impl DeviceJoinOutcome {
         if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        let mut outcome = Self {
-            version: STORE_PROTOCOL_VERSION,
-            store_root_hash: owner.store_root.store_root_hash,
-            attempt,
-            body,
-            owner_registration,
-            owner_grant,
-            signature: String::new(),
-        };
-        let (_, signature) = keys::sign_hex(owner_device_signer, &outcome.canonical_signed_bytes());
-        outcome.signature = signature;
-        Ok(outcome)
-    }
-
-    pub(crate) fn canonical_signed_bytes(&self) -> Vec<u8> {
-        domain_json(
-            DEVICE_JOIN_OUTCOME_DOMAIN,
-            &DeviceJoinOutcomeSignedFields {
-                version: self.version,
-                store_root_hash: self.store_root_hash,
-                attempt: &self.attempt,
-                body: &self.body,
-                owner_registration: &self.owner_registration,
-                owner_grant: &self.owner_grant,
+        Ok(Signed::sign(
+            DeviceJoinOutcomeBody {
+                store_root_hash: owner.store_root.store_root_hash,
+                attempt,
+                disposition,
+                owner_registration,
+                owner_grant,
             },
-        )
+            owner_device_signer,
+        ))
     }
 
     pub fn outcome_hash(&self) -> ObjectHash {
-        ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("DeviceJoinOutcome serialization cannot fail")
+        self.hash()
     }
 }
 
@@ -555,7 +450,9 @@ impl DeviceJoinOutcomeRef {
         if &outcome.attempt != attempt || outcome.outcome_hash() != *expected_hash {
             return Err(StoreProtocolError::JoinOutcomeMismatch);
         }
-        if expects_activated != matches!(outcome.body, DeviceJoinOutcomeBody::Activated { .. }) {
+        if expects_activated
+            != matches!(outcome.disposition, DeviceJoinDisposition::Activated { .. })
+        {
             return Err(StoreProtocolError::JoinOutcomeMismatch);
         }
         Ok(())

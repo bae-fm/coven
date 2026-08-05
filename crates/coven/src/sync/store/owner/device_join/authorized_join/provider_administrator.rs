@@ -499,8 +499,8 @@ impl<'operation, 'storage>
             .await?
             .value;
         if !matches!(
-            outcome.body,
-            crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled
+            outcome.disposition,
+            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -603,8 +603,8 @@ impl<'operation, 'storage>
             .await?
             .value;
         if !matches!(
-            outcome.body,
-            crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled
+            outcome.disposition,
+            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }

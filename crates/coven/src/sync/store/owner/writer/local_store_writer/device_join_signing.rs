@@ -132,7 +132,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_device_join_outcome(
         &self,
         attempt: crate::protocol::store_commit::DeviceJoinAttemptRef,
-        body: crate::protocol::store_commit::DeviceJoinOutcomeBody,
+        body: crate::protocol::store_commit::DeviceJoinDisposition,
         owner_grant: crate::protocol::membership::MembershipGrantId,
     ) -> Result<
         crate::protocol::store_commit::DeviceJoinOutcome,

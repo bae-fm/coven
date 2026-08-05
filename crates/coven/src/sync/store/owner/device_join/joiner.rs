@@ -234,8 +234,8 @@ impl<'storage> JoiningStore<'storage> {
             .load_device_join_outcome(&activation.outcome, &owner.value)
             .await?
             .value;
-        let crate::protocol::store_commit::DeviceJoinOutcomeBody::Activated { readiness } =
-            outcome.body
+        let crate::protocol::store_commit::DeviceJoinDisposition::Activated { readiness } =
+            outcome.disposition.clone()
         else {
             return Err(DeviceJoinError::AttemptMismatch);
         };
@@ -917,8 +917,8 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .await?
             .value;
         if !matches!(
-            outcome.body,
-            crate::protocol::store_commit::DeviceJoinOutcomeBody::Cancelled
+            outcome.disposition,
+            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -1003,7 +1003,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         }
         let closure = JoinerJoinClosure::signed(
             cancellation.outcome,
-            attempt.value.expected_registration,
+            attempt.value.expected_registration.clone(),
             registration,
             initial_ack,
             response,

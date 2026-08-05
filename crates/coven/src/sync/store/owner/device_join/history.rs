@@ -291,7 +291,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             attempt_ref,
             registration_ref,
             durable.initial_ack_ref,
-            attempt.bootstrap_cut,
+            attempt.bootstrap_cut.clone(),
             &registration,
             &device_signer,
         )
