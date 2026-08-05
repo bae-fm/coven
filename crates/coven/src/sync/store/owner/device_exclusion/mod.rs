@@ -189,6 +189,12 @@ impl Store {
             .collect()
     }
 
+    /// Stage and upload one exclusion proposal against this device's own
+    /// registration, stopping before activation so a restart resumes it. The
+    /// target is the local device — which [`AuthorizedDeviceExclusion::propose`]
+    /// refuses — so the test enters the production pipeline one step below that
+    /// gate, at [`AuthorizedDeviceExclusion::stage_proposal`], under a fixed
+    /// proposal id.
     #[cfg(test)]
     pub(crate) async fn stage_uploaded_device_exclusion_proposal_for_test(
         &self,
@@ -197,78 +203,20 @@ impl Store {
             .authorize_writer()
             .await
             .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        let plan = writer.prepare_plan().await?;
+        let plan = Box::new(writer.prepare_plan().await?);
         let target = plan.local_registration_reference_for_test();
-        let target_registration = self
-            .database
-            .activated_store_device_registration(target.clone())
-            .await?;
         let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
             b"restart exclusion proposal",
         ));
-        let outcome_prefix =
-            device_exclusion_outcome_semantic_prefix(target.device_id, proposal_id);
-        let outcome_context = ProtocolObjectContext::signed_plaintext(
-            plan.root().store_root_hash,
-            ProtocolObjectDomain::StoreDeviceExclusionOutcome,
-        );
-        let outcome_slot = self
-            .storage
-            .allocate_protocol_slot(&outcome_context, &outcome_prefix, ".json")
-            .await?;
-        let proposal = plan.sign_device_exclusion_proposal(
-            proposal_id,
-            target.clone(),
-            target_registration.value(),
-            outcome_slot,
-            plan.owner_grant()
-                .ok_or(StoreDeviceExclusionError::OwnerAuthorityRequired)?
-                .clone(),
-        )?;
-        let prefix = device_exclusion_proposal_semantic_prefix(
-            target.device_id,
-            proposal_id,
-            proposal.proposal_hash(),
-        );
-        let context = ProtocolObjectContext::signed_plaintext(
-            plan.root().store_root_hash,
-            ProtocolObjectDomain::StoreDeviceExclusionProposal,
-        );
-        let slot = self
-            .storage
-            .allocate_protocol_slot(&context, &prefix, ".json")
-            .await?;
-        let prepared =
-            self.storage
-                .prepare_protocol_object(&context, slot, &prefix, proposal.to_bytes())?;
-        let reference = StoreDeviceExclusionProposalRef::from_proposal(
-            &proposal,
-            prepared.reference().clone(),
-        )?;
-        let retained = plan.retain_device_exclusion_proposal(
-            reference.clone(),
-            &proposal,
-            target_registration.value(),
-        )?;
-        let candidate = writer
-            .prepare_candidate(plan, StoreOperationBatch::DeviceExclusionProposal(retained))
-            .await?;
-        let operation = DurableStoreDeviceExclusionOperation::prepared(
-            DurableStoreDeviceExclusionObject::Proposal {
-                reference: reference.clone(),
-                value: proposal,
-                prepared,
-            },
-            candidate,
-        )?;
-        let durable = self
-            .database
-            .begin_outbound_store_device_exclusion(operation)
-            .await?;
-        writer
-            .device_exclusion()
-            .create_exact_object(&durable)
-            .await?;
+        let mut exclusion = writer.device_exclusion();
+        let durable = exclusion.stage_proposal(plan, &target, proposal_id).await?;
+        let DurableStoreDeviceExclusionObject::Proposal { reference, .. } = durable.object() else {
+            return Err(StoreDeviceExclusionError::InvalidState(
+                "staged exclusion operation is not a proposal".to_string(),
+            ));
+        };
+        let reference = reference.clone();
+        exclusion.create_exact_object(&durable).await?;
         self.database
             .mark_store_device_exclusion_authority_uploaded(durable)
             .await?;
@@ -360,22 +308,36 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         if plan.is_local_registration(target) {
             return Err(StoreDeviceExclusionError::CannotExcludeLocalDevice);
         }
-        let target_registration = database
-            .activated_store_device_registration(target.clone())
-            .await?;
         let state = Box::new(
             database
                 .resolved_store_device_state(plan.device_state())
                 .await?,
         );
         require_active_target(&state, target)?;
+        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+            database.new_store_write_id().as_str().as_bytes(),
+        ));
+        self.stage_proposal(plan, target, proposal_id).await
+    }
+
+    /// Sign one exclusion proposal against `target`, reserve its exact slots,
+    /// and journal the candidate that activates it. The caller has already
+    /// established that `target` is an excludable active device and chosen the
+    /// proposal's identity.
+    async fn stage_proposal(
+        &mut self,
+        plan: Box<crate::sync::store::operations::StoreOperationCommitPlan>,
+        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        proposal_id: StoreDeviceExclusionProposalId,
+    ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
+        let database = self.database.clone();
+        let target_registration = database
+            .activated_store_device_registration(target.clone())
+            .await?;
         let owner_grant = plan
             .owner_grant()
             .cloned()
             .ok_or(StoreDeviceExclusionError::OwnerAuthorityRequired)?;
-        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
-            database.new_store_write_id().as_str().as_bytes(),
-        ));
         let outcome_prefix =
             device_exclusion_outcome_semantic_prefix(target.device_id, proposal_id);
         let outcome_context = ProtocolObjectContext::signed_plaintext(
