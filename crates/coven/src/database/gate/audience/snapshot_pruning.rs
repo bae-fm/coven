@@ -98,47 +98,11 @@ pub(super) fn circle_snapshot_retained_rows(
         if !retained.insert((table.clone(), row_id.clone())) {
             continue;
         }
-        for (child_column, parent_table, parent_column) in foreign_keys(conn, &table)? {
-            if !gates.is_synced_table(&parent_table) {
-                continue;
-            }
-            let parent_id = match fk_parent_row(
-                conn,
-                &table,
-                &row_id,
-                &child_column,
-                &parent_table,
-                &parent_column,
-            )? {
-                FkParentRow::Found(parent_id) => parent_id,
-                FkParentRow::NullForeignKey => continue,
-                FkParentRow::RowAbsent => {
-                    return Err(GateError::MissingAudienceRow {
-                        table: table.clone(),
-                        row_id: row_id.clone(),
-                    })
-                }
-                FkParentRow::ParentAbsent => {
-                    return Err(GateError::MissingAudienceParent {
-                        table: table.clone(),
-                        row_id: Some(row_id.clone()),
-                        parent: parent_table.clone(),
-                    })
-                }
-            };
-            let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
-            if parent_audience != Audience::Store && parent_audience != audience {
-                return Err(GateError::InvalidAudience {
-                    table: table.clone(),
-                    value: audience.column_value(),
-                    reason: format!(
-                        "Circle snapshot relationship through {child_column} references \
-                         {parent_table}.{parent_id} in {parent_audience:?}"
-                    ),
-                });
-            }
-            pending.push_back((parent_table, parent_id));
-        }
+        // A compatible parent is part of the Circle's snapshot too: the retained
+        // set is the closure of the Circle's rows over their relationships.
+        pending.extend(compatible_parent_rows(
+            conn, gates, &table, &row_id, &audience,
+        )?);
     }
     Ok(retained)
 }

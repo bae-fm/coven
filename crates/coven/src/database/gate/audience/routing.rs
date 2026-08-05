@@ -397,6 +397,63 @@ pub(super) fn stored_route_audience(
     })
 }
 
+/// Every synced foreign-key parent of the live row `(table, row_id)`, checked
+/// against `audience`: a parent in Store is compatible with any audience, and a
+/// parent in any other audience must be in that same one — otherwise the row
+/// reaches across an audience boundary and the relationship cannot travel with
+/// it. Returns the parents it accepted, so a caller walking the closure of a
+/// row's relationships continues through them.
+pub(super) fn compatible_parent_rows(
+    conn: &Connection,
+    gates: &Gates,
+    table: &str,
+    row_id: &str,
+    audience: &Audience,
+) -> Result<Vec<(String, String)>, GateError> {
+    let mut parents = Vec::new();
+    for (fk_column, parent_table, parent_column) in foreign_keys(conn, table)? {
+        if !gates.is_synced_table(&parent_table) {
+            continue;
+        }
+        let parent_id = match fk_parent_row(
+            conn,
+            table,
+            row_id,
+            &fk_column,
+            &parent_table,
+            &parent_column,
+        )? {
+            FkParentRow::Found(parent_id) => parent_id,
+            FkParentRow::NullForeignKey => continue,
+            FkParentRow::RowAbsent => {
+                return Err(GateError::MissingAudienceRow {
+                    table: table.to_string(),
+                    row_id: row_id.to_string(),
+                })
+            }
+            FkParentRow::ParentAbsent => {
+                return Err(GateError::MissingAudienceParent {
+                    table: table.to_string(),
+                    row_id: Some(row_id.to_string()),
+                    parent: parent_table,
+                })
+            }
+        };
+        let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
+        if parent_audience != Audience::Store && &parent_audience != audience {
+            return Err(GateError::InvalidAudience {
+                table: table.to_string(),
+                value: audience.column_value(),
+                reason: format!(
+                    "relationship through {fk_column} references {parent_table}.{parent_id} in {parent_audience:?}"
+                ),
+            });
+        }
+        parents.push((parent_table, parent_id));
+    }
+    Ok(parents)
+}
+
 pub(crate) fn live_row_audience(
     conn: &Connection,
     gates: &Gates,

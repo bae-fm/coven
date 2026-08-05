@@ -201,45 +201,7 @@ pub(crate) fn validate_scoped_foreign_key_audiences(
         )?;
         for row_id in row_ids {
             let row_audience = live_row_audience(conn, gates, &table, &row_id)?;
-            for (fk_column, parent_table, parent_column) in foreign_keys(conn, &table)? {
-                if !gates.is_synced_table(&parent_table) {
-                    continue;
-                }
-                let parent_id = match fk_parent_row(
-                    conn,
-                    &table,
-                    &row_id,
-                    &fk_column,
-                    &parent_table,
-                    &parent_column,
-                )? {
-                    FkParentRow::Found(parent_id) => parent_id,
-                    FkParentRow::NullForeignKey => continue,
-                    FkParentRow::RowAbsent => {
-                        return Err(GateError::MissingAudienceRow {
-                            table: table.clone(),
-                            row_id: row_id.clone(),
-                        })
-                    }
-                    FkParentRow::ParentAbsent => {
-                        return Err(GateError::MissingAudienceParent {
-                            table: table.clone(),
-                            row_id: Some(row_id.clone()),
-                            parent: parent_table.clone(),
-                        })
-                    }
-                };
-                let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
-                if parent_audience != Audience::Store && parent_audience != row_audience {
-                    return Err(GateError::InvalidAudience {
-                        table: table.clone(),
-                        value: row_audience.column_value(),
-                        reason: format!(
-                            "relationship through {fk_column} references {parent_table}.{parent_id} in {parent_audience:?}"
-                        ),
-                    });
-                }
-            }
+            compatible_parent_rows(conn, gates, &table, &row_id, &row_audience)?;
         }
     }
     Ok(())
@@ -384,94 +346,70 @@ pub(super) fn row_audience_move(
     Ok((source != destination).then_some((source, destination)))
 }
 
+/// The audience this change puts its row in: what the change itself records,
+/// and otherwise what the live row already says. A change records the column
+/// that decides the audience only when it wrote it — an INSERT's new image, a
+/// DELETE's old image, an UPDATE's value only if that update changed it — so
+/// every other case is the live resolution, which walks the same gate model
+/// against the db.
 pub(super) fn change_audience(
     conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<Audience, GateError> {
+    let live_audience = |table: &str, id: &str| live_row_audience(conn, gates, table, id);
+    let live_row = || {
+        let id = row
+            .pk()
+            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+        live_audience(&row.table, id)
+    };
     match gates.tables.get(&row.table) {
         Some(TableGate::ScopedRoot { audience_col }) => {
-            let value = match row.op {
-                op if op == ffi::SQLITE_INSERT => row
-                    .new
-                    .get(audience_col.index)
-                    .and_then(|value| value.as_deref()),
-                op if op == ffi::SQLITE_DELETE => row
-                    .old
-                    .get(audience_col.index)
-                    .and_then(|value| value.as_deref()),
-                _ => {
-                    if let Some(changed) = row.new_value(audience_col.index) {
-                        changed
-                    } else {
-                        return row
-                            .pk()
-                            .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))
-                            .and_then(|id| live_row_audience(conn, gates, &row.table, id));
-                    }
+            match recorded_column(row, audience_col.index) {
+                Some(value) => {
+                    Audience::from_column(value).map_err(|error| GateError::InvalidAudience {
+                        table: row.table.clone(),
+                        value: value.map(str::to_string),
+                        reason: error.to_string(),
+                    })
                 }
-            };
-            Audience::from_column(value).map_err(|error| GateError::InvalidAudience {
-                table: row.table.clone(),
-                value: value.map(str::to_string),
-                reason: error.to_string(),
-            })
-        }
-        Some(TableGate::Root { gate_col }) => {
-            let value = match row.op {
-                op if op == ffi::SQLITE_INSERT => row
-                    .new
-                    .get(gate_col.index)
-                    .and_then(|value| value.as_deref()),
-                _ => {
-                    let row_id = row
-                        .pk()
-                        .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-                    return live_row_audience(conn, gates, &row.table, row_id);
-                }
-            };
-            Ok(if value.is_some_and(truthy) {
-                Audience::Store
-            } else {
-                Audience::Local
-            })
+                None => live_row(),
+            }
         }
         Some(TableGate::Child {
             fk_col,
             parent,
             parent_col,
-        }) => {
-            let parent_key = if let Some(value) = row.fk_value(fk_col.index) {
-                value.to_string()
-            } else {
-                let id = row
-                    .pk()
-                    .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-                query_column_text(conn, &row.table, &fk_col.name, id)?.ok_or_else(|| {
-                    GateError::MissingAudienceParent {
-                        table: row.table.clone(),
-                        row_id: Some(id.to_string()),
-                        parent: fk_col.name.clone(),
-                    }
-                })?
-            };
-            let parent_id = row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
-                .ok_or_else(|| GateError::MissingAudienceParent {
-                table: row.table.clone(),
-                row_id: row.pk().map(str::to_string),
-                parent: parent.clone(),
-            })?;
-            live_row_audience(conn, gates, parent, &parent_id)
-        }
-        Some(TableGate::RemoteRoot) | Some(TableGate::Parent { .. }) => Ok(Audience::Store),
-        None => {
-            let row_id = row
-                .pk()
-                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            Err(GateError::MissingAudienceRow {
-                table: row.table.clone(),
-                row_id: row_id.to_string(),
-            })
-        }
+        }) => match row.fk_value(fk_col.index) {
+            // The change repointed (or first set) the foreign key, so the parent
+            // it now names decides the audience, not the one the live row holds.
+            Some(parent_key) => {
+                let parent_id =
+                    row_id_for_column_value(conn, parent, &parent_col.name, parent_key)?
+                        .ok_or_else(|| GateError::MissingAudienceParent {
+                            table: row.table.clone(),
+                            row_id: row.pk().map(str::to_string),
+                            parent: parent.clone(),
+                        })?;
+                live_audience(parent, &parent_id)
+            }
+            None => live_row(),
+        },
+        // Only a scoped table reaches this: an unscoped row's audience follows
+        // from its gate, which the live resolution reads directly.
+        _ => live_row(),
+    }
+}
+
+/// The value this change records for the column at `index`, following op
+/// semantics: an INSERT's new image, a DELETE's old image, and for an UPDATE the
+/// new value only when the update changed that column. `None` when the change
+/// does not record it, so the caller reads the live row instead.
+fn recorded_column(row: &ChangeRow, index: usize) -> Option<Option<&str>> {
+    match row.op {
+        op if op == ffi::SQLITE_INSERT => row.new.get(index).map(|value| value.as_deref()),
+        op if op == ffi::SQLITE_DELETE => row.old.get(index).map(|value| value.as_deref()),
+        _ => row.new_value(index),
     }
 }
