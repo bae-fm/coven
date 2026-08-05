@@ -1,6 +1,20 @@
 use super::reduction::*;
 use super::*;
 
+fn causal_owner_barriers(
+    owner_barriers: &BTreeMap<MembershipGrantId, CircleOwnerGrantBarrier>,
+) -> BTreeMap<MembershipGrantId, OwnerGrantBarrier<CircleRosterCoord>> {
+    owner_barriers
+        .iter()
+        .map(|(grant, barrier)| {
+            (
+                grant.clone(),
+                OwnerGrantBarrier::from_observed(barrier.observed_streams.iter().cloned()),
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CircleRosterChain {
     pub(super) entries: Vec<CircleRosterEntry>,
@@ -157,22 +171,7 @@ impl CircleRosterChain {
                         assignment: *role,
                         grant_id: grant_id.clone(),
                         replaces: replaces.clone(),
-                        owner_barriers: owner_barriers
-                            .iter()
-                            .map(|(grant, barrier)| {
-                                (
-                                    grant.clone(),
-                                    OwnerGrantBarrier {
-                                        observed_streams: barrier
-                                            .observed_streams
-                                            .iter()
-                                            .cloned()
-                                            .map(|coord| (coord.stream_key(), coord))
-                                            .collect(),
-                                    },
-                                )
-                            })
-                            .collect(),
+                        owner_barriers: causal_owner_barriers(owner_barriers),
                     },
                     CircleRosterChange::RemoveMember {
                         member_pubkey,
@@ -181,22 +180,7 @@ impl CircleRosterChain {
                     } => CausalChange::RemoveMember {
                         member_pubkey: member_pubkey.clone(),
                         removes: removes.clone(),
-                        owner_barriers: owner_barriers
-                            .iter()
-                            .map(|(grant, barrier)| {
-                                (
-                                    grant.clone(),
-                                    OwnerGrantBarrier {
-                                        observed_streams: barrier
-                                            .observed_streams
-                                            .iter()
-                                            .cloned()
-                                            .map(|coord| (coord.stream_key(), coord))
-                                            .collect(),
-                                    },
-                                )
-                            })
-                            .collect(),
+                        owner_barriers: causal_owner_barriers(owner_barriers),
                     },
                     CircleRosterChange::ResolutionActivation { .. } => {
                         CausalChange::ResolutionActivation

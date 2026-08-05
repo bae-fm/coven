@@ -61,21 +61,8 @@ pub(super) fn exact_circle_head_refs(
     head_refs: &[CircleRosterHeadRef],
     coords: &[CircleRosterCoord],
 ) -> Result<Vec<CircleRosterHeadRef>, CircleRosterError> {
-    let expected = coords.iter().cloned().collect::<BTreeSet<_>>();
-    let mut references = head_refs
-        .iter()
-        .filter(|reference| expected.contains(&reference.coord))
-        .cloned()
-        .collect::<Vec<_>>();
-    let actual = references
-        .iter()
-        .map(|reference| reference.coord.clone())
-        .collect::<BTreeSet<_>>();
-    if expected != actual || references.len() != expected.len() {
-        return Err(CircleRosterError::MissingConflictHeads);
-    }
-    references.sort();
-    Ok(references)
+    crate::protocol::causal_grants::exact_head_refs(head_refs, coords, |reference| &reference.coord)
+        .ok_or(CircleRosterError::MissingConflictHeads)
 }
 
 pub(super) fn map_circle_grants(

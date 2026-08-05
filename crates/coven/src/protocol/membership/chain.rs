@@ -863,22 +863,10 @@ impl MembershipChain {
         &self,
         raw_heads: &[MembershipCoord],
     ) -> Result<Vec<MembershipHeadRef>, MembershipError> {
-        let expected = raw_heads.iter().cloned().collect::<BTreeSet<_>>();
-        let mut references = self
-            .head_refs
-            .iter()
-            .filter(|reference| expected.contains(&reference.coord))
-            .cloned()
-            .collect::<Vec<_>>();
-        let actual = references
-            .iter()
-            .map(|reference| reference.coord.clone())
-            .collect::<BTreeSet<_>>();
-        if expected != actual || references.len() != expected.len() {
-            return Err(MembershipError::MissingConflictHeads);
-        }
-        references.sort();
-        Ok(references)
+        crate::protocol::causal_grants::exact_head_refs(&self.head_refs, raw_heads, |reference| {
+            &reference.coord
+        })
+        .ok_or(MembershipError::MissingConflictHeads)
     }
 
     fn branch_head_refs(

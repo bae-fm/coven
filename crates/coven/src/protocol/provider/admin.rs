@@ -375,15 +375,7 @@ impl ProviderAdminState {
             let ready = pending.iter().find(|coord| {
                 let entry = by_coord[*coord];
                 let predecessor = (entry.seq > 1)
-                    .then(|| {
-                        by_coord.keys().find(|candidate| {
-                            candidate.author_pubkey == entry.author_pubkey
-                                && candidate.author_owner_grant == entry.author_owner_grant
-                                && candidate.stream_id == entry.stream_id
-                                && candidate.seq + 1 == entry.seq
-                                && Some(candidate.entry_hash) == entry.previous_hash
-                        })
-                    })
+                    .then(|| stream_predecessor(&by_coord, entry))
                     .flatten();
                 (entry.seq == 1 || predecessor.is_some_and(|value| states.contains_key(value)))
                     && entry
@@ -395,14 +387,7 @@ impl ProviderAdminState {
             let Some(coord) = ready.cloned() else {
                 if pending.iter().any(|coord| {
                     let entry = by_coord[coord];
-                    entry.seq > 1
-                        && !by_coord.keys().any(|candidate| {
-                            candidate.author_pubkey == entry.author_pubkey
-                                && candidate.author_owner_grant == entry.author_owner_grant
-                                && candidate.stream_id == entry.stream_id
-                                && candidate.seq + 1 == entry.seq
-                                && Some(candidate.entry_hash) == entry.previous_hash
-                        })
+                    entry.seq > 1 && stream_predecessor(&by_coord, entry).is_none()
                 }) {
                     return Err(ProviderAdminReducerError::MissingPredecessor);
                 }
@@ -415,13 +400,7 @@ impl ProviderAdminState {
                 .filter_map(|dependency| states.get(dependency).cloned())
                 .collect::<Vec<_>>();
             if entry.seq > 1 {
-                if let Some(predecessor) = by_coord.keys().find(|candidate| {
-                    candidate.author_pubkey == entry.author_pubkey
-                        && candidate.author_owner_grant == entry.author_owner_grant
-                        && candidate.stream_id == entry.stream_id
-                        && candidate.seq + 1 == entry.seq
-                        && Some(candidate.entry_hash) == entry.previous_hash
-                }) {
+                if let Some(predecessor) = stream_predecessor(&by_coord, entry) {
                     if !entry.dependencies.contains(predecessor) {
                         causal_states.push(states[predecessor].clone());
                     }
@@ -545,4 +524,20 @@ pub enum ProviderAdminReducerError {
     CausalCycle,
     #[error("provider administrator revocation conflict has {0} heads, exceeding 12")]
     ConflictTooWide(usize),
+}
+
+/// The in-stream predecessor of `entry` among the included coordinates: the
+/// same author stream at the previous sequence, carrying the hash the entry
+/// links back to.
+fn stream_predecessor<'coords>(
+    by_coord: &'coords BTreeMap<MembershipCoord, &MembershipEntry>,
+    entry: &MembershipEntry,
+) -> Option<&'coords MembershipCoord> {
+    by_coord.keys().find(|candidate| {
+        candidate.author_pubkey == entry.author_pubkey
+            && candidate.author_owner_grant == entry.author_owner_grant
+            && candidate.stream_id == entry.stream_id
+            && candidate.seq + 1 == entry.seq
+            && Some(candidate.entry_hash) == entry.previous_hash
+    })
 }
