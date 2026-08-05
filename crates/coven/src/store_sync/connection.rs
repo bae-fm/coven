@@ -306,33 +306,4 @@ impl StoreSync {
             .map(|sync| sync.config().clone())
             .unwrap_or_else(|| self.config())
     }
-
-    pub(super) async fn ensure_command_store(&self) -> Result<(), SyncError> {
-        if matches!(
-            &*self.state.read().expect("read Store sync connection"),
-            SyncConnection::WithCloud { .. } | SyncConnection::CommandOnly { .. }
-        ) {
-            return Ok(());
-        }
-        let config = self.command_config();
-        let storage = self
-            .cloud_storage
-            .open(&config, None, None)
-            .await
-            .map_err(SyncError::StorageSetup)?;
-        let store = self
-            .security
-            .established_identity()?
-            .load_store(
-                self.database.clone(),
-                Arc::new(storage),
-                self.store_dir.clone(),
-            )
-            .await
-            .map_err(SyncError::from)?;
-        *self.state.write().expect("write Store sync connection") = SyncConnection::CommandOnly {
-            store: Arc::new(store),
-        };
-        Ok(())
-    }
 }

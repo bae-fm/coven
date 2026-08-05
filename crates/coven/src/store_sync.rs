@@ -75,6 +75,17 @@ enum SyncConnection {
     },
 }
 
+/// Who carries out a Store command that needs no running sync loop — the two
+/// states [`StoreSync::command_authority`] can leave the connection in, and
+/// therefore the only two it can answer with. Resolving to this instead of to
+/// "the state is now good enough" is what leaves no third case to guard.
+enum CommandAuthority {
+    /// A cloud connection is installed; its loop handle serves the command.
+    Connected(Arc<SyncLoopHandle>),
+    /// No cloud connection; the Store retained for commands serves it.
+    CommandOnly(Arc<Store>),
+}
+
 #[derive(Clone)]
 pub(crate) struct StoreSync {
     config_provider: ConfigProvider,
@@ -175,6 +186,45 @@ impl StoreSync {
             self.open_guard.clone(),
             self.status_tx.clone(),
         ))
+    }
+
+    /// Who carries out a command that needs no running sync loop, installing
+    /// the command-only Store authority when the connection holds none.
+    /// Callers hold the lifecycle lock across this and the command it resolves,
+    /// so the authority they receive is the one still installed when they use
+    /// it — and because they receive the authority rather than a promise about
+    /// `self.state`, there is no "installed it, then failed to find it" case
+    /// for them to re-check.
+    async fn command_authority(&self) -> Result<CommandAuthority, SyncError> {
+        if let Some(sync) = self.connected() {
+            return Ok(CommandAuthority::Connected(sync));
+        }
+        if let SyncConnection::CommandOnly { store } =
+            &*self.state.read().expect("read Store sync connection")
+        {
+            return Ok(CommandAuthority::CommandOnly(Arc::clone(store)));
+        }
+        let config = self.command_config();
+        let storage = self
+            .cloud_storage
+            .open(&config, None, None)
+            .await
+            .map_err(SyncError::StorageSetup)?;
+        let store = Arc::new(
+            self.security
+                .established_identity()?
+                .load_store(
+                    self.database.clone(),
+                    Arc::new(storage),
+                    self.store_dir.clone(),
+                )
+                .await
+                .map_err(SyncError::from)?,
+        );
+        *self.state.write().expect("write Store sync connection") = SyncConnection::CommandOnly {
+            store: Arc::clone(&store),
+        };
+        Ok(CommandAuthority::CommandOnly(store))
     }
 
     /// A Circle write command needs the loop *thread* itself, because that

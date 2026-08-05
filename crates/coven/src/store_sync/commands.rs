@@ -1,27 +1,13 @@
 use super::*;
 
 impl StoreSync {
-    /// The Store authority `ensure_command_store` installed for a connection
-    /// that has no cloud attached.
-    fn command_only_store(&self) -> Result<Arc<Store>, SyncError> {
-        match &*self.state.read().expect("read Store sync connection") {
-            SyncConnection::CommandOnly { store } => Ok(Arc::clone(store)),
-            _ => Err(SyncError::NotConfigured),
-        }
-    }
-
     pub(crate) async fn members(
         &self,
     ) -> Result<Vec<crate::protocol::membership::MemberInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.ensure_command_store().await?;
-        match self.connected() {
-            Some(sync) => sync.members().await.map_err(Into::into),
-            None => self
-                .command_only_store()?
-                .members()
-                .await
-                .map_err(Into::into),
+        match self.command_authority().await? {
+            CommandAuthority::Connected(sync) => sync.members().await.map_err(Into::into),
+            CommandAuthority::CommandOnly(store) => store.members().await.map_err(Into::into),
         }
     }
 
@@ -29,14 +15,13 @@ impl StoreSync {
         &self,
     ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.ensure_command_store().await?;
-        match self.connected() {
-            Some(sync) => sync.membership_conflict().await.map_err(Into::into),
-            None => self
-                .command_only_store()?
-                .membership_conflict()
-                .await
-                .map_err(Into::into),
+        match self.command_authority().await? {
+            CommandAuthority::Connected(sync) => {
+                sync.membership_conflict().await.map_err(Into::into)
+            }
+            CommandAuthority::CommandOnly(store) => {
+                store.membership_conflict().await.map_err(Into::into)
+            }
         }
     }
 
@@ -44,14 +29,13 @@ impl StoreSync {
         &self,
     ) -> Result<crate::sync::store::owner::StoreRestoreMembership, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        self.ensure_command_store().await?;
-        match self.connected() {
-            Some(sync) => sync.restore_membership().await.map_err(Into::into),
-            None => self
-                .command_only_store()?
-                .restore_membership()
-                .await
-                .map_err(Into::into),
+        match self.command_authority().await? {
+            CommandAuthority::Connected(sync) => {
+                sync.restore_membership().await.map_err(Into::into)
+            }
+            CommandAuthority::CommandOnly(store) => {
+                store.restore_membership().await.map_err(Into::into)
+            }
         }
     }
 
