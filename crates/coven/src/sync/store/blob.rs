@@ -169,6 +169,63 @@ async fn open_external_file(
     Ok(BlobStreamSource::Local(file))
 }
 
+/// The four blob operations that mean the same thing whether or not a cloud
+/// home is attached: serve a blob's plaintext, prove it durable on this device,
+/// open it for ranged reading, and keep a set offline.
+///
+/// A store with no cloud home answers them from the local store and cache
+/// alone; a cloud-backed one falls back to fetching. Because the answer is the
+/// same question either way, a resolved connection dispatches to whichever
+/// access it holds rather than being re-matched at each operation. Operations
+/// that only a cloud-backed store can carry out are not here — those stay on
+/// [`RemoteStoreBlobAccess`], where a store without a home has no way to reach
+/// them by accident.
+#[async_trait::async_trait]
+pub(crate) trait BlobAccess: Send + Sync {
+    async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError>;
+    async fn materialize(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError>;
+    async fn open_stream(&self, reference: &RowBlobRef) -> Result<BlobStream, BlobCacheError>;
+    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError>;
+}
+
+#[async_trait::async_trait]
+impl BlobAccess for LocalStoreBlobAccess {
+    async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
+        LocalStoreBlobAccess::read(self, reference).await
+    }
+
+    async fn materialize(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError> {
+        LocalStoreBlobAccess::materialize(self, reference).await
+    }
+
+    async fn open_stream(&self, reference: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
+        LocalStoreBlobAccess::open_stream(self, reference).await
+    }
+
+    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
+        LocalStoreBlobAccess::pin(self, blobs).await
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobAccess for RemoteStoreBlobAccess {
+    async fn read(&self, reference: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
+        RemoteStoreBlobAccess::read(self, reference).await
+    }
+
+    async fn materialize(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError> {
+        RemoteStoreBlobAccess::materialize(self, reference).await
+    }
+
+    async fn open_stream(&self, reference: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
+        RemoteStoreBlobAccess::open_stream(self, reference).await
+    }
+
+    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
+        RemoteStoreBlobAccess::pin(self, blobs).await
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct LocalStoreBlobAccess {
     database: StoreDatabase,

@@ -7,7 +7,7 @@ use crate::storage::cloud::setup::StorageSetupError;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::ConfigProvider;
 use crate::sync::store::blob::{
-    CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
+    BlobAccess, CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
 };
 use crate::sync::{BlobCacheError, BlobStream};
 
@@ -152,22 +152,22 @@ impl StoreBlobAccess {
     }
 
     pub(crate) async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        self.resolve().await?.read(blob).await
+        self.resolve().await?.access().read(blob).await
     }
 
     pub(crate) async fn materialize(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        self.resolve().await?.materialize(blob).await
+        self.resolve().await?.access().materialize(blob).await
     }
 
     pub(crate) async fn open_stream(
         &self,
         blob: &RowBlobRef,
     ) -> Result<BlobStream, BlobCacheError> {
-        self.resolve().await?.open_stream(blob).await
+        self.resolve().await?.access().open_stream(blob).await
     }
 
     pub(crate) async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        self.resolve().await?.pin(blobs).await
+        self.resolve().await?.access().pin(blobs).await
     }
 
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
@@ -241,31 +241,14 @@ enum ResolvedBlobAccess {
 }
 
 impl ResolvedBlobAccess {
-    async fn read(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
+    /// Whichever access this connection resolved to, as the operations both
+    /// answer the same way. Naming the variant is only needed for what a
+    /// cloud-backed store alone can do — see
+    /// [`StoreBlobAccess::stage_verified_local_copy`].
+    fn access(&self) -> &dyn BlobAccess {
         match self {
-            Self::Local(access) => access.read(blob).await,
-            Self::Remote(access) => access.read(blob).await,
-        }
-    }
-
-    async fn materialize(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
-        match self {
-            Self::Local(access) => access.materialize(blob).await,
-            Self::Remote(access) => access.materialize(blob).await,
-        }
-    }
-
-    async fn open_stream(&self, blob: &RowBlobRef) -> Result<BlobStream, BlobCacheError> {
-        match self {
-            Self::Local(access) => access.open_stream(blob).await,
-            Self::Remote(access) => access.open_stream(blob).await,
-        }
-    }
-
-    async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
-        match self {
-            Self::Local(access) => access.pin(blobs).await,
-            Self::Remote(access) => access.pin(blobs).await,
+            Self::Local(access) => access,
+            Self::Remote(access) => access,
         }
     }
 }
