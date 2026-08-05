@@ -186,6 +186,29 @@ struct CancelTombstoneOnExists {
     fired: AtomicBool,
 }
 
+/// A tombstone drain over the fixed parts every test here shares: no pending
+/// rotation, one store id. Only the storage the drain writes through and the
+/// clock it reads deletion times from vary between tests.
+async fn drain_at(
+    store_database: &StoreDatabase,
+    storage: &dyn crate::storage::SyncStorage,
+    cipher: &dyn crate::storage::CloudCipherAccess,
+    keypair: &UserKeypair,
+    clock: &dyn crate::clock::Clock,
+) -> Result<usize, String> {
+    TombstoneDrain::new(
+        store_database,
+        storage,
+        cipher,
+        &PendingRotation::none(),
+        "lib",
+        keypair,
+        clock,
+    )
+    .drain()
+    .await
+}
+
 #[async_trait]
 impl StorageInterceptor for CancelTombstoneOnExists {
     async fn before_provider_object_exists(
@@ -302,18 +325,9 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
         .expect("enqueue exact blob deletion");
 
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &*storage.storage(),
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &clock,
-    )
-    .drain()
-    .await
-    .expect("drain");
+    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &clock)
+        .await
+        .expect("drain");
     assert_eq!(n, 1, "one tombstone written");
 
     // The blob is still present — the drain records the deletion, it doesn't
@@ -373,18 +387,9 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
         .await
         .expect("enqueue exact blob deletion");
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &*storage.storage(),
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &clock,
-    )
-    .drain()
-    .await
-    .expect("drain");
+    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &clock)
+        .await
+        .expect("drain");
 
     assert_eq!(n, 1, "the garbage object is replaced by a signed tombstone");
     let tombstone_bytes = storage
@@ -430,18 +435,9 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
         .await
         .expect("enqueue exact blob deletion");
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &*storage.storage(),
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &clock,
-    )
-    .drain()
-    .await
-    .expect("drain");
+    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &clock)
+        .await
+        .expect("drain");
 
     assert_eq!(n, 0, "an existing valid tombstone is not rewritten");
     assert_eq!(
@@ -553,18 +549,9 @@ async fn delete_validation_failure_backs_off_then_retries() {
         .await
         .expect("enqueue exact blob deletion");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let error = TombstoneDrain::new(
-        &store_database,
-        &intercepted,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &first,
-    )
-    .drain()
-    .await
-    .expect_err("failed validation fails the drain");
+    let error = drain_at(&store_database, &intercepted, &cipher, &kp, &first)
+        .await
+        .expect_err("failed validation fails the drain");
     assert!(error.contains("Failed to validate"), "{error}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -586,18 +573,9 @@ async fn delete_validation_failure_backs_off_then_retries() {
     assert_eq!(recorded.with_timezone(&chrono::Utc), first.0);
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &intercepted,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &inside,
-    )
-    .drain()
-    .await
-    .expect("inside backoff drain");
+    let n = drain_at(&store_database, &intercepted, &cipher, &kp, &inside)
+        .await
+        .expect("inside backoff drain");
     assert_eq!(n, 0, "inside the backoff window no tombstone is written");
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -614,18 +592,9 @@ async fn delete_validation_failure_backs_off_then_retries() {
     );
 
     let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &intercepted,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &after,
-    )
-    .drain()
-    .await
-    .expect("after backoff drain");
+    let n = drain_at(&store_database, &intercepted, &cipher, &kp, &after)
+        .await
+        .expect("after backoff drain");
     assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
@@ -663,18 +632,9 @@ async fn delete_write_failure_backs_off_then_retries() {
         .await
         .expect("enqueue exact blob deletion");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let error = TombstoneDrain::new(
-        &store_database,
-        &intercepted,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &first,
-    )
-    .drain()
-    .await
-    .expect_err("failed write fails the drain");
+    let error = drain_at(&store_database, &intercepted, &cipher, &kp, &first)
+        .await
+        .expect_err("failed write fails the drain");
     assert!(error.contains("Tombstone write failed"), "{error}");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -694,18 +654,9 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &intercepted,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &inside,
-    )
-    .drain()
-    .await
-    .expect("inside backoff drain");
+    let n = drain_at(&store_database, &intercepted, &cipher, &kp, &inside)
+        .await
+        .expect("inside backoff drain");
     assert_eq!(n, 0, "inside the backoff window no tombstone is written");
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -714,18 +665,9 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 
     let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &intercepted,
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &after,
-    )
-    .drain()
-    .await
-    .expect("after backoff drain");
+    let n = drain_at(&store_database, &intercepted, &cipher, &kp, &after)
+        .await
+        .expect("after backoff drain");
     assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
@@ -1869,18 +1811,9 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         .await
         .expect("enqueue exact blob deletion");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &*storage.storage(),
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &first,
-    )
-    .drain()
-    .await
-    .expect("first drain");
+    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &first)
+        .await
+        .expect("first drain");
     assert_eq!(n, 1, "the first drain writes the tombstone");
     let original_deleted_at = {
         let bytes = storage
@@ -1897,18 +1830,9 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         .await
         .expect("reenqueue exact blob deletion");
     let second = FixedClock(at("2024-06-02T00:00:00Z"));
-    let n = TombstoneDrain::new(
-        &store_database,
-        &*storage.storage(),
-        &cipher,
-        &PendingRotation::none(),
-        "lib",
-        &kp,
-        &second,
-    )
-    .drain()
-    .await
-    .expect("second drain");
+    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &second)
+        .await
+        .expect("second drain");
     assert_eq!(n, 0, "the re-drain writes no new tombstone");
 
     // Exactly one tombstone, still carrying the first drain's deleted_at.
