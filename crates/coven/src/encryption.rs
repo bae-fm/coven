@@ -134,21 +134,71 @@ pub(crate) fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
 /// framing, so a reader needs every chunk before it knows anything. Blobs, which
 /// are read by range, use [`SealedBlobSealer`] instead.
 struct ChunkSealer {
-    cipher: XChaCha20Poly1305,
-    base_nonce: [u8; NONCE_SIZE],
+    cipher: ChunkCipher,
     aad_context: Vec<u8>,
     total_chunks: u64,
     next_index: u64,
 }
 
-impl ChunkSealer {
-    /// Start a sealer with a fresh random base nonce.
-    fn new(key: &[u8; 32], plaintext_len: u64, aad_context: &[u8]) -> Self {
-        let mut base_nonce = [0u8; NONCE_SIZE];
-        rand::rng().fill_bytes(&mut base_nonce);
+/// One key's chunked AEAD: the cipher, and the base nonce that chunk `n`'s own
+/// nonce derives from. Each format above keeps its own framing and builds its
+/// own additional data — this is the pair every one of them seals and opens
+/// with, so no format repeats the nonce derivation or the AEAD call.
+struct ChunkCipher {
+    cipher: XChaCha20Poly1305,
+    base_nonce: [u8; NONCE_SIZE],
+}
+
+impl ChunkCipher {
+    fn new(key: &[u8; 32], base_nonce: [u8; NONCE_SIZE]) -> Self {
         Self {
             cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
             base_nonce,
+        }
+    }
+
+    /// A cipher over a fresh random base nonce — the form used by the format
+    /// that stores its base nonce ahead of the chunks.
+    fn with_random_base_nonce(key: &[u8; 32]) -> Self {
+        let mut base_nonce = [0u8; NONCE_SIZE];
+        rand::rng().fill_bytes(&mut base_nonce);
+        Self::new(key, base_nonce)
+    }
+
+    fn base_nonce(&self) -> [u8; NONCE_SIZE] {
+        self.base_nonce
+    }
+
+    fn seal(&self, index: u64, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+        self.cipher
+            .encrypt(
+                GenericArray::from_slice(&chunk_nonce(&self.base_nonce, index)),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .expect("encryption should not fail")
+    }
+
+    /// Open chunk `index`, or `None` when its bytes do not authenticate under
+    /// `aad`. The AEAD reports no more than that, so each caller names the
+    /// failure in its own terms.
+    fn open(&self, index: u64, aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+        self.cipher
+            .decrypt(
+                GenericArray::from_slice(&chunk_nonce(&self.base_nonce, index)),
+                Payload { msg: sealed, aad },
+            )
+            .ok()
+    }
+}
+
+impl ChunkSealer {
+    /// Start a sealer with a fresh random base nonce.
+    fn new(key: &[u8; 32], plaintext_len: u64, aad_context: &[u8]) -> Self {
+        Self {
+            cipher: ChunkCipher::with_random_base_nonce(key),
             aad_context: aad_context.to_vec(),
             total_chunks: chunk_count_for_plaintext_len(plaintext_len),
             next_index: 0,
@@ -158,7 +208,7 @@ impl ChunkSealer {
     /// The base nonce — the first [`NONCE_SIZE`] bytes of the payload, emitted
     /// before any chunk.
     fn base_nonce(&self) -> [u8; NONCE_SIZE] {
-        self.base_nonce
+        self.cipher.base_nonce()
     }
 
     /// Seal one plaintext chunk (at most [`CHUNK_SIZE`] bytes) into its
@@ -170,18 +220,10 @@ impl ChunkSealer {
             plaintext.len() <= CHUNK_SIZE,
             "a sealed chunk must be at most CHUNK_SIZE bytes"
         );
-        let nonce = chunk_nonce(&self.base_nonce, self.next_index);
-        let aad = chunk_aad(&self.aad_context, self.next_index, self.total_chunks);
+        let index = self.next_index;
         self.next_index += 1;
-        self.cipher
-            .encrypt(
-                GenericArray::from_slice(&nonce),
-                Payload {
-                    msg: plaintext,
-                    aad: &aad,
-                },
-            )
-            .expect("encryption should not fail")
+        let aad = chunk_aad(&self.aad_context, index, self.total_chunks);
+        self.cipher.seal(index, &aad, plaintext)
     }
 }
 
@@ -434,8 +476,7 @@ fn blob_nonce_base(key: &[u8; 32], aad_context: &[u8]) -> [u8; NONCE_SIZE] {
 /// the whole plaintext or ciphertext. The header it emits first is what a later
 /// read needs to compute every chunk offset.
 pub struct SealedBlobSealer {
-    cipher: XChaCha20Poly1305,
-    base_nonce: [u8; NONCE_SIZE],
+    cipher: ChunkCipher,
     header: SealedBlobHeader,
     aad_context: Vec<u8>,
     next_index: u64,
@@ -444,8 +485,7 @@ pub struct SealedBlobSealer {
 impl SealedBlobSealer {
     fn new(key: &[u8; 32], header: SealedBlobHeader, aad_context: &[u8]) -> Self {
         Self {
-            cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
-            base_nonce: blob_nonce_base(key, aad_context),
+            cipher: ChunkCipher::new(key, blob_nonce_base(key, aad_context)),
             header,
             aad_context: aad_context.to_vec(),
             next_index: 0,
@@ -467,17 +507,8 @@ impl SealedBlobSealer {
             "a sealed chunk carries exactly the plaintext its header assigns it",
         );
         self.next_index += 1;
-        let nonce = chunk_nonce(&self.base_nonce, index);
         let aad = self.header.chunk_aad(&self.aad_context, index);
-        self.cipher
-            .encrypt(
-                GenericArray::from_slice(&nonce),
-                Payload {
-                    msg: plaintext,
-                    aad: &aad,
-                },
-            )
-            .expect("encryption should not fail")
+        self.cipher.seal(index, &aad, plaintext)
     }
 }
 
@@ -485,8 +516,7 @@ impl SealedBlobSealer {
 /// the tag covers its bytes, its position, and the header that framed it — so
 /// decryption is the whole verification and no separate hash is read.
 pub struct SealedBlobOpener {
-    cipher: XChaCha20Poly1305,
-    base_nonce: [u8; NONCE_SIZE],
+    cipher: ChunkCipher,
     header: SealedBlobHeader,
     aad_context: Vec<u8>,
 }
@@ -494,8 +524,7 @@ pub struct SealedBlobOpener {
 impl SealedBlobOpener {
     fn new(key: &[u8; 32], header: SealedBlobHeader, aad_context: &[u8]) -> Self {
         Self {
-            cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
-            base_nonce: blob_nonce_base(key, aad_context),
+            cipher: ChunkCipher::new(key, blob_nonce_base(key, aad_context)),
             header,
             aad_context: aad_context.to_vec(),
         }
@@ -517,17 +546,10 @@ impl SealedBlobOpener {
                 actual: sealed.len(),
             });
         }
-        let nonce = chunk_nonce(&self.base_nonce, index);
         let aad = self.header.chunk_aad(&self.aad_context, index);
         self.cipher
-            .decrypt(
-                GenericArray::from_slice(&nonce),
-                Payload {
-                    msg: sealed,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| SealedBlobError::ChunkAuthentication { index })
+            .open(index, &aad, sealed)
+            .ok_or(SealedBlobError::ChunkAuthentication { index })
     }
 
     /// Open every chunk in `chunks` from the contiguous sealed bytes covering
@@ -944,27 +966,21 @@ impl EncryptionService {
         encrypted_data: &[u8],
         aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
-        let base_nonce = read_base_nonce(encrypted_data)?;
         let layout = encrypted_chunk_layout(encrypted_data.len())?;
-        let key = self.key_bytes();
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
+        let cipher = ChunkCipher::new(&self.key_bytes(), read_base_nonce(encrypted_data)?);
 
         let mut result = Vec::with_capacity(decrypted_len_upper_bound(layout.data_len));
         for chunk_index in 0..layout.total_chunks {
             let (chunk_start, chunk_end) =
                 layout.chunk_bounds(encrypted_data.len(), chunk_index)?;
-            let chunk_data = &encrypted_data[chunk_start..chunk_end];
-            let nonce = chunk_nonce(&base_nonce, chunk_index as u64);
             let aad = chunk_aad(aad_context, chunk_index as u64, layout.total_chunks as u64);
             let decrypted = cipher
-                .decrypt(
-                    GenericArray::from_slice(&nonce),
-                    Payload {
-                        msg: chunk_data,
-                        aad: &aad,
-                    },
+                .open(
+                    chunk_index as u64,
+                    &aad,
+                    &encrypted_data[chunk_start..chunk_end],
                 )
-                .map_err(|_| {
+                .ok_or_else(|| {
                     EncryptionError::Decryption(format!(
                         "Authentication failed for chunk {}",
                         chunk_index
