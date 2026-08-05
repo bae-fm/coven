@@ -775,15 +775,15 @@ fn frontier_at(stream: &str, sequence: u64) -> crate::protocol::store_commit::Co
 fn snapshot_supersedes_seed_requires_strict_domination() {
     let seed = frontier_at("owner", 4);
     assert!(
-        !super::snapshot_supersedes_seed(&frontier_at("owner", 4), &seed),
+        !super::candidates::snapshot_supersedes_seed(&frontier_at("owner", 4), &seed),
         "a snapshot whose cut equals the seed exactly does not supersede it"
     );
     assert!(
-        super::snapshot_supersedes_seed(&frontier_at("owner", 5), &seed),
+        super::candidates::snapshot_supersedes_seed(&frontier_at("owner", 5), &seed),
         "a snapshot strictly past the seed on its stream supersedes it"
     );
     assert!(
-        !super::snapshot_supersedes_seed(&frontier_at("owner", 3), &seed),
+        !super::candidates::snapshot_supersedes_seed(&frontier_at("owner", 3), &seed),
         "a snapshot behind the seed does not cover it and cannot supersede it"
     );
 }
