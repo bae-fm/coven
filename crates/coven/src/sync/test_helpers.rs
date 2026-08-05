@@ -4809,10 +4809,6 @@ where
         self.inner.blob_path_scheme()
     }
 
-    fn self_uploader(&self) -> String {
-        self.inner.self_uploader()
-    }
-
     async fn probe_provider(&self) -> Result<(), crate::protocol::objects::StorageError> {
         self.inner.probe_provider().await
     }

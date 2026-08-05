@@ -8,10 +8,6 @@ impl SyncStorage for CloudSyncStorage {
         self.blob_path_scheme()
     }
 
-    fn self_uploader(&self) -> String {
-        self.self_uploader()
-    }
-
     async fn probe_provider(&self) -> Result<(), StorageError> {
         self.home.probe().await.map_err(Into::into)
     }

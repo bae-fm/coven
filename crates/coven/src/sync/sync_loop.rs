@@ -683,10 +683,6 @@ impl SyncLoopHandle {
         self.inner.components.blob_path_scheme()
     }
 
-    pub(crate) fn self_uploader(&self) -> String {
-        self.inner.components.self_uploader()
-    }
-
     pub(crate) fn is_encrypted(&self) -> bool {
         self.inner.components.is_encrypted()
     }

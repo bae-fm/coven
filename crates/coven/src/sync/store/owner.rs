@@ -399,10 +399,6 @@ impl Store {
         })
     }
 
-    pub(crate) fn self_uploader(&self) -> String {
-        self.storage.self_uploader()
-    }
-
     #[doc(hidden)]
     pub(crate) async fn discard_blocked_write(
         &self,

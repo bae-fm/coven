@@ -921,10 +921,6 @@ impl SyncComponents {
         self.current_encryption().is_some()
     }
 
-    pub(crate) fn self_uploader(&self) -> String {
-        self.store.self_uploader()
-    }
-
     pub(crate) async fn drain_uploads(
         &self,
         clock: &dyn crate::clock::Clock,

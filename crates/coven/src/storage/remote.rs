@@ -209,14 +209,6 @@ impl CloudSyncStorage {
         self.cipher.snapshot()
     }
 
-    /// This device's hex public key — the `{uploader}` segment its own blob
-    /// uploads are keyed under. A device only ever writes blobs it authored, so a
-    /// write always keys under itself; a read resolves the uploader of the blob it
-    /// wants (which may be a peer) and passes it in.
-    pub(crate) fn self_uploader(&self) -> String {
-        hex::encode(self.keypair.public_key())
-    }
-
     /// The cipher to seal new data under — refuses while the cloud has committed
     /// a rotation this device has not adopted, rather than sealing under the
     /// generation the store has superseded. Every write that protects data under

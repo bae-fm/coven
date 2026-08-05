@@ -17,9 +17,6 @@ pub(crate) trait SyncStorage: Send + Sync {
     /// Return the cloud home's fixed blob path representation.
     fn blob_path_scheme(&self) -> crate::storage::BlobPathScheme;
 
-    /// Return this installation's uploader identity.
-    fn self_uploader(&self) -> String;
-
     /// Verify that the retained provider session is reachable and usable.
     async fn probe_provider(&self) -> Result<(), StorageError>;
 
@@ -284,10 +281,6 @@ where
 {
     fn blob_path_scheme(&self) -> crate::storage::BlobPathScheme {
         (**self).blob_path_scheme()
-    }
-
-    fn self_uploader(&self) -> String {
-        (**self).self_uploader()
     }
 
     async fn probe_provider(&self) -> Result<(), StorageError> {
