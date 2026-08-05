@@ -96,16 +96,7 @@ impl CloudCipherState {
                 "cannot rotate the key of a plaintext cloud home".to_string(),
             ));
         };
-        let mut live = live.write().unwrap();
-        let merged = live
-            .merged_with(new_encryption)
-            .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
-        if merged.key_count() == live.key_count() {
-            return Ok(None);
-        }
-        custody.persist(&crate::encryption::MasterKeyring::from(merged.clone()))?;
-        *live = merged;
-        Ok(Some(live.fingerprint()))
+        merge_into(&mut live.write().unwrap(), new_encryption, custody)
     }
 
     #[cfg(test)]
@@ -131,9 +122,9 @@ impl CloudCipherAccess for CloudCipherState {
     }
 }
 
-impl CloudCipherAccess for Arc<CloudCipherState> {
+impl<T: CloudCipherAccess + ?Sized> CloudCipherAccess for Arc<T> {
     fn snapshot(&self) -> CloudCipher {
-        self.as_ref().snapshot()
+        (**self).snapshot()
     }
 
     fn merge_key_rotation(
@@ -141,8 +132,31 @@ impl CloudCipherAccess for Arc<CloudCipherState> {
         new_encryption: &EncryptionService,
         custody: &dyn crate::keys::MasterKeyCustody,
     ) -> Result<Option<String>, crate::keys::KeyError> {
-        self.as_ref().merge_key_rotation(new_encryption, custody)
+        (**self).merge_key_rotation(new_encryption, custody)
     }
+}
+
+/// Adopt `new_encryption`'s generations into the live keyring, or report that
+/// it held them all already.
+///
+/// Custody is written before the live keyring is replaced: a generation this
+/// process starts sealing under must never be one custody has not stored, or a
+/// restart would leave objects nothing can open. `Ok(None)` means nothing was
+/// adopted, so nothing was written either.
+fn merge_into(
+    live: &mut EncryptionService,
+    new_encryption: &EncryptionService,
+    custody: &dyn crate::keys::MasterKeyCustody,
+) -> Result<Option<String>, crate::keys::KeyError> {
+    let merged = live
+        .merged_with(new_encryption)
+        .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
+    if merged.key_count() == live.key_count() {
+        return Ok(None);
+    }
+    custody.persist(&crate::encryption::MasterKeyring::from(merged.clone()))?;
+    *live = merged;
+    Ok(Some(live.fingerprint()))
 }
 
 #[cfg(test)]
@@ -162,15 +176,7 @@ impl CloudCipherAccess for RwLock<CloudCipher> {
                 "cannot rotate the key of a plaintext cloud home".to_string(),
             ));
         };
-        let merged = live
-            .merged_with(new_encryption)
-            .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
-        if merged.key_count() == live.key_count() {
-            return Ok(None);
-        }
-        custody.persist(&crate::encryption::MasterKeyring::from(merged.clone()))?;
-        *live = merged;
-        Ok(Some(live.fingerprint()))
+        merge_into(live, new_encryption, custody)
     }
 }
 

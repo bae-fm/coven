@@ -183,11 +183,7 @@ pub(crate) fn recipient_slot_with_peer(
     peer_pubkey: &str,
     circle_id: CircleId,
 ) -> Result<String, CircleTransitionError> {
-    let peer_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] = hex::decode(peer_pubkey)
-        .map_err(|_| CircleTransitionError::InvalidRecipient(peer_pubkey.to_string()))?
-        .try_into()
-        .map_err(|_| CircleTransitionError::InvalidRecipient(peer_pubkey.to_string()))?;
-    let peer_x25519 = keys::ed25519_to_x25519_public_key(&peer_ed25519)
+    let peer_x25519 = keys::ed25519_hex_to_x25519_public_key(peer_pubkey)
         .map_err(|_| CircleTransitionError::InvalidRecipient(peer_pubkey.to_string()))?;
     let shared = keys::x25519_shared_secret(local_identity.to_x25519_secret_key(), peer_x25519)
         .map_err(|_| CircleTransitionError::InvalidRecipient(peer_pubkey.to_string()))?;

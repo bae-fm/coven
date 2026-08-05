@@ -619,25 +619,13 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 }
                 access.leaf.value.signature =
                     keys::sign_hex(identity_signer, &access.leaf.value.canonical_bytes()).1;
-                let recipient_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] =
-                    hex::decode(&access.leaf.value.recipient_pubkey)
-                        .map_err(|_| {
-                            CircleOperationError::InvalidState(
-                                "Circle access recipient key is malformed".to_string(),
-                            )
-                        })?
-                        .try_into()
-                        .map_err(|_| {
-                            CircleOperationError::InvalidState(
-                                "Circle access recipient key has the wrong length".to_string(),
-                            )
+                let recipient_x25519 =
+                    keys::ed25519_hex_to_x25519_public_key(&access.leaf.value.recipient_pubkey)
+                        .map_err(|error| {
+                            CircleOperationError::InvalidState(format!(
+                                "convert Circle access recipient key: {error}"
+                            ))
                         })?;
-                let recipient_x25519 = keys::ed25519_to_x25519_public_key(&recipient_ed25519)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "convert Circle access recipient key: {error}"
-                        ))
-                    })?;
                 let plaintext = serde_json::to_vec(&access.leaf.value)
                     .expect("Circle access serialization cannot fail");
                 access.leaf.bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);

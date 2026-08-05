@@ -187,16 +187,7 @@ impl<'identity> CircleAccessDraft<'identity> {
                     signature: String::new(),
                 };
                 value.signature = keys::sign_hex(signer, &value.canonical_bytes()).1;
-                let recipient_ed25519: [u8; keys::SIGN_PUBLICKEYBYTES] =
-                    hex::decode(recipient_pubkey)
-                        .map_err(|_| {
-                            CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
-                        })?
-                        .try_into()
-                        .map_err(|_| {
-                            CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
-                        })?;
-                let recipient_x25519 = keys::ed25519_to_x25519_public_key(&recipient_ed25519)
+                let recipient_x25519 = keys::ed25519_hex_to_x25519_public_key(recipient_pubkey)
                     .map_err(|_| {
                         CircleTransitionError::InvalidRecipient(recipient_pubkey.clone())
                     })?;
