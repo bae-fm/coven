@@ -156,39 +156,7 @@ impl PendingJoinJournal {
                 }
                 _ => return Err(DeviceJoinError::JournalConflict),
             };
-        let provider_ready = self.advance(
-            &prepared,
-            JoinerJoinProgress::ProviderReady(bootstrap.clone()),
-        )?;
-        let registration_intent = self.advance(
-            &provider_ready,
-            JoinerJoinProgress::RegistrationCreateIntent(bootstrap.clone()),
-        )?;
-        let registration_created = self.advance(
-            &registration_intent,
-            JoinerJoinProgress::RegistrationCreated(readiness.proof.registration.clone()),
-        )?;
-        let ack_intent = self.advance(
-            &registration_created,
-            JoinerJoinProgress::AckCreateIntent(readiness.proof.registration.clone()),
-        )?;
-        let ack_created = self.advance(
-            &ack_intent,
-            JoinerJoinProgress::AckCreated(readiness.proof.initial_ack.clone()),
-        )?;
-        let ready = JoinerJoinProgress::Ready(readiness.clone());
-        match readiness.provider {
-            DeviceProviderReadiness::SamePrincipal => {
-                self.advance(&ack_created, ready)?;
-            }
-            DeviceProviderReadiness::CrossPrincipal(_) => {
-                let response_intent = self.advance(
-                    &ack_created,
-                    JoinerJoinProgress::ResponseCreateIntent(readiness.clone()),
-                )?;
-                self.advance(&response_intent, ready)?;
-            }
-        }
+        self.advance(&prepared, JoinerJoinProgress::Ready(readiness.clone()))?;
         Ok(readiness)
     }
 }
@@ -199,10 +167,6 @@ fn progress_offer(progress: &JoinerJoinProgress) -> Option<&DeviceJoinOffer> {
         JoinerJoinProgress::AccessRequested(request) => Some(&request.offer),
         JoinerJoinProgress::ApprovalReceived(approval) => Some(&approval.request.offer),
         JoinerJoinProgress::RegistrationPrepared(request) => Some(&request.approval.request.offer),
-        JoinerJoinProgress::ProviderReady(bootstrap)
-        | JoinerJoinProgress::RegistrationCreateIntent(bootstrap) => {
-            Some(&bootstrap.bootstrap.request.approval.request.offer)
-        }
         _ => None,
     }
 }

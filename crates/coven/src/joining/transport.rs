@@ -352,14 +352,6 @@ impl DeviceJoinClient {
                         .publish(&DeviceJoinAction::TransferReadiness(readiness))
                         .await?;
                 }
-                Some(DeviceJoinStatus::AwaitingReadiness { bootstrap }) => {
-                    let readiness =
-                        Box::pin(self.bootstrap_pending_device(bootstrap, &on_status, cancel))
-                            .await?;
-                    transport
-                        .publish(&DeviceJoinAction::TransferReadiness(readiness))
-                        .await?;
-                }
                 Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
                     transport
                         .publish(&DeviceJoinAction::TransferReadiness(readiness))

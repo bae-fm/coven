@@ -57,9 +57,6 @@ pub enum DeviceJoinCleanupProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceJoinStatus {
-    OperationInProgress {
-        attempt_id: DeviceJoinAttemptId,
-    },
     AwaitingAccessRequest {
         offer: DeviceJoinOffer,
     },
@@ -257,12 +254,6 @@ pub(crate) enum JoinerJoinProgress {
     AccessRequested(DeviceProviderAccessRequest),
     ApprovalReceived(DeviceProviderAdmissionApproval),
     RegistrationPrepared(DeviceRegistrationRequest),
-    ProviderReady(ProviderReadyDeviceBootstrap),
-    RegistrationCreateIntent(ProviderReadyDeviceBootstrap),
-    RegistrationCreated(StoreDeviceRegistrationRef),
-    AckCreateIntent(StoreDeviceRegistrationRef),
-    AckCreated(crate::protocol::store_commit::StoreAckRef),
-    ResponseCreateIntent(DeviceJoinReadiness),
     Ready(DeviceJoinReadiness),
     ActivationObserved {
         readiness: DeviceJoinReadiness,
@@ -291,15 +282,7 @@ impl JoinerJoinProgress {
     pub(crate) fn holds_staged_work(&self) -> bool {
         matches!(
             self,
-            Self::RegistrationPrepared(_)
-                | Self::ProviderReady(_)
-                | Self::RegistrationCreateIntent(_)
-                | Self::RegistrationCreated(_)
-                | Self::AckCreateIntent(_)
-                | Self::AckCreated(_)
-                | Self::ResponseCreateIntent(_)
-                | Self::Ready(_)
-                | Self::CleanupIntent { .. }
+            Self::RegistrationPrepared(_) | Self::Ready(_) | Self::CleanupIntent { .. }
         )
     }
 }
@@ -530,13 +513,9 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         },
         DeviceJoinRoleProgress::ProviderAdministrator(
             ProviderAdminJoinProgress::ProviderReady(bootstrap),
-        )
-        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ProviderReady(bootstrap))
-        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::RegistrationCreateIntent(bootstrap)) => {
-            DeviceJoinStatus::AwaitingReadiness {
-                bootstrap: bootstrap.clone(),
-            }
-        }
+        ) => DeviceJoinStatus::AwaitingReadiness {
+            bootstrap: bootstrap.clone(),
+        },
         DeviceJoinRoleProgress::ProviderAdministrator(
             ProviderAdminJoinProgress::ResponseObserved(readiness),
         )
@@ -651,9 +630,6 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
                 activation: activation.clone(),
             }
         }
-        _ => DeviceJoinStatus::OperationInProgress {
-            attempt_id: record.attempt_id,
-        },
     }
 }
 
@@ -732,12 +708,6 @@ pub(crate) fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<Dev
         DeviceJoinRoleProgress::Joiner(
             JoinerJoinProgress::OfferReceived(_)
             | JoinerJoinProgress::ApprovalReceived(_)
-            | JoinerJoinProgress::ProviderReady(_)
-            | JoinerJoinProgress::RegistrationCreateIntent(_)
-            | JoinerJoinProgress::RegistrationCreated(_)
-            | JoinerJoinProgress::AckCreateIntent(_)
-            | JoinerJoinProgress::AckCreated(_)
-            | JoinerJoinProgress::ResponseCreateIntent(_)
             | JoinerJoinProgress::CleanupIntent { .. },
         ) => Some(resume()),
         DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::AccessRequested(request)) => Some(
@@ -907,48 +877,9 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
             JoinerJoinProgress::Abandoned(_)
         ) | (
             JoinerJoinProgress::RegistrationPrepared(_),
-            JoinerJoinProgress::ProviderReady(_)
+            JoinerJoinProgress::Ready(_)
         ) | (
             JoinerJoinProgress::RegistrationPrepared(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::ProviderReady(_),
-            JoinerJoinProgress::RegistrationCreateIntent(_)
-        ) | (
-            JoinerJoinProgress::ProviderReady(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::RegistrationCreateIntent(_),
-            JoinerJoinProgress::RegistrationCreated(_)
-        ) | (
-            JoinerJoinProgress::RegistrationCreateIntent(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::RegistrationCreated(_),
-            JoinerJoinProgress::AckCreateIntent(_)
-        ) | (
-            JoinerJoinProgress::RegistrationCreated(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::AckCreateIntent(_),
-            JoinerJoinProgress::AckCreated(_)
-        ) | (
-            JoinerJoinProgress::AckCreateIntent(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::AckCreated(_),
-            JoinerJoinProgress::ResponseCreateIntent(_)
-        ) | (
-            JoinerJoinProgress::AckCreated(_),
-            JoinerJoinProgress::Ready(_)
-        ) | (
-            JoinerJoinProgress::AckCreated(_),
-            JoinerJoinProgress::CleanupIntent { .. }
-        ) | (
-            JoinerJoinProgress::ResponseCreateIntent(_),
-            JoinerJoinProgress::Ready(_)
-        ) | (
-            JoinerJoinProgress::ResponseCreateIntent(_),
             JoinerJoinProgress::CleanupIntent { .. }
         ) | (
             JoinerJoinProgress::Ready(_),
@@ -958,24 +889,6 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
             JoinerJoinProgress::CleanupIntent { .. }
         ) | (
             JoinerJoinProgress::RegistrationPrepared(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::ProviderReady(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::RegistrationCreateIntent(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::RegistrationCreated(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::AckCreateIntent(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::AckCreated(_),
-            JoinerJoinProgress::WriteRevoked(_)
-        ) | (
-            JoinerJoinProgress::ResponseCreateIntent(_),
             JoinerJoinProgress::WriteRevoked(_)
         ) | (
             JoinerJoinProgress::CleanupIntent { .. },
