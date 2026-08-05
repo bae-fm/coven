@@ -124,29 +124,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .database
             .circle_authoring_context(circle_id, &identity_pubkey)
             .await?;
-        let activation_commit = self
-            .history()
-            .load_commit(&activation_commit_ref)
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-        if activation_commit.value().candidate_family() != current.candidate_family {
-            return Err(CircleOperationError::InvalidState(format!(
-                "Circle {circle_id} current state differs from its activating Store commit"
-            )));
-        }
-        let reference = activation_commit
-            .value()
-            .circle_controls()
-            .iter()
-            .find(|reference| {
-                reference.circle_id() == circle_id && reference.control() == &current.control.coord
-            })
-            .cloned()
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(format!(
-                    "Circle {circle_id} current control is absent from its activating Store commit"
-                ))
-            })?;
+        let (activation_commit, reference) = self
+            .verified_activation_control(circle_id, &current, &activation_commit_ref)
+            .await?;
         Ok((current, activation_commit, reference))
     }
 
@@ -165,9 +145,30 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .database
             .circle_delete_context(circle_id, &identity_pubkey)
             .await?;
+        let (_, reference) = self
+            .verified_activation_control(circle_id, &current, &activation_commit_ref)
+            .await?;
+        Ok((current, reference))
+    }
+
+    /// Load the Circle's activating Store commit and pin down the control
+    /// reference it carries for the current state, rejecting a commit whose
+    /// candidate family or control set disagrees with that state.
+    async fn verified_activation_control(
+        &mut self,
+        circle_id: CircleId,
+        current: &CircleAuthoringState,
+        activation_commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<
+        (
+            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            crate::protocol::store_commit::CircleControlRef,
+        ),
+        CircleOperationError,
+    > {
         let activation_commit = self
             .history()
-            .load_commit(&activation_commit_ref)
+            .load_commit(activation_commit_ref)
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if activation_commit.value().candidate_family() != current.candidate_family {
@@ -188,7 +189,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     "Circle {circle_id} current control is absent from its activating Store commit"
                 ))
             })?;
-        Ok((current, reference))
+        Ok((activation_commit, reference))
     }
 }
 

@@ -3,6 +3,9 @@ use crate::protocol::store_commit::{StoreAck, StoreAckRef, StoreDeviceRegistrati
 use rusqlite::OptionalExtension;
 
 use super::*;
+use crate::database::store_ack_records::{
+    load_expected_outbound_store_ack_on, load_outbound_store_ack_on,
+};
 
 impl StoreDatabase {
     pub(crate) async fn latest_local_store_ack(
@@ -96,14 +99,11 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != expected {
-                    return Err(DbError::Message(
-                        "acknowledgement slot winner names another queued object".to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    &tx,
+                    &expected,
+                    "acknowledgement slot winner names another queued object",
+                )?;
                 let OutboundStoreAckActivation::Prepared(candidate) = &outbound.activation else {
                     return Err(DbError::Message(
                         "acknowledgement slot collision has no prepared activation candidate"
@@ -209,15 +209,11 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != accepted {
-                    return Err(DbError::Message(
-                        "accepted Store acknowledgement differs from the prepared exact object"
-                            .to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    &tx,
+                    &accepted,
+                    "accepted Store acknowledgement differs from the prepared exact object",
+                )?;
                 finish_outbound_store_ack_on(
                     &tx,
                     &accepted,

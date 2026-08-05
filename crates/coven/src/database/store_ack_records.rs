@@ -221,6 +221,53 @@ pub(crate) fn load_outbound_circle_acks_on(
     Ok(activations)
 }
 
+/// Load the singleton outbound Store acknowledgement and require it to match
+/// `expected`; `mismatch` is the error when another acknowledgement is queued.
+pub(crate) fn load_expected_outbound_store_ack_on(
+    conn: &Connection,
+    expected: &crate::protocol::store_commit::StoreAckRef,
+    mismatch: &str,
+) -> Result<OutboundStoreAck, DbError> {
+    let outbound = load_outbound_store_ack_on(conn)?
+        .ok_or_else(|| DbError::Message("outbound Store acknowledgement is absent".to_string()))?;
+    if &outbound.reference != expected {
+        return Err(DbError::Message(mismatch.to_string()));
+    }
+    Ok(outbound)
+}
+
+/// Write the singleton outbound acknowledgement's activation column, keyed by
+/// the acknowledgement reference it must still carry; `missing` is the error
+/// when that row is gone.
+pub(crate) fn set_outbound_store_ack_activation_on(
+    conn: &Connection,
+    expected: &crate::protocol::store_commit::StoreAckRef,
+    activation: &crate::database::OutboundStoreAckActivation,
+    missing: &str,
+) -> Result<(), DbError> {
+    let activation = serde_json::to_string(activation).map_err(|error| {
+        DbError::Message(format!(
+            "serialize Merge Store acknowledgement activation: {error}"
+        ))
+    })?;
+    let updated = conn
+        .execute(
+            "UPDATE outbound_store_acks SET activation = ?2 \
+             WHERE singleton = 1 AND ack_ref = ?1",
+            rusqlite::params![
+                serde_json::to_string(expected).map_err(|error| DbError::Message(format!(
+                    "serialize Store acknowledgement ref: {error}"
+                )))?,
+                activation,
+            ],
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(missing.to_string()));
+    }
+    Ok(())
+}
+
 pub(crate) fn load_outbound_store_ack_on(
     conn: &Connection,
 ) -> Result<Option<OutboundStoreAck>, DbError> {

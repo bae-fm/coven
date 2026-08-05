@@ -1,4 +1,7 @@
 use super::*;
+use crate::database::store_ack_records::{
+    load_expected_outbound_store_ack_on, set_outbound_store_ack_activation_on,
+};
 
 impl StoreDatabase {
     pub(crate) async fn prepare_acknowledgement_activation(
@@ -9,14 +12,11 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != expected {
-                    return Err(DbError::Message(
-                        "prepared activation names a different Store acknowledgement".to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    &tx,
+                    &expected,
+                    "prepared activation names a different Store acknowledgement",
+                )?;
                 match outbound.activation {
                     OutboundStoreAckActivation::AwaitingCandidate => {}
                     OutboundStoreAckActivation::Prepared(existing)
@@ -54,31 +54,12 @@ impl StoreDatabase {
                         )?;
                     }
                 }
-                let activation =
-                    serde_json::to_string(&OutboundStoreAckActivation::Prepared(candidate))
-                        .map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize prepared Merge Store acknowledgement activation: {error}"
-                            ))
-                        })?;
-                let updated = tx
-                    .execute(
-                        "UPDATE outbound_store_acks SET activation = ?2 \
-                         WHERE singleton = 1 AND ack_ref = ?1",
-                        rusqlite::params![
-                            serde_json::to_string(&expected).map_err(|error| DbError::Message(
-                                format!("serialize Store acknowledgement ref: {error}")
-                            ))?,
-                            activation,
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "outbound Store acknowledgement disappeared during activation preparation"
-                            .to_string(),
-                    ));
-                }
+                set_outbound_store_ack_activation_on(
+                    &tx,
+                    &expected,
+                    &OutboundStoreAckActivation::Prepared(candidate),
+                    "outbound Store acknowledgement disappeared during activation preparation",
+                )?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -104,14 +85,11 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != expected {
-                    return Err(DbError::Message(
-                        "nonactivation names another Store acknowledgement".to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    &tx,
+                    &expected,
+                    "nonactivation names another Store acknowledgement",
+                )?;
                 let (candidate, already_nonactivating) = match outbound.activation {
                     OutboundStoreAckActivation::Prepared(candidate) => (candidate, false),
                     OutboundStoreAckActivation::Nonactivating(candidate) => (candidate, true),
@@ -215,32 +193,12 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                let activation = serde_json::to_string(
+                set_outbound_store_ack_activation_on(
+                    &tx,
+                    &expected,
                     &OutboundStoreAckActivation::Nonactivating(candidate),
-                )
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize nonactivating Merge Store acknowledgement: {error}"
-                    ))
-                })?;
-                let updated = tx
-                    .execute(
-                        "UPDATE outbound_store_acks SET activation = ?2
-                         WHERE singleton = 1 AND ack_ref = ?1",
-                        rusqlite::params![
-                            serde_json::to_string(&expected).map_err(|error| DbError::Message(
-                                format!("serialize Store acknowledgement ref: {error}")
-                            ))?,
-                            activation,
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "outbound Store acknowledgement disappeared during nonactivation"
-                            .to_string(),
-                    ));
-                }
+                    "outbound Store acknowledgement disappeared during nonactivation",
+                )?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -255,14 +213,11 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != expected {
-                    return Err(DbError::Message(
-                        "alternate Merge head names another Store acknowledgement".to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    &tx,
+                    &expected,
+                    "alternate Merge head names another Store acknowledgement",
+                )?;
                 let OutboundStoreAckActivation::Prepared(candidate) = outbound.activation else {
                     return Err(DbError::Message(
                         "Store acknowledgement has no prepared Merge candidate".to_string(),
@@ -303,31 +258,12 @@ impl StoreDatabase {
                 candidate
                     .adopt_merge_head(winner, winner_prepared)
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                let activation =
-                    serde_json::to_string(&OutboundStoreAckActivation::Prepared(candidate))
-                        .map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize alternate Store acknowledgement activation: {error}"
-                            ))
-                        })?;
-                let updated = tx
-                    .execute(
-                        "UPDATE outbound_store_acks SET activation = ?2
-                         WHERE singleton = 1 AND ack_ref = ?1",
-                        rusqlite::params![
-                            serde_json::to_string(&expected).map_err(|error| DbError::Message(
-                                format!("serialize Store acknowledgement ref: {error}")
-                            ))?,
-                            activation,
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "outbound Store acknowledgement disappeared during head adoption"
-                            .to_string(),
-                    ));
-                }
+                set_outbound_store_ack_activation_on(
+                    &tx,
+                    &expected,
+                    &OutboundStoreAckActivation::Prepared(candidate),
+                    "outbound Store acknowledgement disappeared during head adoption",
+                )?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -339,14 +275,11 @@ impl StoreDatabase {
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
         self.connection
             .call(move |conn| {
-                let outbound = load_outbound_store_ack_on(conn)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != expected {
-                    return Err(DbError::Message(
-                        "Store acknowledgement cleanup names another exact object".to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    conn,
+                    &expected,
+                    "Store acknowledgement cleanup names another exact object",
+                )?;
                 let OutboundStoreAckActivation::Nonactivating(candidate) = outbound.activation
                 else {
                     return Err(DbError::Message(
@@ -371,14 +304,11 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store acknowledgement is absent".to_string())
-                })?;
-                if outbound.reference != expected {
-                    return Err(DbError::Message(
-                        "Store acknowledgement completion names another exact object".to_string(),
-                    ));
-                }
+                let outbound = load_expected_outbound_store_ack_on(
+                    &tx,
+                    &expected,
+                    "Store acknowledgement completion names another exact object",
+                )?;
                 let OutboundStoreAckActivation::Nonactivating(candidate) = &outbound.activation
                 else {
                     return Err(DbError::Message(

@@ -567,14 +567,16 @@ pub(crate) fn resolve_store_membership_conflict(
     })
 }
 
-pub(super) fn conflict_resolution_retirements(
-    resolutions: &[(
-        StoreMembershipConflictResolutionRef,
-        StoreMembershipConflictResolution,
-    )],
+pub(super) fn conflict_resolution_retirements<'resolution>(
+    resolutions: impl IntoIterator<
+        Item = &'resolution (
+            StoreMembershipConflictResolutionRef,
+            StoreMembershipConflictResolution,
+        ),
+    >,
     grant: &MembershipGrantId,
 ) -> Result<GrantRetirements<MembershipGrantRetirement>, MembershipError> {
-    let mut retirements = resolutions.iter().map(|(reference, resolution)| {
+    let mut retirements = resolutions.into_iter().map(|(reference, resolution)| {
         resolution
             .retirement_barriers
             .get(grant)
@@ -595,6 +597,8 @@ pub(super) fn conflict_resolution_retirements(
     Ok(result)
 }
 
+/// The conflict-resolution retirements for `grant`, excluding the resolution
+/// whose member-assignment selection kept that grant.
 pub(super) fn assignment_conflict_retirements(
     resolutions: &[(
         StoreMembershipConflictResolutionRef,
@@ -602,32 +606,14 @@ pub(super) fn assignment_conflict_retirements(
     )],
     grant: &MembershipGrantId,
 ) -> Result<GrantRetirements<MembershipGrantRetirement>, MembershipError> {
-    let mut retirements = resolutions
-        .iter()
-        .filter(|(_, resolution)| {
+    conflict_resolution_retirements(
+        resolutions.iter().filter(|(_, resolution)| {
             !matches!(
                 &resolution.selection,
                 MembershipConflictSelection::MemberAssignment { grant: selected }
                     if selected == grant
             )
-        })
-        .map(|(reference, resolution)| {
-            resolution
-                .retirement_barriers
-                .get(grant)
-                .cloned()
-                .map(|barrier| MembershipGrantRetirement::ConflictResolution {
-                    authority: reference.clone(),
-                    barrier,
-                })
-                .ok_or(MembershipError::InvalidConflictResolution)
-        });
-    let first = retirements
-        .next()
-        .ok_or(MembershipError::InvalidConflictResolution)??;
-    let mut result = GrantRetirements::new(first);
-    for retirement in retirements {
-        result.insert(retirement?);
-    }
-    Ok(result)
+        }),
+        grant,
+    )
 }
