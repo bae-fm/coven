@@ -719,6 +719,25 @@ fn missing_exact_membership_authority_positions(
         .collect()
 }
 
+/// A plaintext, plain-path test Store on a fresh in-memory home, with the
+/// identity that signs for it.
+fn plain_cloud_test_store() -> (
+    InMemoryCloudHome,
+    UserKeypair,
+    std::sync::Arc<CloudSyncStorage>,
+) {
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = cloud_test_storage(
+        std::sync::Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        keypair.clone(),
+    );
+    (home, keypair, storage)
+}
+
 fn membership_author_stream(
     chain: &MembershipChain,
     signer: &UserKeypair,
@@ -735,6 +754,25 @@ fn membership_author_stream(
         .map(|entry| entry.stream_id)
         .or_else(|| chain.membership_stream_id(&owner_grant))
         .expect("membership author has an anchored Store-membership stream")
+}
+
+/// The active Owner's signed grant of ordinary membership to `member`, authored
+/// on the Owner's own membership stream.
+fn signed_member_grant(
+    chain: &MembershipChain,
+    owner: &UserKeypair,
+    member: &UserKeypair,
+) -> crate::protocol::membership::MembershipEntry {
+    chain
+        .signed_set_member_in_stream(
+            owner,
+            membership_author_stream(chain, owner),
+            pubkey_hex(member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant")
 }
 
 struct ExactMembershipChain<'storage> {
@@ -4350,15 +4388,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
 /// must leave the cloud object alone.
 #[tokio::test]
 async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the_upload() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
+    let (home, keypair, storage) = plain_cloud_test_store();
 
     let bytes = b"COVER-BYTES";
     let db = open_test_db_with_blob(readable_photo_decl());
@@ -4524,15 +4554,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 /// keying a blob at an object another blob could also be keyed at.
 #[tokio::test]
 async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
+    let (home, keypair, storage) = plain_cloud_test_store();
 
     let bytes = b"COVER-BYTES";
     let db = open_test_db_with_blob(readable_photo_decl());
@@ -4578,15 +4600,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
     tokio::spawn(async {
         // A browsable home: readable keys, objects stored in the clear (the two are one
         // choice), so the test reads the cloud object back as plaintext.
-        let home = InMemoryCloudHome::new();
-        let keypair = UserKeypair::generate();
-        let storage = cloud_test_storage(
-            std::sync::Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "test-lib",
-            keypair.clone(),
-        );
+        let (home, keypair, storage) = plain_cloud_test_store();
         let old_bytes = b"OLD-COVER-BYTES";
         let new_bytes = b"NEW-COVER-BYTES";
 
@@ -4683,15 +4697,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
 #[tokio::test]
 async fn plain_scheme_two_replacements_write_two_objects() {
     tokio::spawn(async {
-        let home = InMemoryCloudHome::new();
-        let keypair = UserKeypair::generate();
-        let storage = cloud_test_storage(
-            std::sync::Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "test-lib",
-            keypair.clone(),
-        );
+        let (home, keypair, storage) = plain_cloud_test_store();
         let tables = test_synced_tables_with_blob(replaceable_photo_decl());
 
         let original = b"ORIGINAL-COVER";
@@ -4809,15 +4815,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
 /// A device replaying two blob-bearing changesets can fetch each immutable object.
 #[tokio::test]
 async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
+    let (_home, keypair, storage) = plain_cloud_test_store();
     let tables = test_synced_tables_with_blob(readable_photo_decl());
 
     let old_bytes = b"OLD-COVER-BYTES";
@@ -4906,15 +4904,7 @@ fn write_once_photo_decl() -> BlobDecl {
 /// what the test below enforces.
 #[tokio::test]
 async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
+    let (home, keypair, storage) = plain_cloud_test_store();
     // A readable name with no blob id anywhere in it.
     let bytes = b"AUDIO-BYTES";
     let db1 = open_test_db_with_blob(write_once_photo_decl());
@@ -4974,15 +4964,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
 /// appearing in one *is* the repointing.
 #[tokio::test]
 async fn plain_scheme_repointing_a_write_once_row_is_refused() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
+    let (home, keypair, storage) = plain_cloud_test_store();
     let first = b"FIRST-AUDIO";
     let second = b"SECOND-AUDIO-BYTES";
 
@@ -5060,15 +5042,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     tokio::spawn(async {
         // A browsable home: readable keys, objects stored in the clear (the two are one
         // choice), so the test reads the cloud object back as plaintext.
-        let home = InMemoryCloudHome::new();
-        let keypair = UserKeypair::generate();
-        let storage = cloud_test_storage(
-            std::sync::Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "test-lib",
-            keypair.clone(),
-        );
+        let (home, keypair, storage) = plain_cloud_test_store();
         let old_bytes = b"OLD-COVER-BYTES";
         let new_bytes = b"NEW-COVER-BYTES";
 
@@ -5177,15 +5151,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 /// where it catches that the path names the blob the row no longer points at.
 #[tokio::test]
 async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused() {
-    let home = InMemoryCloudHome::new();
-    let keypair = UserKeypair::generate();
-    let storage = cloud_test_storage(
-        std::sync::Arc::new(home.clone()),
-        CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
-        "test-lib",
-        keypair.clone(),
-    );
+    let (home, keypair, storage) = plain_cloud_test_store();
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
 
@@ -6198,16 +6164,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .expect("authorize the cycle before membership advances");
 
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let changeset = source
         .capture_test_changeset(&[
@@ -6641,16 +6598,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
 
     // Founder at (owner, 1); the owner adds the member as a Member at (owner, 2).
     let mut chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     let lagging_authority = add_member.coord();
     chain.publish_entry(add_member, &owner).await;
     let hidden_head = chain
@@ -6913,16 +6861,7 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
     let storage = create_store(&owner_db, owner.clone()).await;
 
     let mut chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let member_db = open_test_db();
     storage
@@ -7006,16 +6945,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .await
         .expect("retain revocation-witness Owner device");
     let mut chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
 
     let member_db = open_test_db();
@@ -7152,16 +7082,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let storage = create_store(&db1, owner.clone()).await;
 
     let mut chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let remove_member = chain
         .signed_remove_member_in_stream(
@@ -7242,16 +7163,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     // adding the member, so the Add at seq 2 is uploaded but no head certifies it
     // yet — genuinely uncommitted, not just list-lagging.
     let chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     let grant = add_member.coord();
     let (prepared, _) = crate::storage::prepare_membership_entry(
         &*storage.storage(),
@@ -7309,16 +7221,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let storage = create_store(&source, owner.clone()).await;
 
     let mut chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     let owner_grant = add_member.coord();
     let grant_bytes = serde_json::to_vec(&add_member).expect("serialize exact membership grant");
     chain.publish_entry(add_member, &owner).await;
@@ -7436,16 +7339,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .await
         .expect("authorize retained founder-only membership");
 
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let member_db = open_test_db();
     storage
@@ -7510,16 +7404,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     let storage = create_store(&db2, owner.clone()).await;
 
     let mut chain = ExactMembershipChain::load(&storage).await;
-    let add_member = chain
-        .signed_set_member_in_stream(
-            &owner,
-            membership_author_stream(&chain, &owner),
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "2026-03-01T00:01:00Z".to_string(),
-        )
-        .expect("active Owner signs membership grant");
+    let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member.clone(), &owner).await;
     let remove_member = chain
         .signed_remove_member_in_stream(
