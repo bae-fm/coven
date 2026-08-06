@@ -111,7 +111,10 @@ impl HostWriteBlobStaging {
                         &authority,
                     )
                     .map_err(|error| {
-                        move_materialization_error(fact, DbError::Store(Box::new(error)))
+                        move_materialization_error(
+                            fact,
+                            DbError::AudienceBlobStaging(Box::new(error)),
+                        )
                     })?;
                     let spool_path = self
                         .store_dir

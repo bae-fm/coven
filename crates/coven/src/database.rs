@@ -458,12 +458,11 @@ pub enum DbError {
     BlobOpeningAuthority(#[from] crate::protocol::blob::BlobOpeningAuthorityError),
     #[error("{0}")]
     CommitNewFile(#[from] crate::local_file::CommitNewFileError),
-    /// A Store operation invoked through [`AudienceBlobMoveStaging`] failed.
-    /// The database layer calls back into the sync layer to stage a write's
-    /// audience-move blobs, so that layer's failures arrive here. Boxed
-    /// because `StoreError` carries a `DbError` of its own.
-    #[error("{0}")]
-    Store(Box<crate::sync::store::StoreError>),
+    /// Staging a write's audience-move blobs failed. The implementation of
+    /// [`AudienceBlobMoveStaging`] is injected from above, so its failure is
+    /// carried as an opaque source rather than named here.
+    #[error("audience blob staging: {0}")]
+    AudienceBlobStaging(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     /// Staging a write's audience-move blobs failed AND rolling the staged
     /// files back failed, so those files are left on disk. Carries both
     /// failures rather than reporting one and describing the other.
