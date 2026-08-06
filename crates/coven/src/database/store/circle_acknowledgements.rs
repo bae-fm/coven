@@ -93,7 +93,7 @@ impl StoreDatabase {
                 .map_err(DbError::from)?
                 .map(|raw| {
                     let reference: CircleAckRef = serde_json::from_str(&raw).map_err(|error| {
-                        DbError::Message(format!("activated Circle acknowledgement ref: {error}"))
+                        DbError::context("activated Circle acknowledgement ref", error)
                     })?;
                     if reference.circle_id != circle_id {
                         return Err(DbError::Message(
@@ -123,7 +123,7 @@ impl StoreDatabase {
             return Ok(BTreeSet::new());
         }
         let frontier = CommitFrontier::from_refs(self.materialized_frontier().await?)
-            .map_err(|error| DbError::Message(format!("shape current Store frontier: {error}")))?;
+            .map_err(|error| DbError::context("shape current Store frontier", error))?;
         let (_, device_state) = self
             .store_device_state_for_history_cut(&StoreHistoryCut(frontier.0))
             .await?;
@@ -198,9 +198,7 @@ impl StoreDatabase {
                     .map(|raw| {
                         let reference: CircleAckRef =
                             serde_json::from_str(&raw).map_err(|error| {
-                                DbError::Message(format!(
-                                    "activated Circle acknowledgement ref: {error}"
-                                ))
+                                DbError::context("activated Circle acknowledgement ref", error)
                             })?;
                         if reference.circle_id != circle_id {
                             return Err(DbError::Message(
@@ -234,7 +232,7 @@ impl StoreDatabase {
                 };
                 let reference: CircleAckRef =
                     serde_json::from_str(&reference).map_err(|error| {
-                        DbError::Message(format!("published Circle acknowledgement ref: {error}"))
+                        DbError::context("published Circle acknowledgement ref", error)
                     })?;
                 if reference.circle_id != circle_id || reference.sequence == 0 {
                     return Err(DbError::Message(
@@ -245,17 +243,13 @@ impl StoreDatabase {
                 Ok(Some(PublishedCircleAck {
                     reference,
                     successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
-                        DbError::Message(format!(
-                            "published Circle acknowledgement successor slot: {error}"
-                        ))
+                        DbError::context("published Circle acknowledgement successor slot", error)
                     })?,
                     store_cut: serde_json::from_str(&store_cut).map_err(|error| {
-                        DbError::Message(format!("published Circle acknowledgement cut: {error}"))
+                        DbError::context("published Circle acknowledgement cut", error)
                     })?,
                     control: serde_json::from_str(&control).map_err(|error| {
-                        DbError::Message(format!(
-                            "published Circle acknowledgement control: {error}"
-                        ))
+                        DbError::context("published Circle acknowledgement control", error)
                     })?,
                 }))
             })
@@ -288,7 +282,7 @@ impl StoreDatabase {
                     registration,
                 )
                     .map_err(|error| {
-                        DbError::Message(format!("stage Circle acknowledgement: {error}"))
+                        DbError::context("stage Circle acknowledgement", error)
                     })?;
                 if verified != ack {
                     return Err(DbError::Message(
@@ -297,10 +291,10 @@ impl StoreDatabase {
                     ));
                 }
                 let ack_ref = serde_json::to_string(&reference).map_err(|error| {
-                    DbError::Message(format!("serialize exact Circle acknowledgement ref: {error}"))
+                    DbError::context("serialize exact Circle acknowledgement ref", error)
                 })?;
                 let prepared = serde_json::to_string(&prepared).map_err(|error| {
-                    DbError::Message(format!("serialize prepared Circle acknowledgement: {error}"))
+                    DbError::context("serialize prepared Circle acknowledgement", error)
                 })?;
                 tx.execute(
                     "INSERT INTO outbound_circle_acks (circle_id, ack_ref, ack_bytes, prepared_object)

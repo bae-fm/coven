@@ -265,18 +265,24 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let live_audience =
                 crate::database::live_row_audience(conn, gates, binding.table(), binding.row_id())
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "resolve winning blob row audience for {:?}/{:?}: {error}",
-                            binding.table(),
-                            binding.row_id()
-                        ))
+                        DbError::context(
+                            format!(
+                                "resolve winning blob row audience for {:?}/{:?}",
+                                binding.table(),
+                                binding.row_id()
+                            ),
+                            error,
+                        )
                     })?;
             let live_audience = RemoteAudience::try_from(live_audience).map_err(|error| {
-                DbError::Message(format!(
-                    "winning blob row {:?}/{:?} is not remote: {error}",
-                    binding.table(),
-                    binding.row_id()
-                ))
+                DbError::context(
+                    format!(
+                        "winning blob row {:?}/{:?} is not remote",
+                        binding.table(),
+                        binding.row_id()
+                    ),
+                    error,
+                )
             })?;
             if live_audience != package_audience {
                 return Err(DbError::Message(format!(
@@ -318,7 +324,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 
             let audience_authority =
                 serde_json::to_string(package.audience()).map_err(|error| {
-                    DbError::Message(format!("serialize row blob audience authority: {error}"))
+                    DbError::context("serialize row blob audience authority", error)
                 })?;
             conn.execute(
                 "INSERT INTO row_blob_locators

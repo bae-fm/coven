@@ -346,7 +346,7 @@ impl StoreDatabase {
                 }
                 let unverified_commit: StoreBatchCommit =
                     serde_json::from_slice(&operation.commit_bytes).map_err(|error| {
-                        DbError::Message(format!("parse circle Store commit: {error}"))
+                        DbError::context("parse circle Store commit", error)
                     })?;
                 let root = required_store_root_authority_on(&tx)?;
                 let author = load_activated_registration_on(
@@ -368,7 +368,7 @@ impl StoreDatabase {
                         &author,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("verify circle Store commit: {error}"))
+                        DbError::context("verify circle Store commit", error)
                     })?;
                     if operation.commit_ref.object.slot().logical_key()
                         != commit_semantic_prefix(
@@ -428,7 +428,7 @@ impl StoreDatabase {
                         &operation.commit_ref,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("verify circle activation head: {error}"))
+                        DbError::context("verify circle activation head", error)
                     })?;
                     if parsed.commit != operation.commit_ref {
                         return Err(DbError::Message(

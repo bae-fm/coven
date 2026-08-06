@@ -628,7 +628,7 @@ impl StoreDatabase {
                 let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(connection, None)?,
                 )
-                .map_err(|error| DbError::Message(format!("snapshot coverage: {error}")))?;
+                .map_err(|error| DbError::context("snapshot coverage", error))?;
                 Ok((snapshot, coverage))
             })
             .await
@@ -665,7 +665,7 @@ impl StoreDatabase {
                 let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(connection, None)?,
                 )
-                .map_err(|error| DbError::Message(format!("snapshot coverage: {error}")))?;
+                .map_err(|error| DbError::context("snapshot coverage", error))?;
                 Ok((snapshot, coverage))
             })
             .await

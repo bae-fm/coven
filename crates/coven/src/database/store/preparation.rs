@@ -46,7 +46,7 @@ impl StoreDatabase {
             ).map_err(DbError::from)?;
             let registration_ref: StoreDeviceRegistrationRef =
                 serde_json::from_str(&registration_object).map_err(|error| {
-                    DbError::Message(format!("prepared write exact registration ref: {error}"))
+                    DbError::context("prepared write exact registration ref", error)
                 })?;
             if registration_ref != stage.commit.value.author_registration
                 || registration_ref != stage.head.value.author_registration
@@ -107,9 +107,7 @@ impl StoreDatabase {
                 stage.root.store_root_hash,
                 registration,
                 &commit_ref,
-            ).map_err(|error| DbError::Message(format!(
-                "verify prepared Store head: {error}"
-            )))?;
+            ).map_err(|error| DbError::context("verify prepared Store head", error))?;
             let (stored_changeset, stored_base, stored_status, stored_preparation): (
                 Vec<u8>,
                 String,
@@ -136,11 +134,11 @@ impl StoreDatabase {
             )?;
             let stored_base: StoreWriteBase =
                 serde_json::from_str(&stored_base).map_err(|error| {
-                    DbError::Message(format!("write {} base: {error}", stage.write_id))
+                    DbError::context(format!("write {} base", stage.write_id), error)
                 })?;
             let stored_dependencies = CommitFrontier::from_refs(stored_base.dependencies)
                 .map_err(|error| {
-                    DbError::Message(format!("stored write dependencies: {error}"))
+                    DbError::context("stored write dependencies", error)
                 })?;
             if stored_dependencies.commits() != stage.commit.value.merge_dependencies() {
                 return Err(DbError::Message(format!(
@@ -179,7 +177,7 @@ impl StoreDatabase {
             let mut object_ids = std::collections::BTreeSet::new();
             for remote in &stage.remote_objects {
                 remote.validate().map_err(|error| {
-                    DbError::Message(format!("prepared remote object: {error}"))
+                    DbError::context("prepared remote object", error)
                 })?;
                 if !object_ids.insert(remote.object_id()) {
                     return Err(DbError::Message(
@@ -205,7 +203,7 @@ impl StoreDatabase {
                 stage.commit.prepared.stored_bytes().to_vec(),
             )
             .map_err(|error| {
-                DbError::Message(format!("prepared candidate commit: {error}"))
+                DbError::context("prepared candidate commit", error)
             })?;
             persist_exact_remote_object_on(&tx, &commit_remote, "candidate commit")?;
             let expected_partition_count = usize::from(partitions.store.is_some())
@@ -304,7 +302,7 @@ impl StoreDatabase {
                 stage.head.prepared.stored_bytes().to_vec(),
                 commit_ref.clone(),
             )
-            .map_err(|error| DbError::Message(format!("prepared Store head: {error}")))?;
+            .map_err(|error| DbError::context("prepared Store head", error))?;
             persist_exact_remote_object_on(&tx, &head_remote, "Store head")?;
 
             let prepared = PreparedStoreWriteState::Publication {
@@ -321,10 +319,10 @@ impl StoreDatabase {
                 completion: stage.completion,
             };
             let prepared = serde_json::to_string(&prepared).map_err(|error| {
-                DbError::Message(format!("serialize prepared Store write: {error}"))
+                DbError::context("serialize prepared Store write", error)
             })?;
             let status = serde_json::to_string(&WriteStatus::Publishing)
-                .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
+                .map_err(|error| DbError::context("serialize write status", error))?;
             let updated = tx
                 .execute(
                     "UPDATE store_writes SET prepared = ?2, status = ?3
@@ -362,7 +360,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("Merge abandonment status: {error}"))
+                    DbError::context("Merge abandonment status", error)
                 })?;
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(format!(
@@ -372,7 +370,7 @@ impl StoreDatabase {
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("prepared Merge candidate: {error}"))
+                        DbError::context("prepared Merge candidate", error)
                     })?;
                 let PreparedStoreWriteState::Publication {
                     commit: candidate_commit,
@@ -449,14 +447,14 @@ impl StoreDatabase {
                     &authority_ref,
                 )
                 .map_err(|error| {
-                    DbError::Message(format!("verify Merge abandonment head: {error}"))
+                    DbError::context("verify Merge abandonment head", error)
                 })?;
                 let authority_commit = RemoteObjectRecord::candidate_commit(
                     authority_ref.clone(),
                     stage.commit.value.to_bytes(),
                     stage.commit.prepared.stored_bytes().to_vec(),
                 )
-                .map_err(|error| DbError::Message(format!("Merge abandonment commit: {error}")))?;
+                .map_err(|error| DbError::context("Merge abandonment commit", error))?;
                 persist_exact_remote_object_on(&tx, &authority_commit, "Merge abandonment commit")?;
                 let authority_head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
                     head_hash: stage.head.value.head_hash(),
@@ -468,7 +466,7 @@ impl StoreDatabase {
                     stage.head.prepared.stored_bytes().to_vec(),
                     authority_ref,
                 )
-                .map_err(|error| DbError::Message(format!("Merge abandonment head: {error}")))?;
+                .map_err(|error| DbError::context("Merge abandonment head", error))?;
                 persist_exact_remote_object_on(&tx, &authority_head, "Merge abandonment head")?;
                 let replacement = PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
@@ -488,11 +486,11 @@ impl StoreDatabase {
                     completion,
                 };
                 let replacement = serde_json::to_string(&replacement).map_err(|error| {
-                    DbError::Message(format!("serialize Merge abandonment: {error}"))
+                    DbError::context("serialize Merge abandonment", error)
                 })?;
                 let publishing =
                     serde_json::to_string(&WriteStatus::Publishing).map_err(|error| {
-                        DbError::Message(format!("serialize Merge abandonment status: {error}"))
+                        DbError::context("serialize Merge abandonment status", error)
                     })?;
                 let updated = tx
                     .execute(

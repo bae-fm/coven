@@ -293,13 +293,13 @@ impl StoreDatabase {
                     store_transaction
                         .complete_membership_journal(completion, &reference)
                         .map_err(|error| {
-                            DbError::Message(format!("complete exact membership journal: {error}"))
+                            DbError::context("complete exact membership journal", error)
                         })?;
                 }
                 store_transaction
                     .record_verified_merge_materialization(materialization)
                     .map_err(|error| {
-                        DbError::Message(format!("record exact Merge materialization: {error}"))
+                        DbError::context("record exact Merge materialization", error)
                     })?;
                 tx.commit().map_err(DbError::from)
             })
@@ -408,9 +408,7 @@ impl StoreDatabase {
                     continue;
                 }
                 let encoded = serde_json::to_string(&prepared.reference).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize device join bootstrap commit ref: {error}"
-                    ))
+                    DbError::context("serialize device join bootstrap commit ref", error)
                 })?;
                 let has_snapshot_state = tx
                     .query_row(

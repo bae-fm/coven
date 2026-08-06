@@ -6,7 +6,7 @@ use rusqlite::types::ValueRef;
 use crate::protocol::synced_schema::{RowIdentityError, SyncedTable};
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ChangesetIdentityError {
+pub enum ChangesetIdentityError {
     #[error("changeset row identity validation failed: {0}")]
     Parse(String),
     #[error("changeset contains undeclared table {0:?}")]

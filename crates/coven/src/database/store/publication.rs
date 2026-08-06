@@ -65,10 +65,10 @@ impl StoreDatabase {
                     .map_err(DbError::from)?;
                 let current_status: WriteStatus =
                     serde_json::from_str(&raw_status).map_err(|error| {
-                        DbError::Message(format!("prepared Store write status: {error}"))
+                        DbError::context("prepared Store write status", error)
                     })?;
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
+                    .map_err(|error| DbError::context("prepared Store write", error))?;
                 let exclusion_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
                 if author_exclusion_activation_for_candidate_on(
                     &tx,
@@ -180,7 +180,7 @@ impl StoreDatabase {
                         &accepted,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("verify accepted Merge abandonment head: {error}"))
+                        DbError::context("verify accepted Merge abandonment head", error)
                     })?;
                     for object in [
                         authority_commit.prepared().reference(),
@@ -190,9 +190,7 @@ impl StoreDatabase {
                         let remote = load_remote_object_on(&tx, object_id)?
                             .into_activated(&accepted)
                             .map_err(|error| {
-                                DbError::Message(format!(
-                                    "activate Merge abandonment object {object_id}: {error}"
-                                ))
+                                DbError::context(format!("activate Merge abandonment object {object_id}"), error)
                             })?;
                         update_remote_object_on(&tx, object_id, &remote)?;
                     }
@@ -232,9 +230,7 @@ impl StoreDatabase {
                     };
                     let completed_preparation = serde_json::to_string(&completed_preparation)
                         .map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize accepted Merge abandonment: {error}"
-                            ))
+                            DbError::context("serialize accepted Merge abandonment", error)
                         })?;
                     let updated = tx
                         .execute(
@@ -280,7 +276,7 @@ impl StoreDatabase {
                 };
                 let root = required_store_root_authority_on(&tx)?;
                 let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
-                    .map_err(|error| DbError::Message(format!("prepared Store commit: {error}")))?;
+                    .map_err(|error| DbError::context("prepared Store commit", error))?;
                 let registration =
                     load_activated_registration_on(&tx, &root, &unverified.author_registration)?;
                 let expected_stream =
@@ -302,14 +298,14 @@ impl StoreDatabase {
                     &accepted,
                     &registration,
                 )
-                .map_err(|error| DbError::Message(format!("outbound commit: {error}")))?;
+                .map_err(|error| DbError::context("outbound commit", error))?;
                 let head_value = StoreDeviceHead::parse_at(
                     head.semantic_bytes(),
                     root.store_root_hash,
                     &registration,
                     &accepted,
                 )
-                .map_err(|error| DbError::Message(format!("outbound Store head: {error}")))?;
+                .map_err(|error| DbError::context("outbound Store head", error))?;
                 if commit_value.write_id.as_str() != stored_write_id {
                     return Err(DbError::Message(
                         "prepared write id differs from signed commit".to_string(),
@@ -362,12 +358,10 @@ impl StoreDatabase {
                     let remote = load_remote_object_on(&tx, object_id)?
                         .into_activated(commit_ref)
                         .map_err(|error| {
-                            DbError::Message(format!(
-                                "activate remote object {object_id}: {error}"
-                            ))
+                            DbError::context(format!("activate remote object {object_id}"), error)
                         })?;
                     let state = serde_json::to_string(&remote).map_err(|error| {
-                        DbError::Message(format!("serialize activated remote object: {error}"))
+                        DbError::context("serialize activated remote object", error)
                     })?;
                     let updated = tx
                         .execute(
@@ -578,18 +572,15 @@ impl StoreDatabase {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("Merge candidate status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("Merge candidate status", error))?;
                 if !matches!(status, WriteStatus::Publishing) {
                     return Err(DbError::Message(format!(
                         "Merge candidate {write_id} is not publishing"
                     )));
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| {
-                        DbError::Message(format!("prepared Merge candidate: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("prepared Merge candidate", error))?;
                 let prepared_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
                 let publication = parse_prepared_merge_publication_on(&tx, &prepared)?;
                 if winner_head.object.slot() != publication.head_prepared.reference().slot()
@@ -650,7 +641,7 @@ impl StoreDatabase {
                     };
                     let lost_preparation =
                         serde_json::to_string(&lost_preparation).map_err(|error| {
-                            DbError::Message(format!("serialize lost Merge abandonment: {error}"))
+                            DbError::context("serialize lost Merge abandonment", error)
                         })?;
                     let updated = tx
                         .execute(

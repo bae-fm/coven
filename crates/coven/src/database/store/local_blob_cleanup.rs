@@ -52,7 +52,7 @@ pub(super) fn record_obsolete_copy_intents_on(
                         .expect("one exact locator hash")
                         .parse::<crate::protocol::store_commit::ObjectHash>()
                         .map_err(|error| {
-                            DbError::Message(format!("parse local cleanup locator hash: {error}"))
+                            DbError::context("parse local cleanup locator hash", error)
                         })?;
                     Some(locator_hash)
                 }

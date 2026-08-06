@@ -226,7 +226,7 @@ impl RetainedReplaySnapshotAuthority {
             &self.snapshot,
             author.value(),
         )
-        .map_err(|error| DbError::Message(format!("retained snapshot metadata: {error}")))?;
+        .map_err(|error| DbError::context("retained snapshot metadata", error))?;
         if self.metadata.store_root_hash != self.store_root.store_root_hash
             || self.metadata.generation != self.snapshot.generation
             || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
@@ -407,9 +407,8 @@ impl RetainedReplayBaseline {
     }
 
     pub(crate) fn canonical_authority_bytes(&self) -> Result<Vec<u8>, DbError> {
-        serde_json::to_vec(&self.authority).map_err(|error| {
-            DbError::Message(format!("serialize retained replay authority: {error}"))
-        })
+        serde_json::to_vec(&self.authority)
+            .map_err(|error| DbError::context("serialize retained replay authority", error))
     }
 
     pub(crate) fn open_image(&self) -> Result<Connection, DbError> {
@@ -498,7 +497,7 @@ impl RetainedReplayBaseline {
                 for (stream_id, sequence, encoded) in rows {
                     let reference: StoreBatchCommitRef =
                         serde_json::from_str(&encoded).map_err(|error| {
-                            DbError::Message(format!("snapshot replay coverage reference: {error}"))
+                            DbError::context("snapshot replay coverage reference", error)
                         })?;
                     if sequence < 0
                         || u64::try_from(sequence).ok() != Some(reference.coord.sequence())
@@ -561,7 +560,7 @@ impl RetainedReplayBaseline {
 
 fn open_image(image: &[u8]) -> Result<Connection, DbError> {
     crate::database::open_database_image(image)
-        .map_err(|error| DbError::Message(format!("open retained replay database image: {error}")))
+        .map_err(|error| DbError::context("open retained replay database image", error))
 }
 
 /// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose
@@ -717,7 +716,7 @@ fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<Strin
         )
         .map_err(DbError::from)?;
     let root = crate::protocol::store_commit::StoreProtocolRoot::parse(&bytes)
-        .map_err(|error| DbError::Message(format!("retained replay Store root: {error}")))?;
+        .map_err(|error| DbError::context("retained replay Store root", error))?;
     let stream = crate::protocol::membership::derive_founder_stream_id(
         &root.descriptor.store_root_id().to_string(),
         &root.descriptor.founder_pubkey,

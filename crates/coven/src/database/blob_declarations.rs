@@ -39,7 +39,7 @@ use crate::protocol::synced_schema::SyncedTable;
 
 /// Why building the blob-declaration model failed.
 #[derive(Debug)]
-pub(crate) enum BlobDeclError {
+pub enum BlobDeclError {
     /// A declared blob column is absent from the table's live schema.
     MissingColumn { table: String, column: String },
     /// A schema read (`PRAGMA table_info`) failed.

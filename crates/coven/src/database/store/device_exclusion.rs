@@ -26,9 +26,12 @@ pub(super) fn parse_store_device_exclusion_operation(
 ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
     let operation: DurableStoreDeviceExclusionOperation =
         serde_json::from_str(raw).map_err(|error| {
-            DbError::Message(format!(
-                "Store-device exclusion operation {operation_id} has invalid durable state: {error}"
-            ))
+            DbError::context(
+                format!(
+                    "Store-device exclusion operation {operation_id} has invalid durable state"
+                ),
+                error,
+            )
         })?;
     operation
         .validate()
@@ -68,9 +71,9 @@ pub(super) fn load_active_store_device_exclusion_on(
     .optional()
     .map_err(DbError::from)?
     .map(|(raw_id, raw)| {
-        let operation_id = raw_id.parse::<ObjectHash>().map_err(|error| {
-            DbError::Message(format!("Store-device exclusion operation id: {error}"))
-        })?;
+        let operation_id = raw_id
+            .parse::<ObjectHash>()
+            .map_err(|error| DbError::context("Store-device exclusion operation id", error))?;
         let operation = parse_store_device_exclusion_operation(operation_id, &raw)?;
         if operation.is_completed() {
             return Err(DbError::Message(
@@ -95,11 +98,8 @@ pub(super) fn insert_store_device_exclusion_on(
             "Store-device exclusion active marker differs from its closed state".to_string(),
         ));
     }
-    let encoded = serde_json::to_string(operation).map_err(|error| {
-        DbError::Message(format!(
-            "serialize Store-device exclusion operation: {error}"
-        ))
-    })?;
+    let encoded = serde_json::to_string(operation)
+        .map_err(|error| DbError::context("serialize Store-device exclusion operation", error))?;
     conn.execute(
         "INSERT INTO outbound_store_device_exclusion (operation_id, active_key, state)
          VALUES (?1, ?2, ?3)",
@@ -123,11 +123,8 @@ pub(super) fn require_store_device_exclusion_transition_on(
             "invalid Store-device exclusion journal transition".to_string(),
         ));
     }
-    let expected_state = serde_json::to_string(expected).map_err(|error| {
-        DbError::Message(format!(
-            "serialize expected Store-device exclusion: {error}"
-        ))
-    })?;
+    let expected_state = serde_json::to_string(expected)
+        .map_err(|error| DbError::context("serialize expected Store-device exclusion", error))?;
     let current = conn
         .query_row(
             "SELECT state FROM outbound_store_device_exclusion WHERE operation_id = ?1",
@@ -159,14 +156,10 @@ pub(super) fn update_store_device_exclusion_on(
             "Store-device exclusion active marker differs from its next state".to_string(),
         ));
     }
-    let expected_state = serde_json::to_string(expected).map_err(|error| {
-        DbError::Message(format!(
-            "serialize expected Store-device exclusion: {error}"
-        ))
-    })?;
-    let next_state = serde_json::to_string(next).map_err(|error| {
-        DbError::Message(format!("serialize next Store-device exclusion: {error}"))
-    })?;
+    let expected_state = serde_json::to_string(expected)
+        .map_err(|error| DbError::context("serialize expected Store-device exclusion", error))?;
+    let next_state = serde_json::to_string(next)
+        .map_err(|error| DbError::context("serialize next Store-device exclusion", error))?;
     let updated = conn
         .execute(
             "UPDATE outbound_store_device_exclusion
@@ -538,9 +531,7 @@ impl StoreDatabase {
             authority
                 .add_retained_authority_candidate(replacement_candidate.reference.clone())
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "attach replacement exclusion candidate authority: {error}"
-                    ))
+                    DbError::context("attach replacement exclusion candidate authority", error)
                 })?;
             update_remote_object_on(&tx, authority_id, &authority)?;
             if begin_remote_candidate_nonactivation_on(&tx, authority_id, nonactivation.clone())?
@@ -853,7 +844,7 @@ impl StoreDatabase {
                 .map(|row| {
                     let (raw_id, raw) = row.map_err(DbError::from)?;
                     let operation_id = raw_id.parse::<ObjectHash>().map_err(|error| {
-                        DbError::Message(format!("Store-device exclusion operation id: {error}"))
+                        DbError::context("Store-device exclusion operation id", error)
                     })?;
                     parse_store_device_exclusion_operation(operation_id, &raw)
                 })

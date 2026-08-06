@@ -329,7 +329,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let base = serde_json::json!({ "dependencies": {} }).to_string();
         let status = serde_json::to_string(&status)
-            .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
+            .map_err(|error| DbError::context("serialize write status", error))?;
         self.connection
             .call(move |connection| {
                 connection
@@ -421,9 +421,10 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let sequence = u64::try_from(sequence).map_err(|error| {
-                    DbError::Message(format!(
-                        "materialized commit sequence {sequence} is invalid: {error}"
-                    ))
+                    DbError::context(
+                        format!("materialized commit sequence {sequence} is invalid"),
+                        error,
+                    )
                 })?;
                 Ok((device_id, sequence))
             })
@@ -745,7 +746,7 @@ impl StoreDatabase {
         exclusion: &StoreDeviceExclusionRef,
     ) -> Result<(String, String), DbError> {
         let exclusion = serde_json::to_string(exclusion)
-            .map_err(|error| DbError::Message(format!("serialize exclusion ref: {error}")))?;
+            .map_err(|error| DbError::context("serialize exclusion ref", error))?;
         self.connection
             .call(move |connection| {
                 connection
@@ -772,7 +773,7 @@ impl StoreDatabase {
         self.connection
             .call(move |connection| {
                 let exact = serde_json::to_string(&exclusion).map_err(|error| {
-                    DbError::Message(format!("serialize exact exclusion reference: {error}"))
+                    DbError::context("serialize exact exclusion reference", error)
                 })?;
                 let affected = match tamper {
                     AuthorExclusionLocatorTamper::Missing => connection.execute(
@@ -784,9 +785,7 @@ impl StoreDatabase {
                         let mut wrong = exclusion;
                         wrong.outcome_hash = ObjectHash::digest(b"wrong exclusion reference");
                         let wrong = serde_json::to_string(&wrong).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize wrong exclusion reference: {error}"
-                            ))
+                            DbError::context("serialize wrong exclusion reference", error)
                         })?;
                         connection.execute(
                             "UPDATE store_author_exclusion_activations
@@ -808,7 +807,7 @@ impl StoreDatabase {
                             crate::protocol::causal_grants::AuthorStreamId,
                             StoreBatchCommitRef,
                         > = serde_json::from_str(&cut).map_err(|error| {
-                            DbError::Message(format!("parse exclusion accepted cut: {error}"))
+                            DbError::context("parse exclusion accepted cut", error)
                         })?;
                         cut.insert(
                             crate::protocol::causal_grants::AuthorStreamId::from_digest(
@@ -817,9 +816,7 @@ impl StoreDatabase {
                             candidate.clone(),
                         );
                         let wrong = serde_json::to_string(&cut).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize wrong exclusion accepted cut: {error}"
-                            ))
+                            DbError::context("serialize wrong exclusion accepted cut", error)
                         })?;
                         connection.execute(
                             "UPDATE store_author_exclusion_activations
@@ -829,9 +826,7 @@ impl StoreDatabase {
                     }
                     AuthorExclusionLocatorTamper::ActivationCommit => {
                         let wrong = serde_json::to_string(&candidate).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize wrong exclusion activation commit: {error}"
-                            ))
+                            DbError::context("serialize wrong exclusion activation commit", error)
                         })?;
                         connection.execute(
                             "UPDATE store_author_exclusion_activations
@@ -851,15 +846,11 @@ impl StoreDatabase {
                             .map_err(DbError::from)?;
                         let mut head: StoreDeviceHeadRef =
                             serde_json::from_str(&head).map_err(|error| {
-                                DbError::Message(format!(
-                                    "parse exclusion activation head: {error}"
-                                ))
+                                DbError::context("parse exclusion activation head", error)
                             })?;
                         head.head_hash = ObjectHash::digest(b"wrong exclusion activation head");
                         let wrong = serde_json::to_string(&head).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize wrong exclusion activation head: {error}"
-                            ))
+                            DbError::context("serialize wrong exclusion activation head", error)
                         })?;
                         connection.execute(
                             "UPDATE store_author_exclusion_activations

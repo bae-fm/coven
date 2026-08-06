@@ -40,9 +40,9 @@ impl StoreDatabase {
                 .optional()
                 .map_err(DbError::from)?
                 .map(|(hash, plan_bytes, progress_bytes)| {
-                    let intent_hash: ObjectHash = hash.parse().map_err(|error| {
-                        DbError::Message(format!("membership intent hash: {error}"))
-                    })?;
+                    let intent_hash: ObjectHash = hash
+                        .parse()
+                        .map_err(|error| DbError::context("membership intent hash", error))?;
                     if ObjectHash::digest(&plan_bytes) != intent_hash {
                         return Err(DbError::Message(
                             "membership intent hash differs from its exact plan bytes".to_string(),
@@ -242,7 +242,7 @@ impl StoreDatabase {
         crate::database::get_protocol_state_on(connection, key)?
             .map(|encoded| {
                 let gate = serde_json::from_str::<crate::protocol::objects::RotationGate>(&encoded)
-                    .map_err(|error| DbError::Message(format!("parse rotation gate: {error}")))?;
+                    .map_err(|error| DbError::context("parse rotation gate", error))?;
                 Ok((encoded, gate))
             })
             .transpose()
@@ -258,9 +258,7 @@ impl StoreDatabase {
         let changed = match (expected, next) {
             (Some((expected, _)), Some(next)) => {
                 let encoded = serde_json::to_string(&next).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize rotation gate during {operation}: {error}"
-                    ))
+                    DbError::context(format!("serialize rotation gate during {operation}"), error)
                 })?;
                 tx.execute(
                     "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
@@ -276,9 +274,7 @@ impl StoreDatabase {
                 .map_err(DbError::from)?,
             (None, Some(next)) => {
                 let encoded = serde_json::to_string(&next).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize rotation gate during {operation}: {error}"
-                    ))
+                    DbError::context(format!("serialize rotation gate during {operation}"), error)
                 })?;
                 tx.execute(
                     "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
@@ -460,9 +456,7 @@ impl StoreDatabase {
             ));
         }
         replacement.mark_uploaded_verified().map_err(|error| {
-            DbError::Message(format!(
-                "mark adopted Merge membership head uploaded: {error}"
-            ))
+            DbError::context("mark adopted Merge membership head uploaded", error)
         })?;
         let replacement_hash = ObjectHash::digest(&plan_bytes);
         self.connection
@@ -652,9 +646,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?
                     .map(|encoded| {
                         serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
-                            DbError::Message(format!(
-                                "parse nonactivating membership authority {object_id}: {error}"
-                            ))
+                            DbError::context(format!("parse nonactivating membership authority {object_id}"), error)
                         })
                     })
                     .transpose()?;
@@ -697,9 +689,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?
                     .map(|encoded| {
                         serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
-                            DbError::Message(format!(
-                                "parse terminal membership authority {object_id}: {error}"
-                            ))
+                            DbError::context(format!("parse terminal membership authority {object_id}"), error)
                         })
                     })
                     .transpose()?
@@ -875,20 +865,23 @@ impl StoreDatabase {
             }
             let remote = load_remote_object_on(tx, object_id)?;
             let activated = remote.clone().into_activated(candidate).map_err(|error| {
-                DbError::Message(format!(
-                    "validate activated membership object {object_id}: {error}"
-                ))
+                DbError::context(
+                    format!("validate activated membership object {object_id}"),
+                    error,
+                )
             })?;
             if activated != remote {
                 let expected = serde_json::to_string(&remote).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize pending membership object {object_id}: {error}"
-                    ))
+                    DbError::context(
+                        format!("serialize pending membership object {object_id}"),
+                        error,
+                    )
                 })?;
                 let replacement = serde_json::to_string(&activated).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize activated membership object {object_id}: {error}"
-                    ))
+                    DbError::context(
+                        format!("serialize activated membership object {object_id}"),
+                        error,
+                    )
                 })?;
                 if tx
                     .execute(

@@ -166,7 +166,7 @@ pub(crate) fn parse_prepared_merge_candidate_parts_on(
 ) -> Result<PreparedMergeCandidate, DbError> {
     let root = required_store_root_authority_on(conn)?;
     let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
-        .map_err(|error| DbError::Message(format!("signed Merge candidate: {error}")))?;
+        .map_err(|error| DbError::context("signed Merge candidate", error))?;
     let registration =
         load_activated_registration_on(conn, &root, &unverified.author_registration)?;
     let coord = StoreCommitCoord {
@@ -184,7 +184,7 @@ pub(crate) fn parse_prepared_merge_candidate_parts_on(
         commit.prepared().reference().clone(),
         &registration,
     )
-    .map_err(|error| DbError::Message(format!("verify Merge candidate: {error}")))?;
+    .map_err(|error| DbError::context("verify Merge candidate", error))?;
     let reference = value.reference().clone();
     let head_value = StoreDeviceHead::parse_at(
         head.semantic_bytes(),
@@ -192,7 +192,7 @@ pub(crate) fn parse_prepared_merge_candidate_parts_on(
         &registration,
         &reference,
     )
-    .map_err(|error| DbError::Message(format!("verify Merge candidate head: {error}")))?;
+    .map_err(|error| DbError::context("verify Merge candidate head", error))?;
     Ok(PreparedMergeCandidate {
         commit: value,
         reference,
@@ -320,9 +320,8 @@ pub(crate) fn load_author_exclusion_activation_locator_on(
     root: &crate::protocol::store_commit::StoreRootRef,
     exclusion: &crate::protocol::store_commit::StoreDeviceExclusionRef,
 ) -> Result<AuthorExclusionActivationLocator, DbError> {
-    let exclusion_json = serde_json::to_string(exclusion).map_err(|error| {
-        DbError::Message(format!("serialize author exclusion reference: {error}"))
-    })?;
+    let exclusion_json = serde_json::to_string(exclusion)
+        .map_err(|error| DbError::context("serialize author exclusion reference", error))?;
     let stored: Option<(String, String, String)> = conn
         .query_row(
             "SELECT accepted_cut, activation_commit, activation_head
@@ -338,15 +337,12 @@ pub(crate) fn load_author_exclusion_activation_locator_on(
             "applied author exclusion has no exact activation locator".to_string(),
         ));
     };
-    let accepted_cut = serde_json::from_str(&accepted_cut).map_err(|error| {
-        DbError::Message(format!("parse author exclusion accepted cut: {error}"))
-    })?;
-    let activation_commit = serde_json::from_str(&activation_commit).map_err(|error| {
-        DbError::Message(format!("parse author exclusion activation commit: {error}"))
-    })?;
-    let activation_head = serde_json::from_str(&activation_head).map_err(|error| {
-        DbError::Message(format!("parse author exclusion activation head: {error}"))
-    })?;
+    let accepted_cut = serde_json::from_str(&accepted_cut)
+        .map_err(|error| DbError::context("parse author exclusion accepted cut", error))?;
+    let activation_commit = serde_json::from_str(&activation_commit)
+        .map_err(|error| DbError::context("parse author exclusion activation commit", error))?;
+    let activation_head = serde_json::from_str(&activation_head)
+        .map_err(|error| DbError::context("parse author exclusion activation head", error))?;
     let locator = AuthorExclusionActivationLocator::verified(
         exclusion.clone(),
         accepted_cut,
@@ -438,7 +434,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
             let commit: StoreBatchCommit = serde_json::from_slice(
                 &durable.candidate().canonical_signed_bytes,
             )
-            .map_err(|error| DbError::Message(format!("terminal candidate commit: {error}")))?;
+            .map_err(|error| DbError::context("terminal candidate commit", error))?;
             let reference = durable
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
@@ -620,9 +616,9 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
             .map(|object| remote_object_id(object).to_string()),
     );
     for encoded in object_ids {
-        let object_id: ObjectHash = encoded.parse().map_err(|error| {
-            DbError::Message(format!("Merge conflict remote object id: {error}"))
-        })?;
+        let object_id: ObjectHash = encoded
+            .parse()
+            .map_err(|error| DbError::context("Merge conflict remote object id", error))?;
         let _cleanup_target =
             begin_remote_candidate_nonactivation_on(conn, object_id, nonactivation.clone())?;
     }
@@ -756,9 +752,9 @@ pub(super) fn merge_candidate_cleanup_targets_on(
                 .map(|object| remote_object_id(object).to_string()),
         );
         for encoded in encoded {
-            let object_id: ObjectHash = encoded.parse().map_err(|error| {
-                DbError::Message(format!("Merge cleanup remote object id: {error}"))
-            })?;
+            let object_id: ObjectHash = encoded
+                .parse()
+                .map_err(|error| DbError::context("Merge cleanup remote object id", error))?;
             let remote = load_remote_object_on(conn, object_id)?;
             if let Some(object) = remote.cleanup_target() {
                 cleanup.insert(
@@ -769,7 +765,7 @@ pub(super) fn merge_candidate_cleanup_targets_on(
                 );
             } else if !remote
                 .candidate_cleanup_complete(&candidate.reference)
-                .map_err(|error| DbError::Message(format!("Merge cleanup {object_id}: {error}")))?
+                .map_err(|error| DbError::context(format!("Merge cleanup {object_id}"), error))?
             {
                 return Err(DbError::Message(format!(
                     "Merge candidate object {object_id} has no cleanup transition"
@@ -810,7 +806,7 @@ pub(super) fn merge_candidate_cleanup_targets_on(
         });
     } else if !commit_remote
         .candidate_cleanup_complete(&candidate.reference)
-        .map_err(|error| DbError::Message(format!("Merge cleanup commit: {error}")))?
+        .map_err(|error| DbError::context("Merge cleanup commit", error))?
     {
         return Err(DbError::Message(
             "Merge candidate commit cleanup is incomplete".to_string(),
@@ -840,9 +836,10 @@ pub(super) fn finish_merge_retraction_cleanup_on(
         if !remote
             .candidate_cleanup_complete(&candidate.reference)
             .map_err(|error| {
-                DbError::Message(format!(
-                    "finish Merge retraction cleanup for {object_id}: {error}"
-                ))
+                DbError::context(
+                    format!("finish Merge retraction cleanup for {object_id}"),
+                    error,
+                )
             })?
         {
             return Err(DbError::Message(format!(
@@ -888,9 +885,7 @@ pub(super) fn finish_merge_retraction_cleanup_on(
                 stream_id.to_string(),
                 Database::sequence_to_sqlite(&stream_id.to_string(), *sequence)?,
                 serde_json::to_string(&candidate.reference).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize completed Merge retraction cleanup ref: {error}"
-                    ))
+                    DbError::context("serialize completed Merge retraction cleanup ref", error)
                 })?,
             ],
         )
@@ -926,12 +921,12 @@ pub(crate) fn load_merge_candidate_head_cleanup_on(
         (true, false) => load_remote_object_on(conn, object_id)?
             .candidate_cleanup_complete(candidate)
             .map(|complete| MergeCandidateHeadCleanup::Remote { complete })
-            .map_err(|error| DbError::Message(format!("Merge cleanup head: {error}"))),
+            .map_err(|error| DbError::context("Merge cleanup head", error)),
         (false, true) => {
             let inert = load_protocol_inert_object_on(conn, object_id)?;
             if !inert
                 .is_terminal_head_for(candidate, head)
-                .map_err(|error| DbError::Message(format!("Merge cleanup inert head: {error}")))?
+                .map_err(|error| DbError::context("Merge cleanup inert head", error))?
             {
                 return Err(DbError::Message(format!(
                     "protocol-inert Merge head {object_id} does not prove this excluded candidate"
@@ -961,9 +956,10 @@ pub(super) fn remove_cleaned_merge_authority_on(
         if !remote
             .candidate_cleanup_complete(&authority.reference)
             .map_err(|error| {
-                DbError::Message(format!(
-                    "validate abandoned authority cleanup for {object_id}: {error}"
-                ))
+                DbError::context(
+                    format!("validate abandoned authority cleanup for {object_id}"),
+                    error,
+                )
             })?
         {
             return Err(DbError::Message(
@@ -994,9 +990,10 @@ pub(super) fn remove_cleaned_author_excluded_merge_authority_on(
     if !commit
         .candidate_cleanup_complete(&authority.reference)
         .map_err(|error| {
-            DbError::Message(format!(
-                "validate excluded abandonment commit cleanup for {commit_object_id}: {error}"
-            ))
+            DbError::context(
+                format!("validate excluded abandonment commit cleanup for {commit_object_id}"),
+                error,
+            )
         })?
     {
         return Err(DbError::Message(

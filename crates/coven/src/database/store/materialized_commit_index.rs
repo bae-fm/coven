@@ -160,9 +160,8 @@ impl StoreDatabase {
                     let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
                     frontier.insert(device_id.clone(), reference);
                 }
-                CommitFrontier::from_refs(frontier).map_err(|error| {
-                    DbError::Message(format!("snapshot coverage frontier: {error}"))
-                })
+                CommitFrontier::from_refs(frontier)
+                    .map_err(|error| DbError::context("snapshot coverage frontier", error))
             })
             .await
     }
@@ -243,7 +242,7 @@ impl StoreDatabase {
         encoded: &str,
     ) -> Result<StoreBatchCommitRef, DbError> {
         let reference: StoreBatchCommitRef = serde_json::from_str(encoded)
-            .map_err(|error| DbError::Message(format!("stored exact Store commit ref: {error}")))?;
+            .map_err(|error| DbError::context("stored exact Store commit ref", error))?;
         let coordinate_matches = reference.coord.stream_id.to_string() == stream_id
             && reference.coord.sequence == sequence;
         if !coordinate_matches {
@@ -274,9 +273,7 @@ impl StoreDatabase {
         })?;
         input_hash.parse::<crate::protocol::store_commit::ObjectHash>().map_err(
             |error| {
-                DbError::Message(format!(
-                    "materialized coordinate {stream_id}/{sequence} retained input hash is invalid: {error}"
-                ))
+                DbError::context(format!("materialized coordinate {stream_id}/{sequence} retained input hash is invalid"), error)
             },
         )?;
         Ok(reference)
@@ -426,42 +423,38 @@ impl StoreDatabase {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading activated devices".to_string())
         })?;
-        self.connection.call(move |conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT device_id, registration_hash, registration_bytes,
+        self.connection
+            .call(move |conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT device_id, registration_hash, registration_bytes,
                             registration_object
                      FROM store_device_registration_activations ORDER BY device_id",
-                )
-                .map_err(DbError::from)?;
+                    )
+                    .map_err(DbError::from)?;
                 let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(DbError::from)?;
-            rows
-                .map(|row| {
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                rows.map(|row| {
                     let (device_id, registration_hash, bytes, object) =
                         row.map_err(DbError::from)?;
-                    let device_id = device_id.parse().map_err(|error| {
-                        DbError::Message(format!("activated Store device id: {error}"))
-                    })?;
+                    let device_id = device_id
+                        .parse()
+                        .map_err(|error| DbError::context("activated Store device id", error))?;
                     let registration_hash = registration_hash.parse().map_err(|error| {
-                        DbError::Message(format!(
-                            "activated Store device registration hash: {error}"
-                        ))
+                        DbError::context("activated Store device registration hash", error)
                     })?;
-                    let reference: StoreDeviceRegistrationRef =
-                        serde_json::from_str(&object).map_err(|error| {
-                        DbError::Message(format!(
-                            "activated Store device exact reference: {error}"
-                        ))
-                    })?;
+                    let reference: StoreDeviceRegistrationRef = serde_json::from_str(&object)
+                        .map_err(|error| {
+                            DbError::context("activated Store device exact reference", error)
+                        })?;
                     if reference.device_id != device_id
                         || reference.registration_hash != registration_hash
                     {
@@ -472,23 +465,27 @@ impl StoreDatabase {
                     }
                     let registration = StoreDeviceRegistration::parse_at(&bytes, &root, device_id)
                         .map_err(|error| {
-                            DbError::Message(format!(
-                                "activated Store device registration {device_id}: {error}"
-                            ))
+                            DbError::context(
+                                format!("activated Store device registration {device_id}"),
+                                error,
+                            )
                         })?;
                     crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                         reference,
                         registration,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "activated Store device registration {device_id} exact reference: {error}"
-                        ))
+                        DbError::context(
+                            format!(
+                                "activated Store device registration {device_id} exact reference"
+                            ),
+                            error,
+                        )
                     })
                 })
                 .collect::<Result<Vec<_>, DbError>>()
-        })
-        .await
+            })
+            .await
     }
 
     pub(crate) async fn activated_store_device_registration(
@@ -548,7 +545,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let authority = serde_json::from_str(&authority).map_err(|error| {
-                    DbError::Message(format!("activated Store registration authority: {error}"))
+                    DbError::context("activated Store registration authority", error)
                 })?;
                 let registration =
                     ReferencedStoreDeviceRegistration::verified(reference, registration)
@@ -581,9 +578,7 @@ impl StoreDatabase {
                     return Ok(None);
                 };
                 let reference: StoreDeviceRegistrationRef = serde_json::from_str(&reference)
-                    .map_err(|error| {
-                        DbError::Message(format!("activated Store registration ref: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("activated Store registration ref", error))?;
                 if reference.device_id != device_id {
                     return Err(DbError::Message(
                         "activated Store registration row names another device".to_string(),
@@ -591,7 +586,7 @@ impl StoreDatabase {
                 }
                 let registration = load_activated_registration_on(conn, &root, &reference)?;
                 let authority = serde_json::from_str(&authority).map_err(|error| {
-                    DbError::Message(format!("activated Store registration authority: {error}"))
+                    DbError::context("activated Store registration authority", error)
                 })?;
                 let registration =
                     ReferencedStoreDeviceRegistration::verified(reference, registration)
@@ -695,12 +690,10 @@ pub(super) fn record_activated_store_device_registrations_on(
             )));
         }
         let registration_bytes = registration.to_bytes();
-        let registration_object = serde_json::to_string(&signed.registration).map_err(|error| {
-            DbError::Message(format!("serialize Store registration exact ref: {error}"))
-        })?;
-        let activation_authority = serde_json::to_string(authority).map_err(|error| {
-            DbError::Message(format!("serialize Store registration authority: {error}"))
-        })?;
+        let registration_object = serde_json::to_string(&signed.registration)
+            .map_err(|error| DbError::context("serialize Store registration exact ref", error))?;
+        let activation_authority = serde_json::to_string(authority)
+            .map_err(|error| DbError::context("serialize Store registration authority", error))?;
         let inserted = conn
             .execute(
                 "INSERT INTO store_device_registration_activations
@@ -734,10 +727,10 @@ pub(super) fn record_activated_store_device_registrations_on(
                     signed.registration.registration_hash.to_string(),
                     registration.to_bytes(),
                     serde_json::to_string(&signed.registration).map_err(|error| {
-                        DbError::Message(format!("serialize Store registration exact ref: {error}"))
+                        DbError::context("serialize Store registration exact ref", error)
                     })?,
                     serde_json::to_string(authority).map_err(|error| {
-                        DbError::Message(format!("serialize Store registration authority: {error}"))
+                        DbError::context("serialize Store registration authority", error)
                     })?,
                 )
             {
@@ -785,11 +778,11 @@ pub(super) fn record_activated_store_device_registrations_on(
             continue;
         }
         let local_prepared: PreparedExactObject = serde_json::from_str(&local_prepared)
-            .map_err(|error| DbError::Message(format!("local registration object: {error}")))?;
+            .map_err(|error| DbError::context("local registration object", error))?;
         let local_ack_ref: StoreAckRef = serde_json::from_str(&local_ack_ref)
-            .map_err(|error| DbError::Message(format!("local initial ack ref: {error}")))?;
+            .map_err(|error| DbError::context("local initial ack ref", error))?;
         let local_ack_prepared: PreparedExactObject = serde_json::from_str(&local_ack_prepared)
-            .map_err(|error| DbError::Message(format!("local initial ack object: {error}")))?;
+            .map_err(|error| DbError::context("local initial ack object", error))?;
         if local_hash != signed.registration.registration_hash.to_string()
             || local_bytes != registration.to_bytes()
             || local_prepared.reference() != &signed.registration.object
@@ -805,7 +798,7 @@ pub(super) fn record_activated_store_device_registrations_on(
             &local_ack_ref,
             registration,
         )
-        .map_err(|error| DbError::Message(format!("local initial ack: {error}")))?;
+        .map_err(|error| DbError::context("local initial ack", error))?;
         if ack.sequence != 1
             || ack.successor.predecessor.is_some()
             || local_ack_prepared
@@ -818,7 +811,7 @@ pub(super) fn record_activated_store_device_registrations_on(
             ));
         }
         let state: LocalDeviceRegistrationState = serde_json::from_str(&local_state)
-            .map_err(|error| DbError::Message(format!("local registration journal: {error}")))?;
+            .map_err(|error| DbError::context("local registration journal", error))?;
         let activated_state = LocalDeviceRegistrationState::Activated {
             authority: authority.clone(),
         };
@@ -836,17 +829,15 @@ pub(super) fn record_activated_store_device_registrations_on(
                                AND initial_ack_ref = ?4 AND state = ?5",
                         rusqlite::params![
                             serde_json::to_string(&activated_state).map_err(|error| {
-                                DbError::Message(format!("serialize activated journal: {error}"))
+                                DbError::context("serialize activated journal", error)
                             })?,
                             local_device,
                             local_hash,
                             serde_json::to_string(&local_ack_ref).map_err(|error| {
-                                DbError::Message(format!("serialize local initial ack: {error}"))
+                                DbError::context("serialize local initial ack", error)
                             })?,
                             serde_json::to_string(&LocalDeviceRegistrationState::Created).map_err(
-                                |error| DbError::Message(format!(
-                                    "serialize created journal: {error}"
-                                ))
+                                |error| DbError::context("serialize created journal", error)
                             )?,
                         ],
                     )
@@ -861,10 +852,10 @@ pub(super) fn record_activated_store_device_registrations_on(
                          VALUES (1, ?1, ?2)",
                     rusqlite::params![
                         serde_json::to_string(&local_ack_ref).map_err(|error| {
-                            DbError::Message(format!("serialize activated initial ack: {error}"))
+                            DbError::context("serialize activated initial ack", error)
                         })?,
                         serde_json::to_string(&ack.successor.next_slot).map_err(|error| {
-                            DbError::Message(format!("serialize activated ack successor: {error}"))
+                            DbError::context("serialize activated ack successor", error)
                         })?,
                     ],
                 )
@@ -890,11 +881,11 @@ pub(super) fn record_activated_store_device_registrations_on(
                     crate::database::get_protocol_state_on(conn, LOCAL_DEVICE_ID_STATE_KEY)?;
                 if stored_ack.0
                     != serde_json::to_string(&local_ack_ref).map_err(|error| {
-                        DbError::Message(format!("serialize replayed initial ack: {error}"))
+                        DbError::context("serialize replayed initial ack", error)
                     })?
                     || stored_ack.1
                         != serde_json::to_string(&ack.successor.next_slot).map_err(|error| {
-                            DbError::Message(format!("serialize replayed ack successor: {error}"))
+                            DbError::context("serialize replayed ack successor", error)
                         })?
                     || local_device_id.as_deref() != Some(local_device.as_str())
                 {

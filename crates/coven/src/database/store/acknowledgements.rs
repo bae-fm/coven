@@ -239,9 +239,7 @@ impl StoreDatabase {
                     &registration,
                     &candidate.reference,
                 )
-                .map_err(|error| {
-                    DbError::Message(format!("verify alternate Merge head: {error}"))
-                })?;
+                .map_err(|error| DbError::context("verify alternate Merge head", error))?;
                 if verified != winner {
                     return Err(DbError::Message(
                         "alternate Merge head changed during exact verification".to_string(),

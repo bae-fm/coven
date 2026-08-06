@@ -412,6 +412,12 @@ pub enum DbError {
     ParseInt(#[from] std::num::ParseIntError),
     #[error("database error: stored value is not UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("database error: {0}")]
+    BlobDecl(#[from] crate::database::BlobDeclError),
+    #[error("database error: {0}")]
+    ChangesetIdentity(#[from] crate::database::ChangesetIdentityError),
+    #[error("database error: {0}")]
+    Encryption(#[from] crate::encryption::EncryptionError),
     /// A [`DbError`] with the operation that produced it named in front of it.
     /// Carries the cause as a [`DbError`] so callers keep matching on it after
     /// it crosses the layer that added the description.

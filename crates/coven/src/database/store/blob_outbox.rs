@@ -209,7 +209,7 @@ impl StoreDatabase {
         };
         let id = entry.id;
         let stored = serde_json::to_string(stored)
-            .map_err(|error| DbError::Message(format!("serialize stored blob ref: {error}")))?;
+            .map_err(|error| DbError::context("serialize stored blob ref", error))?;
         self.connection
             .call(move |connection| {
                 let removed = connection
@@ -398,11 +398,10 @@ impl StoreDatabase {
             stored,
             spool_path,
         };
-        let prepared_json = serde_json::to_string(&prepared).map_err(|error| {
-            DbError::Message(format!("serialize prepared blob upload: {error}"))
-        })?;
+        let prepared_json = serde_json::to_string(&prepared)
+            .map_err(|error| DbError::context("serialize prepared blob upload", error))?;
         let pending_json = serde_json::to_string(&OutboxUploadState::Pending)
-            .map_err(|error| DbError::Message(format!("serialize pending blob upload: {error}")))?;
+            .map_err(|error| DbError::context("serialize pending blob upload", error))?;
         self.swap_blob_upload_state(
             entry.id,
             row,
@@ -437,10 +436,9 @@ impl StoreDatabase {
             stored: stored.clone(),
             spool_path: spool_path.clone(),
         })
-        .map_err(|error| DbError::Message(format!("serialize created blob upload: {error}")))?;
-        let prepared_json = serde_json::to_string(state).map_err(|error| {
-            DbError::Message(format!("serialize prepared blob upload identity: {error}"))
-        })?;
+        .map_err(|error| DbError::context("serialize created blob upload", error))?;
+        let prepared_json = serde_json::to_string(state)
+            .map_err(|error| DbError::context("serialize prepared blob upload identity", error))?;
         self.swap_blob_upload_state(
             entry.id,
             row,

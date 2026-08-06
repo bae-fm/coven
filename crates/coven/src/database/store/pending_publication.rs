@@ -58,7 +58,7 @@ impl StoreDatabase {
                 row.map(|(write_id, stored_changeset, base, prepared)| {
                     let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                         .map_err(|error| {
-                            DbError::Message(format!("prepared Store write: {error}"))
+                            DbError::context("prepared Store write", error)
                         })?;
                     let (commit, head, graph_commit) = match &prepared {
                         PreparedStoreWriteState::Publication { commit, head, .. } => {
@@ -74,7 +74,7 @@ impl StoreDatabase {
                     let write_id = WriteId::from_generated(write_id);
                     let unverified_commit: StoreBatchCommit =
                         serde_json::from_slice(commit.semantic_bytes()).map_err(|error| {
-                            DbError::Message(format!("prepared Store commit: {error}"))
+                            DbError::context("prepared Store commit", error)
                         })?;
                     if unverified_commit.write_id != write_id {
                         return Err(DbError::Message(
@@ -97,7 +97,7 @@ impl StoreDatabase {
                         .map_err(DbError::from)?;
                     let stored_registration_ref: StoreDeviceRegistrationRef =
                         serde_json::from_str(&stored_registration_ref).map_err(|error| {
-                            DbError::Message(format!("prepared write registration ref: {error}"))
+                            DbError::context("prepared write registration ref", error)
                         })?;
                     if stored_registration_ref != *registration_ref {
                         return Err(DbError::Message(
@@ -110,7 +110,7 @@ impl StoreDatabase {
                         registration_ref.device_id,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("prepared write registration: {error}"))
+                        DbError::context("prepared write registration", error)
                     })?;
                     let stream_id =
                         crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
@@ -130,7 +130,7 @@ impl StoreDatabase {
                         &registration,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("verify prepared Store commit: {error}"))
+                        DbError::context("verify prepared Store commit", error)
                     })?;
                     let commit_ref = commit_value.reference().clone();
                     let head_value = StoreDeviceHead::parse_at(
@@ -140,14 +140,14 @@ impl StoreDatabase {
                         &commit_ref,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("verify prepared Store head: {error}"))
+                        DbError::context("verify prepared Store head", error)
                     })?;
                     let base: StoreWriteBase = serde_json::from_str(&base).map_err(|error| {
-                        DbError::Message(format!("prepared write base: {error}"))
+                        DbError::context("prepared write base", error)
                     })?;
                     let dependencies =
                         CommitFrontier::from_refs(base.dependencies).map_err(|error| {
-                            DbError::Message(format!("prepared dependency frontier: {error}"))
+                            DbError::context("prepared dependency frontier", error)
                         })?;
                     if dependencies.commits() != commit_value.merge_dependencies() {
                         return Err(DbError::Message(
@@ -300,9 +300,7 @@ impl StoreDatabase {
                                 size,
                                 crate::protocol::store_commit::ObjectHash::from_digest(digest),
                             )
-                            .map_err(|error| {
-                                DbError::Message(format!("prepared blob spool: {error}"))
-                            })?;
+                            .map_err(|error| DbError::context("prepared blob spool", error))?;
                     }
                 }
             }

@@ -392,18 +392,13 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let circle_id = exclusion.circle_id.to_string();
         let close_id = serde_json::to_string(&exclusion.close_id)
-            .map_err(|error| DbError::Message(format!("serialize close exclusion id: {error}")))?;
-        let excluded = serde_json::to_string(&exclusion.excluded).map_err(|error| {
-            DbError::Message(format!("serialize close exclusion registration: {error}"))
-        })?;
-        let successor_control =
-            serde_json::to_string(&exclusion.successor_control).map_err(|error| {
-                DbError::Message(format!("serialize close exclusion successor: {error}"))
-            })?;
-        let activating_commit =
-            serde_json::to_string(&exclusion.activating_commit).map_err(|error| {
-                DbError::Message(format!("serialize close exclusion activation: {error}"))
-            })?;
+            .map_err(|error| DbError::context("serialize close exclusion id", error))?;
+        let excluded = serde_json::to_string(&exclusion.excluded)
+            .map_err(|error| DbError::context("serialize close exclusion registration", error))?;
+        let successor_control = serde_json::to_string(&exclusion.successor_control)
+            .map_err(|error| DbError::context("serialize close exclusion successor", error))?;
+        let activating_commit = serde_json::to_string(&exclusion.activating_commit)
+            .map_err(|error| DbError::context("serialize close exclusion activation", error))?;
         conn.execute(
             "INSERT INTO circle_close_exclusions
              (circle_id, close_id, excluded_registration, successor_control, activating_commit)
@@ -502,9 +497,10 @@ impl StoreDatabase {
                 };
                 let parsed = crate::encryption::MasterKeyring::from_serialized(keyring).map_err(
                     |error| {
-                        DbError::Message(format!(
-                            "parse Circle {circle_id} historical package keyring: {error}"
-                        ))
+                        DbError::context(
+                            format!("parse Circle {circle_id} historical package keyring"),
+                            error,
+                        )
                     },
                 )?;
                 let encryption = EncryptionService::from(parsed);
@@ -763,9 +759,8 @@ impl StoreDatabase {
         circle_id: crate::protocol::circle::CircleId,
         control: &crate::protocol::circle::CircleControlCoord,
     ) -> Result<CircleActivationCommitLookup, DbError> {
-        let control_coord = serde_json::to_string(control).map_err(|error| {
-            DbError::Message(format!("serialize Circle control coordinate: {error}"))
-        })?;
+        let control_coord = serde_json::to_string(control)
+            .map_err(|error| DbError::context("serialize Circle control coordinate", error))?;
         let stored = conn
             .query_row(
                 "SELECT stream_id, seq, commit_hash
@@ -941,11 +936,10 @@ impl StoreDatabase {
     ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
         let circle_id: crate::protocol::circle::CircleId = stored_circle_id
             .parse()
-            .map_err(|error| DbError::Message(format!("parse current Circle id: {error}")))?;
+            .map_err(|error| DbError::context("parse current Circle id", error))?;
         let state: crate::protocol::circle_activation::CircleCurrentState =
-            serde_json::from_slice(payload).map_err(|error| {
-                DbError::Message(format!("parse Circle current state: {error}"))
-            })?;
+            serde_json::from_slice(payload)
+                .map_err(|error| DbError::context("parse Circle current state", error))?;
         if !state.verify() || state.circle_id() != circle_id {
             return Err(DbError::Message(format!(
                 "Circle {circle_id} has invalid current state"
@@ -959,7 +953,7 @@ impl StoreDatabase {
             let circle_id = state.circle_id().to_string();
             let state = state.without_local_access();
             let payload = serde_json::to_vec(&state).map_err(|error| {
-                DbError::Message(format!("serialize public Circle current state: {error}"))
+                DbError::context("serialize public Circle current state", error)
             })?;
             let changed = conn
                 .execute(
@@ -1065,7 +1059,7 @@ pub(super) fn circle_publication_context_on(
             .map_err(DbError::from)?;
         if coverage_commit.as_deref() != Some(activating_commit.as_str()) {
             let close_id = serde_json::from_str(&close_id).map_err(|error| {
-                DbError::Message(format!("parse pending Circle close exclusion id: {error}"))
+                DbError::context("parse pending Circle close exclusion id", error)
             })?;
             return Err(DbError::ExcludedDeviceMustReset {
                 circle_id,
@@ -1123,9 +1117,10 @@ pub(super) fn circle_blob_opening_protection_on(
     for encoded in rows {
         let encoded = encoded.map_err(DbError::from)?;
         controls.push(serde_json::from_str(&encoded).map_err(|error| {
-            DbError::Message(format!(
-                "parse retained Circle {circle_id} control coordinate: {error}"
-            ))
+            DbError::context(
+                format!("parse retained Circle {circle_id} control coordinate"),
+                error,
+            )
         })?);
     }
 

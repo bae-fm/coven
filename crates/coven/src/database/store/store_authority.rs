@@ -91,9 +91,7 @@ impl StoreDatabase {
                 let stored_genesis: ResolvedStoreDeviceState = serde_json::from_str(
                     &required_protocol_state_on(conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
                 )
-                .map_err(|error| {
-                    DbError::Message(format!("Store device genesis state: {error}"))
-                })?;
+                .map_err(|error| DbError::context("Store device genesis state", error))?;
                 if founder.author_pubkey != owner || stored_genesis != expected_genesis {
                     return Err(DbError::Message(
                         "Store device genesis differs from installed founder authority".to_string(),
@@ -189,10 +187,8 @@ impl StoreDatabase {
                     &tx,
                     STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?;
-                let attempt: StoreCreationAttempt =
-                    serde_json::from_str(&attempt_json).map_err(|error| {
-                        DbError::Message(format!("parse Store creation attempt: {error}"))
-                    })?;
+                let attempt: StoreCreationAttempt = serde_json::from_str(&attempt_json)
+                    .map_err(|error| DbError::context("parse Store creation attempt", error))?;
                 let StoreCreationAttempt::FounderGraphReserved(graph_reservation) = attempt else {
                     return Err(DbError::Message(
                         "Store creation attempt has not reserved the complete founder graph"
@@ -244,10 +240,8 @@ impl StoreDatabase {
                     hex::encode(authority.probes.exact_slots().as_bytes())
                 );
                 let exact_json = crate::database::required_protocol_state_on(&tx, &exact_key)?;
-                let exact: ProviderProbeJournalRecord =
-                    serde_json::from_str(&exact_json).map_err(|error| {
-                        DbError::Message(format!("parse provider probe journal: {error}"))
-                    })?;
+                let exact: ProviderProbeJournalRecord = serde_json::from_str(&exact_json)
+                    .map_err(|error| DbError::context("parse provider probe journal", error))?;
                 let ProviderProbeJournalRecord::Exact(exact) = exact else {
                     return Err(DbError::Message(
                         "Store creation exact probe id names another probe kind".to_string(),
@@ -280,7 +274,7 @@ impl StoreDatabase {
                         graph.root.value.object_hash().to_string(),
                         graph.root.bytes,
                         serde_json::to_string(&graph.root.prepared).map_err(|error| {
-                            DbError::Message(format!("serialize prepared Store root: {error}"))
+                            DbError::context("serialize prepared Store root", error)
                         })?,
                     ],
                 )
@@ -295,23 +289,17 @@ impl StoreDatabase {
                         graph.registration.value.registration_hash().to_string(),
                         graph.registration.bytes,
                         serde_json::to_string(&graph.registration.prepared).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize prepared founder registration: {error}"
-                            ))
+                            DbError::context("serialize prepared founder registration", error)
                         })?,
                         serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
-                            DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                            DbError::context("serialize founder initial ack ref", error)
                         })?,
                         graph.initial_ack.bytes,
                         serde_json::to_string(&graph.initial_ack.prepared).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize founder initial ack object: {error}"
-                            ))
+                            DbError::context("serialize founder initial ack object", error)
                         })?,
                         serde_json::to_string(&LocalDeviceRegistrationState::Prepared).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize registration journal state: {error}"
-                            ))
+                            |error| DbError::context("serialize registration journal state", error)
                         )?,
                     ],
                 )
@@ -322,9 +310,10 @@ impl StoreDatabase {
                     rusqlite::params![serde_json::to_string(
                         &DurableFounderMembershipJournal::from_graph(&graph.membership,)
                     )
-                    .map_err(|error| DbError::Message(format!(
-                        "serialize founder membership graph: {error}"
-                    )))?,],
+                    .map_err(|error| DbError::context(
+                        "serialize founder membership graph",
+                        error
+                    ))?,],
                 )
                 .map_err(DbError::from)?;
                 tx.commit().map_err(DbError::from)
@@ -378,7 +367,7 @@ impl StoreDatabase {
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
             let device_genesis_json = serde_json::to_string(&device_genesis).map_err(|error| {
-                DbError::Message(format!("serialize Store device genesis state: {error}"))
+                DbError::context("serialize Store device genesis state", error)
             })?;
             let device_id = registration.device_id.to_string();
             let registration_hash = registration.registration_hash.to_string();
@@ -424,21 +413,17 @@ impl StoreDatabase {
                         || stored
                             != Some((
                                 serde_json::to_string(&registration).map_err(|error| {
-                                    DbError::Message(format!(
-                                        "serialize founder registration ref: {error}"
-                                    ))
+                                    DbError::context("serialize founder registration ref", error)
                                 })?,
                                 serde_json::to_string(&founder_authority).map_err(|error| {
-                                    DbError::Message(format!(
-                                        "serialize founder authority: {error}"
-                                    ))
+                                    DbError::context("serialize founder authority", error)
                                 })?,
                                 registration.registration_hash.to_string(),
                             ))
                         || ack
                             != Some(serde_json::to_string(&graph.initial_ack_ref).map_err(
                                 |error| {
-                                    DbError::Message(format!("serialize founder ack ref: {error}"))
+                                    DbError::context("serialize founder ack ref", error)
                                 },
                             )?)
                         || stored_device_genesis.as_deref() != Some(&device_genesis_json)
@@ -478,15 +463,13 @@ impl StoreDatabase {
                 },
             )
             .map_err(|error| {
-                DbError::Message(format!(
-                    "serialize founder registration activation: {error}"
-                ))
+                DbError::context("serialize founder registration activation", error)
             })?;
             let journal_state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
                 authority: founder_authority,
             })
             .map_err(|error| {
-                DbError::Message(format!("serialize founder registration journal: {error}"))
+                DbError::context("serialize founder registration journal", error)
             })?;
             let updated = tx
                 .execute(
@@ -498,12 +481,10 @@ impl StoreDatabase {
                         &device_id,
                         &registration_hash,
                         serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
-                            DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                            DbError::context("serialize founder initial ack ref", error)
                         })?,
                         serde_json::to_string(&LocalDeviceRegistrationState::Created).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize created journal state: {error}"
-                            ))
+                            |error| DbError::context("serialize created journal state", error)
                         )?,
                     ],
                 )
@@ -525,7 +506,7 @@ impl StoreDatabase {
                     graph.registration.value.device_signing_pubkey,
                     graph.registration.bytes,
                     serde_json::to_string(&registration).map_err(|error| {
-                        DbError::Message(format!("serialize founder registration ref: {error}"))
+                        DbError::context("serialize founder registration ref", error)
                     })?,
                     activation,
                 ],
@@ -536,12 +517,10 @@ impl StoreDatabase {
                  (singleton, ack_ref, successor_slot) VALUES (1, ?1, ?2)",
                 rusqlite::params![
                     serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
-                        DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                        DbError::context("serialize founder initial ack ref", error)
                     })?,
                     serde_json::to_string(&graph.initial_ack.value.successor.next_slot).map_err(
-                        |error| DbError::Message(format!(
-                            "serialize founder ack successor: {error}"
-                        ))
+                        |error| DbError::context("serialize founder ack successor", error)
                     )?,
                 ],
             )
@@ -597,16 +576,12 @@ impl StoreDatabase {
                     LocalDeviceRegistrationState::Created => {
                         let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
                             .map_err(|error| {
-                                DbError::Message(format!(
-                                    "serialize created journal state: {error}"
-                                ))
+                                DbError::context("serialize created journal state", error)
                             })?;
                         let prepared =
                             serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
                                 .map_err(|error| {
-                                    DbError::Message(format!(
-                                        "serialize prepared journal state: {error}"
-                                    ))
+                                    DbError::context("serialize prepared journal state", error)
                                 })?;
                         let updated = tx
                             .execute(

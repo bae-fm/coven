@@ -40,7 +40,7 @@ impl StoreDatabase {
             &root,
             durable.device_id,
         )
-        .map_err(|error| DbError::Message(format!("local Store registration: {error}")))?;
+        .map_err(|error| DbError::context("local Store registration", error))?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration,
             durable.prepared.reference().clone(),
@@ -52,7 +52,7 @@ impl StoreDatabase {
         }
         let device_signer = registration
             .device_signer(identity_signer)
-            .map_err(|error| DbError::Message(format!("local device signer: {error}")))?;
+            .map_err(|error| DbError::context("local device signer", error))?;
         let latest_ack = self
             .latest_local_store_ack()
             .await?
@@ -101,14 +101,14 @@ impl StoreDatabase {
             &root,
             continuation.registration.device_id,
         )
-        .map_err(|error| DbError::Message(format!("continued Store registration: {error}")))?;
+        .map_err(|error| DbError::context("continued Store registration", error))?;
         continuation
             .registration
             .verify_registration(&registration)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let derived_device = registration
             .device_signer(identity_signer)
-            .map_err(|error| DbError::Message(format!("continued device signer: {error}")))?;
+            .map_err(|error| DbError::context("continued device signer", error))?;
         if derived_device.to_keypair_bytes() != device_signer.to_keypair_bytes()
             || continuation.registration_prepared.reference() != &continuation.registration.object
             || continuation.initial_ack_prepared.reference() != &continuation.initial_ack.object
@@ -123,7 +123,7 @@ impl StoreDatabase {
             &continuation.initial_ack,
             &registration,
         )
-        .map_err(|error| DbError::Message(format!("continued initial ack: {error}")))?;
+        .map_err(|error| DbError::context("continued initial ack", error))?;
         let Some((latest_ack_ref, latest_ack)) = ack_chain.first() else {
             return Err(DbError::Message(
                 "continued acknowledgement chain is empty".into(),
@@ -194,7 +194,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?;
                 let stored_authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation =
                     serde_json::from_str(&stored_authority).map_err(|error| {
-                        DbError::Message(format!("continued activation authority: {error}"))
+                        DbError::context("continued activation authority", error)
                     })?;
                 if stored_authority != continuation.activation {
                     return Err(DbError::Message(
@@ -228,20 +228,20 @@ impl StoreDatabase {
                 let state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
                     authority: continuation.activation.clone(),
                 })
-                .map_err(|error| DbError::Message(format!("continued activation: {error}")))?;
+                .map_err(|error| DbError::context("continued activation", error))?;
                 let expected_local = (
                     continuation.registration.device_id.to_string(),
                     continuation.registration.registration_hash.to_string(),
                     continuation.registration_bytes.clone(),
                     serde_json::to_string(&continuation.registration_prepared).map_err(
-                        |error| DbError::Message(format!("continued registration object: {error}")),
+                        |error| DbError::context("continued registration object", error),
                     )?,
                     serde_json::to_string(&continuation.initial_ack).map_err(|error| {
-                        DbError::Message(format!("continued initial ack ref: {error}"))
+                        DbError::context("continued initial ack ref", error)
                     })?,
                     continuation.initial_ack_bytes.clone(),
                     serde_json::to_string(&continuation.initial_ack_prepared).map_err(|error| {
-                        DbError::Message(format!("continued initial ack object: {error}"))
+                        DbError::context("continued initial ack object", error)
                     })?,
                     state,
                 );
@@ -313,7 +313,7 @@ impl StoreDatabase {
                             .map_err(DbError::from)?;
                         let stored_ref: StoreAckRef =
                             serde_json::from_str(&stored_ref).map_err(|error| {
-                                DbError::Message(format!("restored acknowledgement: {error}"))
+                                DbError::context("restored acknowledgement", error)
                             })?;
                         let Some((_, stored_ack)) = ack_chain
                             .iter()
@@ -326,7 +326,7 @@ impl StoreDatabase {
                         if stored_successor
                             != serde_json::to_string(&stored_ack.successor.next_slot).map_err(
                                 |error| {
-                                    DbError::Message(format!("restored ack successor: {error}"))
+                                    DbError::context("restored ack successor", error)
                                 },
                             )?
                         {
@@ -358,15 +358,11 @@ impl StoreDatabase {
                             rusqlite::params![
                                 generation,
                                 serde_json::to_string(reference).map_err(|error| {
-                                    DbError::Message(format!(
-                                        "serialize continued Store snapshot ref: {error}"
-                                    ))
+                                    DbError::context("serialize continued Store snapshot ref", error)
                                 })?,
                                 serde_json::to_string(&meta.successor.next_slot).map_err(
                                     |error| {
-                                        DbError::Message(format!(
-                                            "serialize continued Store snapshot successor: {error}"
-                                        ))
+                                        DbError::context("serialize continued Store snapshot successor", error)
                                     }
                                 )?,
                                 meta.to_bytes(),
@@ -391,10 +387,10 @@ impl StoreDatabase {
                     }
                 }
                 let latest_ref = serde_json::to_string(&continuation.latest_ack)
-                    .map_err(|error| DbError::Message(format!("continued latest ack: {error}")))?;
+                    .map_err(|error| DbError::context("continued latest ack", error))?;
                 let latest_successor =
                     serde_json::to_string(&latest_successor_slot).map_err(|error| {
-                        DbError::Message(format!("continued ack successor: {error}"))
+                        DbError::context("continued ack successor", error)
                     })?;
                 if existing_ack == 0 {
                     tx.execute(

@@ -14,7 +14,7 @@ pub(super) fn load_store_device_genesis_state_on(
 ) -> Result<ResolvedStoreDeviceState, DbError> {
     let raw = crate::database::required_protocol_state_on(conn, STORE_DEVICE_GENESIS_STATE_KEY)?;
     serde_json::from_str(&raw)
-        .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
+        .map_err(|error| DbError::context("parse Store device genesis state", error))
 }
 
 pub(super) fn load_store_device_snapshot_on(
@@ -22,7 +22,7 @@ pub(super) fn load_store_device_snapshot_on(
     reference: &StoreBatchCommitRef,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
     let exact = serde_json::to_string(reference)
-        .map_err(|error| DbError::Message(format!("serialize Store commit ref: {error}")))?;
+        .map_err(|error| DbError::context("serialize Store commit ref", error))?;
     // An absent row is not a database fault: it means this device's local Store
     // history does not cover `reference`, so no state was ever recorded for it.
     // The caller resolved a history cut it has not materialized — name that
@@ -42,7 +42,7 @@ pub(super) fn load_store_device_snapshot_on(
             other => DbError::from(other),
         })?;
     let state: ResolvedStoreDeviceState = serde_json::from_str(&raw)
-        .map_err(|error| DbError::Message(format!("parse Store device state snapshot: {error}")))?;
+        .map_err(|error| DbError::context("parse Store device state snapshot", error))?;
     state
         .validate_canonical()
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -119,9 +119,8 @@ pub(super) fn load_store_device_exclusion_freezes_on(
     for row in rows {
         let (proposal_id, proposal_ref, target_cut) = row.map_err(DbError::from)?;
         let proposal: crate::protocol::store_commit::StoreDeviceExclusionProposalRef =
-            serde_json::from_str(&proposal_ref).map_err(|error| {
-                DbError::Message(format!("stored device exclusion proposal ref: {error}"))
-            })?;
+            serde_json::from_str(&proposal_ref)
+                .map_err(|error| DbError::context("stored device exclusion proposal ref", error))?;
         proposal
             .validate_path()
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -130,9 +129,8 @@ pub(super) fn load_store_device_exclusion_freezes_on(
                 "stored device exclusion freeze uses another proposal id".to_string(),
             ));
         }
-        let target_cut: StoreHistoryCut = serde_json::from_str(&target_cut).map_err(|error| {
-            DbError::Message(format!("stored device exclusion target cut: {error}"))
-        })?;
+        let target_cut: StoreHistoryCut = serde_json::from_str(&target_cut)
+            .map_err(|error| DbError::context("stored device exclusion target cut", error))?;
         let target_frontier = &target_cut.0;
         let target_stream =
             crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
@@ -254,10 +252,10 @@ pub(super) fn replace_store_device_exclusion_freezes_on(
             rusqlite::params![
                 freeze.proposal.proposal_id.to_string(),
                 serde_json::to_string(&freeze.proposal).map_err(|error| {
-                    DbError::Message(format!("serialize device exclusion proposal ref: {error}"))
+                    DbError::context("serialize device exclusion proposal ref", error)
                 })?,
                 serde_json::to_string(&freeze.target_cut).map_err(|error| {
-                    DbError::Message(format!("serialize device exclusion target cut: {error}"))
+                    DbError::context("serialize device exclusion target cut", error)
                 })?,
             ],
         )

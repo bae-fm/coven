@@ -18,7 +18,7 @@ impl StoreDatabase {
                     .map(|value| {
                         let journal: crate::protocol::owner_promotion_journal::OwnerPromotionJournal =
                             serde_json::from_str(&value).map_err(|error| {
-                                DbError::Message(format!("parse Owner-promotion journal: {error}"))
+                                DbError::context("parse Owner-promotion journal", error)
                             })?;
                         journal
                             .validate_id(promotion_id)
@@ -43,7 +43,7 @@ impl StoreDatabase {
                 };
                 let journal: crate::protocol::owner_promotion_journal::OwnerPromotionJournal =
                     serde_json::from_str(&value).map_err(|error| {
-                        DbError::Message(format!("parse Owner-promotion target journal: {error}"))
+                        DbError::context("parse Owner-promotion target journal", error)
                     })?;
                 journal
                     .validate_target_key(&key)
@@ -78,9 +78,8 @@ impl StoreDatabase {
             ));
         }
         let journal_key = format!("owner_promotion/{}", journal.promotion_id());
-        let value = serde_json::to_string(&journal).map_err(|error| {
-            DbError::Message(format!("serialize Owner-promotion journal: {error}"))
-        })?;
+        let value = serde_json::to_string(&journal)
+            .map_err(|error| DbError::context("serialize Owner-promotion journal", error))?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -102,9 +101,8 @@ impl StoreDatabase {
                     ));
                 }
                 tx.commit().map_err(DbError::from)?;
-                serde_json::from_str(&by_id).map_err(|error| {
-                    DbError::Message(format!("parse begun Owner-promotion journal: {error}"))
-                })
+                serde_json::from_str(&by_id)
+                    .map_err(|error| DbError::context("parse begun Owner-promotion journal", error))
             })
             .await
     }
@@ -118,9 +116,7 @@ impl StoreDatabase {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let journal_key = format!("owner_promotion/{}", journal.promotion_id());
         let value = serde_json::to_string(&journal).map_err(|error| {
-            DbError::Message(format!(
-                "serialize Owner-promotion candidate acceptance: {error}"
-            ))
+            DbError::context("serialize Owner-promotion candidate acceptance", error)
         })?;
         self.connection
             .call(move |conn| {
@@ -137,9 +133,7 @@ impl StoreDatabase {
                     ));
                 }
                 serde_json::from_str(&actual).map_err(|error| {
-                    DbError::Message(format!(
-                        "parse begun Owner-promotion candidate acceptance: {error}"
-                    ))
+                    DbError::context("parse begun Owner-promotion candidate acceptance", error)
                 })
             })
             .await
@@ -290,13 +284,10 @@ impl StoreDatabase {
             ));
         }
         let replacement_key = format!("owner_promotion/{}", replacement.promotion_id());
-        let previous_value = serde_json::to_string(&previous).map_err(|error| {
-            DbError::Message(format!("serialize failed Owner-promotion journal: {error}"))
-        })?;
+        let previous_value = serde_json::to_string(&previous)
+            .map_err(|error| DbError::context("serialize failed Owner-promotion journal", error))?;
         let replacement_value = serde_json::to_string(&replacement).map_err(|error| {
-            DbError::Message(format!(
-                "serialize replacement Owner-promotion journal: {error}"
-            ))
+            DbError::context("serialize replacement Owner-promotion journal", error)
         })?;
         self.connection
             .call(move |conn| {

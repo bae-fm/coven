@@ -138,7 +138,7 @@ impl LocalRegistrationRecord {
 
 fn encode<T: serde::Serialize>(value: &T, subject: &str, what: &str) -> Result<String, DbError> {
     serde_json::to_string(value)
-        .map_err(|error| DbError::Message(format!("serialize {subject} {what}: {error}")))
+        .map_err(|error| DbError::context(format!("serialize {subject} {what}"), error))
 }
 
 impl StoreDatabase {
@@ -197,9 +197,10 @@ impl StoreDatabase {
                                 expected.5,
                                 expected.6,
                                 serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
-                                    .map_err(|error| DbError::Message(format!(
-                                        "serialize local registration state: {error}"
-                                    )))?,
+                                    .map_err(|error| DbError::context(
+                                        "serialize local registration state",
+                                        error
+                                    ))?,
                             ],
                         )
                         .map(|_| ())
@@ -517,14 +518,15 @@ impl StoreDatabase {
                         ack_prepared,
                         state,
                     )| {
-                        let device_id = device_id.parse().map_err(|error| {
-                            DbError::Message(format!("local Store device id: {error}"))
-                        })?;
+                        let device_id = device_id
+                            .parse()
+                            .map_err(|error| DbError::context("local Store device id", error))?;
                         let prepared: PreparedExactObject = serde_json::from_str(&prepared)
                             .map_err(|error| {
-                                DbError::Message(format!(
-                                    "local Store device registration prepared object: {error}"
-                                ))
+                                DbError::context(
+                                    "local Store device registration prepared object",
+                                    error,
+                                )
                             })?;
                         let registration = StoreDeviceRegistration::parse_at(
                             &bytes,
@@ -532,13 +534,11 @@ impl StoreDatabase {
                             device_id,
                         )
                         .map_err(|error| {
-                            DbError::Message(format!("local Store device registration: {error}"))
+                            DbError::context("local Store device registration", error)
                         })?;
                         let initial_ack_ref: StoreAckRef =
                             serde_json::from_str(&ack_ref).map_err(|error| {
-                                DbError::Message(format!(
-                                    "local Store initial acknowledgement ref: {error}"
-                                ))
+                                DbError::context("local Store initial acknowledgement ref", error)
                             })?;
                         let initial_ack_value = StoreAck::parse_at(
                             &ack_bytes,
@@ -547,20 +547,16 @@ impl StoreDatabase {
                             &registration,
                         )
                         .map_err(|error| {
-                            DbError::Message(format!(
-                                "local Store initial acknowledgement: {error}"
-                            ))
+                            DbError::context("local Store initial acknowledgement", error)
                         })?;
                         let initial_ack_prepared: PreparedExactObject =
                             serde_json::from_str(&ack_prepared).map_err(|error| {
-                                DbError::Message(format!("local Store initial ack object: {error}"))
+                                DbError::context("local Store initial ack object", error)
                             })?;
                         Ok(DurableDeviceRegistration {
                             device_id,
                             registration_hash: hash.parse().map_err(|error| {
-                                DbError::Message(format!(
-                                    "local Store device registration hash: {error}"
-                                ))
+                                DbError::context("local Store device registration hash", error)
                             })?,
                             registration_bytes: bytes,
                             prepared,
@@ -572,9 +568,7 @@ impl StoreDatabase {
                                 prepared: initial_ack_prepared,
                             },
                             state: serde_json::from_str(&state).map_err(|error| {
-                                DbError::Message(format!(
-                                    "local Store registration journal state: {error}"
-                                ))
+                                DbError::context("local Store registration journal state", error)
                             })?,
                         })
                     },
@@ -627,17 +621,12 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let stored_registration_prepared: PreparedExactObject =
-                    serde_json::from_str(&durable.1).map_err(|error| {
-                        DbError::Message(format!("stored registration object: {error}"))
-                    })?;
-                let stored_ack_ref: StoreAckRef =
-                    serde_json::from_str(&durable.2).map_err(|error| {
-                        DbError::Message(format!("stored initial ack ref: {error}"))
-                    })?;
+                    serde_json::from_str(&durable.1)
+                        .map_err(|error| DbError::context("stored registration object", error))?;
+                let stored_ack_ref: StoreAckRef = serde_json::from_str(&durable.2)
+                    .map_err(|error| DbError::context("stored initial ack ref", error))?;
                 let stored_ack_prepared: PreparedExactObject = serde_json::from_str(&durable.4)
-                    .map_err(|error| {
-                        DbError::Message(format!("stored initial ack object: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("stored initial ack object", error))?;
                 if registration_ref.object != *stored_registration_prepared.reference()
                     || registration.prepared.reference() != stored_registration_prepared.reference()
                     || registration.prepared.stored_bytes()
@@ -655,13 +644,9 @@ impl StoreDatabase {
                     ));
                 }
                 let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
-                    .map_err(|error| {
-                        DbError::Message(format!("serialize prepared journal: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("serialize prepared journal", error))?;
                 let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
-                    .map_err(|error| {
-                        DbError::Message(format!("serialize created journal: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("serialize created journal", error))?;
                 let updated = tx
                     .execute(
                         "UPDATE local_store_device_registration SET state = ?1 \
@@ -672,7 +657,7 @@ impl StoreDatabase {
                             registration_ref.device_id.to_string(),
                             registration_ref.registration_hash.to_string(),
                             serde_json::to_string(&initial_ack).map_err(|error| {
-                                DbError::Message(format!("serialize initial ack ref: {error}"))
+                                DbError::context("serialize initial ack ref", error)
                             })?,
                             prepared,
                         ],

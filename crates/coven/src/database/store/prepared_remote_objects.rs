@@ -138,7 +138,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| DbError::Message(format!("prepared remote graph: {error}")))?;
+                    .map_err(|error| DbError::context("prepared remote graph", error))?;
                 let commit = parse_prepared_merge_candidate_on(conn, &prepared)?.commit;
                 let mut ids = candidate_graph_exact_objects(&commit)?
                     .iter()
@@ -163,7 +163,7 @@ impl StoreDatabase {
                 ids.into_iter()
                     .map(|(encoded, spool_path)| {
                         let id = encoded.parse().map_err(|error| {
-                            DbError::Message(format!("prepared remote object id: {error}"))
+                            DbError::context("prepared remote object id", error)
                         })?;
                         Ok(PreparedRemoteObject {
                             record: load_remote_object_on(conn, id)?,
@@ -210,7 +210,7 @@ impl StoreDatabase {
                 let mut spools = Vec::new();
                 for (write_id, remote_object_id, path) in rows {
                     let remote_object_id = remote_object_id.parse().map_err(|error| {
-                        DbError::Message(format!("prepared blob remote object id: {error}"))
+                        DbError::context("prepared blob remote object id", error)
                     })?;
                     let remote = load_remote_object_on(conn, remote_object_id)?;
                     if remote_object_is_uploaded(&remote) {
@@ -383,9 +383,7 @@ impl StoreDatabase {
                             size,
                             crate::protocol::store_commit::ObjectHash::from_digest(digest),
                         )
-                        .map_err(|error| {
-                            DbError::Message(format!("prepared blob spool: {error}"))
-                        })?;
+                        .map_err(|error| DbError::context("prepared blob spool", error))?;
                 }
             }
             verified_blobs.push(prepared);

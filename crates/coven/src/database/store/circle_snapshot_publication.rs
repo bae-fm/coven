@@ -76,7 +76,7 @@ impl StoreDatabase {
                     registration,
                 )
                 .map_err(|error| {
-                    DbError::Message(format!("verify staged Circle snapshot metadata: {error}"))
+                    DbError::context("verify staged Circle snapshot metadata", error)
                 })?;
                 if verified != meta {
                     return Err(DbError::Message(
@@ -164,14 +164,13 @@ impl StoreDatabase {
                             format!("serialize prepared Circle snapshot metadata: {error}")
                         ))?,
                         serde_json::to_string(&meta.bootstrap.image).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize exact Circle snapshot image ref: {error}"
-                            ))
+                            DbError::context("serialize exact Circle snapshot image ref", error)
                         })?,
                         serde_json::to_string(&image_prepared).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize prepared Circle snapshot image: {error}"
-                            ))
+                            |error| DbError::context(
+                                "serialize prepared Circle snapshot image",
+                                error
+                            )
                         )?,
                         image_bytes,
                         meta.to_bytes(),
@@ -200,9 +199,7 @@ impl StoreDatabase {
                             "SELECT meta_bytes FROM outbound_circle_snapshot \
                              WHERE snapshot_ref = ?1",
                             [serde_json::to_string(&accepted).map_err(|error| {
-                                DbError::Message(format!(
-                                    "serialize accepted Circle snapshot ref: {error}"
-                                ))
+                                DbError::context("serialize accepted Circle snapshot ref", error)
                             })?],
                             |row| row.get::<_, Vec<u8>>(0),
                         )
@@ -213,7 +210,7 @@ impl StoreDatabase {
                         })?;
                     let meta: CircleSnapshotMeta =
                         serde_json::from_slice(&bytes).map_err(|error| {
-                            DbError::Message(format!("accepted Circle snapshot metadata: {error}"))
+                            DbError::context("accepted Circle snapshot metadata", error)
                         })?;
                     meta.circle_id
                 };
@@ -262,14 +259,13 @@ impl StoreDatabase {
                             format!("serialize published Circle snapshot ref: {error}")
                         ))?,
                         serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize Circle snapshot successor slot: {error}"
-                            ))
+                            |error| DbError::context(
+                                "serialize Circle snapshot successor slot",
+                                error
+                            )
                         )?,
                         serde_json::to_string(&outbound.meta.value.bootstrap.coverage).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize Circle snapshot cut: {error}"
-                            ))
+                            |error| DbError::context("serialize Circle snapshot cut", error)
                         )?,
                         outbound.meta.bytes,
                     ],

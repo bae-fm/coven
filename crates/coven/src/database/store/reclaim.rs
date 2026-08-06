@@ -77,9 +77,10 @@ impl StoreDatabase {
                 let retained = remote
                     .store_package_is_retained_for_replay(&target, &activation)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "validate Store package {object_id} replay ownership: {error}"
-                        ))
+                        DbError::context(
+                            format!("validate Store package {object_id} replay ownership"),
+                            error,
+                        )
                     })?;
                 if !retained {
                     return Ok(false);
@@ -127,9 +128,10 @@ impl StoreDatabase {
                 let retained = remote
                     .circle_package_is_retained_for_replay(&target, &activation)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "validate Circle package {object_id} replay ownership: {error}"
-                        ))
+                        DbError::context(
+                            format!("validate Circle package {object_id} replay ownership"),
+                            error,
+                        )
                     })?;
                 if !retained {
                     return Ok(false);
@@ -195,9 +197,7 @@ impl StoreDatabase {
                 };
                 let bootstrap: crate::protocol::circle::CircleBootstrapRef =
                     serde_json::from_slice(&bootstrap_ref).map_err(|error| {
-                        DbError::Message(format!(
-                            "parse retained Circle bootstrap reference: {error}"
-                        ))
+                        DbError::context("parse retained Circle bootstrap reference", error)
                     })?;
                 Ok(bootstrap.image == image)
             })
@@ -231,7 +231,7 @@ impl StoreDatabase {
                 let mut candidates = Vec::new();
                 for object_id in object_ids {
                     let parsed = object_id.parse().map_err(|error| {
-                        DbError::Message(format!("stored blob object id {object_id:?}: {error}"))
+                        DbError::context(format!("stored blob object id {object_id:?}"), error)
                     })?;
                     let remote = load_remote_object_on(conn, parsed)?;
                     if !remote.is_activated_stored_blob() {
@@ -241,14 +241,14 @@ impl StoreDatabase {
                         remote.bytes().canonical_semantic_bytes(),
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("stored blob {object_id} locator: {error}"))
+                        DbError::context(format!("stored blob {object_id} locator"), error)
                     })?;
                     let stored = crate::protocol::blob::locator::StoredBlobRef::new(
                         locator,
                         remote.object().clone(),
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("stored blob {object_id} reference: {error}"))
+                        DbError::context(format!("stored blob {object_id} reference"), error)
                     })?;
                     candidates.push((stored, remote.stored_blob_commit_owners()));
                 }
@@ -332,9 +332,7 @@ impl StoreDatabase {
                 for bytes in coverages {
                     let bootstrap: crate::protocol::circle::CircleBootstrapRef =
                         serde_json::from_slice(&bytes).map_err(|error| {
-                            DbError::Message(format!(
-                                "parse retained Circle bootstrap reference: {error}"
-                            ))
+                            DbError::context("parse retained Circle bootstrap reference", error)
                         })?;
                     if bootstrap
                         .blobs
@@ -370,7 +368,7 @@ impl StoreDatabase {
                 rows.into_iter()
                     .map(|(raw_id, raw)| {
                         let id = raw_id.parse().map_err(|error| {
-                            DbError::Message(format!("Store reclaim operation id: {error}"))
+                            DbError::context("Store reclaim operation id", error)
                         })?;
                         parse_store_reclaim_operation(id, &raw)
                     })
@@ -652,9 +650,7 @@ impl StoreDatabase {
                 authority
                     .add_retained_authority_candidate(replacement.reference.clone())
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "attach replacement reclaim authority candidate: {error}"
-                        ))
+                        DbError::context("attach replacement reclaim authority candidate", error)
                     })?;
                 update_remote_object_on(&tx, authority_id, &authority)?;
                 if begin_remote_candidate_nonactivation_on(

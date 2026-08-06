@@ -63,7 +63,7 @@ impl StoreDatabase {
                     registration,
                 )
                 .map_err(|error| {
-                    DbError::Message(format!("verify staged Store snapshot metadata: {error}"))
+                    DbError::context("verify staged Store snapshot metadata", error)
                 })?;
                 if verified != meta {
                     return Err(DbError::Message(
@@ -144,9 +144,10 @@ impl StoreDatabase {
                             format!("serialize exact Store snapshot image ref: {error}")
                         ))?,
                         serde_json::to_string(&image_prepared).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize prepared Store snapshot image: {error}"
-                            ))
+                            |error| DbError::context(
+                                "serialize prepared Store snapshot image",
+                                error
+                            )
                         )?,
                         image_bytes,
                         meta.to_bytes(),
@@ -200,9 +201,7 @@ impl StoreDatabase {
                         "DELETE FROM outbound_store_snapshot \
                      WHERE singleton = 1 AND snapshot_ref = ?1",
                         [serde_json::to_string(&accepted).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize accepted Store snapshot ref: {error}"
-                            ))
+                            DbError::context("serialize accepted Store snapshot ref", error)
                         })?],
                     )
                     .map_err(DbError::from)?;
@@ -222,9 +221,10 @@ impl StoreDatabase {
                             format!("serialize published Store snapshot ref: {error}")
                         ))?,
                         serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
-                            |error| DbError::Message(format!(
-                                "serialize Store snapshot successor slot: {error}"
-                            ))
+                            |error| DbError::context(
+                                "serialize Store snapshot successor slot",
+                                error
+                            )
                         )?,
                         outbound.meta.bytes,
                     ],

@@ -12,9 +12,8 @@ impl StoreDatabase {
         for activation in verified.as_slice() {
             let activation_id = activation.activation_id().as_hash().to_string();
             let author_stream_id = activation.author_stream_id().to_string();
-            let activation_bytes = serde_json::to_vec(activation).map_err(|error| {
-                DbError::Message(format!("serialize verified stream activation: {error}"))
-            })?;
+            let activation_bytes = serde_json::to_vec(activation)
+                .map_err(|error| DbError::context("serialize verified stream activation", error))?;
             let existing: Option<(String, Vec<u8>, String)> = conn
                 .query_row(
                     "SELECT author_stream_id, activation, activating_commit
@@ -82,19 +81,20 @@ impl StoreDatabase {
                 else {
                     return Ok(None);
                 };
-                let activation_id =
-                    StreamActivationId::from_digest(activation_id.parse().map_err(|error| {
-                        DbError::Message(format!("stored stream activation id: {error}"))
-                    })?);
+                let activation_id = StreamActivationId::from_digest(
+                    activation_id
+                        .parse()
+                        .map_err(|error| DbError::context("stored stream activation id", error))?,
+                );
                 let author_stream_id = author_stream_id.parse().map_err(|error| {
                     DbError::Message(format!("stored author stream id: {error}"))
                 })?;
                 let activation = serde_json::from_slice(&activation).map_err(|error| {
-                    DbError::Message(format!("stored stream activation descriptor: {error}"))
+                    DbError::context("stored stream activation descriptor", error)
                 })?;
                 let activating_commit =
                     serde_json::from_str(&activating_commit).map_err(|error| {
-                        DbError::Message(format!("stored stream activation commit ref: {error}"))
+                        DbError::context("stored stream activation commit ref", error)
                     })?;
                 crate::protocol::store_commit::RegisteredStreamActivation::from_stored(
                     activation_id,

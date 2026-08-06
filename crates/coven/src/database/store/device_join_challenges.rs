@@ -20,9 +20,7 @@ impl StoreDatabase {
             progress: DeviceJoinChallengePublicationProgress::Prepared,
         };
         let value = serde_json::to_string(&prepared).map_err(|error| {
-            DbError::Message(format!(
-                "serialize device join challenge publication: {error}"
-            ))
+            DbError::context("serialize device join challenge publication", error)
         })?;
         self.connection
             .call(move |conn| {
@@ -36,9 +34,7 @@ impl StoreDatabase {
                 tx.commit().map_err(DbError::from)?;
                 let actual: DeviceJoinChallengePublicationRecord = serde_json::from_str(&actual)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "parse device join challenge publication: {error}"
-                        ))
+                        DbError::context("parse device join challenge publication", error)
                     })?;
                 if actual.challenge != prepared.challenge {
                     return Err(DbError::Message(
@@ -70,9 +66,7 @@ impl StoreDatabase {
                 let previous_json = crate::database::required_protocol_state_on(&tx, &key)?;
                 let previous: DeviceJoinChallengePublicationRecord =
                     serde_json::from_str(&previous_json).map_err(|error| {
-                        DbError::Message(format!(
-                            "parse device join challenge publication: {error}"
-                        ))
+                        DbError::context("parse device join challenge publication", error)
                     })?;
                 if previous.challenge != challenge {
                     return Err(DbError::Message(
@@ -88,9 +82,7 @@ impl StoreDatabase {
                             },
                         };
                         let next_json = serde_json::to_string(&next).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize device join challenge publication: {error}"
-                            ))
+                            DbError::context("serialize device join challenge publication", error)
                         })?;
                         let changed = tx
                         .execute(

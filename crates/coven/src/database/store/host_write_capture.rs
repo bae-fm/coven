@@ -188,7 +188,7 @@ impl StoreDatabase {
         for change in changes {
             let Some(publication) = blob_decls
                 .publication_blob_from_change(tx, &change)
-                .map_err(|error| DbError::Message(format!("capture Store write blob: {error}")))?
+                .map_err(|error| DbError::context("capture Store write blob", error))?
             else {
                 continue;
             };
@@ -213,10 +213,13 @@ impl StoreDatabase {
         publication: PublicationBlob,
     ) -> Result<StoreWriteBlobFact, DbError> {
         let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
-            DbError::Message(format!(
-                "capture Store write blob {}/{} plaintext hash: {error}",
-                publication.blob.namespace, publication.blob.id
-            ))
+            DbError::context(
+                format!(
+                    "capture Store write blob {}/{} plaintext hash",
+                    publication.blob.namespace, publication.blob.id
+                ),
+                error,
+            )
         })?;
         let external_path = if publication.blob.provenance == Provenance::UserProvided {
             tx.query_row(
@@ -279,9 +282,10 @@ impl StoreDatabase {
                 let Some(publication) = blob_decls
                     .publication_blob_for_row(tx, table, row_id)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "capture audience-move blob {table}/{row_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("capture audience-move blob {table}/{row_id}"),
+                            error,
+                        )
                     })?
                 else {
                     continue;
@@ -327,9 +331,10 @@ impl StoreDatabase {
                 let carries_blob = blob_decls
                     .publication_blob_for_row(tx, table, row_id)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "read audience-move blob row {table}/{row_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("read audience-move blob row {table}/{row_id}"),
+                            error,
+                        )
                     })?
                     .is_some();
                 if !carries_blob {
@@ -474,14 +479,13 @@ impl StoreDatabase {
             WriteStatus::Pending
         };
         let base = serde_json::to_string(base)
-            .map_err(|error| DbError::Message(format!("serialize pending Store base: {error}")))?;
+            .map_err(|error| DbError::context("serialize pending Store base", error))?;
         let status_json = serde_json::to_string(&status)
-            .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
+            .map_err(|error| DbError::context("serialize write status", error))?;
         let affected_rows = serde_json::to_string(&affected_rows)
-            .map_err(|error| DbError::Message(format!("serialize affected rows: {error}")))?;
-        let blob_facts_json = serde_json::to_string(blob_facts).map_err(|error| {
-            DbError::Message(format!("serialize Store write blob facts: {error}"))
-        })?;
+            .map_err(|error| DbError::context("serialize affected rows", error))?;
+        let blob_facts_json = serde_json::to_string(blob_facts)
+            .map_err(|error| DbError::context("serialize Store write blob facts", error))?;
         let store_changeset = remote_partitions
             .iter()
             .find(|partition| partition.audience == crate::protocol::circle::Audience::Store)
@@ -576,12 +580,10 @@ impl StoreDatabase {
                     changeset,
                     partitions,
                     inverse_changeset,
-                    base: serde_json::from_str(&base).map_err(|error| {
-                        DbError::Message(format!("pending write base: {error}"))
-                    })?,
-                    blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
-                        DbError::Message(format!("pending write blob facts: {error}"))
-                    })?,
+                    base: serde_json::from_str(&base)
+                        .map_err(|error| DbError::context("pending write base", error))?,
+                    blob_facts: serde_json::from_str(&blob_facts)
+                        .map_err(|error| DbError::context("pending write blob facts", error))?,
                 }))
             })
             .await
@@ -654,9 +656,10 @@ impl StoreDatabase {
             let circle_id = audience
                 .parse::<crate::protocol::circle::CircleId>()
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "pending write {write_id} has invalid audience {audience:?}: {error}"
-                    ))
+                    DbError::context(
+                        format!("pending write {write_id} has invalid audience {audience:?}"),
+                        error,
+                    )
                 })?;
             let control_json = control.ok_or_else(|| {
                 DbError::Message(format!(
@@ -821,29 +824,21 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         encryption,
                         store_root_hash,
                     )
-                    .map_err(|error| {
-                        E::from(DbError::Message(format!("derive row routing key: {error}")))
-                    })?;
+                    .map_err(|error| E::from(DbError::context("derive row routing key", error)))?;
                     let routing_changeset = capture_routing_changes(&tx, &captured, gates, &key)
                         .map_err(|error| {
-                            E::from(DbError::Message(format!(
-                                "capture scoped routing changes: {error}"
-                            )))
+                            E::from(DbError::context("capture scoped routing changes", error))
                         })?;
                     partition_outbound(&tx, &captured, &routing_changeset, gates).map_err(
                         |error| {
-                            E::from(DbError::Message(format!(
-                                "partition scoped host transaction: {error}"
-                            )))
+                            E::from(DbError::context("partition scoped host transaction", error))
                         },
                     )?
                 }
                 StoreWriteRouting::Unscoped => {
                     partition_outbound(&tx, &captured, &RoutingChanges::empty(), gates).map_err(
                         |error| {
-                            E::from(DbError::Message(format!(
-                                "partition gated host transaction: {error}"
-                            )))
+                            E::from(DbError::context("partition gated host transaction", error))
                         },
                     )?
                 }

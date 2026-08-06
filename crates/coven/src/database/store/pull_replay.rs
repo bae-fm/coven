@@ -17,10 +17,8 @@ pub(crate) fn install_circle_bootstrap_image_on(
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &VerifiedCircleImage,
 ) -> Result<(), DbError> {
-    let source =
-        crate::database::open_database_image(bootstrap.image_bytes()).map_err(|error| {
-            DbError::Message(format!("open retained Circle bootstrap image: {error}"))
-        })?;
+    let source = crate::database::open_database_image(bootstrap.image_bytes())
+        .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
     let mut projection_tables = synced_tables
         .iter()
         .map(|table| table.name().to_string())
@@ -42,10 +40,13 @@ pub(crate) fn install_circle_bootstrap_image_on(
         let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
         crate::database::copy_table_with_conflicts(&source, conn, table, ignore_existing).map_err(
             |error| {
-                DbError::Message(format!(
-                    "install exact Circle {} bootstrap table {table}: {error}",
-                    bootstrap.circle_id()
-                ))
+                DbError::context(
+                    format!(
+                        "install exact Circle {} bootstrap table {table}",
+                        bootstrap.circle_id()
+                    ),
+                    error,
+                )
             },
         )?;
     }
@@ -83,9 +84,7 @@ pub(crate) fn install_circle_bootstrap_image_on(
             }
         }
         let encoded_authority = serde_json::to_string(authority).map_err(|error| {
-            DbError::Message(format!(
-                "serialize Circle bootstrap blob authority: {error}"
-            ))
+            DbError::context("serialize Circle bootstrap blob authority", error)
         })?;
         let binding_inserted = conn
             .execute(
@@ -166,7 +165,7 @@ pub(crate) fn install_circle_bootstrap_remote_objects_on(
             rusqlite::params![
                 object_id.to_string(),
                 serde_json::to_string(&remote).map_err(|error| {
-                    DbError::Message(format!("serialize Circle bootstrap blob: {error}"))
+                    DbError::context("serialize Circle bootstrap blob", error)
                 })?,
             ],
         )

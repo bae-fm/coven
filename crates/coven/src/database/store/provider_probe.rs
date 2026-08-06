@@ -20,7 +20,7 @@ impl ProviderProbeJournal for StoreDatabase {
                 value
                     .map(|value| {
                         serde_json::from_str(&value).map_err(|error| {
-                            DbError::Message(format!("parse provider probe journal: {error}"))
+                            DbError::context("parse provider probe journal", error)
                         })
                     })
                     .transpose()
@@ -54,9 +54,8 @@ impl ProviderProbeJournal for StoreDatabase {
                     .map_err(DbError::from)?;
                 let actual = crate::database::required_protocol_state_on(&transaction, &key)?;
                 transaction.commit().map_err(DbError::from)?;
-                serde_json::from_str(&actual).map_err(|error| {
-                    DbError::Message(format!("parse provider probe journal: {error}"))
-                })
+                serde_json::from_str(&actual)
+                    .map_err(|error| DbError::context("parse provider probe journal", error))
             })
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))

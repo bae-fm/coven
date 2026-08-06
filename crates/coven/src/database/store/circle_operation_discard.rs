@@ -260,9 +260,10 @@ impl StoreDatabase {
                         &head_nonactivation,
                     )
                     .map_err(|error| {
-                        crate::DbError::Message(format!(
-                            "reconcile excluded-author head {object_id}: {error}"
-                        ))
+                        crate::DbError::context(
+                            format!("reconcile excluded-author head {object_id}"),
+                            error,
+                        )
                     })?;
                 finish_remote_candidate_nonactivation_on(&tx, object_id, remote, inert)?;
                 tx.commit().map_err(crate::DbError::from)
@@ -375,9 +376,7 @@ impl StoreDatabase {
                     if !remote
                         .candidate_cleanup_complete(&candidate.reference)
                         .map_err(|error| {
-                            crate::DbError::Message(format!(
-                                "finish Circle operation discard for {object_id}: {error}"
-                            ))
+                            crate::DbError::context(format!("finish Circle operation discard for {object_id}"), error)
                         })?
                     {
                         return Err(crate::DbError::Message(format!(

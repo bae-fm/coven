@@ -49,7 +49,7 @@ impl RowIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum RowIdentityError {
+pub enum RowIdentityError {
     #[error(
         "synced table {table:?} id {value:?} is invalid for IndependentUuid; expected a canonical lowercase hyphenated RFC UUID version 4 or 7"
     )]

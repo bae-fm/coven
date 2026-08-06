@@ -30,7 +30,7 @@ impl StoreDatabase {
                 .map_err(DbError::from)?
                 .map(|raw| {
                     let reference: StoreAckRef = serde_json::from_str(&raw).map_err(|error| {
-                        DbError::Message(format!("activated Store acknowledgement ref: {error}"))
+                        DbError::context("activated Store acknowledgement ref", error)
                     })?;
                     if reference.registration != registration {
                         return Err(DbError::Message(
@@ -62,20 +62,16 @@ impl StoreDatabase {
                     ));
                 }
                 let ack_ref = serde_json::to_string(&reference).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize exact Store acknowledgement ref: {error}"
-                    ))
+                    DbError::context("serialize exact Store acknowledgement ref", error)
                 })?;
                 let prepared = serde_json::to_string(&prepared).map_err(|error| {
-                    DbError::Message(format!("serialize prepared Store acknowledgement: {error}"))
+                    DbError::context("serialize prepared Store acknowledgement", error)
                 })?;
                 let activation = serde_json::to_string(
                     &OutboundStoreAckActivation::AwaitingCandidate,
                 )
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize Store acknowledgement activation state: {error}"
-                    ))
+                    DbError::context("serialize Store acknowledgement activation state", error)
                 })?;
                 tx.execute(
                     "INSERT INTO outbound_store_acks \
@@ -155,19 +151,13 @@ impl StoreDatabase {
                     &OutboundStoreAckActivation::AwaitingCandidate,
                 )
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize adopted Store acknowledgement activation: {error}"
-                    ))
+                    DbError::context("serialize adopted Store acknowledgement activation", error)
                 })?;
                 let winner_ref = serde_json::to_string(&winner_reference).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize adopted Store acknowledgement ref: {error}"
-                    ))
+                    DbError::context("serialize adopted Store acknowledgement ref", error)
                 })?;
                 let winner_prepared = serde_json::to_string(&winner_prepared).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize adopted prepared Store acknowledgement: {error}"
-                    ))
+                    DbError::context("serialize adopted prepared Store acknowledgement", error)
                 })?;
                 let updated = tx
                     .execute(
@@ -237,21 +227,15 @@ impl StoreDatabase {
                         &circle.ack.value.successor.next_slot,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "serialize Circle acknowledgement successor slot: {error}"
-                        ))
+                        DbError::context("serialize Circle acknowledgement successor slot", error)
                     })?;
                     let store_cut =
                         serde_json::to_string(&circle.ack.value.store_cut).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize Circle acknowledgement cut: {error}"
-                            ))
+                            DbError::context("serialize Circle acknowledgement cut", error)
                         })?;
                     let control_coord =
                         serde_json::to_string(&circle.ack.value.control).map_err(|error| {
-                            DbError::Message(format!(
-                                "serialize Circle acknowledgement control: {error}"
-                            ))
+                            DbError::context("serialize Circle acknowledgement control", error)
                         })?;
                     tx.execute(
                         "INSERT INTO published_circle_acks
@@ -263,9 +247,10 @@ impl StoreDatabase {
                         rusqlite::params![
                             circle_id,
                             serde_json::to_string(&circle.reference).map_err(|error| {
-                                DbError::Message(format!(
-                                    "serialize published Circle acknowledgement ref: {error}"
-                                ))
+                                DbError::context(
+                                    "serialize published Circle acknowledgement ref",
+                                    error,
+                                )
                             })?,
                             successor_slot,
                             store_cut,

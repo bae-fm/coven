@@ -47,12 +47,10 @@ impl StoreDatabase {
                     let (write_id, status, affected_rows) = row.map_err(DbError::from)?;
                     Ok(PendingWrite {
                         write_id: WriteId::from_generated(write_id),
-                        status: serde_json::from_str(&status).map_err(|error| {
-                            DbError::Message(format!("pending write status: {error}"))
-                        })?,
-                        affected_rows: serde_json::from_str(&affected_rows).map_err(|error| {
-                            DbError::Message(format!("pending affected rows: {error}"))
-                        })?,
+                        status: serde_json::from_str(&status)
+                            .map_err(|error| DbError::context("pending write status", error))?,
+                        affected_rows: serde_json::from_str(&affected_rows)
+                            .map_err(|error| DbError::context("pending affected rows", error))?,
                     })
                 })
                 .collect()
@@ -86,9 +84,8 @@ impl StoreDatabase {
                         |row| row.get(0),
                     )
                     .map_err(DbError::from)?;
-                let current: WriteStatus = serde_json::from_str(&raw).map_err(|error| {
-                    DbError::Message(format!("write {write_id} status: {error}"))
-                })?;
+                let current: WriteStatus = serde_json::from_str(&raw)
+                    .map_err(|error| DbError::context(format!("write {write_id} status"), error))?;
                 let mut senders = statuses.lock().expect("write status mutex poisoned");
                 let sender = senders
                     .entry(write_id)
@@ -114,7 +111,7 @@ impl StoreDatabase {
         let mut candidate = None;
         if let Some(raw_prepared) = raw_prepared.as_deref() {
             let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
-                .map_err(|error| DbError::Message(format!("resolved prepared write: {error}")))?;
+                .map_err(|error| DbError::context("resolved prepared write", error))?;
             let merge = parse_prepared_merge_candidate_on(tx, &prepared)?;
             removable.push(remote_object_id(&merge.reference.object));
             match load_merge_candidate_head_cleanup_on(
@@ -144,9 +141,11 @@ impl StoreDatabase {
             .map_err(DbError::from)?;
         drop(statement);
         for encoded in indexed {
-            removable.push(encoded.parse().map_err(|error| {
-                DbError::Message(format!("resolved remote object id: {error}"))
-            })?);
+            removable.push(
+                encoded
+                    .parse()
+                    .map_err(|error| DbError::context("resolved remote object id", error))?,
+            );
         }
         Ok(UnpublishedWriteCleanup {
             removable,
@@ -166,9 +165,7 @@ impl StoreDatabase {
             if !remote
                 .candidate_cleanup_complete(candidate)
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "validate candidate cleanup for {object_id}: {error}"
-                    ))
+                    DbError::context(format!("validate candidate cleanup for {object_id}"), error)
                 })?
             {
                 return Ok(false);
@@ -282,7 +279,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let current: WriteStatus = serde_json::from_str(&raw).map_err(|error| {
-                    DbError::Message(format!("write {write_id} status before blocking: {error}"))
+                    DbError::context(format!("write {write_id} status before blocking"), error)
                 })?;
                 match current {
                     WriteStatus::Resolved(_) => Ok(None),
@@ -326,7 +323,7 @@ impl StoreDatabase {
                 )
                 .map_err(DbError::from)?;
             let status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError::Message(format!("blocked write {write_id} status: {error}")))?;
+                .map_err(|error| DbError::context(format!("blocked write {write_id} status"), error))?;
             if !matches!(status, WriteStatus::Blocked(_)) {
                 return Err(DbError::Message(format!("write {write_id} is not blocked")));
             }
@@ -334,9 +331,7 @@ impl StoreDatabase {
             if let Some(raw_prepared) = prepared.as_deref() {
                 let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "blocked write {write_id} preparation: {error}"
-                        ))
+                        DbError::context(format!("blocked write {write_id} preparation"), error)
                     })?;
                 let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?.reference;
                 let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
@@ -366,7 +361,7 @@ impl StoreDatabase {
                 WriteStatus::Pending
             };
             let next_json = serde_json::to_string(&next).map_err(|error| {
-                DbError::Message(format!("serialize retry status: {error}"))
+                DbError::context("serialize retry status", error)
             })?;
             let updated = tx
                 .execute(
@@ -414,7 +409,7 @@ impl StoreDatabase {
                 )
                 .map_err(DbError::from)?;
             let target_status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError::Message(format!("blocked write {write_id} status: {error}")))?;
+                .map_err(|error| DbError::context(format!("blocked write {write_id} status"), error))?;
             if !matches!(target_status, WriteStatus::Blocked(_)) {
                 return Err(DbError::Message(format!("write {write_id} is not blocked")));
             }
@@ -442,7 +437,7 @@ impl StoreDatabase {
             for row in rows {
                 let (stored_id, raw_status, inverse) = row.map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::Message(format!("discard write status: {error}")))?;
+                    .map_err(|error| DbError::context("discard write status", error))?;
                 if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(format!(
                         "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
@@ -471,10 +466,10 @@ impl StoreDatabase {
                     inverse,
                     schema.clone(),
                 )
-                .map_err(|error| DbError::Message(format!("invalid blocked-write inverse: {error}")))?;
+                .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
                 MergeMaterializationTransaction::new(&tx)
                     .apply_changeset_strict(inverse)
-                    .map_err(|error| DbError::Message(format!("reverse blocked-write suffix: {error}")))?;
+                    .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
             }
             let discarded_ids: Vec<_> = discarded
                 .into_iter()
