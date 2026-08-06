@@ -837,6 +837,11 @@ impl ExactSlotStorage for InMemoryCloudHome {
 #[path = "test_utils_tests.rs"]
 mod tests;
 
+/// An [`InMemoryCloudHome`] bound to a fixed Google Drive provider, for the
+/// tests that need a cloud home but do not care which provider it claims to
+/// be. `cfg(test)`-only: the `test-utils` feature offers downstream crates
+/// [`InMemoryCloudHome`] itself, which they bind to their own provider.
+#[cfg(test)]
 pub(crate) fn test_cloud_home() -> std::sync::Arc<InMemoryCloudHome> {
     test_cloud_home_with_binding(crate::protocol::objects::ResolvedProviderBinding {
         store: crate::protocol::objects::StoreProviderBinding::GoogleDrive {
@@ -853,6 +858,7 @@ pub(crate) fn test_cloud_home() -> std::sync::Arc<InMemoryCloudHome> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn test_cloud_home_with_binding(
     binding: crate::protocol::objects::ResolvedProviderBinding,
 ) -> std::sync::Arc<InMemoryCloudHome> {
