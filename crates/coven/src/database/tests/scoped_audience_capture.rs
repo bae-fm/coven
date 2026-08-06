@@ -1,10 +1,63 @@
-use crate::{
-    Config, Coven, KeyCustody, MasterKeyring, Migration, RowIdentity, StoreDir, SyncedTable,
+use crate::database::{
+    Database, DbError, HostWriteError, HostWriteOperation, SqlContext, StoreDatabase,
+    StoreRowWrites,
 };
+use crate::{Migration, RowIdentity, StoreDir, SyncedTable, WriteBatch, WriteReceipt};
 
 const CIRCLE_LABEL: &str = "circle-a";
-fn routing_keyring() -> MasterKeyring {
-    crate::encryption::EncryptionService::from_key([7; 32]).into()
+
+/// The key a scoped store routes its rows under.
+fn routing_encryption() -> crate::encryption::EncryptionService {
+    crate::encryption::EncryptionService::from_key([7; 32])
+}
+
+/// A scoped store over its own file, and the host-write service that captures
+/// into it.
+fn scoped_store(
+    store_dir: &StoreDir,
+    device: &str,
+    tables: Vec<SyncedTable>,
+    migrations: Vec<Migration>,
+) -> (Database, StoreRowWrites) {
+    let database = Database::open(
+        &store_dir.db_path(),
+        tables,
+        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        device.to_string(),
+        std::sync::Arc::new(crate::clock::SystemClock),
+        &migrations,
+    )
+    .expect("open scoped Store");
+    let writes = StoreRowWrites::new(StoreDatabase::new(&database), store_dir.clone());
+    (database, writes)
+}
+
+/// Run `sql` as one host write under the scoped store's routing key.
+async fn capture<R>(
+    writes: &StoreRowWrites,
+    sql: impl for<'context, 'connection> FnOnce(SqlContext<'context, 'connection>) -> Result<R, DbError>
+        + Send
+        + 'static,
+) -> Result<WriteReceipt<R>, HostWriteError<DbError>>
+where
+    R: Send + 'static,
+{
+    writes
+        .execute(
+            HostWriteOperation::new(WriteBatch::new(), sql),
+            Some(routing_encryption()),
+            None,
+        )
+        .await
+}
+
+/// The database failure a rejected host write carries.
+fn write_failure(error: HostWriteError<DbError>) -> DbError {
+    match error {
+        HostWriteError::Database(error) | HostWriteError::Host(error) => error,
+        other => panic!("expected a database failure, got {other:?}"),
+    }
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -172,18 +225,11 @@ fn scoped_ancestor_rollback_state(
 async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "scoped-capture".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Scoped capture".to_string(),
-    );
-    let handle = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
-            SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience")
-        ])
-        .migrations(vec![Migration::sql(
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience")],
+        vec![Migration::sql(
             1,
             "accounts",
             "CREATE TABLE accounts (
@@ -192,9 +238,8 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
                 audience TEXT,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )])
-        .open()
-        .expect("open scoped Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
@@ -205,23 +250,22 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     drop(authority);
 
     let write_circle_id = circle_id.clone();
-    let receipt = handle
-        .sql(move |sql| {
-            for (id, name, audience) in [
-                ("store-account", "Store", None),
-                ("circle-account", "Circle", Some(write_circle_id.as_str())),
-                ("local-account", "Local", Some("local")),
-            ] {
-                sql.execute(
-                    "INSERT INTO accounts (id, name, audience, _updated_at)
+    let receipt = capture(&writes, move |sql| {
+        for (id, name, audience) in [
+            ("store-account", "Store", None),
+            ("circle-account", "Circle", Some(write_circle_id.as_str())),
+            ("local-account", "Local", Some("local")),
+        ] {
+            sql.execute(
+                "INSERT INTO accounts (id, name, audience, _updated_at)
                      VALUES (?1, ?2, ?3, ?4)",
-                    (id, name, audience, sql.stamp()),
-                )?;
-            }
-            Ok(())
-        })
-        .await
-        .expect("capture scoped host transaction");
+                (id, name, audience, sql.stamp()),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .expect("capture scoped host transaction");
 
     let write_id = receipt.write_id.to_string();
     let affected_write_id = write_id.clone();
@@ -345,20 +389,15 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
 async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomically() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "scoped-update-move".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Scoped update move".to_string(),
-    );
-    let handle = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("transactions", RowIdentity::SharedKey)
                 .inherits_audience_through("account_id"),
-        ])
-        .migrations(vec![Migration::sql(
+        ],
+        vec![Migration::sql(
             1,
             "accounts",
             "CREATE TABLE accounts (
@@ -373,9 +412,8 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
                 memo TEXT NOT NULL,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )])
-        .open()
-        .expect("open scoped Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
@@ -384,22 +422,21 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     let store_transaction_route = authority.scoped_routing_id("transactions", "store-transaction");
     drop(authority);
 
-    handle
-        .sql(|sql| {
-            sql.execute(
-                "INSERT INTO accounts (id, name, audience, _updated_at)
+    capture(&writes, |sql| {
+        sql.execute(
+            "INSERT INTO accounts (id, name, audience, _updated_at)
                  VALUES ('store-account', 'Store', NULL, ?1)",
-                [sql.stamp()],
-            )?;
-            sql.execute(
-                "INSERT INTO transactions (id, account_id, memo, _updated_at)
+            [sql.stamp()],
+        )?;
+        sql.execute(
+            "INSERT INTO transactions (id, account_id, memo, _updated_at)
                  VALUES ('store-transaction', 'store-account', 'Inherited', ?1)",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("seed scoped rows");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("seed scoped rows");
 
     let before = inspect_database(&store_dir, |conn| {
         let writes = row_count(conn, "store_writes")?;
@@ -420,16 +457,15 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         .expect("install partition journal failure");
 
     let failed_circle_id = circle_id.clone();
-    let failed = handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = ?1, _updated_at = ?2
+    let failed = capture(&writes, move |sql| {
+        sql.execute(
+            "UPDATE accounts SET audience = ?1, _updated_at = ?2
                  WHERE id = 'store-account'",
-                (&failed_circle_id, sql.stamp()),
-            )?;
-            Ok(())
-        })
-        .await;
+            (&failed_circle_id, sql.stamp()),
+        )?;
+        Ok(())
+    })
+    .await;
     assert!(failed.is_err(), "the injected journal failure must surface");
     let after_failure = inspect_database(&store_dir, move |conn| {
         let audience = conn.query_row(
@@ -465,17 +501,16 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     drop(fault);
 
     let moved_circle_id = circle_id.clone();
-    let moved = handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = ?1, _updated_at = ?2
+    let moved = capture(&writes, move |sql| {
+        sql.execute(
+            "UPDATE accounts SET audience = ?1, _updated_at = ?2
                  WHERE id = 'store-account'",
-                (&moved_circle_id, sql.stamp()),
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Store row into Circle");
+            (&moved_circle_id, sql.stamp()),
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move Store row into Circle");
     let move_write_id = moved.write_id.to_string();
     let (host_audience, child_count, move_partitions, routes, mirror) =
         inspect_database(&store_dir, move |conn| {
@@ -585,18 +620,11 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
 async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "scoped-authority-rejections".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Scoped authority rejections".to_string(),
-    );
-    let handle = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
-            SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience")
-        ])
-        .migrations(vec![Migration::sql(
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience")],
+        vec![Migration::sql(
             1,
             "accounts",
             "CREATE TABLE accounts (
@@ -605,9 +633,8 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
                 audience TEXT,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )])
-        .open()
-        .expect("open scoped Store");
+        )],
+    );
 
     let unknown_circle = crate::CircleId::from_bytes([3; 16]).to_string();
     let authority =
@@ -634,17 +661,17 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
     ] {
         let attempted_id = id.to_string();
         let attempted_audience = audience.clone();
-        let error = handle
-            .sql(move |sql| {
-                sql.execute(
-                    "INSERT INTO accounts (id, name, audience, _updated_at)
+        let error = capture(&writes, move |sql| {
+            sql.execute(
+                "INSERT INTO accounts (id, name, audience, _updated_at)
                      VALUES (?1, 'Rejected', ?2, ?3)",
-                    (attempted_id, attempted_audience, sql.stamp()),
-                )?;
-                Ok(())
-            })
-            .await
-            .expect_err("invalid scoped write must fail loudly");
+                (attempted_id, attempted_audience, sql.stamp()),
+            )?;
+            Ok(())
+        })
+        .await
+        .expect_err("invalid scoped write must fail loudly");
+        let error = write_failure(error);
         assert!(
             error.to_string().contains(expected_error),
             "{id} surfaced the wrong error: {error}"
@@ -672,20 +699,15 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
 async fn circle_moves_materialize_destinations_and_delete_removes_current_rows() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "scoped-circle-transitions".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Scoped Circle transitions".to_string(),
-    );
-    let handle = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("transactions", RowIdentity::SharedKey)
                 .inherits_audience_through("account_id"),
-        ])
-        .migrations(vec![Migration::sql(
+        ],
+        vec![Migration::sql(
             1,
             "accounts-and-transactions",
             "CREATE TABLE accounts (
@@ -700,9 +722,8 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
                 memo TEXT NOT NULL,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )])
-        .open()
-        .expect("open scoped Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
@@ -719,28 +740,27 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     drop(authority);
 
     let seed_circle_id = circle_id.clone();
-    handle
-        .sql(move |sql| {
-            for (account, transaction) in [
-                ("local-move-account", "local-move-transaction"),
-                ("store-move-account", "store-move-transaction"),
-                ("deleted-account", "deleted-transaction"),
-            ] {
-                sql.execute(
-                    "INSERT INTO accounts (id, name, audience, _updated_at)
+    capture(&writes, move |sql| {
+        for (account, transaction) in [
+            ("local-move-account", "local-move-transaction"),
+            ("store-move-account", "store-move-transaction"),
+            ("deleted-account", "deleted-transaction"),
+        ] {
+            sql.execute(
+                "INSERT INTO accounts (id, name, audience, _updated_at)
                      VALUES (?1, 'Circle', ?2, ?3)",
-                    (account, &seed_circle_id, sql.stamp()),
-                )?;
-                sql.execute(
-                    "INSERT INTO transactions (id, account_id, memo, _updated_at)
+                (account, &seed_circle_id, sql.stamp()),
+            )?;
+            sql.execute(
+                "INSERT INTO transactions (id, account_id, memo, _updated_at)
                      VALUES (?1, ?2, 'Inherited', ?3)",
-                    (transaction, account, sql.stamp()),
-                )?;
-            }
-            Ok(())
-        })
-        .await
-        .expect("seed three Circle subtrees");
+                (transaction, account, sql.stamp()),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .expect("seed three Circle subtrees");
 
     let before_failure = inspect_database(&store_dir, |conn| {
         let routes = text_quads(
@@ -775,16 +795,15 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
              END;",
         )
         .expect("install Circle transition partition failure");
-    let failed = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = 'local', _updated_at = ?1
+    let failed = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE accounts SET audience = 'local', _updated_at = ?1
                  WHERE id = 'local-move-account'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await;
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await;
     assert!(failed.is_err(), "injected partition failure must surface");
     let after_failure = inspect_database(&store_dir, |conn| {
         let audience = conn.query_row(
@@ -824,17 +843,16 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         .expect("remove Circle transition partition failure");
     drop(fault);
 
-    let local_move = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = 'local', _updated_at = ?1
+    let local_move = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE accounts SET audience = 'local', _updated_at = ?1
                  WHERE id = 'local-move-account'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Circle subtree to Local");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move Circle subtree to Local");
     let local_write_id = local_move.write_id.to_string();
     let (local_partitions, local_store_bytes, local_routes, local_mirror_count) =
         inspect_database(&store_dir, move |conn| {
@@ -916,17 +934,16 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     );
     assert_eq!(local_mirror_count, 0);
 
-    let store_move = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = NULL, _updated_at = ?1
+    let store_move = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE accounts SET audience = NULL, _updated_at = ?1
                  WHERE id = 'store-move-account'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Circle subtree to Store");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move Circle subtree to Store");
     let store_write_id = store_move.write_id.to_string();
     let (store_partitions, store_routes, store_mirror) =
         inspect_database(&store_dir, move |conn| {
@@ -1002,13 +1019,12 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     expected_store_mirror.sort();
     assert_eq!(store_mirror, expected_store_mirror);
 
-    let deleted = handle
-        .sql(|sql| {
-            sql.execute("DELETE FROM accounts WHERE id = 'deleted-account'", [])?;
-            Ok(())
-        })
-        .await
-        .expect("delete Circle subtree");
+    let deleted = capture(&writes, |sql| {
+        sql.execute("DELETE FROM accounts WHERE id = 'deleted-account'", [])?;
+        Ok(())
+    })
+    .await
+    .expect("delete Circle subtree");
     let delete_write_id = deleted.write_id.to_string();
     let deleted_routes_for_query = [
         deleted_account_route.clone(),
@@ -1088,20 +1104,15 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
 async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "scoped-sibling-isolation".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Scoped sibling isolation".to_string(),
-    );
-    let handle = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![
             SyncedTable::new("folders", RowIdentity::SharedKey).remote_root(),
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
-        ])
-        .migrations(vec![Migration::sql(
+        ],
+        vec![Migration::sql(
             1,
             "scoped siblings",
             "CREATE TABLE folders (
@@ -1123,49 +1134,46 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
                 audience TEXT,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )])
-        .open()
-        .expect("open scoped sibling Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
     let (circle_id, _control) = authority.seed_active_circle(CIRCLE_LABEL);
     drop(authority);
 
-    handle
-        .sql(|sql| {
-            sql.execute(
-                "INSERT INTO folders (id, name, _updated_at)
+    capture(&writes, |sql| {
+        sql.execute(
+            "INSERT INTO folders (id, name, _updated_at)
                  VALUES ('shared-folder', 'Shared', ?1)",
-                [sql.stamp()],
-            )?;
-            sql.execute(
-                "INSERT INTO accounts (id, folder_id, name, audience, _updated_at)
+            [sql.stamp()],
+        )?;
+        sql.execute(
+            "INSERT INTO accounts (id, folder_id, name, audience, _updated_at)
                  VALUES ('moved-account', 'shared-folder', 'Moved', NULL, ?1)",
-                [sql.stamp()],
-            )?;
-            sql.execute(
-                "INSERT INTO documents (id, folder_id, title, audience, _updated_at)
+            [sql.stamp()],
+        )?;
+        sql.execute(
+            "INSERT INTO documents (id, folder_id, title, audience, _updated_at)
                  VALUES ('store-document', 'shared-folder', 'Unrelated', NULL, ?1)",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("seed scoped siblings");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("seed scoped siblings");
 
     let moved_circle_id = circle_id.clone();
-    let moved = handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE accounts SET audience = ?1, _updated_at = ?2
+    let moved = capture(&writes, move |sql| {
+        sql.execute(
+            "UPDATE accounts SET audience = ?1, _updated_at = ?2
                  WHERE id = 'moved-account'",
-                (&moved_circle_id, sql.stamp()),
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move one scoped root");
+            (&moved_circle_id, sql.stamp()),
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move one scoped root");
     let write_id = moved.write_id.to_string();
     let partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -1199,20 +1207,15 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
 async fn validates_every_outgoing_synced_fk_audience() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "cross-audience-fk".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Cross-audience relationship".to_string(),
-    );
-    let builder = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![
             SyncedTable::new("homes", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("targets", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("links", RowIdentity::SharedKey).inherits_audience_through("home_id"),
-        ])
-        .migrations(vec![Migration::sql(
+        ],
+        vec![Migration::sql(
             1,
             "cross-audience relationship",
             "CREATE TABLE homes (
@@ -1231,8 +1234,8 @@ async fn validates_every_outgoing_synced_fk_audience() {
                 target_id TEXT NOT NULL REFERENCES targets(id),
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )]);
-    let handle = builder.open().expect("open cross-audience Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
@@ -1242,49 +1245,47 @@ async fn validates_every_outgoing_synced_fk_audience() {
 
     let seeded_circle_id = circle_id.clone();
     let seeded_other_circle_id = other_circle_id.clone();
-    handle
-        .sql(move |sql| {
-            for (id, audience) in [
-                ("circle-a-home", Some(seeded_circle_id.as_str())),
-                ("store-home", None),
-                ("local-home", Some("local")),
-            ] {
-                sql.execute(
-                    "INSERT INTO homes (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
-                    (id, audience, sql.stamp()),
-                )?;
-            }
-            for (id, audience) in [
-                ("circle-a-target", Some(seeded_circle_id.as_str())),
-                ("circle-b-target", Some(seeded_other_circle_id.as_str())),
-                ("store-target", None),
-            ] {
-                sql.execute(
-                    "INSERT INTO targets (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
-                    (id, audience, sql.stamp()),
-                )?;
-            }
-            Ok(())
-        })
-        .await
-        .expect("seed Store, Circle, and Local relationship parents");
+    capture(&writes, move |sql| {
+        for (id, audience) in [
+            ("circle-a-home", Some(seeded_circle_id.as_str())),
+            ("store-home", None),
+            ("local-home", Some("local")),
+        ] {
+            sql.execute(
+                "INSERT INTO homes (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
+                (id, audience, sql.stamp()),
+            )?;
+        }
+        for (id, audience) in [
+            ("circle-a-target", Some(seeded_circle_id.as_str())),
+            ("circle-b-target", Some(seeded_other_circle_id.as_str())),
+            ("store-target", None),
+        ] {
+            sql.execute(
+                "INSERT INTO targets (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
+                (id, audience, sql.stamp()),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .expect("seed Store, Circle, and Local relationship parents");
 
-    let allowed = handle
-        .sql(|sql| {
-            sql.execute(
-                "INSERT INTO links (id, home_id, target_id, _updated_at)
+    let allowed = capture(&writes, |sql| {
+        sql.execute(
+            "INSERT INTO links (id, home_id, target_id, _updated_at)
                  VALUES ('same-circle-link', 'circle-a-home', 'circle-a-target', ?1)",
-                [sql.stamp()],
-            )?;
-            sql.execute(
-                "INSERT INTO links (id, home_id, target_id, _updated_at)
+            [sql.stamp()],
+        )?;
+        sql.execute(
+            "INSERT INTO links (id, home_id, target_id, _updated_at)
                  VALUES ('store-parent-link', 'circle-a-home', 'store-target', ?1)",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("same-audience and Store-parent relationships must succeed");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("same-audience and Store-parent relationships must succeed");
     let allowed_write_id = allowed.write_id.to_string();
     let allowed_state = inspect_database(&store_dir, move |conn| {
         let host_rows = conn.query_row(
@@ -1337,17 +1338,17 @@ async fn validates_every_outgoing_synced_fk_audience() {
         let attempted_id = id.to_string();
         let attempted_home = home.to_string();
         let attempted_target = target.to_string();
-        let error = handle
-            .sql(move |sql| {
-                sql.execute(
-                    "INSERT INTO links (id, home_id, target_id, _updated_at)
+        let error = capture(&writes, move |sql| {
+            sql.execute(
+                "INSERT INTO links (id, home_id, target_id, _updated_at)
                      VALUES (?1, ?2, ?3, ?4)",
-                    (attempted_id, attempted_home, attempted_target, sql.stamp()),
-                )?;
-                Ok(())
-            })
-            .await
-            .unwrap_err();
+                (attempted_id, attempted_home, attempted_target, sql.stamp()),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        let error = write_failure(error);
         assert!(
             error.to_string().contains("relationship through target_id"),
             "{description} surfaced the wrong error: {error}"
@@ -1379,23 +1380,18 @@ async fn validates_every_outgoing_synced_fk_audience() {
 async fn reparenting_an_inherited_row_materializes_its_subtree() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "inherited-reparent".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Inherited reparent".to_string(),
-    );
-    let builder = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![
             SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("requirements", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("transactions", RowIdentity::SharedKey)
                 .inherits_audience_through("account_id"),
             SyncedTable::new("line_items", RowIdentity::SharedKey)
                 .inherits_audience_through("transaction_id"),
-        ])
-        .migrations(vec![Migration::sql(
+        ],
+        vec![Migration::sql(
             1,
             "inherited reparent",
             "CREATE TABLE accounts (
@@ -1419,8 +1415,8 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
                 transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )]);
-    let handle = builder.open().expect("open inherited reparent Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
@@ -1430,73 +1426,72 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
 
     let seeded_circle_id = circle_id.clone();
     let seeded_circle_b = circle_b.clone();
-    handle
-        .sql(move |sql| {
-            for (id, audience) in [
-                ("store-account", None),
-                ("circle-a-account", Some(seeded_circle_id.as_str())),
-                ("circle-b-account", Some(seeded_circle_b.as_str())),
-                ("local-account", Some("local")),
-            ] {
-                sql.execute(
-                    "INSERT INTO accounts (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
-                    (id, audience, sql.stamp()),
-                )?;
-            }
-            for (id, audience) in [
-                ("store-requirement", None),
-                ("circle-a-requirement", Some(seeded_circle_id.as_str())),
-                ("circle-b-requirement", Some(seeded_circle_b.as_str())),
-                ("local-requirement", Some("local")),
-            ] {
-                sql.execute(
-                    "INSERT INTO requirements (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
-                    (id, audience, sql.stamp()),
-                )?;
-            }
-            for (transaction, account, requirement) in [
-                (
-                    "to-circle-transaction",
-                    "store-account",
-                    "store-requirement",
-                ),
-                (
-                    "to-local-transaction",
-                    "circle-a-account",
-                    "circle-a-requirement",
-                ),
-                (
-                    "to-store-transaction",
-                    "circle-a-account",
-                    "circle-a-requirement",
-                ),
-                (
-                    "invalid-target-transaction",
-                    "circle-a-account",
-                    "circle-a-requirement",
-                ),
-                (
-                    "journal-failure-transaction",
-                    "store-account",
-                    "store-requirement",
-                ),
-            ] {
-                sql.execute(
-                    "INSERT INTO transactions
+    capture(&writes, move |sql| {
+        for (id, audience) in [
+            ("store-account", None),
+            ("circle-a-account", Some(seeded_circle_id.as_str())),
+            ("circle-b-account", Some(seeded_circle_b.as_str())),
+            ("local-account", Some("local")),
+        ] {
+            sql.execute(
+                "INSERT INTO accounts (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
+                (id, audience, sql.stamp()),
+            )?;
+        }
+        for (id, audience) in [
+            ("store-requirement", None),
+            ("circle-a-requirement", Some(seeded_circle_id.as_str())),
+            ("circle-b-requirement", Some(seeded_circle_b.as_str())),
+            ("local-requirement", Some("local")),
+        ] {
+            sql.execute(
+                "INSERT INTO requirements (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
+                (id, audience, sql.stamp()),
+            )?;
+        }
+        for (transaction, account, requirement) in [
+            (
+                "to-circle-transaction",
+                "store-account",
+                "store-requirement",
+            ),
+            (
+                "to-local-transaction",
+                "circle-a-account",
+                "circle-a-requirement",
+            ),
+            (
+                "to-store-transaction",
+                "circle-a-account",
+                "circle-a-requirement",
+            ),
+            (
+                "invalid-target-transaction",
+                "circle-a-account",
+                "circle-a-requirement",
+            ),
+            (
+                "journal-failure-transaction",
+                "store-account",
+                "store-requirement",
+            ),
+        ] {
+            sql.execute(
+                "INSERT INTO transactions
                      (id, account_id, requirement_id, _updated_at)
                      VALUES (?1, ?2, ?3, ?4)",
-                    (transaction, account, requirement, sql.stamp()),
-                )?;
-                sql.execute(
-                    "INSERT INTO line_items (id, transaction_id, _updated_at)
+                (transaction, account, requirement, sql.stamp()),
+            )?;
+            sql.execute(
+                "INSERT INTO line_items (id, transaction_id, _updated_at)
                      VALUES (?1, ?2, ?3)",
-                    (format!("{transaction}-line"), transaction, sql.stamp()),
-                )?;
-            }
-            Ok(())
-        })
-        .await
-        .expect("seed inherited reparenting cases");
+                (format!("{transaction}-line"), transaction, sql.stamp()),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .expect("seed inherited reparenting cases");
 
     let before_routes = inspect_database(&store_dir, move |conn| {
         text_triples(
@@ -1508,17 +1503,16 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     })
     .expect("read routes before reparent");
 
-    let moved = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE transactions SET account_id = 'circle-b-account', _updated_at = ?1
+    let moved = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE transactions SET account_id = 'circle-b-account', _updated_at = ?1
                  WHERE id = 'to-circle-transaction'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("reparent Store child to Circle B");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("reparent Store child to Circle B");
     let write_id = moved.write_id.to_string();
     let (partitions, after_routes) = inspect_database(&store_dir, move |conn| {
         let partitions = conn.query(
@@ -1562,20 +1556,19 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         .iter()
         .all(|change| change.table != "transactions" && change.table != "line_items"));
 
-    let to_local = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE transactions
+    let to_local = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE transactions
                  SET account_id = 'local-account',
                      requirement_id = 'local-requirement',
                      _updated_at = ?1
                  WHERE id = 'to-local-transaction'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("reparent Circle A child to Local with a Local requirement");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("reparent Circle A child to Local with a Local requirement");
     let local_write_id = to_local.write_id.to_string();
     let (local_partitions, local_state) = inspect_database(&store_dir, move |conn| {
         let partitions = conn.query(
@@ -1622,20 +1615,19 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         "the host database is already the Local materialization"
     );
 
-    let to_store = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE transactions
+    let to_store = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE transactions
                  SET account_id = 'store-account',
                      requirement_id = 'store-requirement',
                      _updated_at = ?1
                  WHERE id = 'to-store-transaction'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("reparent Circle A child to Store");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("reparent Circle A child to Store");
     let store_write_id = to_store.write_id.to_string();
     let store_partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -1676,18 +1668,18 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         reparent_rollback_state(conn, "invalid-target-transaction")
     })
     .expect("read state before invalid reparent");
-    let invalid_error = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE transactions
+    let invalid_error = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE transactions
                  SET account_id = 'circle-b-account', _updated_at = ?1
                  WHERE id = 'invalid-target-transaction'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect_err("Circle B child must not retain its Circle A requirement");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect_err("Circle B child must not retain its Circle A requirement");
+    let invalid_error = write_failure(invalid_error);
     assert!(
         invalid_error
             .to_string()
@@ -1714,18 +1706,18 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
              END;",
         )
         .expect("install inherited reparent journal failure");
-    let journal_error = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE transactions
+    let journal_error = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE transactions
                  SET account_id = 'circle-b-account', _updated_at = ?1
                  WHERE id = 'journal-failure-transaction'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect_err("journal failure must abort inherited reparent");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect_err("journal failure must abort inherited reparent");
+    let journal_error = write_failure(journal_error);
     assert!(journal_error
         .to_string()
         .contains("forced inherited reparent journal failure"));
@@ -1756,21 +1748,16 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
 async fn scoped_descendant_keeps_store_ancestor() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new(temp.path());
-    let config = Config::with_defaults(
-        "scoped-ancestor".to_string(),
-        "capture-device".to_string(),
-        store_dir.clone(),
-        "Scoped descendant ancestor".to_string(),
-    );
-    let builder = Coven::builder(config)
-        .key_custody(KeyCustody::InMemory(routing_keyring()))
-        .synced_tables(vec![
+    let (_database, writes) = scoped_store(
+        &store_dir,
+        "capture-device",
+        vec![
             SyncedTable::new("folders", RowIdentity::SharedKey).gated_by_descendants(),
             SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
             SyncedTable::new("details", RowIdentity::SharedKey)
                 .inherits_audience_through("document_id"),
-        ])
-        .migrations(vec![Migration::sql(
+        ],
+        vec![Migration::sql(
             1,
             "scoped descendant ancestor",
             "CREATE TABLE folders (
@@ -1789,8 +1776,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
                 document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
                 _updated_at TEXT NOT NULL
              ) STRICT;",
-        )]);
-    let handle = builder.open().expect("open scoped ancestor Store");
+        )],
+    );
 
     let authority =
         crate::database::DatabaseImageTest::open(&store_dir.db_path()).expect("open authority db");
@@ -1798,27 +1785,26 @@ async fn scoped_descendant_keeps_store_ancestor() {
     let (circle_b, _circle_b_control) = authority.seed_active_circle("circle-b");
     drop(authority);
 
-    let seeded = handle
-        .sql(|sql| {
-            sql.execute(
-                "INSERT INTO folders (id, name, _updated_at)
+    let seeded = capture(&writes, |sql| {
+        sql.execute(
+            "INSERT INTO folders (id, name, _updated_at)
                  VALUES ('required-folder', 'Required', ?1)",
-                [sql.stamp()],
-            )?;
-            sql.execute(
-                "INSERT INTO documents (id, folder_id, audience, _updated_at)
+            [sql.stamp()],
+        )?;
+        sql.execute(
+            "INSERT INTO documents (id, folder_id, audience, _updated_at)
                  VALUES ('moving-document', 'required-folder', 'local', ?1)",
-                [sql.stamp()],
-            )?;
-            sql.execute(
-                "INSERT INTO details (id, document_id, _updated_at)
+            [sql.stamp()],
+        )?;
+        sql.execute(
+            "INSERT INTO details (id, document_id, _updated_at)
                  VALUES ('moving-detail', 'moving-document', ?1)",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("seed Local-only ancestor subtree");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("seed Local-only ancestor subtree");
     let seed_write_id = seeded.write_id.to_string();
     let local_only_partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -1846,17 +1832,16 @@ async fn scoped_descendant_keeps_store_ancestor() {
     }
 
     let destination_circle_id = circle_id.clone();
-    let moved = handle
-        .sql(move |sql| {
-            sql.execute(
-                "UPDATE documents SET audience = ?1, _updated_at = ?2
+    let moved = capture(&writes, move |sql| {
+        sql.execute(
+            "UPDATE documents SET audience = ?1, _updated_at = ?2
                  WHERE id = 'moving-document'",
-                (&destination_circle_id, sql.stamp()),
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Local descendant into Circle A");
+            (&destination_circle_id, sql.stamp()),
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move Local descendant into Circle A");
     let write_id = moved.write_id.to_string();
     let partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -1900,22 +1885,21 @@ async fn scoped_descendant_keeps_store_ancestor() {
     }
 
     let sibling_circle = circle_b.clone();
-    let inserted_sibling = handle
-        .sql(move |sql| {
-            sql.execute(
-                "INSERT INTO documents (id, folder_id, audience, _updated_at)
+    let inserted_sibling = capture(&writes, move |sql| {
+        sql.execute(
+            "INSERT INTO documents (id, folder_id, audience, _updated_at)
                  VALUES ('sibling-document', 'required-folder', ?1, ?2)",
-                (sibling_circle, sql.stamp()),
-            )?;
-            sql.execute(
-                "INSERT INTO details (id, document_id, _updated_at)
+            (sibling_circle, sql.stamp()),
+        )?;
+        sql.execute(
+            "INSERT INTO details (id, document_id, _updated_at)
                  VALUES ('sibling-detail', 'sibling-document', ?1)",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("insert Circle B sibling under required ancestor");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("insert Circle B sibling under required ancestor");
     let sibling_write_id = inserted_sibling.write_id.to_string();
     let sibling_circle = circle_b.clone();
     let sibling_partitions = inspect_database(&store_dir, move |conn| {
@@ -1970,17 +1954,16 @@ async fn scoped_descendant_keeps_store_ancestor() {
         }
     }
 
-    let moved_local = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE documents SET audience = 'local', _updated_at = ?1
+    let moved_local = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE documents SET audience = 'local', _updated_at = ?1
                  WHERE id = 'moving-document'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move Circle A descendant to Local while Circle B remains");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move Circle A descendant to Local while Circle B remains");
     let local_write_id = moved_local.write_id.to_string();
     let local_partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -2032,17 +2015,17 @@ async fn scoped_descendant_keeps_store_ancestor() {
              END;",
         )
         .expect("install scoped ancestor journal failure");
-    let failed_move = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE documents SET audience = 'local', _updated_at = ?1
+    let failed_move = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE documents SET audience = 'local', _updated_at = ?1
                  WHERE id = 'sibling-document'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect_err("journal failure must abort final non-Local descendant move");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect_err("journal failure must abort final non-Local descendant move");
+    let failed_move = write_failure(failed_move);
     assert!(failed_move
         .to_string()
         .contains("forced scoped ancestor journal failure"));
@@ -2054,17 +2037,16 @@ async fn scoped_descendant_keeps_store_ancestor() {
         .expect("remove scoped ancestor journal failure");
     drop(fault);
 
-    let moved_sibling_local = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE documents SET audience = 'local', _updated_at = ?1
+    let moved_sibling_local = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE documents SET audience = 'local', _updated_at = ?1
                  WHERE id = 'sibling-document'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move final Circle descendant to Local");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move final Circle descendant to Local");
     let sibling_local_write_id = moved_sibling_local.write_id.to_string();
     let sibling_local_partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -2100,17 +2082,16 @@ async fn scoped_descendant_keeps_store_ancestor() {
         "the host database is already the Local materialization"
     );
 
-    let moved_store = handle
-        .sql(|sql| {
-            sql.execute(
-                "UPDATE documents SET audience = NULL, _updated_at = ?1
+    let moved_store = capture(&writes, |sql| {
+        sql.execute(
+            "UPDATE documents SET audience = NULL, _updated_at = ?1
                  WHERE id = 'moving-document'",
-                [sql.stamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("move selected Local descendant to Store");
+            [sql.stamp()],
+        )?;
+        Ok(())
+    })
+    .await
+    .expect("move selected Local descendant to Store");
     let store_write_id = moved_store.write_id.to_string();
     let store_partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
@@ -2146,13 +2127,12 @@ async fn scoped_descendant_keeps_store_ancestor() {
         ));
     }
 
-    let deleted_store = handle
-        .sql(|sql| {
-            sql.execute("DELETE FROM documents WHERE id = 'moving-document'", [])?;
-            Ok(())
-        })
-        .await
-        .expect("delete final Store descendant");
+    let deleted_store = capture(&writes, |sql| {
+        sql.execute("DELETE FROM documents WHERE id = 'moving-document'", [])?;
+        Ok(())
+    })
+    .await
+    .expect("delete final Store descendant");
     let delete_write_id = deleted_store.write_id.to_string();
     let delete_partitions = inspect_database(&store_dir, move |conn| {
         conn.query(
