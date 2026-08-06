@@ -608,9 +608,11 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .journal
             .load()?
             .ok_or(DeviceJoinError::JournalConflict)?;
-        if current
-            .joiner_abandonment_transition(&abandonment)?
-            .is_none()
+        if crate::database::device_join_journal::joiner_abandonment_transition(
+            &current,
+            &abandonment,
+        )?
+        .is_none()
         {
             return Ok(abandonment);
         }
@@ -654,9 +656,11 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let next = current
-            .joiner_abandonment_transition(&abandonment)?
-            .ok_or(DeviceJoinError::JournalConflict)?;
+        let next = crate::database::device_join_journal::joiner_abandonment_transition(
+            &current,
+            &abandonment,
+        )?
+        .ok_or(DeviceJoinError::JournalConflict)?;
         self.journal.advance_to(&current, &next)?;
         Ok(abandonment)
     }

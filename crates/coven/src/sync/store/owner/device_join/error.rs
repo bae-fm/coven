@@ -90,13 +90,9 @@ impl From<crate::protocol::store_commit::device_join_exchange::DeviceJoinExchang
     }
 }
 
-impl From<crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError>
-    for DeviceJoinError
-{
-    fn from(
-        error: crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError,
-    ) -> Self {
-        use crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError as E;
+impl From<crate::database::DeviceJoinJournalError> for DeviceJoinError {
+    fn from(error: crate::database::DeviceJoinJournalError) -> Self {
+        use crate::database::DeviceJoinJournalError as E;
         match error {
             E::NonAdjacentJournalTransition => DeviceJoinError::NonAdjacentJournalTransition,
             E::JournalConflict => DeviceJoinError::JournalConflict,

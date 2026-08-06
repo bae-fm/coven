@@ -66,12 +66,8 @@ impl From<crate::sync::store::MembershipOpsError> for SyncError {
     }
 }
 
-impl From<crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError>
-    for SyncError
-{
-    fn from(
-        error: crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError,
-    ) -> Self {
+impl From<crate::database::DeviceJoinJournalError> for SyncError {
+    fn from(error: crate::database::DeviceJoinJournalError) -> Self {
         SyncError::DeviceJoin(crate::DeviceJoinError::from(error))
     }
 }

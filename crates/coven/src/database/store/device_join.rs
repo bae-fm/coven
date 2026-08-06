@@ -1,6 +1,8 @@
 use crate::database::query_mapped_rows;
+use crate::database::store::device_join_journal::{
+    require_initial, require_replacement_terminal, validate_successor, DeviceJoinJournalError,
+};
 use crate::database::StoreDatabase;
-use crate::protocol::store_commit::device_join_journal::DeviceJoinJournalError;
 use crate::protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,
 };
@@ -238,7 +240,7 @@ impl StoreDatabase {
         &self,
         record: DeviceJoinJournalRecord,
     ) -> Result<DeviceJoinJournalRecord, DeviceJoinJournalError> {
-        record.require_initial()?;
+        require_initial(&record)?;
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
         self.connection
@@ -279,7 +281,7 @@ impl StoreDatabase {
         previous: &DeviceJoinJournalRecord,
         next: DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinJournalError> {
-        previous.validate_successor(&next)?;
+        validate_successor(previous, &next)?;
         let key = previous.store_key();
         let previous = serde_json::to_string(previous)?;
         let next = serde_json::to_string(&next)?;
@@ -306,7 +308,7 @@ impl StoreDatabase {
         &self,
         record: DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinJournalError> {
-        record.require_replacement_terminal()?;
+        require_replacement_terminal(&record)?;
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
         let durable = self

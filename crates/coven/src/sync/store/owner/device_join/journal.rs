@@ -8,11 +8,12 @@ use crate::protocol::store_commit::device_join_exchange::{
 use crate::protocol::store_commit::DeviceJoinAttemptRef;
 use crate::protocol::store_commit::DeviceJoinOutcomeRef;
 
+pub(crate) use crate::database::device_join_journal::validate_initial_progress;
+use crate::database::device_join_journal::validate_successor;
 pub(crate) use crate::protocol::store_commit::device_join_journal::attempt_key;
 pub(crate) use crate::protocol::store_commit::device_join_journal::{
-    device_join_action, validate_initial_progress, DeviceJoinRoleProgress,
-    DeviceJoinRoleProgressKind, JoinerJoinProgress, OwnerJoinProgress, PreparedDeviceJoinObject,
-    ProviderAdminJoinProgress,
+    device_join_action, DeviceJoinRoleProgress, DeviceJoinRoleProgressKind, JoinerJoinProgress,
+    OwnerJoinProgress, PreparedDeviceJoinObject, ProviderAdminJoinProgress,
 };
 pub use crate::protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,
@@ -245,7 +246,7 @@ impl DeviceJoinJournalDatabase {
         previous: &DeviceJoinJournalRecord,
         next: DeviceJoinJournalRecord,
     ) -> Result<(), DeviceJoinError> {
-        previous.validate_successor(&next)?;
+        validate_successor(previous, &next)?;
         self.swap(previous, &next)
     }
 

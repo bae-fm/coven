@@ -14,6 +14,7 @@ mod device_continuation;
 mod device_exclusion;
 mod device_join;
 mod device_join_challenges;
+pub(crate) mod device_join_journal;
 mod device_registration_journal;
 mod host_sql;
 mod host_sql_transaction;

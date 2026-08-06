@@ -210,6 +210,8 @@ pub(crate) use schema_introspection::{
     create_table_sql, foreign_key_edges, quote_ident, rewrite_create_into_schema, table_columns,
     CreateTableSchemaError, ForeignKeyEdge, ForeignKeySchemaError,
 };
+pub(crate) use store::device_join_journal;
+pub(crate) use store::device_join_journal::DeviceJoinJournalError;
 pub(crate) use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
