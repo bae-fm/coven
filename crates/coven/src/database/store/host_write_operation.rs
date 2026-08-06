@@ -45,6 +45,37 @@ impl Default for WriteBatch {
     }
 }
 
+/// A local blob file that failed to unwind after a host write failed. Names the
+/// blob so a host learns which files are left behind, not just that some were.
+#[derive(Debug)]
+pub struct BlobFileFailure {
+    pub namespace: String,
+    pub id: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for BlobFileFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}/{}: {}", self.namespace, self.id, self.reason)
+    }
+}
+
+/// Every blob that failed to unwind, in the order they were attempted.
+#[derive(Debug)]
+pub struct BlobFileFailures(pub Vec<BlobFileFailure>);
+
+impl std::fmt::Display for BlobFileFailures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{failure}")?;
+        }
+        Ok(())
+    }
+}
+
 struct NewBlob {
     namespace: String,
     id: String,
@@ -75,11 +106,17 @@ impl StagedBlob {
             published: None,
         };
         if let Err(operation) = staged_blob.staged_mut().write_bytes(&blob.bytes).await {
+            let namespace = staged_blob.namespace.clone();
+            let id = staged_blob.id.clone();
             return match staged_blob.discard().await {
                 Ok(()) => Err(HostWriteError::Blob(operation)),
-                Err(cleanup) => Err(HostWriteError::BlobCleanupFailed {
+                Err(reason) => Err(HostWriteError::BlobCleanupFailed {
                     operation: Box::new(HostWriteError::Blob(operation)),
-                    cleanup,
+                    cleanup: BlobFileFailures(vec![BlobFileFailure {
+                        namespace,
+                        id,
+                        reason,
+                    }]),
                 }),
             };
         }
@@ -153,9 +190,13 @@ impl StagedBlobBatch {
     ) -> HostWriteError<E> {
         let mut failures = Vec::new();
         for blob in self.blobs {
-            let identity = format!("{}/{}", blob.namespace, blob.id);
-            if let Err(error) = blob.discard().await {
-                failures.push(format!("{identity}: {error}"));
+            let (namespace, id) = (blob.namespace.clone(), blob.id.clone());
+            if let Err(reason) = blob.discard().await {
+                failures.push(BlobFileFailure {
+                    namespace,
+                    id,
+                    reason,
+                });
             }
         }
         if failures.is_empty() {
@@ -163,7 +204,7 @@ impl StagedBlobBatch {
         } else {
             HostWriteError::BlobCleanupFailed {
                 operation: Box::new(operation),
-                cleanup: failures.join("; "),
+                cleanup: BlobFileFailures(failures),
             }
         }
     }
@@ -188,9 +229,13 @@ impl StagedBlobBatch {
     fn rollback<E>(self, write: HostWriteError<E>) -> HostWriteError<E> {
         let mut failures = Vec::new();
         for blob in self.blobs.into_iter().rev() {
-            let identity = format!("{}/{}", blob.namespace, blob.id);
-            if let Err(error) = blob.rollback() {
-                failures.push(format!("{identity}: {error}"));
+            let (namespace, id) = (blob.namespace.clone(), blob.id.clone());
+            if let Err(reason) = blob.rollback() {
+                failures.push(BlobFileFailure {
+                    namespace,
+                    id,
+                    reason,
+                });
             }
         }
         if failures.is_empty() {
@@ -198,7 +243,7 @@ impl StagedBlobBatch {
         } else {
             HostWriteError::WriteRollbackFailed {
                 write: Box::new(write),
-                rollback: failures.join("; "),
+                rollback: BlobFileFailures(failures),
             }
         }
     }
@@ -236,11 +281,11 @@ pub(crate) enum HostWriteError<E> {
     WriteClosurePanicked,
     WriteRollbackFailed {
         write: Box<Self>,
-        rollback: String,
+        rollback: BlobFileFailures,
     },
     BlobCleanupFailed {
         operation: Box<Self>,
-        cleanup: String,
+        cleanup: BlobFileFailures,
     },
     BlobStillReferenced {
         namespace: String,

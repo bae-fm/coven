@@ -83,7 +83,7 @@ pub(crate) use host_write_capture::{
     StagedAudienceBlobRollback,
 };
 pub(crate) use host_write_operation::StoreRowWrites;
-pub use host_write_operation::WriteBatch;
+pub use host_write_operation::{BlobFileFailure, BlobFileFailures, WriteBatch};
 pub(crate) use host_write_operation::{HostWriteError, HostWriteOperation};
 pub(crate) use local_blob_cleanup::LocalBlobCleanup;
 pub(crate) use materialization_models::{

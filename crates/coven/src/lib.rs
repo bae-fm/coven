@@ -68,8 +68,8 @@ pub use config::{
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
 pub use database::{
-    DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete, QueuedUpload, SqlContext,
-    SqlReadContext, WriteBatch,
+    BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
+    QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
 };
 pub use database::{Migration, MigrationContext, MigrationError, MigrationStep};
 #[cfg(any(test, feature = "test-utils"))]

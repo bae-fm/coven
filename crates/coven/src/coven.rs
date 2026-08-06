@@ -44,12 +44,12 @@ pub enum CovenError {
     )]
     WriteRollbackFailed {
         write: Box<CovenError>,
-        rollback: String,
+        rollback: crate::database::BlobFileFailures,
     },
     #[error("write failed: {operation}; failed to remove unpublished local blobs: {cleanup}")]
     BlobCleanupFailed {
         operation: Box<CovenError>,
-        cleanup: String,
+        cleanup: crate::database::BlobFileFailures,
     },
     #[error("synced_tables must be set before opening a coven store")]
     MissingSyncedTables,
@@ -84,7 +84,10 @@ impl From<OpenError> for CovenError {
 
 impl From<LocalBlobStoreError> for CovenError {
     fn from(value: LocalBlobStoreError) -> Self {
-        CovenError::Blob(value.to_string())
+        match value {
+            LocalBlobStoreError::Path(error) => CovenError::UnsafeBlobPath(error),
+            LocalBlobStoreError::Io(error) => CovenError::Blob(error),
+        }
     }
 }
 

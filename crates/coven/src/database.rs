@@ -240,8 +240,8 @@ pub(crate) use store::{
 pub(crate) use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};
 #[cfg(test)]
 pub(crate) use store::{select_author_exclusion_activation_locator, AuthorExclusionLocatorTamper};
+pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
 pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
-pub use store::{SqlContext, SqlReadContext, WriteBatch};
 pub(crate) use store_authority_records::{
     ensure_founder_replay_baseline_on, founder_graph_identity,
     install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
