@@ -25,18 +25,14 @@ chrono = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
-hmac = { workspace = true }
-hkdf = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 fallible-streaming-iterator = { workspace = true }
-keyring-core = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tempfile = { workspace = true }
 rusqlite = { workspace = true }
 axum = { workspace = true }
 open = { workspace = true, optional = true }
@@ -49,6 +45,7 @@ aws-smithy-http-client = { workspace = true }
 
 [dev-dependencies]
 keyring-core = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 # Signing keys appear only in this crate's test fixtures now; key material
 # itself belongs to coven-keys.

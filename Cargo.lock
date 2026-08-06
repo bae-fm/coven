@@ -960,8 +960,6 @@ dependencies = [
  "fallible-streaming-iterator",
  "futures-util",
  "hex",
- "hkdf",
- "hmac 0.12.1",
  "keyring-core",
  "open",
  "rand",

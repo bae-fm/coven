@@ -26,7 +26,6 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 x25519-dalek = { workspace = true }
@@ -46,6 +45,7 @@ android-native-keyring-store = { workspace = true }
 windows-native-keyring-store = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # A `cfg(test)` build of this crate reaches the foundation staged-file test
 # hooks, which exist only under that crate's own `test-utils`. `cfg(test)`
 # enables no `[features]` of this crate, so they arrive through this edge.
