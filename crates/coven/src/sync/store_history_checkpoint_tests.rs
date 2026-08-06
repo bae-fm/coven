@@ -462,12 +462,8 @@ impl MemberRemovalHistory {
             .await
             .expect("promote removable member to Owner");
         let custody = crate::sync::test_helpers::TestCustody::default();
-        let security = crate::sync::test_helpers::test_store_security(
-            "retained-removal-proof",
-            std::sync::Arc::new(custody),
-        );
         store
-            .remove_member(&db, &owner, &member_pubkey, &encryption, &security)
+            .remove_member(&db, &owner, &member_pubkey, &encryption, &custody)
             .await
             .expect("remove retained member");
         let device = store

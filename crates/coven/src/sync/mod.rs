@@ -31,7 +31,6 @@ pub(crate) mod test_owner_graph;
 #[cfg(test)]
 mod tests;
 pub use crate::protocol::hlc::Hlc;
-pub(crate) use cycle::RotationKeyAdoption;
 pub use error::SyncError;
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use status::DeviceActivity;

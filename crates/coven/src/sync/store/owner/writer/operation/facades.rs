@@ -312,7 +312,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
-        security: Option<&dyn crate::sync::RotationKeyAdoption>,
+        master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
     ) -> Result<(), SyncCycleFailure> {
         let result = async {
             if cipher.snapshot().is_plaintext() {
@@ -364,7 +364,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             .await
                             .map_err(AuthorizationRefreshError::Database)?;
                         pending_rotation.install_durable_gate(Some(gate));
-                        match security {
+                        match master_keys {
                             None => {
                                 tracing::info!(
                                     committed_generation = merged.current_generation(),
@@ -373,9 +373,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                      cycle with custody adopts it"
                                 );
                             }
-                            Some(security) => {
-                                let fingerprint = security
-                                    .adopt_key_rotation(cipher, &new_encryption)
+                            Some(master_keys) => {
+                                let fingerprint = cipher
+                                    .adopt_key_rotation(&new_encryption, master_keys)
                                     .map_err(AuthorizationRefreshError::KeyAdoption)?;
                                 let adopted_generation = match cipher.snapshot() {
                                     crate::storage::CloudCipher::Encrypted(encryption) => {

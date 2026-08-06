@@ -15,19 +15,10 @@ use crate::sync::{BlobCacheError, BlobStream};
 pub(crate) struct StoreBlobAccess {
     database: StoreDatabase,
     local: LocalStoreBlobAccess,
-    resolver: BlobAccessResolver,
+    config_provider: ConfigProvider,
+    cloud_storage: StoreCloudStorage,
     resolved: Arc<std::sync::RwLock<ResolvedBlobState>>,
     resolution: Arc<tokio::sync::Mutex<()>>,
-}
-
-#[derive(Clone)]
-enum BlobAccessResolver {
-    Configured {
-        config_provider: ConfigProvider,
-        cloud_storage: StoreCloudStorage,
-    },
-    #[cfg(test)]
-    Exact,
 }
 
 impl StoreBlobAccess {
@@ -41,34 +32,15 @@ impl StoreBlobAccess {
         Self {
             database,
             local,
-            resolver: BlobAccessResolver::Configured {
-                config_provider,
-                cloud_storage,
-            },
+            config_provider,
+            cloud_storage,
             resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState::new())),
             resolution: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     async fn resolve(&self) -> Result<ResolvedBlobAccess, StorageSetupError> {
-        let (config_provider, cloud_storage) = match &self.resolver {
-            BlobAccessResolver::Configured {
-                config_provider,
-                cloud_storage,
-            } => (config_provider, cloud_storage),
-            #[cfg(test)]
-            BlobAccessResolver::Exact => {
-                return Ok(self
-                    .resolved
-                    .read()
-                    .expect("read exact Store blob access")
-                    .connection
-                    .as_ref()
-                    .expect("exact Store blob access retains its connection")
-                    .access
-                    .clone());
-            }
-        };
+        let (config_provider, cloud_storage) = (&self.config_provider, &self.cloud_storage);
         loop {
             let config = config_provider();
             if let Some(access) = self.cached_access(&config) {
@@ -131,13 +103,7 @@ impl StoreBlobAccess {
             .checked_add(1)
             .expect("Store blob connection generation overflow");
         state.connection = Some(ResolvedBlobConnection {
-            config: match &self.resolver {
-                BlobAccessResolver::Configured {
-                    config_provider, ..
-                } => Some(config_provider()),
-                #[cfg(test)]
-                BlobAccessResolver::Exact => None,
-            },
+            config: Some((self.config_provider)()),
             access,
         });
     }
@@ -186,31 +152,6 @@ impl StoreBlobAccess {
                     .await
             }
             ResolvedBlobAccess::Local(_) => Err(BlobCacheError::NoCloudHome),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn connected_for_test(
-        database: StoreDatabase,
-        local: LocalStoreBlobAccess,
-        storage: Arc<dyn crate::storage::SyncStorage>,
-    ) -> Self {
-        let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
-            local.clone(),
-            CurrentRemoteBlobSource::current(database.clone(), storage),
-        ));
-        Self {
-            database,
-            local,
-            resolver: BlobAccessResolver::Exact,
-            resolved: Arc::new(std::sync::RwLock::new(ResolvedBlobState {
-                generation: 0,
-                connection: Some(ResolvedBlobConnection {
-                    config: None,
-                    access,
-                }),
-            })),
-            resolution: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }

@@ -24,17 +24,6 @@ use crate::storage::{
     BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, SyncStorage,
 };
 
-/// Adopting a committed store-key rotation needs the master-key custody the
-/// host's security owner retains. Replication names only this port; the
-/// security owner implements it.
-pub(crate) trait RotationKeyAdoption: Send + Sync {
-    fn adopt_key_rotation(
-        &self,
-        cipher: &dyn CloudCipherAccess,
-        encryption: &crate::encryption::EncryptionService,
-    ) -> Result<String, crate::keys::KeyError>;
-}
-
 /// Result of a single sync cycle.
 #[derive(Debug)]
 pub(crate) struct SyncCycleResult {
@@ -195,7 +184,7 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     clock: &'cycle dyn crate::clock::Clock,
     cipher: &'cycle dyn CloudCipherAccess,
     pending_rotation: &'cycle dyn CloudRotationAccess,
-    security: Option<&'cycle dyn RotationKeyAdoption>,
+    master_keys: Option<&'cycle dyn crate::keys::MasterKeyCustody>,
     routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
@@ -261,7 +250,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         // not also corrupt state. Adoption itself failing is not this kind of failure —
         // see `rotation_pending` below.
         self.authorization
-            .refresh_authorization_state(self.cipher, self.pending_rotation, self.security)
+            .refresh_authorization_state(self.cipher, self.pending_rotation, self.master_keys)
             .await?;
 
         // Whether this device has adopted everything the store has committed. Read
@@ -934,7 +923,7 @@ impl SyncComponents {
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,
-        security: &dyn RotationKeyAdoption,
+        master_keys: &dyn crate::keys::MasterKeyCustody,
     ) -> Result<String, super::store::MembershipOpsError> {
         let encryption = self
             .current_encryption()
@@ -943,7 +932,7 @@ impl SyncComponents {
             .remove_member(
                 public_key_hex,
                 &encryption,
-                security,
+                master_keys,
                 self.storage.as_ref(),
                 self.storage.as_ref(),
             )
@@ -1102,7 +1091,7 @@ impl SyncComponents {
     pub(crate) async fn run_cycle(
         &self,
         clock: &dyn crate::clock::Clock,
-        security: Option<&dyn RotationKeyAdoption>,
+        master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
         let authorization =
@@ -1114,7 +1103,7 @@ impl SyncComponents {
             clock,
             cipher: self.storage.as_ref(),
             pending_rotation: self.storage.as_ref(),
-            security,
+            master_keys,
             routing_encryption: self.routing_encryption.as_ref(),
             local_blob_access: &self.local_blob_access,
             observer,
@@ -1200,8 +1189,8 @@ impl SyncComponents {
     pub(crate) fn adopt_key_rotation(
         &self,
         encryption: crate::encryption::EncryptionService,
-        security: &dyn RotationKeyAdoption,
+        master_keys: &dyn crate::keys::MasterKeyCustody,
     ) -> Result<String, crate::keys::KeyError> {
-        security.adopt_key_rotation(self.storage.as_ref(), &encryption)
+        CloudCipherAccess::adopt_key_rotation(self.storage.as_ref(), &encryption, master_keys)
     }
 }

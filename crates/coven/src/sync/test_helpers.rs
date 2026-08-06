@@ -82,19 +82,6 @@ impl MasterKeyCustody for TestCustody {
     }
 }
 
-pub(crate) fn test_store_security(
-    store_id: &str,
-    master_keys: Arc<dyn MasterKeyCustody>,
-) -> crate::store_security::StoreSecurity {
-    let store_keys = crate::keys::StoreKeys::bind(store_id.to_string());
-    let identity = crate::identity_custody::IdentityCustody::InMemory(UserKeypair::generate())
-        .resolve(
-            &store_keys,
-            &StoreDir::new(format!("{store_id}-unused-test-identity-directory")),
-        );
-    crate::store_security::StoreSecurity::new(store_keys, master_keys, identity)
-}
-
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
 /// gated by its `shared` boolean), a child with a foreign key (`note_tags`,
@@ -1317,7 +1304,7 @@ mod test_device {
             &self,
             public_key_hex: &str,
             encryption: &crate::encryption::EncryptionService,
-            security: &crate::store_security::StoreSecurity,
+            master_keys: &dyn crate::keys::MasterKeyCustody,
             cipher: &dyn crate::storage::CloudCipherAccess,
             pending_rotation: &dyn crate::storage::CloudRotationAccess,
         ) -> Result<String, crate::sync::store::MembershipOpsError> {
@@ -1325,7 +1312,7 @@ mod test_device {
                 .remove_member(
                     public_key_hex,
                     encryption,
-                    security,
+                    master_keys,
                     cipher,
                     pending_rotation,
                 )
@@ -1989,7 +1976,7 @@ mod test_device {
         pub(crate) async fn run_cycle_with(
             &self,
             clock: &dyn crate::clock::Clock,
-            security: Option<&dyn crate::sync::RotationKeyAdoption>,
+            master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
@@ -1998,7 +1985,7 @@ mod test_device {
                 self.store.clone(),
                 self.storage.clone(),
                 clock,
-                security,
+                master_keys,
                 store_dir,
                 observer,
             )
@@ -2008,7 +1995,7 @@ mod test_device {
         pub(crate) async fn run_cycle_with_interceptor<I>(
             &self,
             clock: &dyn crate::clock::Clock,
-            security: Option<&dyn crate::sync::RotationKeyAdoption>,
+            master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
             interceptor: I,
@@ -2022,7 +2009,7 @@ mod test_device {
             ));
             let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
             let store = std::sync::Arc::new(self.store.with_test_storage(store_storage));
-            self.run_cycle_with_storage(store, storage, clock, security, store_dir, observer)
+            self.run_cycle_with_storage(store, storage, clock, master_keys, store_dir, observer)
                 .await
         }
 
@@ -2031,7 +2018,7 @@ mod test_device {
             store: std::sync::Arc<crate::sync::store::Store>,
             storage: std::sync::Arc<S>,
             clock: &dyn crate::clock::Clock,
-            security: Option<&dyn crate::sync::RotationKeyAdoption>,
+            master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
@@ -2051,7 +2038,7 @@ mod test_device {
                 self.storage.store_id().to_string(),
                 self.device_id.clone(),
             );
-            components.run_cycle(clock, security, observer).await
+            components.run_cycle(clock, master_keys, observer).await
         }
 
         pub(crate) fn current_encryption_for_test(
@@ -4000,7 +3987,7 @@ impl TestStore {
         identity: &UserKeypair,
         member_pubkey: &str,
         encryption: &crate::encryption::EncryptionService,
-        security: &crate::store_security::StoreSecurity,
+        master_keys: &dyn crate::keys::MasterKeyCustody,
     ) -> Result<String, crate::sync::store::MembershipOpsError> {
         let device = self.bind_device(db, identity).await.map_err(|error| {
             crate::sync::store::MembershipOpsError::Chain(
@@ -4011,7 +3998,7 @@ impl TestStore {
             .remove_member(
                 member_pubkey,
                 encryption,
-                security,
+                master_keys,
                 self.storage.as_ref(),
                 self.storage.as_ref(),
             )

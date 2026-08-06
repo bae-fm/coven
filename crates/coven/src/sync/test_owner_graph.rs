@@ -258,10 +258,12 @@ impl TestOwnerGraph {
     ) -> ConnectedBlobTransitions {
         ConnectedBlobTransitions::new(
             self.local_transitions.clone(),
-            Arc::new(crate::store_blobs::StoreBlobAccess::connected_for_test(
-                self.database.clone(),
+            Arc::new(crate::sync::store::blob::RemoteStoreBlobAccess::new(
                 self.local_access.clone(),
-                storage,
+                crate::sync::store::blob::CurrentRemoteBlobSource::current(
+                    self.database.clone(),
+                    storage,
+                ),
             )),
             routing_encryption,
             observer,

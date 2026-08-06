@@ -50,12 +50,8 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     assert!(before_removal.is_owner_now(&writer_pubkey));
 
     let custody = TestCustody::default();
-    let security = crate::sync::test_helpers::test_store_security(
-        "operation-membership-removal",
-        std::sync::Arc::new(custody),
-    );
     store
-        .remove_member(&owner_db, &owner, &writer_pubkey, &encryption, &security)
+        .remove_member(&owner_db, &owner, &writer_pubkey, &encryption, &custody)
         .await
         .expect("remove operation author after its predecessor cut");
     let candidate = owner_device
@@ -128,12 +124,8 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     assert!(before_removal.can_write_now(&writer_pubkey));
 
     let custody = TestCustody::default();
-    let security = crate::sync::test_helpers::test_store_security(
-        "direct-membership-removal",
-        std::sync::Arc::new(custody),
-    );
     store
-        .remove_member(&owner_db, &owner, &writer_pubkey, &encryption, &security)
+        .remove_member(&owner_db, &owner, &writer_pubkey, &encryption, &custody)
         .await
         .expect("remove operation author directly");
     let after_removal = owner_device

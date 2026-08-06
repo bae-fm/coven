@@ -725,6 +725,21 @@ impl RemoteBlobSourceInner<'_> {
     }
 }
 
+/// The connected blob access the host composes resolves to this one, so the
+/// transitions' staging port is satisfied here directly when a fixture wires a
+/// connected Store without the host's resolver.
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::blob::transition::VerifiedLocalCopyStaging for RemoteStoreBlobAccess {
+    async fn stage_verified_local_copy(
+        &self,
+        reference: &RowBlobRef,
+        destination: &std::path::Path,
+    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
+        RemoteStoreBlobAccess::stage_verified_local_copy(self, reference, destination).await
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RemoteStoreBlobAccess {
     local: LocalStoreBlobAccess,

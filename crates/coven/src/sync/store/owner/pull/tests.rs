@@ -1,5 +1,6 @@
 use super::*;
 use crate::database::Database;
+use crate::keys::MasterKeyCustody;
 use crate::protocol::store_commit::OpenedRetainedMergeHistorySummary;
 use crate::sync::store::owner::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
@@ -631,10 +632,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
 
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let security = crate::sync::test_helpers::test_store_security(
-        "removed-member-pull-test",
-        std::sync::Arc::new(custody),
-    );
     fixture
         .store
         .remove_member(
@@ -642,7 +639,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
             &fixture.owner,
             &crate::keys::public_key_hex(&fixture.member),
             &crate::encryption::EncryptionService::from_key([42; 32]),
-            &security,
+            &custody,
         )
         .await
         .expect("remove effective-access Store member");
@@ -833,10 +830,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
 
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let security = crate::sync::test_helpers::test_store_security(
-        "readded-member-pull-test",
-        std::sync::Arc::new(custody.clone()),
-    );
     fixture
         .store
         .remove_member(
@@ -844,7 +837,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
             &fixture.owner,
             &crate::keys::public_key_hex(&fixture.member),
             &crate::encryption::EncryptionService::from_key([42; 32]),
-            &security,
+            &custody,
         )
         .await
         .expect("remove Store member before re-add");
@@ -886,10 +879,12 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         )
         .await
         .expect("re-add effective-access Store member");
-    let rotated_store_encryption = security
-        .routing_encryption(true)
-        .expect("load rotated Store keyring")
-        .expect("scoped Store has routing encryption");
+    let rotated_store_encryption = crate::encryption::EncryptionService::from(
+        custody
+            .unlock()
+            .expect("load rotated Store keyring")
+            .expect("scoped Store has an established keyring"),
+    );
     fixture
         .member_device
         .adopt_key_rotation(&rotated_store_encryption, &custody)

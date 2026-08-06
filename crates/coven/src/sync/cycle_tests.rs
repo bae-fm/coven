@@ -4731,17 +4731,13 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .expect("authorize founder before removal");
 
     let custody = TestCustody::default();
-    let security = crate::sync::test_helpers::test_store_security(
-        "snapshot-authorization-removal-test",
-        std::sync::Arc::new(custody),
-    );
     storage
         .remove_member(
             &successor_db,
             &successor_owner,
             &pubkey_hex(&founder),
             &encryption,
-            &security,
+            &custody,
         )
         .await
         .expect("remove founder after cycle authorization");

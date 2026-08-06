@@ -124,12 +124,10 @@ impl StoreSecurity {
             .map(|identity| identity.public_key()))
     }
 
-    pub(crate) fn adopt_key_rotation(
-        &self,
-        cipher: &dyn crate::storage::CloudCipherAccess,
-        encryption: &EncryptionService,
-    ) -> Result<String, KeyError> {
-        cipher.adopt_key_rotation(encryption, self.master_keys.as_ref())
+    /// The master-key custody this Store's security owner retains, for the
+    /// layers below that unlock or re-protect the keyring themselves.
+    pub(crate) fn master_keys(&self) -> Arc<dyn MasterKeyCustody> {
+        self.master_keys.clone()
     }
 
     pub(crate) fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
@@ -362,12 +360,6 @@ impl StoreSecurity {
     }
 }
 
-impl crate::sync::RotationKeyAdoption for StoreSecurity {
-    fn adopt_key_rotation(
-        &self,
-        cipher: &dyn crate::storage::CloudCipherAccess,
-        encryption: &EncryptionService,
-    ) -> Result<String, KeyError> {
-        StoreSecurity::adopt_key_rotation(self, cipher, encryption)
-    }
-}
+#[cfg(test)]
+#[path = "store_security_tests.rs"]
+mod tests;

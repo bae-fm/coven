@@ -402,17 +402,13 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
 
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let security = crate::sync::test_helpers::test_store_security(
-        "hlc-register-member-removal-test",
-        std::sync::Arc::new(custody),
-    );
     storage
         .remove_member(
             &owner_db,
             &owner,
             &pubkey_hex(&member),
             &encryption,
-            &security,
+            &custody,
         )
         .await
         .expect("remove exact member identity");

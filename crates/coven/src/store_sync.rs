@@ -178,7 +178,7 @@ impl StoreSync {
         Arc::new(SyncLoopHandle::new(
             components,
             blob_transitions,
-            Arc::new(self.security.clone()),
+            self.security.master_keys(),
             self.clock.clone(),
             config,
             self.observer.clone(),

@@ -6401,17 +6401,13 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
 
     let second_owner_custody = TestCustody::default();
     second_owner_custody.set_initial_key(encryption.key_bytes());
-    let second_owner_security = crate::sync::test_helpers::test_store_security(
-        "exact-predecessor-founder-removal",
-        std::sync::Arc::new(second_owner_custody),
-    );
     storage
         .remove_member(
             &second_owner_db,
             &second_owner,
             &owner_pk,
             &encryption,
-            &second_owner_security,
+            &second_owner_custody,
         )
         .await
         .expect("successor Owner removes founder with exact recovery state");

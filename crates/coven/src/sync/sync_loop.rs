@@ -97,7 +97,7 @@ pub(crate) struct SyncLoopHandle {
 struct SyncLoopHandleInner {
     components: SyncComponents,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
-    security: Arc<dyn crate::sync::RotationKeyAdoption>,
+    master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
     clock: ClockRef,
     config: Config,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -166,7 +166,7 @@ impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
         blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
-        security: Arc<dyn crate::sync::RotationKeyAdoption>,
+        master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
         clock: ClockRef,
         config: Config,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -180,7 +180,7 @@ impl SyncLoopHandle {
             inner: Arc::new(SyncLoopHandleInner {
                 components,
                 blob_transitions,
-                security,
+                master_keys,
                 clock,
                 config,
                 observer,
@@ -706,7 +706,7 @@ impl SyncLoopHandle {
     ) -> Result<String, super::store::MembershipOpsError> {
         self.inner
             .components
-            .remove_member(public_key_hex, self.inner.security.as_ref())
+            .remove_member(public_key_hex, self.inner.master_keys.as_ref())
             .await
     }
 
@@ -941,7 +941,7 @@ impl SyncLoopHandle {
     ) -> Result<String, crate::keys::KeyError> {
         self.inner
             .components
-            .adopt_key_rotation(encryption, self.inner.security.as_ref())
+            .adopt_key_rotation(encryption, self.inner.master_keys.as_ref())
     }
 }
 
@@ -1045,7 +1045,7 @@ impl SyncLoopHandleInner {
         self.components
             .run_cycle(
                 self.clock.as_ref(),
-                Some(self.security.as_ref()),
+                Some(self.master_keys.as_ref()),
                 self.observer.as_deref(),
             )
             .await

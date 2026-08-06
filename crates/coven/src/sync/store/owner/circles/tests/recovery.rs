@@ -78,12 +78,8 @@ impl RevokedOperation {
 
         let custody = TestCustody::default();
         custody.set_initial_key([42; 32]);
-        let security = crate::sync::test_helpers::test_store_security(
-            "circle-recovery-test",
-            std::sync::Arc::new(custody),
-        );
         store
-            .remove_member(&db, &founder, &successor_pubkey, &encryption, &security)
+            .remove_member(&db, &founder, &successor_pubkey, &encryption, &custody)
             .await
             .expect("remove successor grant");
 

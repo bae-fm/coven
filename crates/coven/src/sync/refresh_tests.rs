@@ -15,6 +15,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
+use crate::keys::MasterKeyCustody;
 use crate::keys::UserKeypair;
 use crate::protocol::membership::{MemberRole, MembershipChain};
 use crate::protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
@@ -22,9 +23,7 @@ use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess, PendingRotation};
 use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
-use crate::sync::test_helpers::{
-    open_test_db, pubkey_hex, temp_store_dir, test_store_security, TestCustody, TestStore,
-};
+use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 
 const LIB_ID: &str = "lib-refresh-test";
 
@@ -35,7 +34,7 @@ trait RefreshTestStoreOps {
         user_keypair: &UserKeypair,
         public_key_hex: &str,
         current_encryption: &EncryptionService,
-        security: &crate::store_security::StoreSecurity,
+        master_keys: &dyn MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &PendingRotation,
         db: &crate::database::Database,
@@ -77,7 +76,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         user_keypair: &UserKeypair,
         public_key_hex: &str,
         current_encryption: &EncryptionService,
-        security: &crate::store_security::StoreSecurity,
+        master_keys: &dyn MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &PendingRotation,
         db: &crate::database::Database,
@@ -88,7 +87,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .remove_member(
                 public_key_hex,
                 current_encryption,
-                security,
+                master_keys,
                 cipher,
                 pending_rotation,
             )
@@ -289,12 +288,11 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
 
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("pre-rotation cycle");
     assert_eq!(
@@ -326,7 +324,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // --- B's NEXT cycle, no restart: it must adopt the rotated key. ---
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("post-rotation cycle");
 
@@ -499,9 +497,8 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let result = running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("an unreferenced wrapped key does not affect the cycle");
 
@@ -562,7 +559,6 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let new_key = storage
         .revoke_member_durable(
             &owner_db,
@@ -576,7 +572,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .expect("revoke rotates key");
 
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("adopt generation 2");
     assert_eq!(
@@ -596,7 +592,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     .expect("the retained pre-rotation object remains readable");
 
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("replayed old wrapped key is ignored");
 
@@ -657,9 +653,8 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("replacement same-generation wrapped key is merged");
 
@@ -749,7 +744,6 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let (_tmp_b, ld_b) = temp_store_dir();
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let new_key = Box::pin(storage.revoke_member_durable(
         &second_owner_db,
         &second_owner,
@@ -761,7 +755,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     .await
     .expect("second owner can revoke");
 
-    Box::pin(running_b.run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None))
+    Box::pin(running_b.run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None))
         .await
         .expect("existing member adopts a current owner's rotation");
 
@@ -986,9 +980,8 @@ async fn removed_owner_key_is_not_adopted() {
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(rotated.key_bytes());
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("refresh ignores refs authored by a removed owner");
     assert_eq!(
@@ -1042,9 +1035,8 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(real_key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await
         .expect("an unreferenced attacker object does not affect refresh");
 
@@ -1118,9 +1110,8 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         .expect("remove exact membership entry before refresh");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let result = running_b
-        .run_cycle_with(&SystemClock, Some(&security_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
         .await;
     assert!(
         result.is_err(),
@@ -1166,7 +1157,6 @@ async fn one_cycle_loads_exact_membership_once() {
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
-    let security_b = test_store_security(LIB_ID, Arc::new(ks_b.clone()));
     let stream_count = chain
         .entries()
         .iter()
@@ -1181,13 +1171,7 @@ async fn one_cycle_loads_exact_membership_once() {
         .len();
     let counter = MembershipReadCounter::new();
     running_b
-        .run_cycle_with_interceptor(
-            &SystemClock,
-            Some(&security_b),
-            &ld_b,
-            None,
-            counter.clone(),
-        )
+        .run_cycle_with_interceptor(&SystemClock, Some(&ks_b), &ld_b, None, counter.clone())
         .await
         .expect("B's cycle");
     assert_eq!(
@@ -1228,7 +1212,6 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
     let ks = TestCustody::default();
     ks.set_initial_key(old_key);
-    let security = test_store_security(LIB_ID, Arc::new(ks.clone()));
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let pending_rotation = PendingRotation::none();
 
@@ -1241,7 +1224,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             &owner,
             &pubkey_hex(&member),
             &encryption,
-            &security,
+            &ks,
             &cipher,
             &pending_rotation,
             &db,
@@ -1297,13 +1280,12 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     {
         let ks_refresh = TestCustody::default();
         ks_refresh.set_initial_key(old_key);
-        let security_refresh = test_store_security(LIB_ID, Arc::new(ks_refresh.clone()));
         let (_tmp, ld) = temp_store_dir();
         let running_owner = storage
             .bind_device(&db, &owner)
             .await
             .expect("bind removal owner to its retained sync storage");
-        Box::pin(running_owner.run_cycle_with(&SystemClock, Some(&security_refresh), &ld, None))
+        Box::pin(running_owner.run_cycle_with(&SystemClock, Some(&ks_refresh), &ld, None))
             .await
             .expect("refresh cycle");
         assert_eq!(
@@ -1330,7 +1312,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             &owner,
             &pubkey_hex(&member),
             &encryption,
-            &security,
+            &ks,
             &cipher,
             &pending_rotation,
             &db,

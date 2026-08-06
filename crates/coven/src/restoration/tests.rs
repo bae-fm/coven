@@ -1415,17 +1415,13 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let pre_removal_heads = pre_removal_chain.head_refs().to_vec();
     let custody = crate::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let security = crate::sync::test_helpers::test_store_security(
-        "restore-membership-rollback-test",
-        std::sync::Arc::new(custody),
-    );
     storage
         .remove_member(
             &db_owner,
             &owner,
             &pubkey_hex(&member),
             &encryption,
-            &security,
+            &custody,
         )
         .await
         .expect("remove member");

@@ -1,4 +1,5 @@
 use super::*;
+use crate::keys::MasterKeyCustody;
 
 #[tokio::test]
 async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
@@ -50,18 +51,16 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("persist operation that will lose authorization");
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
-    let security = crate::sync::test_helpers::test_store_security(
-        "circle-retained-operation-test",
-        std::sync::Arc::new(custody),
-    );
     store
-        .remove_member(&db, &founder, &successor_pubkey, &encryption, &security)
+        .remove_member(&db, &founder, &successor_pubkey, &encryption, &custody)
         .await
         .expect("remove successor through the production membership path");
-    let rotated_encryption = security
-        .routing_encryption(true)
-        .expect("load rotated Store keyring")
-        .expect("scoped Store has routing encryption");
+    let rotated_encryption = crate::encryption::EncryptionService::from(
+        custody
+            .unlock()
+            .expect("load rotated Store keyring")
+            .expect("scoped Store has an established keyring"),
+    );
     store
         .invite_member(
             &db,

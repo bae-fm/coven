@@ -89,17 +89,13 @@ impl MergeFixture {
 
     async fn try_remove_member(&self, member: &UserKeypair) -> Result<String, MembershipOpsError> {
         let custody = TestCustody::default();
-        let security = crate::sync::test_helpers::test_store_security(
-            "membership-removal-test",
-            std::sync::Arc::new(custody),
-        );
         self.store
             .remove_member(
                 &self.db,
                 &self.owner,
                 &pubkey_hex(member),
                 &EncryptionService::from_key([42; 32]),
-                &security,
+                &custody,
             )
             .await
     }

@@ -2,6 +2,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::keys::MasterKeyCustody;
 use crate::sync::cycle::SyncComponents;
 use crate::sync::test_helpers::TestDevice;
 
@@ -72,7 +73,7 @@ struct RotationFixture {
     member_device: RotationMemberDevice,
     store_dir: crate::store_dir::StoreDir,
     _store_temp: tempfile::TempDir,
-    security: crate::store_security::StoreSecurity,
+    custody: crate::sync::test_helpers::TestCustody,
 }
 
 struct RotationMemberDevice {
@@ -162,11 +163,6 @@ impl RotationFixture {
 
         let custody = crate::sync::test_helpers::TestCustody::default();
         custody.set_initial_key([42; 32]);
-        let security = crate::sync::test_helpers::test_store_security(
-            "circle-rotation-test",
-            Arc::new(custody),
-        );
-
         Self {
             db,
             store,
@@ -181,13 +177,13 @@ impl RotationFixture {
             member_device,
             store_dir,
             _store_temp: store_temp,
-            security,
+            custody,
         }
     }
 
     async fn remove_store_member(&self) {
         self.components
-            .remove_member(&self.member_pubkey, &self.security)
+            .remove_member(&self.member_pubkey, &self.custody)
             .await
             .expect("remove Store member");
     }
@@ -698,11 +694,13 @@ async fn re_adding_the_store_member_clears_rotation_required() {
             &fixture.member_pubkey,
             None,
             MemberRole::Member,
-            &fixture
-                .security
-                .routing_encryption(true)
-                .expect("load rotated Store keyring")
-                .expect("scoped Store has routing encryption"),
+            &crate::encryption::EncryptionService::from(
+                fixture
+                    .custody
+                    .unlock()
+                    .expect("load rotated Store keyring")
+                    .expect("scoped Store has an established keyring"),
+            ),
             "Rotation Store",
         )
         .await
@@ -1060,7 +1058,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
 
     fixture
         .components
-        .remove_member(&outsider_pubkey, &fixture.security)
+        .remove_member(&outsider_pubkey, &fixture.custody)
         .await
         .expect("remove the non-Circle Store member");
 

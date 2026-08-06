@@ -694,7 +694,7 @@ impl Store {
         &self,
         public_key_hex: &str,
         encryption: &crate::encryption::EncryptionService,
-        security: &dyn crate::sync::RotationKeyAdoption,
+        master_keys: &dyn crate::keys::MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
@@ -707,7 +707,7 @@ impl Store {
             .remove_member(
                 public_key_hex,
                 encryption,
-                security,
+                master_keys,
                 cipher,
                 pending_rotation,
             )

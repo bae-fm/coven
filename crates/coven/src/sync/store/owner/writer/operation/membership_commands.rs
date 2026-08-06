@@ -253,7 +253,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         public_key_hex: &str,
         current_encryption: &crate::encryption::EncryptionService,
-        security: &dyn crate::sync::RotationKeyAdoption,
+        master_keys: &dyn crate::keys::MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
@@ -267,8 +267,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await?;
         let generation = new_key.current_generation();
-        let fingerprint = security
-            .adopt_key_rotation(cipher, &new_key)
+        let fingerprint = cipher
+            .adopt_key_rotation(&new_key, master_keys)
         .map_err(|source| {
             crate::sync::store::membership::MembershipOpsError::RotationCommittedAdoptionFailed {
                 source,
