@@ -43,10 +43,10 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         .required_store_root_hash()
         .await
         .expect_err("malformed Store root must fail");
-    assert!(matches!(
-        malformed,
-        DbError::Message(reason) if !reason.is_empty()
-    ));
+    assert!(
+        matches!(&malformed, DbError::Context { source, .. } if matches!(**source, DbError::Protocol(_))),
+        "unexpected malformed Store root error: {malformed:?}"
+    );
 
     db.call(|conn| {
         conn.execute("DELETE FROM store_protocol_root_authority", [])

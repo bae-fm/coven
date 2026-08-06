@@ -77,7 +77,7 @@ pub(crate) struct PublishedAtomicFile {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum CommitNewFileError {
+pub enum CommitNewFileError {
     #[error("destination already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("commit new file: {0}")]

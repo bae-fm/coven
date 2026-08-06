@@ -30,11 +30,12 @@ pub(crate) fn entry_in_backoff(
     let Some(last) = entry.last_attempt_at.as_deref() else {
         return Ok(false);
     };
-    let last_dt = chrono::DateTime::parse_from_rfc3339(last).map_err(|error| {
-        DbError::Message(format!(
-            "outbox entry {} has unparseable last_attempt_at {last:?}: {error}",
-            entry.id
-        ))
+    let last_dt = chrono::DateTime::parse_from_rfc3339(last).map_err(|source| {
+        DbError::UnparseableOutboxAttemptTime {
+            entry_id: entry.id,
+            value: last.to_string(),
+            source,
+        }
     })?;
     let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
     Ok(elapsed < backoff_window(entry.attempt_count))

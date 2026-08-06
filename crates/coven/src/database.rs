@@ -368,6 +368,36 @@ pub(crate) fn authorize_host_sql(
     }
 }
 
+/// A staged audience-move blob file that could not be rolled back, and why.
+/// Names the file so a host learns which staged bytes are left on disk.
+#[derive(Debug)]
+pub struct StagedBlobRollbackFailure {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+impl std::fmt::Display for StagedBlobRollbackFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.path.display(), self.reason)
+    }
+}
+
+/// Every staged file that could not be rolled back, in the order attempted.
+#[derive(Debug)]
+pub struct StagedBlobRollbackFailures(pub Vec<StagedBlobRollbackFailure>);
+
+impl std::fmt::Display for StagedBlobRollbackFailures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{failure}")?;
+        }
+        Ok(())
+    }
+}
+
 /// An error from the owned database.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -422,6 +452,46 @@ pub enum DbError {
     SnapshotImage(#[from] crate::database::store::SnapshotImageError),
     #[error("database error: {0}")]
     FromSql(#[from] rusqlite::types::FromSqlError),
+    #[error("database error: {0}")]
+    BlobOpeningAuthority(#[from] crate::protocol::blob::BlobOpeningAuthorityError),
+    #[error("database error: {0}")]
+    CommitNewFile(#[from] crate::local_file::CommitNewFileError),
+    /// A Store operation invoked through [`AudienceBlobMoveStaging`] failed.
+    /// The database layer calls back into the sync layer to stage a write's
+    /// audience-move blobs, so that layer's failures arrive here. Boxed
+    /// because `StoreError` carries a `DbError` of its own.
+    #[error("database error: {0}")]
+    Store(Box<crate::sync::store::StoreError>),
+    /// Staging a write's audience-move blobs failed AND rolling the staged
+    /// files back failed, so those files are left on disk. Carries both
+    /// failures rather than reporting one and describing the other.
+    #[error("{operation}; audience blob rollback failed: {rollback}")]
+    AudienceBlobRollbackFailed {
+        operation: Box<DbError>,
+        rollback: StagedBlobRollbackFailures,
+    },
+    #[error("database error: staged audience blob rollback failed: {0}")]
+    StagedBlobRollback(StagedBlobRollbackFailures),
+    /// An audience move needs its blob materialized locally and it is not —
+    /// the row's bytes are absent, stale, or refuse their declared identity.
+    /// Names the row so the caller can act on it.
+    #[error("database error: blob move requires materialization for {table}/{row_id}/{column} at {row_stamp}: {reason}")]
+    BlobMoveRequiresMaterialization {
+        table: String,
+        row_id: String,
+        column: String,
+        row_stamp: String,
+        reason: Box<DbError>,
+    },
+    /// A queued outbox entry's `last_attempt_at` is not an RFC 3339 timestamp,
+    /// so whether the entry is still inside its retry backoff cannot be
+    /// decided. Names the entry so the caller can act on that row.
+    #[error("database error: outbox entry {entry_id} has unparseable last_attempt_at {value:?}: {source}")]
+    UnparseableOutboxAttemptTime {
+        entry_id: i64,
+        value: String,
+        source: chrono::ParseError,
+    },
     /// A [`DbError`] with the operation that produced it named in front of it.
     /// Carries the cause as a [`DbError`] so callers keep matching on it after
     /// it crosses the layer that added the description.

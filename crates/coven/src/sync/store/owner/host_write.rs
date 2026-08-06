@@ -50,9 +50,10 @@ impl HostWriteBlobStaging {
                 Ok(()) => Ok(files),
                 Err(error) => match files.rollback().await {
                     Ok(()) => Err(error),
-                    Err(cleanup) => Err(DbError::Message(format!(
-                        "{error}; audience blob rollback failed: {cleanup}"
-                    ))),
+                    Err(rollback) => Err(DbError::AudienceBlobRollbackFailed {
+                        operation: Box::new(error),
+                        rollback,
+                    }),
                 },
             }
         })
@@ -109,7 +110,9 @@ impl HostWriteBlobStaging {
                         &protection,
                         &authority,
                     )
-                    .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+                    .map_err(|error| {
+                        move_materialization_error(fact, DbError::Store(Box::new(error)))
+                    })?;
                     let spool_path = self
                         .store_dir
                         .outbound_blob_spool_path(locator.locator_hash());
@@ -126,7 +129,7 @@ impl HostWriteBlobStaging {
                             &spool_path,
                         )
                         .await
-                        .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+                        .map_err(|error| move_materialization_error(fact, error))?;
                     if spool_write == crate::protocol::objects::BlobSpoolWrite::Created {
                         files
                             .created
@@ -155,7 +158,7 @@ impl HostWriteBlobStaging {
                 .storage
                 .store_blob_protection()
                 .map(|protection| (RemoteAudience::Store, protection))
-                .map_err(|error| move_materialization_error(fact, error.to_string())),
+                .map_err(|error| move_materialization_error(fact, error)),
             crate::protocol::circle::Audience::Circle(circle_id) => {
                 let partition = partitions
                     .iter()
@@ -163,13 +166,17 @@ impl HostWriteBlobStaging {
                     .ok_or_else(|| {
                         move_materialization_error(
                             fact,
-                            format!("destination Circle {circle_id} has no audience partition"),
+                            DbError::Message(format!(
+                                "destination Circle {circle_id} has no audience partition"
+                            )),
                         )
                     })?;
                 let control = partition.control.as_ref().ok_or_else(|| {
                     move_materialization_error(
                         fact,
-                        format!("destination Circle {circle_id} has no exact control"),
+                        DbError::Message(format!(
+                            "destination Circle {circle_id} has no exact control"
+                        )),
                     )
                 })?;
                 let access = transaction
@@ -229,14 +236,17 @@ impl HostWriteBlobStaging {
                 Ok(_) => {
                     return Err(move_materialization_error(
                         fact,
-                        format!("blob source is not a file: {}", path.display()),
+                        DbError::Message(format!("blob source is not a file: {}", path.display())),
                     ));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(move_materialization_error(
                         fact,
-                        format!("inspect blob source {}: {error}", path.display()),
+                        DbError::Message(format!(
+                            "inspect blob source {}: {error}",
+                            path.display()
+                        )),
                     ));
                 }
             }
@@ -244,11 +254,14 @@ impl HostWriteBlobStaging {
         if source == &RowBlobAuthority::Local {
             return Err(move_materialization_error(
                 fact,
-                "Local source plaintext is unavailable",
+                DbError::Message("Local source plaintext is unavailable".to_string()),
             ));
         }
         let previous = fact.previous.as_ref().ok_or_else(|| {
-            move_materialization_error(fact, "remote source has no exact prior blob locator")
+            move_materialization_error(
+                fact,
+                DbError::Message("remote source has no exact prior blob locator".to_string()),
+            )
         })?;
         let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
         let destination = spool_path.with_extension("move-plaintext");
@@ -256,7 +269,7 @@ impl HostWriteBlobStaging {
             .storage
             .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
             .await
-            .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+            .map_err(|error| move_materialization_error(fact, error))?;
         Ok(MoveSourcePlaintext::Downloaded(staged))
     }
 
@@ -271,14 +284,17 @@ impl HostWriteBlobStaging {
             Provenance::HostProvided => self
                 .store_dir
                 .local_blob_path(&fact.blob.namespace, &fact.blob.id)
-                .map_err(|error| move_materialization_error(fact, error.to_string()))?,
+                .map_err(|error| move_materialization_error(fact, error))?,
             Provenance::UserProvided => transaction
                 .external_local_path(fact)
                 .map_err(|error| move_materialization_error(fact, error))?
                 .ok_or_else(|| {
                     move_materialization_error(
                         fact,
-                        "UserProvided Local destination has no registered file path",
+                        DbError::Message(
+                            "UserProvided Local destination has no registered file path"
+                                .to_string(),
+                        ),
                     )
                 })?,
         };
@@ -290,44 +306,50 @@ impl HostWriteBlobStaging {
             Ok(_) => {
                 return Err(move_materialization_error(
                     fact,
-                    format!("Local destination is not a file: {}", destination.display()),
+                    DbError::Message(format!(
+                        "Local destination is not a file: {}",
+                        destination.display()
+                    )),
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(move_materialization_error(
                     fact,
-                    format!(
+                    DbError::Message(format!(
                         "inspect Local destination {}: {error}",
                         destination.display()
-                    ),
+                    )),
                 ));
             }
         }
         if source == &RowBlobAuthority::Local {
             return Err(move_materialization_error(
                 fact,
-                "Local source plaintext is unavailable",
+                DbError::Message("Local source plaintext is unavailable".to_string()),
             ));
         }
         let previous = fact.previous.as_ref().ok_or_else(|| {
-            move_materialization_error(fact, "remote source has no exact prior blob locator")
+            move_materialization_error(
+                fact,
+                DbError::Message("remote source has no exact prior blob locator".to_string()),
+            )
         })?;
         let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
         let staged = self
             .storage
             .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
             .await
-            .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+            .map_err(|error| move_materialization_error(fact, error))?;
         match fact.blob.provenance {
             Provenance::HostProvided => staged
                 .commit()
                 .await
-                .map_err(|error| move_materialization_error(fact, error))?,
+                .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?,
             Provenance::UserProvided => staged
                 .commit_new()
                 .await
-                .map_err(|error| move_materialization_error(fact, error.to_string()))?,
+                .map_err(|error| move_materialization_error(fact, error))?,
         }
         files.created.push(StagedAudienceBlobFile::new(destination));
         Ok(())
@@ -344,7 +366,7 @@ impl HostWriteBlobStaging {
                 .store_dir
                 .local_blob_path(&fact.blob.namespace, &fact.blob.id)
                 .map(Some)
-                .map_err(|error| move_materialization_error(fact, error.to_string())),
+                .map_err(|error| move_materialization_error(fact, error)),
             Provenance::UserProvided if source == &RowBlobAuthority::Local => transaction
                 .external_local_path(fact)
                 .map_err(|error| move_materialization_error(fact, error)),
@@ -364,17 +386,18 @@ impl StagedAudienceBlobFiles {
         }
     }
 
-    async fn rollback(self) -> Result<(), DbError> {
+    async fn rollback(self) -> Result<(), crate::database::StagedBlobRollbackFailures> {
         let mut failures = Vec::new();
         for file in self.created.into_iter().rev() {
-            if let Err(error) = file.rollback().await {
-                failures.push(error);
+            let path = file.path.clone();
+            if let Err(reason) = file.rollback().await {
+                failures.push(crate::database::StagedBlobRollbackFailure { path, reason });
             }
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(DbError::Message(failures.join("; ")))
+            Err(crate::database::StagedBlobRollbackFailures(failures))
         }
     }
 }
@@ -392,16 +415,10 @@ impl StagedAudienceBlobFile {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "staged audience blob disappeared before rollback: {}",
-                    self.path.display()
-                ));
+                return Err("staged audience blob disappeared before rollback".to_string());
             }
             Err(error) => {
-                return Err(format!(
-                    "remove staged audience blob {}: {error}",
-                    self.path.display()
-                ));
+                return Err(format!("remove staged audience blob: {error}"));
             }
         }
         crate::atomic_file::sync_parent_dir(&self.path).await
@@ -416,20 +433,22 @@ fn source_authority(
         crate::protocol::circle::Audience::Local => Ok(RowBlobAuthority::Local),
         source => {
             let expected = RemoteAudience::try_from(source.clone())
-                .map_err(|error| move_materialization_error(fact, error.to_string()))?;
+                .map_err(|error| move_materialization_error(fact, error))?;
             let previous = fact.previous.as_ref().ok_or_else(|| {
                 move_materialization_error(
                     fact,
-                    format!("source audience {source:?} has no exact prior blob locator"),
+                    DbError::Message(format!(
+                        "source audience {source:?} has no exact prior blob locator"
+                    )),
                 )
             })?;
             if previous.authority.remote_audience() != expected {
                 return Err(move_materialization_error(
                     fact,
-                    format!(
+                    DbError::Message(format!(
                         "source audience {source:?} differs from exact prior blob authority {:?}",
                         previous.authority
-                    ),
+                    )),
                 ));
             }
             Ok(RowBlobAuthority::Remote(previous.authority.clone()))
@@ -479,33 +498,36 @@ impl<'a> ExactMovePlaintext<'a> {
             if read == 0 {
                 break;
             }
-            size = size
-                .checked_add(read as u64)
-                .ok_or_else(|| move_materialization_error(self.fact, "plaintext size overflow"))?;
+            size = size.checked_add(read as u64).ok_or_else(|| {
+                move_materialization_error(
+                    self.fact,
+                    DbError::Message("plaintext size overflow".to_string()),
+                )
+            })?;
             hasher.update(&buffer[..read]);
         }
         let hash = crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
         if size != self.fact.plaintext_size || hash != self.fact.plaintext_hash {
             return Err(move_materialization_error(
                 self.fact,
-                format!(
+                DbError::Message(format!(
                     "plaintext {} differs from declared size/hash",
                     self.path.display()
-                ),
+                )),
             ));
         }
         Ok(())
     }
 }
 
-fn move_materialization_error(
-    fact: &StoreWriteBlobFact,
-    reason: impl std::fmt::Display,
-) -> DbError {
-    DbError::Message(format!(
-        "BlobMoveRequiresMaterialization: {}/{}/{} at {}: {reason}",
-        fact.table, fact.row_id, fact.column, fact.row_stamp
-    ))
+fn move_materialization_error(fact: &StoreWriteBlobFact, reason: impl Into<DbError>) -> DbError {
+    DbError::BlobMoveRequiresMaterialization {
+        table: fact.table.clone(),
+        row_id: fact.row_id.clone(),
+        column: fact.column.clone(),
+        row_stamp: fact.row_stamp.clone(),
+        reason: Box::new(reason.into()),
+    }
 }
 
 impl crate::database::AudienceBlobMoveStaging for HostWriteBlobStaging {
@@ -527,9 +549,10 @@ impl crate::database::AudienceBlobMoveStaging for HostWriteBlobStaging {
         Ok(Box::new(move |operation: DbError| {
             match runtime.block_on(files.rollback()) {
                 Ok(()) => operation,
-                Err(cleanup) => DbError::Message(format!(
-                    "{operation}; audience blob rollback failed: {cleanup}"
-                )),
+                Err(rollback) => DbError::AudienceBlobRollbackFailed {
+                    operation: Box::new(operation),
+                    rollback,
+                },
             }
         }))
     }

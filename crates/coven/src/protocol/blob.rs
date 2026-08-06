@@ -404,7 +404,7 @@ pub(crate) enum BlobOpeningAuthority<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum BlobOpeningAuthorityError {
+pub enum BlobOpeningAuthorityError {
     #[error("blob {id} has no exact remote authority")]
     LocalityUnresolved { id: String },
     #[error(
