@@ -104,7 +104,7 @@ impl HostWriteBlobStaging {
                     let authority = BlobWriteAuthority::new(registration);
                     let (audience, protection) =
                         self.destination_protection(transaction, destination, partitions, fact)?;
-                    let locator = super::writer::prepare_partition_blob_locator(
+                    let locator = super::owner::writer::prepare_partition_blob_locator(
                         fact,
                         audience.clone(),
                         &protection,

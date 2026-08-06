@@ -8,7 +8,7 @@ pub(crate) use local_store_writer::LocalWriterKeyrings;
 use local_store_writer::StoreOperationSigningContext;
 
 pub use operation::acknowledgements::StoreAckError;
-pub(super) use operation::prepare_partition_blob_locator;
+pub(crate) use operation::prepare_partition_blob_locator;
 pub use operation::StoreWriterAuthorizationError;
 pub(crate) use operation::{operations, reclaim, snapshot};
 

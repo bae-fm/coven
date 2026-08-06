@@ -11,6 +11,7 @@ use coven_storage::{BlobPathScheme, CloudCipherAccess};
 pub mod blob;
 mod circle_controls;
 mod error;
+mod host_write;
 mod membership;
 pub(crate) mod owner;
 use owner::operations;
@@ -27,6 +28,7 @@ pub use circle_controls::CircleOperationError;
 pub use circle_controls::CircleTransitionHistory;
 pub use error::StoreError;
 pub(crate) use error::StorePreparationError;
+pub use host_write::HostWriteBlobStaging;
 pub use membership::AnchoredChainError;
 pub use membership::InviteError;
 pub(crate) use membership::MembershipOpsError;
@@ -83,7 +85,4 @@ pub use owner::{
     CirclePackageReadError, MergeHistorySuccessorEvidence, MergeOutboundAuthorization,
     PreparedMergeHistorySuccessor, VerifiedMergeMembershipPrefix,
 };
-pub use owner::{
-    HistoryConstructionAuthority, HostWriteBlobStaging, Store, StoreKeyrings,
-    StoreRestoreMembership,
-};
+pub use owner::{HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership};

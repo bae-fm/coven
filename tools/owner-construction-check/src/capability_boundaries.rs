@@ -249,7 +249,7 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-storage/src/",
     "crates/coven-replication/src/blob/transition.rs",
     "crates/coven-replication/src/sync/store/blob.rs",
-    "crates/coven-replication/src/sync/store/owner/host_write.rs",
+    "crates/coven-replication/src/sync/store/host_write.rs",
     "crates/coven-replication/src/sync/store/owner/writer/operation/blob_preparation.rs",
     "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot.rs",
     "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot/image.rs",
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
         let retained = vec![file(
-            "crates/coven-replication/src/sync/store/owner/host_write.rs",
+            "crates/coven-replication/src/sync/store/host_write.rs",
             r#"
             struct HostWriteBlobStaging { runtime: tokio::runtime::Handle }
             impl HostWriteBlobStaging {
