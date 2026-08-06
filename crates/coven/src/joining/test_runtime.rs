@@ -2,7 +2,7 @@
 ///
 /// The joining futures are not `Send`, so the current-thread runtime moves to
 /// the configured thread rather than moving the future to a Tokio worker.
-pub(super) fn on_a_deep_stack<Body, Fut>(body: Body)
+pub(crate) fn on_a_deep_stack<Body, Fut>(body: Body)
 where
     Body: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,

@@ -146,15 +146,19 @@ pub(crate) fn find_module_dependency_violations(
     let reexports = root_reexports(files, &known_modules);
     let mut violations = BTreeSet::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
-            continue;
-        }
         let Some(from) = file_module(&file.relative_path) else {
             continue;
         };
-        if !known_modules.contains(&from) {
+        let from = if known_modules.contains(&from) {
+            from
+        } else if let Some(sibling) = from
+            .strip_suffix("_tests")
+            .filter(|sibling| known_modules.contains(*sibling))
+        {
+            sibling.to_string()
+        } else {
             continue;
-        }
+        };
         let mut visitor = ModuleDependencyVisitor {
             path: &file.relative_path,
             from: &from,
@@ -333,34 +337,6 @@ impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
             return;
         }
         visit::visit_attribute(self, node);
-    }
-
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_mod(self, node);
-    }
-
-    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_impl(self, node);
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_fn(self, node);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {

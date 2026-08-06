@@ -2353,3 +2353,8 @@ async fn disconnect_sync_drops_the_connection_not_just_the_loop() {
         })
         .await;
 }
+
+#[path = "handle_tests/join_through_the_facade.rs"]
+mod join_through_the_facade;
+#[path = "handle_tests/scoped_audience_capture.rs"]
+mod scoped_audience_capture;

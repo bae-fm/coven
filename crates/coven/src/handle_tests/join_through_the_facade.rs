@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::test_runtime::on_a_deep_stack;
+use crate::joining::test_runtime::on_a_deep_stack;
 use crate::sync::test_helpers::*;
 
 fn timing() -> crate::DeviceJoinTransportTiming {
