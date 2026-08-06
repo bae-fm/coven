@@ -8,7 +8,6 @@
 //! let _ = coven::store_sync::StoreSync::connect;
 //! ```
 
-pub(crate) mod blob;
 pub(crate) mod circles;
 pub(crate) mod coven;
 mod handle;
@@ -25,14 +24,12 @@ pub(crate) mod store_recovery;
 pub(crate) mod store_rows;
 pub(crate) mod store_security;
 pub(crate) mod store_sync;
-pub(crate) mod sync;
 
 #[cfg(test)]
 mod blob_facade_tests;
 
 pub use coven_database::rusqlite;
 
-pub use blob::{MakeLocalError, MakeRemoteError};
 pub use circles::{CircleError, Circles};
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::{
@@ -94,6 +91,22 @@ pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
     ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
+pub use coven_replication::blob::{MakeLocalError, MakeRemoteError};
+pub use coven_replication::sync::{
+    BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
+    DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
+    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinDriveOutcome, DeviceJoinError,
+    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle,
+    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
+    DeviceJoinStatus, DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
+    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
+    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
+    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
+    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
+    SyncLoopStatus, SyncLoopSuccess,
+};
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;
 #[cfg(feature = "oauth-providers")]
@@ -126,19 +139,4 @@ pub use read_handle::CovenReadHandle;
 pub use restoration::{
     decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
     OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError, RestoreCodeInfo, RestoreSource,
-};
-pub use sync::{
-    BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
-    DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinDriveOutcome, DeviceJoinError,
-    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle,
-    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
-    DeviceJoinStatus, DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
-    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
-    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
-    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
-    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
-    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
-    SyncLoopStatus, SyncLoopSuccess,
 };

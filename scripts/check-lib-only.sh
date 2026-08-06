@@ -26,6 +26,7 @@ cargo check -p coven-keys --lib --features oauth-providers
 cargo check -p coven-protocol --lib
 cargo check -p coven-storage --lib
 cargo check -p coven-storage --lib --features oauth-providers
+cargo check -p coven-replication --lib
 cargo check -p coven --lib
 # oauth-providers is off by default but a real (if optional) host
 # configuration — bae-bridge's "full" build turns it on — so check it too.

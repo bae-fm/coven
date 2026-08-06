@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::ConfigProvider;
-use crate::sync::store::blob::{
-    BlobAccess, CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
-};
-use crate::sync::{BlobCacheError, BlobStream};
 use coven_database::StoreDatabase;
 use coven_foundation::config::Config;
 use coven_protocol::blob::RowBlobRef;
+use coven_replication::sync::store::blob::{
+    BlobAccess, CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
+};
+use coven_replication::sync::{BlobCacheError, BlobStream};
 use coven_storage::cloud::setup::StorageSetupError;
 
 #[derive(Clone)]
@@ -317,7 +317,7 @@ impl StoreBlobs {
 }
 
 #[async_trait::async_trait]
-impl crate::blob::transition::VerifiedLocalCopyStaging for StoreBlobAccess {
+impl coven_replication::blob::transition::VerifiedLocalCopyStaging for StoreBlobAccess {
     async fn stage_verified_local_copy(
         &self,
         reference: &RowBlobRef,

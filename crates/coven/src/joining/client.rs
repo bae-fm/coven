@@ -7,9 +7,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::sync::store::{
-    InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
-};
 use crate::Migration;
 use coven_database::supported_version;
 use coven_database::Database;
@@ -21,6 +18,9 @@ use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
 use coven_protocol::synced_schema::SyncedTable;
+use coven_replication::sync::store::{
+    InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
+};
 use coven_storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use coven_storage::join_code::InviteCode;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -43,13 +43,13 @@ pub enum BootstrapError {
     #[error("pull: {0}")]
     Pull(#[from] PullError),
     #[error("Store pull: {0}")]
-    StorePull(#[from] crate::sync::store::StorePullError),
+    StorePull(#[from] coven_replication::sync::store::StorePullError),
     #[error("Store device registration: {0}")]
-    StoreRegistration(#[from] crate::sync::store::StoreRegistrationError),
+    StoreRegistration(#[from] coven_replication::sync::store::StoreRegistrationError),
     #[error("Store device join: {0}")]
     DeviceJoin(#[from] crate::DeviceJoinError),
     #[error("Store device join transport: {0}")]
-    DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
+    DeviceJoinTransport(#[from] coven_replication::sync::store::DeviceJoinTransportError),
     #[error("storage: {0}")]
     Storage(#[from] coven_protocol::objects::StorageError),
     #[error("config: {0}")]
@@ -409,16 +409,19 @@ impl DeviceJoinClient {
         let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
             &pending,
             &storage,
             &offer.store_root,
             offer.attempt_id,
         )
         .await?;
-        let authority =
-            crate::sync::store::PendingDeviceJoinAuthority::open(observation, &signer, offer)
-                .await?;
+        let authority = coven_replication::sync::store::PendingDeviceJoinAuthority::open(
+            observation,
+            &signer,
+            offer,
+        )
+        .await?;
         Ok(authority.prepare_provider_access_request().await?)
     }
 
@@ -429,7 +432,7 @@ impl DeviceJoinClient {
         let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let mut observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
             &pending,
             &storage,
             &self.code.store_root,
@@ -460,7 +463,7 @@ impl DeviceJoinClient {
         let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
             &pending,
             &storage,
             &self.code.store_root,
@@ -486,13 +489,14 @@ impl DeviceJoinClient {
             _ => {
                 let storage: Arc<dyn coven_storage::SyncStorage> =
                     Arc::new(self.transport_storage().await?);
-                let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
-                    &pending,
-                    &storage,
-                    &self.code.store_root,
-                    activation.receipt.attempt_id,
-                )
-                .await?;
+                let mut observation =
+                    coven_replication::sync::store::PendingDeviceJoinObservation::open(
+                        &pending,
+                        &storage,
+                        &self.code.store_root,
+                        activation.receipt.attempt_id,
+                    )
+                    .await?;
                 observation.accept_cleanup(activation.clone()).await?;
             }
         }
@@ -529,14 +533,14 @@ impl DeviceJoinClient {
         let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
-        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
             &pending,
             &storage,
             &offer.store_root,
             offer.attempt_id,
         )
         .await?;
-        let mut authority = crate::sync::store::PendingDeviceJoinAuthority::open(
+        let mut authority = coven_replication::sync::store::PendingDeviceJoinAuthority::open(
             observation,
             &signer,
             offer.as_ref().clone(),
@@ -575,10 +579,11 @@ impl DeviceJoinClient {
         store_dir.ensure_created()?;
         on_status("Downloading store snapshot...");
         let db_path = store_dir.db_path();
-        let history_verifier = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
-            .open_pinned(join.storage.as_ref(), &offer.store_root)
-            .await
-            .map_err(SnapshotError::from)?;
+        let history_verifier =
+            coven_replication::sync::store::HistoryConstructionAuthority::for_snapshot()
+                .open_pinned(join.storage.as_ref(), &offer.store_root)
+                .await
+                .map_err(SnapshotError::from)?;
         let snapshot = PreparedSnapshotBootstrap::prepare(
             &join.storage,
             history_verifier,
@@ -683,7 +688,7 @@ impl DeviceJoinClient {
         // has to hold those commits and the row data they carry.
         on_status("Catching up on store history...");
         let routing_encryption = EncryptionService::from(join.keyring.clone());
-        let observation = crate::sync::store::PendingDeviceJoinObservation::open(
+        let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
             &pending,
             &join.storage,
             &self.code.store_root,
@@ -804,7 +809,7 @@ impl DeviceJoinClient {
         let bootstrap_storage = self.plaintext_storage(cloud.clone(), signer)?;
         let recipient = hex::encode(signer.public_key());
         if self.code.wrapped_key.recipient_pubkey != recipient {
-            return Err(crate::sync::store::InviteError::Crypto(
+            return Err(coven_replication::sync::store::InviteError::Crypto(
                 "invite wrapped-key ref names another recipient".to_string(),
             )
             .into());
@@ -812,13 +817,16 @@ impl DeviceJoinClient {
         self.code
             .membership_floor
             .validate()
-            .map_err(crate::sync::store::InviteError::Crypto)?;
-        let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
-            .open_pinned(&bootstrap_storage, &self.code.store_root)
-            .await
-            .map_err(|error| {
-                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
-            })?;
+            .map_err(coven_replication::sync::store::InviteError::Crypto)?;
+        let mut history =
+            coven_replication::sync::store::HistoryConstructionAuthority::invitation()
+                .open_pinned(&bootstrap_storage, &self.code.store_root)
+                .await
+                .map_err(|error| {
+                    coven_replication::sync::store::InviteError::Crypto(format!(
+                        "membership chain: {error}"
+                    ))
+                })?;
         let chain = history
             .load_exact_anchored_membership(
                 &self.code.membership_floor.0,
@@ -826,9 +834,11 @@ impl DeviceJoinClient {
             )
             .await
             .map_err(|error| {
-                crate::sync::store::InviteError::Crypto(format!("membership chain: {error}"))
+                coven_replication::sync::store::InviteError::Crypto(format!(
+                    "membership chain: {error}"
+                ))
             })?;
-        let encryption = crate::sync::store::StoreKeyrings::new(
+        let encryption = coven_replication::sync::store::StoreKeyrings::new(
             &bootstrap_storage,
             self.code.store_root.clone(),
         )

@@ -950,15 +950,14 @@ dependencies = [
  "coven-foundation",
  "coven-keys",
  "coven-protocol",
+ "coven-replication",
  "coven-storage",
- "ed25519-dalek",
  "futures-util",
  "hex",
  "keyring-core",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -1054,6 +1053,30 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "coven-replication"
+version = "1.0.0-rc.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "coven-database",
+ "coven-foundation",
+ "coven-keys",
+ "coven-protocol",
+ "coven-storage",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

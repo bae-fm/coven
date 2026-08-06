@@ -1,0 +1,3385 @@
+use super::*;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use crate::sync::cycle::SyncComponents;
+use crate::sync::test_helpers::TestDevice;
+use coven_keys::keys::MasterKeyCustody;
+
+fn circle_routing_migrations() -> Vec<coven_database::Migration> {
+    vec![coven_database::Migration::sql(
+        1,
+        "Circle routing schema",
+        "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE document_files (
+                 id TEXT PRIMARY KEY,
+                 document_id TEXT NOT NULL REFERENCES documents(id),
+                 size INTEGER NOT NULL,
+                 hash TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+    )]
+}
+
+/// `documents` is scoped by its audience column; `document_files` carries a blob
+/// and inherits its document's audience, so moving a document between audiences
+/// republishes its file's ciphertext under the destination audience's locator.
+fn circle_routing_tables() -> Vec<coven_protocol::synced_schema::SyncedTable> {
+    vec![
+        coven_protocol::synced_schema::SyncedTable::new(
+            "documents",
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience"),
+        coven_protocol::synced_schema::SyncedTable::new(
+            "document_files",
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .inherits_audience_through("document_id")
+        .carries_blob(coven_protocol::synced_schema::BlobDecl::new(
+            "files",
+            coven_protocol::blob::Provenance::HostProvided,
+            coven_protocol::blob::CacheFill::CacheEager,
+        )),
+    ]
+}
+
+fn open_circle_routing_test_db() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        circle_routing_tables(),
+        circle_routing_migrations(),
+    )
+}
+
+/// A two-member Store with an activated Circle whose roster names both the owner
+/// and one member. The owner drives every operation through the production sync
+/// components; the member exists only as a Store identity and Circle roster
+/// entry whose removal makes the Circle rotation-required.
+struct RotationFixture {
+    db: Database,
+    store: std::sync::Arc<TestStore>,
+    home: Arc<coven_storage::InMemoryCloudHome>,
+    owner_device: TestDevice,
+    signer: UserKeypair,
+    components: SyncComponents,
+    circle_id: CircleId,
+    member: UserKeypair,
+    member_pubkey: String,
+    member_db: Database,
+    member_device: RotationMemberDevice,
+    store_dir: coven_foundation::store_dir::StoreDir,
+    _store_temp: tempfile::TempDir,
+    custody: crate::sync::test_helpers::TestCustody,
+}
+
+struct RotationMemberDevice {
+    device: TestDevice,
+    _temp: tempfile::TempDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
+}
+
+impl RotationMemberDevice {
+    async fn pull(&self) {
+        self.device
+            .pull_store(&self.store_dir)
+            .await
+            .expect("member installs the Circle bootstrap");
+    }
+
+    async fn publish_acknowledgements(&self, stamp: &str) {
+        let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
+            self.device
+                .materialized_frontier()
+                .await
+                .expect("read member frontier"),
+        )
+        .expect("shape member frontier");
+        self.device
+            .stage_acknowledgement(frontier.clone(), stamp.to_string())
+            .await
+            .expect("stage member Store acknowledgement");
+        self.device
+            .stage_circle_acknowledgements(&frontier, stamp)
+            .await
+            .expect("stage member Circle acknowledgement");
+        self.device
+            .drain_acknowledgements()
+            .await
+            .expect("publish member acknowledgements");
+    }
+}
+
+impl RotationFixture {
+    async fn build(label: &str) -> Self {
+        let db = open_circle_routing_test_db();
+        let (store, _home, signer, founder) = persist_merge_operation(&db, label).await;
+        let circle_id = founder.circle_id();
+        let owner_device = store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store");
+        owner_device
+            .resume_circle_operations()
+            .await
+            .expect("activate founder transition");
+
+        let member = UserKeypair::generate();
+        let member_pubkey = keys::public_key_hex(&member);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &member_pubkey,
+                None,
+                MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Rotation Store",
+            )
+            .await
+            .expect("invite Store member");
+        let member_db = open_circle_routing_test_db();
+        let member_device = store
+            .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+            .await
+            .expect("activate Store member device");
+        let (member_temp, member_store_dir) = temp_store_dir();
+        let member_device = RotationMemberDevice {
+            device: member_device,
+            _temp: member_temp,
+            store_dir: member_store_dir,
+        };
+
+        let (store_temp, store_dir) = temp_store_dir();
+        let components =
+            prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, label).await;
+        components
+            .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
+            .await
+            .expect("add Circle member");
+
+        let custody = crate::sync::test_helpers::TestCustody::default();
+        custody.set_initial_key([42; 32]);
+        Self {
+            db,
+            store,
+            home: _home,
+            owner_device,
+            signer,
+            components,
+            circle_id,
+            member,
+            member_pubkey,
+            member_db,
+            member_device,
+            store_dir,
+            _store_temp: store_temp,
+            custody,
+        }
+    }
+
+    async fn remove_store_member(&self) {
+        self.components
+            .remove_member(&self.member_pubkey, &self.custody)
+            .await
+            .expect("remove Store member");
+    }
+
+    /// Removes the member from the Circle roster — which opens the epoch close —
+    /// then publishes the owner's close response and activates the successor.
+    async fn close_epoch_by_removing_the_circle_member(&self) {
+        self.components
+            .remove_circle_member(self.circle_id, self.member_pubkey.clone())
+            .await
+            .expect("close the epoch by removing the roster member");
+        finalize_circle_epoch_close(&self.store, &self.db, &self.signer, &self.components).await;
+    }
+
+    /// Authors one standalone Circle snapshot into a throwaway directory.
+    async fn author_standalone_circle_snapshot(&self, stamp: &str) {
+        let snapshot_temp = tempfile::tempdir().expect("snapshot temp dir");
+        self.store
+            .push_circle_snapshots(
+                &self.db,
+                snapshot_temp.path().to_path_buf(),
+                self.db.schema_version(),
+                stamp,
+                &EncryptionService::from_key([42; 32]),
+            )
+            .await
+            .expect("author the standalone Circle snapshot");
+    }
+
+    async fn capture_document(
+        &self,
+        row_id: &str,
+        audience: Option<CircleId>,
+        stamp: &str,
+    ) -> coven_protocol::write::WriteId {
+        self.db
+            .capture_document_for_test(row_id, audience, stamp)
+            .await
+            .expect("capture document row")
+    }
+
+    async fn active_store_members(&self) -> BTreeSet<String> {
+        self.store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("load cycle Store")
+            .membership_for_test()
+            .await
+            .expect("load cycle membership")
+            .current_members()
+            .into_iter()
+            .map(|(pubkey, _)| pubkey)
+            .collect()
+    }
+
+    async fn circles(&self) -> Vec<coven_protocol::circle::CircleInfo> {
+        let members = self.active_store_members().await;
+        StoreDatabase::new(&self.db)
+            .get_circles(&keys::public_key_hex(&self.signer), members)
+            .await
+            .expect("list Circles")
+    }
+
+    async fn latest_circle_snapshot(
+        &self,
+        circle_id: CircleId,
+    ) -> Option<coven_database::PublishedCircleSnapshot> {
+        StoreDatabase::new(&self.db)
+            .latest_local_circle_snapshot(circle_id)
+            .await
+            .expect("read latest local Circle snapshot")
+    }
+
+    async fn pending_circle_snapshot(
+        &self,
+        circle_id: CircleId,
+    ) -> Option<coven_database::DurableCircleSnapshotPublication> {
+        StoreDatabase::new(&self.db)
+            .outbound_circle_snapshot_publication(circle_id)
+            .await
+            .expect("read pending Circle snapshot publication")
+    }
+
+    async fn drive_circle_snapshots(
+        &self,
+        stamp: &str,
+    ) -> Result<(), crate::sync::store::SnapshotError> {
+        self.owner_device
+            .authorize_writer()
+            .await
+            .map_err(|error| {
+                crate::sync::store::SnapshotError::PublicationState(error.to_string())
+            })?
+            .circles()
+            .snapshots()
+            .push_circle_snapshots(
+                self.db.schema_version(),
+                stamp,
+                Some(&EncryptionService::from_key([42; 32])),
+            )
+            .await
+    }
+
+    async fn release_retained_replay_ownership(&self) {
+        self.db
+            .release_retained_replay_ownership_for_test()
+            .await
+            .expect("release retained replay ownership");
+    }
+
+    async fn capture_document_with_file(
+        &self,
+        document_id: &str,
+        file_id: &str,
+        audience: Option<CircleId>,
+        bytes: &[u8],
+        stamp: &str,
+    ) -> coven_protocol::write::WriteId {
+        let write_id = self
+            .db
+            .capture_document_with_file_for_test(document_id, file_id, audience, bytes, stamp)
+            .await
+            .expect("capture document and its file row");
+        coven_foundation::store_dir::StoreDir::store_local_blob(
+            &self.store_dir,
+            "files",
+            file_id,
+            bytes,
+        )
+        .await
+        .expect("stage the document file bytes");
+        write_id
+    }
+
+    async fn move_document_audience(
+        &self,
+        document_id: &str,
+        audience: Option<CircleId>,
+        stamp: &str,
+    ) {
+        let audience = audience.map(|circle_id| circle_id.to_string());
+        let document_id = document_id.to_string();
+        let stamp = stamp.to_string();
+        let staging = self
+            .components
+            .host_write_blob_staging(tokio::runtime::Handle::current());
+        StoreDatabase::new(&self.db)
+            .run_host_store_write_for_test(
+                Some(EncryptionService::from_key([42; 32])),
+                Some(Box::new(staging) as Box<dyn coven_database::AudienceBlobMoveStaging>),
+                move |transaction| {
+                    transaction
+                        .execute(
+                            "UPDATE documents SET audience = ?2, _updated_at = ?3 WHERE id = ?1",
+                            rusqlite::params![document_id, audience, stamp],
+                        )
+                        .map(|_| ())
+                        .map_err(DbError::from)
+                },
+            )
+            .await
+            .expect("move the document to another audience");
+    }
+
+    async fn stored_blobs(&self) -> Vec<coven_protocol::blob::locator::StoredBlobRef> {
+        StoreDatabase::new(&self.db)
+            .stored_blob_reclaim_candidates_for_test()
+            .await
+            .expect("read stored blob candidates")
+            .into_iter()
+            .map(|(stored, _)| stored)
+            .collect()
+    }
+
+    async fn document_file_stamp(&self, file_id: &str) -> String {
+        self.db
+            .document_file_stamp_for_test(file_id)
+            .await
+            .expect("read the document file row stamp")
+    }
+
+    async fn owner_circle_snapshot_stream(
+        &self,
+    ) -> Vec<(
+        coven_protocol::store_commit::CircleSnapshotRef,
+        coven_protocol::store_commit::CircleSnapshotMeta,
+    )> {
+        let control = StoreDatabase::new(&self.db)
+            .current_circle_control(self.circle_id)
+            .await
+            .expect("read the current Circle control")
+            .expect("the Circle has an active control");
+        let device = self
+            .store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("bind Circle snapshot access Store");
+        let access = device
+            .circle_epoch_access(self.circle_id, control)
+            .await
+            .expect("resolve Circle snapshot access")
+            .expect("the Circle access is retained");
+        device
+            .load_circle_snapshot_refs(self.circle_id, &access)
+            .await
+            .expect("walk the owner's Circle snapshot stream")
+    }
+
+    async fn bootstrap_image_present(
+        &self,
+        image: &coven_protocol::objects::ExactObjectRef,
+    ) -> bool {
+        self.db
+            .remote_object_exists_for_test(image.clone())
+            .await
+            .expect("read bootstrap image ownership presence")
+    }
+
+    async fn member_seed_image(
+        &self,
+        circle_id: CircleId,
+    ) -> coven_protocol::objects::ExactObjectRef {
+        StoreDatabase::new(&self.member_db)
+            .circle_bootstrap_coverage_ref(circle_id)
+            .await
+            .expect("read member Circle bootstrap coverage")
+            .expect("the member's projection seeded from a real bootstrap coverage row")
+            .bootstrap
+            .image
+            .object
+    }
+
+    async fn bootstrap_image_owner_count(
+        &self,
+        image: &coven_protocol::objects::ExactObjectRef,
+    ) -> usize {
+        let record = self
+            .db
+            .remote_object_for_test(image.clone())
+            .await
+            .expect("load bootstrap image ownership");
+        let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
+        else {
+            panic!("a live bootstrap image is a shared object");
+        };
+        let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+            shared.state
+        else {
+            panic!("a live bootstrap image is verified");
+        };
+        ownership
+            .activated
+            .iter()
+            .filter(|owner| {
+                matches!(
+                    owner,
+                    coven_protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+                )
+            })
+            .count()
+    }
+
+    async fn live_bootstrap_images(&self) -> Vec<(coven_protocol::objects::ExactObjectRef, usize)> {
+        self.db
+            .remote_objects_for_test()
+            .await
+            .expect("read remote object records")
+            .into_iter()
+            .filter_map(|record| {
+                let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) =
+                    record
+                else {
+                    return None;
+                };
+                if !matches!(
+                    shared.identity.domain,
+                    coven_protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
+                ) {
+                    return None;
+                }
+                let coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
+                    ownership,
+                } = shared.state
+                else {
+                    return None;
+                };
+                let owners = ownership
+                    .activated
+                    .iter()
+                    .filter(|owner| {
+                        matches!(
+                            owner,
+                            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+                        )
+                    })
+                    .count();
+                Some((shared.identity.object.clone(), owners))
+            })
+            .collect()
+    }
+
+    async fn publish_covered_circle_package(
+        &self,
+        member: &RotationMemberDevice,
+        row_id: &str,
+    ) -> (
+        coven_protocol::store_commit::CirclePackageRef,
+        coven_protocol::store_commit::StoreBatchCommitRef,
+    ) {
+        let write_id = self
+            .capture_document(row_id, Some(self.circle_id), "2026-07-23T00:10:00Z")
+            .await;
+        self.components
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+            .await
+            .expect("publish the Circle package");
+        let published = match coven_database::StoreDatabase::new(&self.db)
+            .write_status(&write_id)
+            .await
+            .expect("read Circle write status")
+        {
+            coven_protocol::write::WriteStatus::Published(position) => position.commit,
+            status => panic!("the Circle write must publish: {status:?}"),
+        };
+        let owner = self
+            .store
+            .bind_device(&self.db, &self.signer)
+            .await
+            .expect("bind the Store owner");
+        let package_commit = owner
+            .load_commit_for_test(&published)
+            .await
+            .expect("load the Circle package commit");
+        let [circle_package] = package_commit.value().circle_packages() else {
+            panic!("the Circle write carries exactly one Circle package");
+        };
+        let circle_package = circle_package.clone();
+
+        member.pull().await;
+        self.author_standalone_circle_snapshot("2026-07-23T00:15:00Z")
+            .await;
+
+        self.components
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+            .await
+            .expect("owner acknowledges the snapshot cut");
+        member.pull().await;
+        member
+            .publish_acknowledgements("2026-07-23T00:20:00Z")
+            .await;
+        self.components
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+            .await
+            .expect("owner activates the member acknowledgement");
+        (circle_package, published)
+    }
+}
+
+#[tokio::test]
+async fn store_member_removal_blocks_affected_circle_and_leaves_others_running() {
+    let fixture = RotationFixture::build("rotation-blocks-affected").await;
+    let unaffected = fixture
+        .components
+        .create_circle("Unaffected")
+        .await
+        .expect("create unaffected Circle");
+
+    fixture.remove_store_member().await;
+
+    let circles = fixture.circles().await;
+    let affected = circles
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("affected Circle is listed");
+    assert!(
+        affected.rotation_required(),
+        "removing a roster member makes the Circle rotation-required"
+    );
+    let other = circles
+        .iter()
+        .find(|circle| circle.id() == unaffected)
+        .expect("unaffected Circle is listed");
+    assert!(
+        !other.rotation_required(),
+        "a Circle without the removed member is not rotation-required"
+    );
+
+    // A Store-audience write and a write to an unaffected Circle both publish.
+    let store_write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000010",
+            None,
+            "0000000003000-0000-owner",
+        )
+        .await;
+    let unaffected_write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000011",
+            Some(unaffected),
+            "0000000003100-0000-owner",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish Store-audience and unaffected-Circle writes");
+    assert!(matches!(
+        coven_database::StoreDatabase::new(&fixture.db)
+            .write_status(&store_write)
+            .await
+            .expect("read Store write status"),
+        coven_protocol::write::WriteStatus::Published(_)
+    ));
+    assert!(matches!(
+        coven_database::StoreDatabase::new(&fixture.db)
+            .write_status(&unaffected_write)
+            .await
+            .expect("read unaffected Circle write status"),
+        coven_protocol::write::WriteStatus::Published(_)
+    ));
+
+    // A host write destined to the affected Circle stays durable blocked with the
+    // typed rotation-required reason.
+    let blocked_write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000012",
+            Some(fixture.circle_id),
+            "0000000003200-0000-owner",
+        )
+        .await;
+    let _ = fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await;
+    match coven_database::StoreDatabase::new(&fixture.db)
+        .write_status(&blocked_write)
+        .await
+        .expect("read affected Circle write status")
+    {
+        coven_protocol::write::WriteStatus::Blocked(
+            coven_protocol::write::WriteBlock::RotationRequired {
+                circle_id,
+                removed_members,
+            },
+        ) => {
+            assert_eq!(circle_id, fixture.circle_id);
+            assert_eq!(removed_members, vec![fixture.member_pubkey.clone()]);
+        }
+        status => panic!("affected Circle write must be rotation-blocked: {status:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rotation_required_refuses_rename_and_add_member_but_allows_removal() {
+    let fixture = RotationFixture::build("rotation-gates-lifecycle").await;
+    fixture.remove_store_member().await;
+
+    let rename = fixture
+        .components
+        .rename_circle(fixture.circle_id, "Renamed")
+        .await
+        .expect_err("rename is refused while rotation is required");
+    assert!(
+        matches!(
+            rename,
+            crate::sync::store::CircleOperationError::RotationRequired { .. }
+        ),
+        "{rename}"
+    );
+
+    let newcomer = keys::public_key_hex(&UserKeypair::generate());
+    let add = fixture
+        .components
+        .add_circle_member(fixture.circle_id, newcomer, CircleRole::Member)
+        .await
+        .expect_err("adding a member is refused while rotation is required");
+    // Returned typed (not wrapped), so the public API surfaces it with its ids.
+    assert!(
+        matches!(
+            &add,
+            crate::sync::store::CircleOperationError::RotationRequired { circle_id, removed_members }
+                if *circle_id == fixture.circle_id
+                    && removed_members == &vec![fixture.member_pubkey.clone()]
+        ),
+        "add-member is refused with the typed rotation error: {add:?}"
+    );
+
+    fixture
+        .components
+        .remove_circle_member(fixture.circle_id, fixture.member_pubkey.clone())
+        .await
+        .expect("removing a member is the path out of rotation-required");
+}
+
+#[tokio::test]
+async fn re_adding_the_store_member_clears_rotation_required() {
+    let fixture = RotationFixture::build("rotation-readd-clears").await;
+    fixture.remove_store_member().await;
+    assert!(fixture
+        .circles()
+        .await
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("affected Circle listed after removal")
+        .rotation_required());
+
+    fixture
+        .store
+        .invite_member(
+            &fixture.db,
+            &fixture.signer,
+            &fixture.member_pubkey,
+            None,
+            MemberRole::Member,
+            &coven_keys::encryption::EncryptionService::from(
+                fixture
+                    .custody
+                    .unlock()
+                    .expect("load rotated Store keyring")
+                    .expect("scoped Store has an established keyring"),
+            ),
+            "Rotation Store",
+        )
+        .await
+        .expect("re-add the removed Store member");
+
+    assert!(
+        !fixture
+            .circles()
+            .await
+            .iter()
+            .find(|circle| circle.id() == fixture.circle_id)
+            .expect("affected Circle listed after re-add")
+            .rotation_required(),
+        "a re-added Store member's roster entry is active again, clearing rotation"
+    );
+}
+
+#[tokio::test]
+async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
+    let fixture = RotationFixture::build("rotation-close-clears").await;
+    fixture.remove_store_member().await;
+    assert!(fixture
+        .circles()
+        .await
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("affected Circle listed after removal")
+        .rotation_required());
+
+    // Removing the roster member closes the old epoch and activates a successor
+    // roster without the removed identity.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load successor Circle authoring state");
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+    assert!(
+        !fixture
+            .circles()
+            .await
+            .iter()
+            .find(|circle| circle.id() == fixture.circle_id)
+            .expect("Circle listed after close")
+            .rotation_required(),
+        "the successor roster omits the removed identity, clearing rotation"
+    );
+    // Publication context succeeds under the successor control.
+    StoreDatabase::new(&fixture.db)
+        .circle_publication_context(fixture.circle_id, successor.control.coord.clone())
+        .await
+        .expect("publication context resolves under the successor control");
+
+    // New Circle content publishes again under the successor key.
+    let resumed = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000031",
+            Some(fixture.circle_id),
+            "0000000005000-0000-owner",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish Circle content after the close");
+    assert!(matches!(
+        coven_database::StoreDatabase::new(&fixture.db)
+            .write_status(&resumed)
+            .await
+            .expect("read resumed write status"),
+        coven_protocol::write::WriteStatus::Published(_)
+    ));
+}
+
+#[tokio::test]
+async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
+    let fixture = RotationFixture::build("rotation-close-with-blocked-write").await;
+    fixture.remove_store_member().await;
+
+    // A Circle write captured after the removal stays durable blocked; its rows
+    // are materialized in the live database but its write never publishes.
+    let blocked = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000040",
+            Some(fixture.circle_id),
+            "0000000003000-0000-owner",
+        )
+        .await;
+    let _ = fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await;
+    assert!(matches!(
+        coven_database::StoreDatabase::new(&fixture.db)
+            .write_status(&blocked)
+            .await
+            .expect("read blocked write status"),
+        coven_protocol::write::WriteStatus::Blocked(
+            coven_protocol::write::WriteBlock::RotationRequired { .. }
+        )
+    ));
+
+    // The close finalizes even though a rotation-blocked write is unpublished:
+    // the successor bootstrap derives from accepted history at the exact cutoff,
+    // so the blocked write's live-only rows never enter the image and the cut no
+    // longer demands a write-free device.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load successor Circle authoring state");
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+    assert!(!fixture
+        .circles()
+        .await
+        .iter()
+        .find(|circle| circle.id() == fixture.circle_id)
+        .expect("Circle listed after close")
+        .rotation_required());
+    // The blocked write survives the close as a durable write; the rows it holds
+    // were never surrendered.
+    assert!(matches!(
+        coven_database::StoreDatabase::new(&fixture.db)
+            .write_status(&blocked)
+            .await
+            .expect("read blocked write status after the close"),
+        coven_protocol::write::WriteStatus::Blocked(_)
+    ));
+
+    // Returning the same durable write to publication (no discard, no recreate)
+    // publishes it under the successor epoch: the write captured under the closed
+    // epoch's control now resolves the current control.
+    StoreDatabase::new(&fixture.db)
+        .retry_blocked_write(&blocked)
+        .await
+        .expect("return the durable write to publication after the close");
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish the formerly blocked write under the successor epoch");
+    let published = match coven_database::StoreDatabase::new(&fixture.db)
+        .write_status(&blocked)
+        .await
+        .expect("read republished write status")
+    {
+        coven_protocol::write::WriteStatus::Published(position) => position.commit,
+        status => panic!("formerly blocked write must publish under the successor: {status:?}"),
+    };
+    let owner = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind the Store owner");
+    let published_commit = owner
+        .load_commit_for_test(&published)
+        .await
+        .expect("load the successor-epoch commit");
+    let [circle_package] = published_commit.value().circle_packages() else {
+        panic!("the successor-epoch write carries exactly one Circle package");
+    };
+    assert_eq!(circle_package.control, successor.control.coord);
+    assert_eq!(
+        circle_package.key_fingerprint,
+        successor.control.value.key_fingerprint()
+    );
+
+    // Safety: the removed member's device never receives the write's content.
+    // A Store-removed identity cannot decrypt the rotated-epoch objects, so its
+    // pull cannot advance into the successor epoch that carries the write; the
+    // write is published in the cloud yet absent from the removed member's
+    // projection.
+    let removed_member = fixture
+        .store
+        .bind_device(&fixture.member_db, &fixture.member)
+        .await
+        .expect("open the Store as the removed member");
+    let mut removed_member = removed_member
+        .authorize_writer()
+        .await
+        .expect("authorize the removed member's local Store device");
+    let routing = EncryptionService::from_key([42; 32]);
+    let member_pull = removed_member
+        .pull(Some(&routing))
+        .await
+        .expect("pull the close outcome as the removed member");
+    assert!(
+        !member_pull
+            .frontier
+            .values()
+            .any(|reference| reference == &published),
+        "the removed member cannot advance into the successor-epoch commit"
+    );
+    let received = fixture
+        .member_db
+        .test_sql(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM documents
+                        WHERE id = '00000000-0000-4000-8000-000000000040'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read the removed member's documents projection");
+    assert!(
+        !received,
+        "the removed member's device never receives the blocked write's content"
+    );
+}
+
+#[tokio::test]
+async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
+    let fixture = RotationFixture::build("close-cut-projection").await;
+
+    // An accepted Circle row: captured and published under the active control.
+    let published_id = "00000000-0000-4000-8000-000000000050";
+    fixture
+        .capture_document(
+            published_id,
+            Some(fixture.circle_id),
+            "0000000003000-0000-owner",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish the accepted Circle row");
+
+    // An unpublished Circle row: captured into the live database, never published.
+    let unpublished_id = "00000000-0000-4000-8000-000000000051";
+    fixture
+        .capture_document(
+            unpublished_id,
+            Some(fixture.circle_id),
+            "0000000004000-0000-owner",
+        )
+        .await;
+
+    // Cut the successor bootstrap at the accepted frontier while the unpublished
+    // write is present. The cut no longer refuses, and the image is the accepted
+    // projection: the accepted row is present, the unpublished row is absent.
+    let cutoff = fixture
+        .db
+        .test_sql(|database| {
+            let refs = database.materialized_frontier()?;
+            coven_protocol::store_commit::CommitFrontier::from_refs(refs)
+                .map_err(|error| DbError::Message(error.to_string()))
+        })
+        .await
+        .expect("read the accepted materialized frontier");
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load the successor bootstrap Store");
+    let mut authorized = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize the successor bootstrap cut");
+    let cut = authorized
+        .circles()
+        .snapshots()
+        .capture_circle_snapshot_at_cutoff(
+            &EncryptionService::from_key([42; 32]),
+            fixture.circle_id,
+            cutoff,
+        )
+        .await
+        .expect("cut the successor bootstrap from accepted history");
+    let image = coven_database::DatabaseImageTest::from_bytes(&cut.snapshot.db_image)
+        .expect("open the bootstrap image");
+    let installed_ids = image
+        .query("SELECT id FROM documents ORDER BY id", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .expect("query image rows");
+    assert!(
+        installed_ids.iter().any(|id| id == published_id),
+        "the accepted Circle row is present in the projection image: {installed_ids:?}"
+    );
+    assert!(
+        !installed_ids.iter().any(|id| id == unpublished_id),
+        "the unpublished Circle row is absent from the projection image: {installed_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
+    let fixture = RotationFixture::build("store-cut-gate").await;
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000060",
+            None,
+            "0000000003000-0000-owner",
+        )
+        .await;
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load the ordinary snapshot Store");
+    let authorized = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize the ordinary Store snapshot cut");
+    let error = match authorized
+        .capture_snapshot_cut(
+            fixture.db.synced_tables().to_vec(),
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+    {
+        Ok(_) => panic!("the ordinary Store snapshot cut still refuses unpublished writes"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("snapshot cut refused while unpublished Store writes exist"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
+    let fixture = RotationFixture::build("rotation-unaffected-removal").await;
+    let outsider = UserKeypair::generate();
+    let outsider_pubkey = keys::public_key_hex(&outsider);
+    fixture
+        .store
+        .invite_member(
+            &fixture.db,
+            &fixture.signer,
+            &outsider_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Rotation Store",
+        )
+        .await
+        .expect("invite a Store member who joins no Circle");
+
+    fixture
+        .components
+        .remove_member(&outsider_pubkey, &fixture.custody)
+        .await
+        .expect("remove the non-Circle Store member");
+
+    assert!(
+        !fixture
+            .circles()
+            .await
+            .iter()
+            .find(|circle| circle.id() == fixture.circle_id)
+            .expect("Circle listed after unrelated removal")
+            .rotation_required(),
+        "removing a Store member in no roster leaves every Circle running"
+    );
+
+    let write = fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000020",
+            Some(fixture.circle_id),
+            "0000000003000-0000-owner",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish Circle content after an unrelated Store removal");
+    assert!(matches!(
+        coven_database::StoreDatabase::new(&fixture.db)
+            .write_status(&write)
+            .await
+            .expect("read Circle write status"),
+        coven_protocol::write::WriteStatus::Published(_)
+    ));
+}
+
+#[tokio::test]
+async fn device_join_succeeds_after_a_circle_epoch_close() {
+    let fixture = RotationFixture::build("device-join-after-close").await;
+
+    // Drive a Circle member-removal epoch close through to successor activation.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+
+    // Confirm the close activated its successor.
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
+        .await
+        .expect("load successor Circle authoring state");
+    assert!(!successor
+        .roster
+        .members()
+        .contains_key(&fixture.member_pubkey));
+
+    // A remaining member (the owner) installs a new device through the ordinary
+    // genesis-replaying join, which reconstructs the full retained history.
+    let joined_db = open_circle_routing_test_db();
+    fixture
+        .store
+        .activate_joined_device(
+            &fixture.db,
+            &joined_db,
+            &fixture.signer,
+            "2026-07-24T00:00:00Z",
+        )
+        .await
+        .expect("device join succeeds after a Circle epoch close");
+
+    // The newly joined device pulls the Circle's post-close state, including the
+    // successor bootstrap, which triggers a retained-replay projection.
+    let (_joined_temp, joined_dir) = temp_store_dir();
+    let joined_store = crate::sync::store::Store::load(
+        StoreDatabase::new(&joined_db),
+        fixture.store.storage(),
+        joined_dir,
+        fixture.signer.clone(),
+    )
+    .await
+    .expect("load the joined device Store");
+    let pull = joined_store
+        .authorize_writer()
+        .await
+        .expect("authorize the joined device pull")
+        .pull(Some(&EncryptionService::from_key([42; 32])))
+        .await
+        .expect("the joined device pulls the close successor without a foreign-key violation");
+    assert!(
+        pull.held_positions.is_empty(),
+        "the joined device holds no positions after the close: {:?}",
+        pull.held_positions
+    );
+}
+
+/// A stable, acknowledged Store snapshot of a Circle store with one active
+/// member, cut without an epoch close (so Circle history stays live and no
+/// coverage is reclaimed). The shared base for the restore-selection cases that
+/// differ only in who restores and what the storage provider serves.
+/// A Store with an activated founder Circle, one invited Store member on that
+/// Circle's roster, and the production sync components the owner drives. Every
+/// restore case starts from this shape and differs only in what it does next.
+struct CircleWithOneMember {
+    db: Database,
+    store: std::sync::Arc<TestStore>,
+    home: Arc<coven_storage::InMemoryCloudHome>,
+    signer: UserKeypair,
+    components: SyncComponents,
+    circle_id: CircleId,
+    member: UserKeypair,
+    member_pubkey: String,
+    /// The owner's Store directory, which must outlive the components using it.
+    _store_temp: tempfile::TempDir,
+}
+
+impl CircleWithOneMember {
+    async fn build(name: &str) -> Self {
+        let routing = EncryptionService::from_key([42; 32]);
+        let db = open_circle_routing_test_db();
+        let (store, home, signer, founder) = persist_merge_operation(&db, name).await;
+        let circle_id = founder.circle_id();
+        store
+            .bind_device(&db, &signer)
+            .await
+            .expect("bind Circle test Store")
+            .resume_circle_operations()
+            .await
+            .expect("activate founder transition");
+
+        let member = UserKeypair::generate();
+        let member_pubkey = keys::public_key_hex(&member);
+        store
+            .invite_member(
+                &db,
+                &signer,
+                &member_pubkey,
+                None,
+                MemberRole::Member,
+                &routing,
+                "Restore Store",
+            )
+            .await
+            .expect("invite Store member");
+        let (store_temp, store_dir) = temp_store_dir();
+        let components =
+            prepare_owner_sync_components(&db, &store, &home, &store_dir, &signer, name).await;
+        components
+            .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
+            .await
+            .expect("add Circle member");
+
+        Self {
+            db,
+            store,
+            home,
+            signer,
+            components,
+            circle_id,
+            member,
+            member_pubkey,
+            _store_temp: store_temp,
+        }
+    }
+}
+
+/// Publishes a Store snapshot over the current frontier and acknowledges it
+/// stable from the sole owner device, then reads the membership chain a restore
+/// from that snapshot is floored against.
+async fn publish_acknowledged_store_snapshot(
+    store: &TestStore,
+    db: &Database,
+    signer: &UserKeypair,
+    routing: &EncryptionService,
+    cut_stamp: &str,
+    acknowledged_at: &str,
+) -> coven_protocol::membership::MembershipChain {
+    let loaded_store = store
+        .bind_device(db, signer)
+        .await
+        .expect("load the Store snapshot");
+    let mut authorized = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize the Store snapshot");
+    let cut = authorized
+        .capture_snapshot_cut(db.synced_tables().to_vec(), Some(routing))
+        .await
+        .expect("capture the Store snapshot cut");
+    let coverage = cut.coverage().clone();
+    authorized
+        .push_snapshot_cut(cut, cut_stamp.to_string())
+        .await
+        .expect("publish the Store snapshot");
+    loaded_store
+        .stage_acknowledgement(coverage, acknowledged_at.to_string())
+        .await
+        .expect("stage snapshot stability acknowledgement");
+    loaded_store
+        .drain_acknowledgements()
+        .await
+        .expect("activate snapshot stability acknowledgement");
+
+    store
+        .bind_device(db, signer)
+        .await
+        .expect("load snapshot Store")
+        .membership_for_test()
+        .await
+        .expect("load membership for snapshot restore")
+}
+
+/// The fresh directory a Store snapshot restores into. The temp dir must outlive
+/// the restore, and both the database path and the Store dir are read from it.
+struct RestoreTarget {
+    _temp: tempfile::TempDir,
+    database_path: std::path::PathBuf,
+    store_dir: coven_foundation::store_dir::StoreDir,
+}
+
+impl RestoreTarget {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().expect("restore destination");
+        Self {
+            database_path: temp.path().join("store.db"),
+            store_dir: coven_foundation::store_dir::StoreDir::new(temp.path()),
+            _temp: temp,
+        }
+    }
+}
+
+/// Restores the Store snapshot as `restorer` and installs it into `target`. The
+/// preparation is expected to verify; the install outcome is the caller's, since
+/// the failure cases are exactly what several of these tests assert on.
+async fn restore_store_snapshot<'a>(
+    store: &'a TestStore,
+    db: &Database,
+    membership: &coven_protocol::membership::MembershipChain,
+    restorer: &UserKeypair,
+    target: &'a RestoreTarget,
+    device_id: &str,
+) -> Result<crate::sync::store::RestoringStore<'a>, crate::sync::store::SnapshotError> {
+    store
+        .prepare_snapshot_bootstrap(
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
+            &target.database_path,
+            restorer,
+        )
+        .await
+        .expect("restore the Store snapshot")
+        .install(
+            &target.store_dir,
+            db.synced_tables().to_vec(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            device_id.to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            &circle_routing_migrations(),
+            Some(&EncryptionService::from_key([42; 32])),
+        )
+        .await
+}
+
+struct ActiveMemberCircleSnapshot {
+    db: Database,
+    store: std::sync::Arc<TestStore>,
+    home: Arc<coven_storage::InMemoryCloudHome>,
+    signer: UserKeypair,
+    member: UserKeypair,
+    routing: EncryptionService,
+    circle_id: coven_protocol::circle::CircleId,
+    membership: coven_protocol::membership::MembershipChain,
+}
+
+/// How much Circle history the fixture builds before the Store snapshot cut.
+enum CircleFixtureMode {
+    /// Live Circle content, no epoch close — no image is reclaimed.
+    Live,
+    /// The epoch is closed by removing the member; the successor bootstrap covers
+    /// the pre-close content and the remaining owner's leaf names it.
+    Closed,
+}
+
+impl ActiveMemberCircleSnapshot {
+    async fn build(name: &str, mode: CircleFixtureMode) -> Self {
+        let routing = EncryptionService::from_key([42; 32]);
+        let CircleWithOneMember {
+            db,
+            store,
+            home,
+            signer,
+            components,
+            circle_id,
+            member,
+            member_pubkey,
+            _store_temp,
+        } = CircleWithOneMember::build(name).await;
+
+        // Pre-close Circle content the member holds access to, under the live epoch.
+        db.capture_document_for_test(
+            "00000000-0000-4000-8000-000000000090",
+            Some(circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await
+        .expect("capture Circle content");
+        components
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+            .await
+            .expect("publish pre-close Circle content");
+
+        // Close the epoch by removing the member. The successor bootstrap's activating
+        // commit is retained, so the restored device resolves the head control and the
+        // remaining owner's own leaf names that successor bootstrap image (in storage)
+        // as its Circle image.
+        if matches!(mode, CircleFixtureMode::Closed) {
+            components
+                .remove_circle_member(circle_id, member_pubkey.clone())
+                .await
+                .expect("close the epoch by removing the roster member");
+            finalize_circle_epoch_close(&store, &db, &signer, &components).await;
+        }
+
+        let membership = publish_acknowledged_store_snapshot(
+            &store,
+            &db,
+            &signer,
+            &routing,
+            "2026-07-24T01:00:00Z",
+            "2026-07-24T01:00:01Z",
+        )
+        .await;
+
+        Self {
+            db,
+            store,
+            home,
+            signer,
+            member,
+            routing,
+            circle_id,
+            membership,
+        }
+    }
+}
+
+#[tokio::test]
+async fn restore_reports_a_circle_with_no_coverage_image() {
+    let base =
+        ActiveMemberCircleSnapshot::build("snapshot-restore-no-image", CircleFixtureMode::Live)
+            .await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        signer,
+        circle_id,
+        membership,
+        ..
+    } = base;
+
+    // The owner restores a Circle it holds access to but which no bootstrap or
+    // snapshot ever covered — the no-coverage report path. Selection must not error
+    // on the missing image, and must not fabricate a coverage row; the Store image
+    // still restores the Circle's control indexes.
+    let target = RestoreTarget::new();
+    let restored = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &signer,
+        &target,
+        "no-image-device",
+    )
+    .await
+    .expect("a Circle with active access but no image restores without error");
+
+    let coverage = restored
+        .circle_bootstrap_coverage_for_test(circle_id)
+        .await
+        .expect("read restored Circle coverage");
+    assert!(
+        coverage.is_none(),
+        "selection stages no coverage row for a Circle it holds no image for"
+    );
+
+    let control_count: i64 = restored
+        .circle_control_activation_count_for_test(circle_id)
+        .await
+        .expect("count restored Circle control indexes");
+    assert!(
+        control_count > 0,
+        "the Store image still restores the Circle control indexes"
+    );
+}
+
+#[tokio::test]
+async fn restore_rejects_a_sabotaged_circle_image_and_exposes_no_database() {
+    let base =
+        ActiveMemberCircleSnapshot::build("snapshot-restore-sabotage", CircleFixtureMode::Closed)
+            .await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        home,
+        signer,
+        membership,
+        ..
+    } = base;
+
+    // A hostile storage provider serves the wrong bytes for the Circle bootstrap
+    // image the owner's own access leaf names. The bytes are input to the verifier,
+    // not trusted for being served: their digest no longer matches the image hash
+    // the signed access leaf pins, so `verify_circle_bootstrap_image` rejects them
+    // and the whole restore fails with no database left behind. (An image with a
+    // wrong schema/routing contract or a row outside the audience closure changes
+    // the bytes too, so it fails this same digest check first — those reach the
+    // verifier only from a malicious author, whose defense is the verifier's own
+    // tests, not a storage provider.)
+    let sabotaged_keys: Vec<String> = home
+        .keys()
+        .into_iter()
+        .filter(|key| key.contains("/bootstraps/"))
+        .collect();
+    assert!(
+        !sabotaged_keys.is_empty(),
+        "the Circle bootstrap image was uploaded to storage"
+    );
+    for key in &sabotaged_keys {
+        home.insert_exact_object(key, b"sabotaged Circle bootstrap image".to_vec());
+    }
+
+    // The Store snapshot itself verifies; only the Circle image is sabotaged.
+    let target = RestoreTarget::new();
+    let outcome = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &signer,
+        &target,
+        "sabotaged-restore-device",
+    )
+    .await;
+    let error = match outcome {
+        Ok(_) => panic!("a sabotaged Circle image must fail the whole restore"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("image")
+            || error.to_string().contains("hash")
+            || error.to_string().contains("digest"),
+        "the restore fails on image verification: {error}"
+    );
+    assert!(
+        !target.database_path.exists(),
+        "a failed restore exposes no database at the target path"
+    );
+}
+
+#[tokio::test]
+async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
+    let base =
+        ActiveMemberCircleSnapshot::build("snapshot-restore-crash", CircleFixtureMode::Live).await;
+    let ActiveMemberCircleSnapshot {
+        db,
+        store,
+        member,
+        routing,
+        membership,
+        ..
+    } = base;
+
+    // The member restore selects its own leaf bootstrap as a Circle image to
+    // install. A failure injected into the Circle-decision step — the stand-in for
+    // a crash after the Store image is installed but before the Circle image is —
+    // must roll the whole install transaction back, leaving no database at all: not
+    // even the Store image on its own.
+    let target = RestoreTarget::new();
+    let outcome = store
+        .prepare_snapshot_bootstrap(
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            db.schema_version(),
+            &target.database_path,
+            &member,
+        )
+        .await
+        .expect("restore the Store snapshot")
+        .fail_circle_install_for_test()
+        .install(
+            &target.store_dir,
+            db.synced_tables().to_vec(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            "crash-restore-device".to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            &circle_routing_migrations(),
+            Some(&routing),
+        )
+        .await;
+    match outcome {
+        Ok(_) => panic!("an injected Circle-install failure must fail the whole restore"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains("injected Circle install failure"),
+            "the restore fails at the Circle-install step: {error}"
+        ),
+    }
+    assert!(
+        !target.database_path.exists(),
+        "the rolled-back restore exposes no database — the Store image did not commit \
+         separately from the Circle install"
+    );
+}
+
+#[tokio::test]
+async fn post_close_circle_store_snapshot_restores_and_converges() {
+    let routing = EncryptionService::from_key([42; 32]);
+    // The Circle member is a Store member without an active device, so the
+    // snapshot's stability quorum stays the single owner device.
+    let CircleWithOneMember {
+        db,
+        store,
+        signer,
+        components,
+        circle_id,
+        member,
+        member_pubkey,
+        _store_temp,
+        ..
+    } = CircleWithOneMember::build("snapshot-restore-after-close").await;
+
+    // Old-epoch Circle content, published under the initial epoch.
+    {
+        let routing = routing.clone();
+        let audience = Some(circle_id.to_string());
+        coven_database::StoreDatabase::new(&db)
+            .run_host_store_write_for_test(Some(routing), None, move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO documents (id, audience, _updated_at)
+                             VALUES (?1, ?2, ?3)",
+                        rusqlite::params![
+                            "00000000-0000-4000-8000-000000000090",
+                            audience,
+                            "0000000002000-0000-owner"
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .await
+            .expect("capture old-epoch Circle content");
+    }
+    components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish old-epoch Circle content");
+
+    // Drive the member-removal epoch close through to successor activation. Its
+    // successor bootstrap covers the old-epoch content up to the accepted cutoff.
+    components
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    finalize_circle_epoch_close(&store, &db, &signer, &components).await;
+
+    // Publish a Store snapshot covering the post-close frontier; the single owner
+    // device acknowledges it stable. Its image prunes the old-epoch retained rows
+    // now covered by the successor bootstrap.
+    //
+    // A device then restores from that snapshot. Installation validates the image's
+    // retained inputs against the retention rule; the successor bootstrap's
+    // coverage keeps retained rows a Store snapshot of a Circle store legitimately
+    // carries, which the validator must accept.
+    let membership = publish_acknowledged_store_snapshot(
+        &store,
+        &db,
+        &signer,
+        &routing,
+        "2026-07-24T01:00:00Z",
+        "2026-07-24T01:00:01Z",
+    )
+    .await;
+    let target = RestoreTarget::new();
+    let mut restored = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &signer,
+        &target,
+        "restored-device",
+    )
+    .await
+    .expect("install the restored snapshot database");
+
+    // The restored device pulls and converges to the owner's accepted Store
+    // frontier: the installed snapshot represents the closed epoch exactly, so
+    // nothing is held and the projections agree.
+    let pull = restored
+        .pull(Some(&routing))
+        .await
+        .expect("the restored device pulls the close without a foreign-key violation");
+    assert!(
+        pull.held_positions.is_empty(),
+        "the restored device holds no positions after the close: {:?}",
+        pull.held_positions
+    );
+    let owner_frontier = coven_database::StoreDatabase::new(&db)
+        .materialized_frontier()
+        .await
+        .expect("read owner Store frontier");
+    let restored_frontier = restored
+        .materialized_frontier_for_test()
+        .await
+        .expect("read restored Store frontier");
+    assert_eq!(
+        restored_frontier, owner_frontier,
+        "the restored device converges to the owner's accepted Store frontier"
+    );
+
+    // The same snapshot, restored by the REMOVED member, must not resurrect the
+    // Circle. The Store image carries the owner's preserved coverage row, but the
+    // removed member cannot decrypt the Circle, so selection clears it — and a
+    // forced full replay then materializes none of the Circle's content. If the
+    // clear were skipped, the preserved row would reconstruct the image and hand
+    // the removed member the very rows the epoch close took away.
+    let removed_target = RestoreTarget::new();
+    let removed_db = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &member,
+        &removed_target,
+        "removed-member-device",
+    )
+    .await
+    .expect("install the removed-member restore database");
+
+    let removed_coverage = removed_db
+        .circle_bootstrap_coverage_for_test(circle_id)
+        .await
+        .expect("read removed-member Circle coverage");
+    assert!(
+        removed_coverage.is_none(),
+        "the removed member retains no Circle coverage row"
+    );
+
+    let control_count: i64 = removed_db
+        .circle_control_activation_count_for_test(circle_id)
+        .await
+        .expect("count restored Circle control indexes");
+    assert!(
+        control_count > 0,
+        "the removed member still restores the Circle control indexes"
+    );
+
+    // The exact input a full replay reconstructs Circle images from carries no
+    // entry for this Circle: with the coverage row cleared there is nothing to
+    // rebuild, so no replay can hand the removed member the content the epoch close
+    // took away. Were the clear skipped, the preserved row would reappear here and
+    // re-arm the replay — this assertion is what makes the clear load-bearing.
+    let replay_inputs = removed_db
+        .circle_bootstrap_replay_inputs_for_test()
+        .await
+        .expect("read removed-member Circle replay inputs");
+    assert!(
+        replay_inputs.is_empty(),
+        "the removed member has no Circle image to replay"
+    );
+}
+
+/// End-to-end receipt that restore selection installs from a standalone Circle
+/// snapshot when it dominates the other coverage candidates. The fixture authors
+/// content under the successor epoch after the close and cuts a standalone snapshot
+/// over it, so its coverage strictly dominates both the leaf-named successor
+/// bootstrap and the preserved author-coverage row (both fixed at the close cutoff).
+/// A fresh device restores, and the staged Install decision must name the standalone
+/// snapshot's image.
+///
+/// The standalone snapshot is authored under the SUCCESSOR control, which the head
+/// control is — so it is a retained activation and restore selection does not skip
+/// it as reclaimed (the reclaimed-control skip only drops snapshots authored under a
+/// control a later close reclaimed). Selection reads the standalone metadata and
+/// image with the Circle epoch key the restorer's active leaf carries. That
+/// threading is load-bearing: decrypting the standalone stream with any other key
+/// fails the read outright (a wrong key is an error, not absence), so the restore
+/// cannot install the snapshot and this assertion does not hold.
+#[tokio::test]
+async fn restore_installs_a_dominating_standalone_circle_snapshot() {
+    let routing = EncryptionService::from_key([42; 32]);
+    let CircleWithOneMember {
+        db,
+        store,
+        signer,
+        components,
+        circle_id,
+        member_pubkey,
+        _store_temp,
+        ..
+    } = CircleWithOneMember::build("standalone-restore-dominates").await;
+
+    // Pre-close content, then close the epoch by removing the member. The successor
+    // bootstrap and the owner's successor leaf both cover the pre-close cutoff.
+    db.capture_document_for_test(
+        "00000000-0000-4000-8000-000000000090",
+        Some(circle_id),
+        "0000000002000-0000-owner",
+    )
+    .await
+    .expect("capture Circle content");
+    components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish pre-close Circle content");
+    components
+        .remove_circle_member(circle_id, member_pubkey.clone())
+        .await
+        .expect("close the epoch by removing the roster member");
+    finalize_circle_epoch_close(&store, &db, &signer, &components).await;
+
+    // Post-close content under the successor epoch advances the frontier past the
+    // close cutoff, so a snapshot over it dominates the close-cutoff candidates.
+    db.capture_document_for_test(
+        "00000000-0000-4000-8000-000000000091",
+        Some(circle_id),
+        "0000000004000-0000-owner",
+    )
+    .await
+    .expect("capture Circle content");
+    components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish post-close Circle content");
+
+    // Author the dominating standalone Circle snapshot under the successor epoch.
+    let (_standalone_temp, standalone_dir) = temp_store_dir();
+    let standalone = store
+        .push_circle_snapshots(
+            &db,
+            standalone_dir.as_ref().join("standalone"),
+            db.schema_version(),
+            "2026-07-24T02:00:00Z",
+            &routing,
+        )
+        .await
+        .expect("author the dominating standalone Circle snapshot");
+    let standalone_image_hash = standalone.bootstrap.image.image_hash;
+
+    // A Store snapshot covering the post-close frontier, acknowledged stable, that
+    // a fresh device then restores from.
+    let membership = publish_acknowledged_store_snapshot(
+        &store,
+        &db,
+        &signer,
+        &routing,
+        "2026-07-24T02:00:01Z",
+        "2026-07-24T02:00:02Z",
+    )
+    .await;
+    let target = RestoreTarget::new();
+    let restored = restore_store_snapshot(
+        &store,
+        &db,
+        &membership,
+        &signer,
+        &target,
+        "standalone-restore-device",
+    )
+    .await
+    .expect("install the restored snapshot database");
+
+    // The staged Install decision chose the dominating standalone snapshot: the
+    // coverage row names its image.
+    let coverage_row = restored
+        .circle_bootstrap_coverage_for_test(circle_id)
+        .await
+        .expect("read restored Circle coverage")
+        .expect("the restore installs a Circle coverage row");
+    assert_eq!(
+        coverage_row.bootstrap.image.image_hash, standalone_image_hash,
+        "restore installs the dominating standalone snapshot's image, not a \
+         close-cutoff bootstrap"
+    );
+}
+
+#[tokio::test]
+async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
+    let fixture = RotationFixture::build("rotation-ack-read").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // A cycle publishes the owner's Circle acknowledgement under the current
+    // (soon-rotated-away) epoch.
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("cycle publishes the owner's Circle acknowledgement");
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("old Circle authoring context");
+    let old_control = old_authoring.control.coord.clone();
+    let old_epoch = old_authoring.control.value.epoch_id();
+    let acknowledgements = StoreDatabase::new(&fixture.db)
+        .activated_circle_acks(fixture.circle_id)
+        .await
+        .expect("read activated Circle acknowledgements");
+    let ack_ref = acknowledgements
+        .first()
+        .cloned()
+        .expect("the owner published a Circle acknowledgement");
+    let before = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &ack_ref)
+        .await
+        .expect("read acknowledgement through its exact control");
+    assert_eq!(before.epoch_id, old_epoch);
+    assert_eq!(before.control, old_control);
+    // The owner authored the Circle; its projection never came from an image, so
+    // the acknowledgement names no seed coverage.
+    assert!(before.seeded_from.is_none());
+
+    // Remove the roster member: the old epoch closes and a successor epoch/key
+    // activates.
+    fixture.remove_store_member().await;
+    fixture.close_epoch_by_removing_the_circle_member().await;
+    let (new_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("successor Circle authoring context");
+    let new_control = new_authoring.control.coord.clone();
+    assert_ne!(new_control, old_control, "the epoch rotated");
+
+    // The pre-rotation acknowledgement, sealed under the rotated-away epoch key,
+    // stays readable after the epoch rotates: the read resolves that epoch's key
+    // from the retained activation of the control the acknowledgement names.
+    let after = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &ack_ref)
+        .await
+        .expect("read the pre-rotation acknowledgement after the epoch rotated");
+    assert_eq!(after.epoch_id, old_epoch);
+    assert_eq!(after.control, old_control);
+}
+
+#[tokio::test]
+async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge() {
+    let fixture = RotationFixture::build("snapshot-stability").await;
+
+    // Author a Circle snapshot before any device has acknowledged coverage.
+    fixture
+        .author_standalone_circle_snapshot("2026-07-23T00:00:00Z")
+        .await;
+    let published = StoreDatabase::new(&fixture.db)
+        .latest_local_circle_snapshot(fixture.circle_id)
+        .await
+        .expect("read published Circle snapshot")
+        .expect("a Circle snapshot was published");
+
+    // The owner acknowledges its own coverage past the cut. The second member's
+    // device holds active Circle access but has not acknowledged, so the snapshot
+    // is not stable: an access-holding device that never acknowledged keeps the
+    // snapshot unusable as coverage evidence.
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("owner publishes its Circle acknowledgement");
+    assert!(!fixture
+        .store
+        .circle_snapshot_is_stable(&fixture.db, fixture.circle_id, &published.cut)
+        .await
+        .expect("evaluate stability before the member acknowledges"));
+
+    // The member device installs the Circle bootstrap and publishes its own Circle
+    // acknowledgement covering the cut; the owner pulls and activates it.
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+    member_view
+        .publish_acknowledgements("2026-07-23T01:00:00Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("owner activates the member's Circle acknowledgement");
+
+    // Every access-holding device has now acknowledged coverage past the cut.
+    assert!(fixture
+        .store
+        .circle_snapshot_is_stable(&fixture.db, fixture.circle_id, &published.cut)
+        .await
+        .expect("evaluate stability once every access device acknowledged"));
+}
+
+#[tokio::test]
+async fn circle_snapshot_stays_readable_across_epoch_rotation() {
+    let fixture = RotationFixture::build("rotation-snapshot-read").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("old Circle authoring context");
+    let old_control = old_authoring.control.coord.clone();
+    let old_epoch = old_authoring.control.value.epoch_id();
+
+    // Author a Circle snapshot under the current (soon-rotated-away) epoch.
+    fixture
+        .author_standalone_circle_snapshot("2026-07-23T00:00:00Z")
+        .await;
+
+    // Rotate the epoch by removing the roster member.
+    fixture.remove_store_member().await;
+    fixture.close_epoch_by_removing_the_circle_member().await;
+
+    // The old-epoch snapshot, sealed under the rotated-away key, stays readable
+    // to a current member: resolve the key from the retained activation of the
+    // control the snapshot names.
+    let device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind retained Circle activation Store");
+    let retained = device
+        .circle_epoch_access(fixture.circle_id, old_control.clone())
+        .await
+        .expect("read retained Circle activation")
+        .expect("the pre-rotation control's activation is retained");
+    let metas = fixture
+        .store
+        .load_circle_snapshot_metas(&fixture.db, fixture.circle_id, &retained)
+        .await
+        .expect("read the pre-rotation Circle snapshot after the epoch rotated");
+    let old = metas
+        .iter()
+        .find(|meta| meta.epoch_id == old_epoch)
+        .expect("the pre-rotation snapshot remains readable");
+    assert_eq!(old.control, old_control);
+}
+
+/// A standalone Circle snapshot carries row-routing ids in its image, and those
+/// ids must be derived from the Store generation-one key — the key that routed
+/// the rows when the host captured them — not the per-Circle epoch key that only
+/// seals the published objects. This authors a snapshot over Circle content and
+/// checks that a recipient authenticates its routing state against the true Store
+/// routing key. When authoring derived routing from the Circle epoch key instead,
+/// the projection's routes failed to authenticate against the Store-keyed rows and
+/// no image could be authored at all.
+#[tokio::test]
+async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_key() {
+    let fixture = RotationFixture::build("standalone-snapshot-true-routing").await;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // Circle content captured through the host write path, routed with the Store key.
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000099",
+            Some(fixture.circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish Circle content");
+
+    fixture
+        .author_standalone_circle_snapshot("2026-07-24T00:00:00Z")
+        .await;
+
+    // A recipient reads the image with the Circle epoch key and authenticates its
+    // routing state against the true Store routing key.
+    let (authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(fixture.circle_id, &owner_pk)
+        .await
+        .expect("Circle authoring context");
+    let access = StoreDatabase::new(&fixture.db)
+        .circle_publication_context(fixture.circle_id, authoring.control.coord.clone())
+        .await
+        .expect("Circle publication context");
+    fixture
+        .store
+        .verify_standalone_circle_snapshot_image(
+            &fixture.db,
+            fixture.circle_id,
+            &access,
+            &EncryptionService::from_key([42; 32]),
+        )
+        .await
+        .expect("standalone Circle snapshot authenticates under the true Store routing key");
+}
+
+/// Removing a roster member closes the Circle epoch and rotates its key away from
+/// the generation-one founding key, so the rotated Circle key has no generation-one
+/// entry to derive a row-routing key from. Standalone snapshot authoring must still
+/// succeed, because it derives routing from the Store generation-one key — which an
+/// epoch close never touches. Deriving routing from the rotated Circle key errored
+/// `MissingGenerationOne`, killing snapshot authoring for the Circle every cycle
+/// after the close.
+#[tokio::test]
+async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
+    let fixture = RotationFixture::build("standalone-snapshot-rotation").await;
+
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-000000000099",
+            Some(fixture.circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish pre-close Circle content");
+
+    // Close the epoch by removing the roster member, rotating the Circle key.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+
+    // Authoring derives routing from the Store generation-one key, so the rotated
+    // Circle key having no generation-one entry no longer aborts the capture.
+    fixture
+        .author_standalone_circle_snapshot("2026-07-24T00:00:00Z")
+        .await;
+
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .latest_local_circle_snapshot(fixture.circle_id)
+            .await
+            .expect("read the published Circle snapshot")
+            .is_some(),
+        "a standalone Circle snapshot is published after the rotation"
+    );
+}
+
+#[tokio::test]
+async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
+    let fixture = RotationFixture::build("circle-ack-seeded-from").await;
+    let circle_id = fixture.circle_id;
+
+    // The member device installs the Circle bootstrap: its projection seeds from a
+    // real coverage row the install recorded.
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+    let member_coverage = fixture
+        .member_db
+        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
+        .await
+        .expect("read member Circle bootstrap coverage")
+        .expect("the member's projection seeded from a real bootstrap coverage row");
+
+    // The member publishes its Circle acknowledgement; the owner pulls and
+    // activates it alongside its own.
+    member_view
+        .publish_acknowledgements("2026-07-23T01:00:00Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("owner activates the member's Circle acknowledgement");
+
+    // The owner reads and verifies the member's acknowledgement: its seed coverage
+    // is present and names the exact bootstrap coverage row the member installed.
+    let member_device_id = fixture
+        .member_db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
+    let member_ack_ref = StoreDatabase::new(&fixture.db)
+        .activated_circle_ack(circle_id, member_device_id)
+        .await
+        .expect("read activated member Circle acknowledgement")
+        .expect("the owner activated the member's Circle acknowledgement");
+    let member_ack = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &member_ack_ref)
+        .await
+        .expect("owner reads the member's Circle acknowledgement");
+    assert_eq!(
+        member_ack.seeded_from.as_ref(),
+        Some(&member_coverage),
+        "the member's acknowledgement names its exact seed coverage row"
+    );
+
+    // The founder authored the Circle; its projection never came from an image, so
+    // its own acknowledgement names no seed coverage.
+    let owner_device_id = fixture
+        .db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
+    let owner_ack_ref = StoreDatabase::new(&fixture.db)
+        .activated_circle_ack(circle_id, owner_device_id)
+        .await
+        .expect("read activated owner Circle acknowledgement")
+        .expect("the owner activated its own Circle acknowledgement");
+    let owner_ack = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &owner_ack_ref)
+        .await
+        .expect("owner reads its own Circle acknowledgement");
+    assert!(
+        owner_ack.seeded_from.is_none(),
+        "the founder's acknowledgement names no seed coverage"
+    );
+}
+
+#[tokio::test]
+async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
+    let fixture = RotationFixture::build("successor-snapshot-unreadable").await;
+    let circle_id = fixture.circle_id;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // The member installs the Circle bootstrap and holds the current epoch key.
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    // Close the epoch by removing the member from the Circle; the owner drives the
+    // close to successor activation. The member stays a Store member.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+
+    let (successor, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(circle_id, &owner_pk)
+        .await
+        .expect("successor Circle authoring context");
+    let successor_control = successor.control.coord.clone();
+
+    // A successor-epoch Circle snapshot is sealed under the successor epoch key.
+    // The owner, a remaining member, resolves that key from its retained
+    // activation — so it could author and read such a snapshot.
+    let owner_device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind owner successor Circle Store");
+    assert!(
+        owner_device
+            .circle_epoch_access(circle_id, successor_control.clone())
+            .await
+            .expect("read owner successor access")
+            .is_some(),
+        "the owner resolves the successor epoch key"
+    );
+
+    // The removed member pulls the post-close state but never received the
+    // successor epoch key: it cannot resolve the key that seals a successor-epoch
+    // snapshot, so any such snapshot is unreadable to it.
+    member_view.pull().await;
+    let member_device = fixture
+        .store
+        .bind_device(&fixture.member_db, &fixture.member)
+        .await
+        .expect("bind removed member Circle Store");
+    assert!(
+        member_device
+            .circle_epoch_access(circle_id, successor_control)
+            .await
+            .expect("read member successor access")
+            .is_none(),
+        "the removed member cannot resolve the successor epoch key"
+    );
+}
+
+#[tokio::test]
+async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundaries() {
+    // Derive the number of exact object creates one Circle snapshot publication
+    // makes (the image, then its metadata) from a clean run rather than hardcoding
+    // it, then use the metadata create as the crash boundary.
+    let baseline = RotationFixture::build("snapshot-resume-baseline").await;
+    let before = baseline.home.exact_create_count();
+    baseline
+        .drive_circle_snapshots("2026-07-23T00:00:00Z")
+        .await
+        .expect("clean Circle snapshot publication");
+    let meta_create = baseline.home.exact_create_count() - before;
+    assert_eq!(
+        meta_create, 2,
+        "a blobless Circle snapshot uploads an image, then its metadata"
+    );
+    assert!(
+        StoreDatabase::new(&baseline.db)
+            .latest_local_circle_snapshot(baseline.circle_id)
+            .await
+            .expect("read baseline snapshot")
+            .is_some(),
+        "the clean publication completes"
+    );
+
+    // Boundary — image upload to metadata publication: the image is uploaded but
+    // the metadata upload is interrupted before its bytes land. The publication is
+    // left durable and pending with no completed snapshot; the cycle logs the
+    // failure and continues. The next run resumes it and completes it exactly once,
+    // the exact readback accepting the image already uploaded.
+    {
+        let fixture = RotationFixture::build("snapshot-resume-image-meta").await;
+        let circle_id = fixture.circle_id;
+        fixture.home.fail_exact_create_before_call(meta_create);
+        fixture
+            .drive_circle_snapshots("2026-07-23T00:00:00Z")
+            .await
+            .expect("the cycle logs the interrupted publication and continues");
+        assert!(
+            fixture.latest_circle_snapshot(circle_id).await.is_none(),
+            "no snapshot completes when the metadata upload is interrupted"
+        );
+        assert!(
+            fixture.pending_circle_snapshot(circle_id).await.is_some(),
+            "the interrupted publication remains durable for resume"
+        );
+
+        fixture
+            .drive_circle_snapshots("2026-07-23T00:00:01Z")
+            .await
+            .expect("resume completes the pending publication");
+        assert!(
+            fixture.latest_circle_snapshot(circle_id).await.is_some(),
+            "the resumed publication completes"
+        );
+        assert!(
+            fixture.pending_circle_snapshot(circle_id).await.is_none(),
+            "no durable publication remains after resume"
+        );
+        assert_eq!(
+            fixture
+                .latest_circle_snapshot(circle_id)
+                .await
+                .map(|snapshot| snapshot.reference.generation),
+            Some(0),
+            "the resume opens no second generation"
+        );
+    }
+
+    // Boundary — metadata publication to completion: the metadata bytes are durable
+    // but the upload response is lost before the publication is recorded complete.
+    // The exact readback settles the lost upload within the run, so the publication
+    // completes without duplication and a re-run opens no new generation.
+    {
+        let fixture = RotationFixture::build("snapshot-resume-meta-complete").await;
+        let circle_id = fixture.circle_id;
+        fixture.home.fail_exact_create_after_call(meta_create);
+        fixture
+            .drive_circle_snapshots("2026-07-23T00:00:00Z")
+            .await
+            .expect("the lost metadata-upload response is settled by exact readback");
+        assert_eq!(
+            fixture
+                .latest_circle_snapshot(circle_id)
+                .await
+                .map(|snapshot| snapshot.reference.generation),
+            Some(0),
+            "the settled publication completes exactly one generation"
+        );
+        assert!(
+            fixture.pending_circle_snapshot(circle_id).await.is_none(),
+            "no durable publication remains after the settled upload"
+        );
+
+        fixture
+            .drive_circle_snapshots("2026-07-23T00:00:01Z")
+            .await
+            .expect("a re-run is idempotent");
+        assert_eq!(
+            fixture
+                .latest_circle_snapshot(circle_id)
+                .await
+                .map(|snapshot| snapshot.reference.generation),
+            Some(0),
+            "the re-run duplicates no generation"
+        );
+        assert!(
+            fixture.pending_circle_snapshot(circle_id).await.is_none(),
+            "the idempotent re-run opens no new publication"
+        );
+    }
+}
+
+/// A user-initiated blob deletion writes a signed tombstone and the graced GC
+/// performs the delete, but only after re-checking that no live row still
+/// references the blob. That check has to be able to answer for a row whose
+/// locality comes from an audience column rather than a keep gate — a Circle
+/// document's attachment is exactly that shape — or the whole GC pass fails and no
+/// tombstone anywhere is ever collected.
+#[tokio::test]
+async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row() {
+    let fixture = RotationFixture::build("audience-scoped-tombstone-gc").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    fixture
+        .capture_document_with_file(
+            "00000000-0000-4000-8000-0000000000e3",
+            "00000000-0000-4000-8000-0000000000f3",
+            Some(fixture.circle_id),
+            b"circle attachment under a tombstone",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish the Circle document and its file");
+    let published = fixture.stored_blobs().await;
+    let [stored] = published.as_slice() else {
+        panic!("the Circle document published exactly one blob: {published:?}");
+    };
+    let stored = stored.clone();
+
+    // A stale tombstone over a blob whose row is still live: past the grace the GC
+    // must resolve the reference, cancel the tombstone, and keep the ciphertext.
+    let deleted_at = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:11:00+00:00")
+        .expect("valid tombstone instant")
+        .with_timezone(&chrono::Utc);
+    fixture
+        .db
+        .enqueue_blob_delete_for_test(&stored, "2026-07-23T00:11:00Z")
+        .await
+        .expect("enqueue the blob deletion");
+    let cipher = std::sync::RwLock::new(coven_storage::CloudCipher::Encrypted(
+        EncryptionService::from_key([42; 32]),
+    ));
+    let loaded_store = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("load the Owner Store");
+    let writer = loaded_store
+        .authorize_writer()
+        .await
+        .expect("authorize the Owner Store");
+    assert_eq!(
+        writer
+            .drain_tombstones(
+                &cipher,
+                &coven_storage::PendingRotation::default(),
+                &coven_foundation::clock::FixedClock(deleted_at),
+            )
+            .await
+            .expect("write the signed tombstone"),
+        1,
+        "the queued deletion writes one tombstone"
+    );
+    let tombstone_key = format!(
+        "blob_tombstones/{}{}",
+        coven_protocol::remote_object::remote_object_id(stored.object()),
+        coven_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])).suffix(),
+    );
+    assert!(
+        fixture.home.read(&tombstone_key).await.is_ok(),
+        "the tombstone is written at its exact slot"
+    );
+
+    let past = coven_foundation::clock::FixedClock(
+        deleted_at + coven_protocol::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
+    );
+    let collected = writer
+        .gc_tombstones(&cipher, &past)
+        .await
+        .expect("run the graced tombstone GC over an audience-scoped blob");
+
+    assert_eq!(
+        collected, 0,
+        "a live row still references the blob, so nothing is collected"
+    );
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&stored)
+            .await
+            .expect("read the exact stored blob"),
+        "the referenced ciphertext stays in cloud storage"
+    );
+    assert!(
+        fixture.home.read(&tombstone_key).await.is_err(),
+        "the stale tombstone is canceled"
+    );
+}
+
+/// An audience move re-seals every blob its rows carry under the destination
+/// audience's key, which mints a new locator for content the row still binds at
+/// its old `_updated_at` — and one row stamp binds one exact locator. The move
+/// carries its own stamp onto the blob rows it drags along, so the new binding is
+/// a new one and the host never has to know that publishing a moved subtree needs
+/// its children restamped by hand.
+#[tokio::test]
+async fn an_audience_move_restamps_the_blob_rows_it_drags() {
+    let fixture = RotationFixture::build("audience-move-restamps-blob-rows").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let document = "00000000-0000-4000-8000-0000000000e4";
+    let file = "00000000-0000-4000-8000-0000000000f4";
+    fixture
+        .capture_document_with_file(
+            document,
+            file,
+            Some(fixture.circle_id),
+            b"attachment that moves with its document",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish the Circle document and its file");
+    assert_eq!(
+        fixture.document_file_stamp(file).await,
+        "2026-07-23T00:10:00Z",
+    );
+
+    // The move touches the document alone: the file row keeps the stamp its
+    // published blob is already bound at.
+    fixture
+        .move_document_audience(document, None, "2026-07-23T00:20:00Z")
+        .await;
+
+    assert_eq!(
+        fixture.document_file_stamp(file).await,
+        "2026-07-23T00:20:00Z",
+        "the dragged blob row carries the stamp its move published it at",
+    );
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("republish the document and its re-sealed file under the Store audience");
+}
+
+/// Moving a row between audiences republishes its blob under the destination
+/// audience's locator and drops the binding to the source ciphertext, which
+/// nothing else ever deletes. Reclamation deletes exactly the ciphertext no live
+/// row binds any more — in both directions, since a document can leave a Circle
+/// for the Store audience or join one from it — and leaves the destination
+/// ciphertext, which a live row does bind, alone.
+#[tokio::test]
+async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
+    let fixture = RotationFixture::build("audience-blob-reclaim").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let leaving = "00000000-0000-4000-8000-0000000000e1";
+    let joining = "00000000-0000-4000-8000-0000000000e2";
+    fixture
+        .capture_document_with_file(
+            leaving,
+            "00000000-0000-4000-8000-0000000000f1",
+            Some(fixture.circle_id),
+            b"circle attachment",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture
+        .capture_document_with_file(
+            joining,
+            "00000000-0000-4000-8000-0000000000f2",
+            None,
+            b"store attachment",
+            "2026-07-23T00:10:01Z",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish both documents and their files");
+
+    let sources = fixture.stored_blobs().await;
+    assert_eq!(
+        sources.len(),
+        2,
+        "one ciphertext per audience is published: {sources:?}"
+    );
+    for stored in &sources {
+        assert!(
+            fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
+            "the published ciphertext is uploaded"
+        );
+    }
+
+    // Nothing has moved yet: every ciphertext is still bound by a live row.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation while every blob is still bound");
+    for stored in &sources {
+        assert!(
+            fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
+            "a blob a live row still binds is never reclaimed"
+        );
+    }
+
+    fixture
+        .move_document_audience(leaving, None, "2026-07-23T00:20:00Z")
+        .await;
+    fixture
+        .move_document_audience(joining, Some(fixture.circle_id), "2026-07-23T00:20:01Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("republish both documents under their destination audiences");
+
+    let after_move = fixture.stored_blobs().await;
+    let destinations = after_move
+        .into_iter()
+        .filter(|stored| !sources.contains(stored))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        destinations.len(),
+        2,
+        "each move republished its blob under a new locator: {destinations:?}"
+    );
+
+    // A blob a published snapshot image lists is read by devices restoring from
+    // that image, which have no rows at all — so an unbound blob an image still
+    // names is held back rather than deleted.
+    let mut pinned_by_an_image = Vec::new();
+    for stored in &sources {
+        if StoreDatabase::new(&fixture.db)
+            .stored_blob_has_snapshot_owner_for_test(stored.clone())
+            .await
+            .expect("read the blob's snapshot ownership")
+        {
+            pinned_by_an_image.push(stored.clone());
+        }
+    }
+
+    // A blob an accepted merge still replays is not free however its rows moved;
+    // release that ownership, as a superseding coverage cut does in production.
+    fixture.release_retained_replay_ownership().await;
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the stranded source ciphertext");
+
+    let mut deleted = 0;
+    for stored in &sources {
+        if pinned_by_an_image.contains(stored) {
+            assert!(
+                fixture
+                    .store
+                    .contains_stored_blob_object(stored)
+                    .await
+                    .expect("read the exact stored blob"),
+                "a blob a published snapshot image lists survives its rows moving away: {:?}",
+                stored.locator().audience()
+            );
+            continue;
+        }
+        assert!(
+            !fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
+            "the stranded source ciphertext is deleted: {:?}",
+            stored.locator().audience()
+        );
+        deleted += 1;
+    }
+    assert!(
+        deleted > 0,
+        "at least one stranded source ciphertext was reclaimable"
+    );
+    for stored in &destinations {
+        assert!(
+            fixture
+                .store
+                .contains_stored_blob_object(stored)
+                .await
+                .expect("read the exact stored blob"),
+            "the destination ciphertext a live row binds survives: {:?}",
+            stored.locator().audience()
+        );
+    }
+}
+
+/// Every reclaim kind rides the same durable journal, so a delete that fails
+/// between authorization and deletion must leave a plan the next run finishes.
+/// Driven over a stranded audience blob because its eligibility is fully
+/// controlled here — the move unbinds it and releasing replay ownership frees it —
+/// so the interruption lands on the delete under test rather than on whatever a
+/// setup cycle happened to reclaim first.
+#[tokio::test]
+async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
+    let fixture = RotationFixture::build("audience-blob-crash-resume").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let document = "00000000-0000-4000-8000-0000000000e5";
+    fixture
+        .capture_document_with_file(
+            document,
+            "00000000-0000-4000-8000-0000000000f5",
+            Some(fixture.circle_id),
+            b"circle attachment for the interrupted reclaim",
+            "2026-07-23T00:10:00Z",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish the Circle document and its file");
+    let published = fixture.stored_blobs().await;
+    let [source] = published.as_slice() else {
+        panic!("the Circle document published exactly one blob: {published:?}");
+    };
+    let source = source.clone();
+
+    fixture
+        .move_document_audience(document, None, "2026-07-23T00:20:00Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("republish the document under the Store audience");
+    fixture.release_retained_replay_ownership().await;
+
+    // The stranded ciphertext is now eligible. Fail its delete: the reclaim
+    // authorizes the deletion, the delete fails, and the run surfaces the failure
+    // to its initiator with the object still present.
+    fixture
+        .home
+        .fail_nth_exact_delete_of(&[source.object().slot()], 1);
+    let interrupted = fixture.owner_device.reclaim_packages().await;
+    assert!(
+        interrupted.is_err(),
+        "the delete failure fails the reclaim to its initiator: {interrupted:?}"
+    );
+    assert!(
+        fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
+        "the stranded ciphertext survives the interrupted deletion"
+    );
+
+    // The journal still holds the authorized reclaim, so a restart finishes it.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("restart resumes the interrupted audience blob reclaim");
+    assert!(
+        !fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
+        "the restart deletes the stranded ciphertext"
+    );
+
+    // A further run is idempotent: the target is recorded as reclaimed, so nothing
+    // re-authorizes or re-deletes it.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("a further run finds nothing left to reclaim");
+    assert!(
+        !fixture
+            .store
+            .contains_stored_blob_object(&source)
+            .await
+            .expect("read the exact stored blob"),
+        "the reclaimed ciphertext stays absent"
+    );
+}
+
+/// A device authors its Circle snapshots as one create-once stream of
+/// generations, and a reader finds any generation only by walking that stream from
+/// generation zero. Once a later generation is acknowledgement-stable and its cut
+/// strictly dominates an earlier one, nobody will install the earlier image again
+/// — so reclamation deletes that image while leaving the whole metadata chain, and
+/// the surviving generation's own image, intact.
+#[tokio::test]
+async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
+    let fixture = RotationFixture::build("circle-snapshot-generation-reclaim").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000d1")
+        .await;
+    let before = fixture.owner_circle_snapshot_stream().await;
+    let (_, latest) = before
+        .last()
+        .expect("the owner authored a Circle snapshot")
+        .clone();
+
+    // Nothing supersedes the stream's latest generation, so reclamation refuses it
+    // and its image stays readable.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation with no superseding Circle snapshot generation");
+    assert!(
+        fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &latest)
+            .await
+            .expect("read the exact Circle snapshot image"),
+        "the latest generation's image survives while nothing supersedes it"
+    );
+
+    // Publish Circle content past the acknowledged frontier and author a snapshot
+    // over it. That generation strictly dominates the previous one, but no device
+    // has acknowledged its cut — so it supersedes nothing and the earlier image
+    // stays.
+    fixture
+        .capture_document(
+            "00000000-0000-4000-8000-0000000000d3",
+            Some(fixture.circle_id),
+            "2026-07-23T00:30:00Z",
+        )
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish Circle content past the acknowledged frontier");
+    fixture
+        .drive_circle_snapshots("2026-07-23T00:35:00Z")
+        .await
+        .expect("author an unacknowledged Circle snapshot generation");
+    let unacknowledged = fixture.owner_circle_snapshot_stream().await;
+    let (_, unstable) = unacknowledged
+        .last()
+        .expect("the owner authored a later Circle snapshot")
+        .clone();
+    assert!(
+        unstable.generation > latest.generation
+            && unstable
+                .bootstrap
+                .coverage
+                .covers(&latest.bootstrap.coverage)
+            && unstable.bootstrap.coverage != latest.bootstrap.coverage,
+        "the unacknowledged generation's cut strictly dominates the earlier one"
+    );
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation against an unacknowledged superseding generation");
+    assert!(
+        fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &latest)
+            .await
+            .expect("read the exact Circle snapshot image"),
+        "a superseding generation nobody acknowledged does not release the earlier image"
+    );
+
+    // A second round of Circle content drives both devices to acknowledge the later
+    // generations, so the once-latest generation is superseded.
+    fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000d2")
+        .await;
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the superseded Circle snapshot image");
+
+    let after = fixture.owner_circle_snapshot_stream().await;
+    let (_, newest) = after
+        .last()
+        .expect("the owner authored later Circle snapshots")
+        .clone();
+    assert!(
+        newest.generation > latest.generation
+            && newest.bootstrap.coverage.covers(&latest.bootstrap.coverage)
+            && newest.bootstrap.coverage != latest.bootstrap.coverage,
+        "a later generation's cut strictly dominates the earlier one"
+    );
+    assert!(
+        !fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &latest)
+            .await
+            .expect("read the exact Circle snapshot image"),
+        "the superseded generation's image is deleted"
+    );
+    assert!(
+        fixture
+            .store
+            .contains_circle_snapshot_image(fixture.circle_id, &newest)
+            .await
+            .expect("read the exact Circle snapshot image"),
+        "the generation no later snapshot supersedes keeps its image"
+    );
+    assert!(
+        after
+            .iter()
+            .map(|(reference, _)| reference.generation)
+            .collect::<Vec<_>>()
+            .starts_with(
+                &before
+                    .iter()
+                    .map(|(reference, _)| reference.generation)
+                    .collect::<Vec<_>>()
+            ),
+        "every generation's metadata survives, so the stream stays walkable"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
+    let fixture = RotationFixture::build("circle-package-reclaim").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let (circle_package, published) = fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000c1")
+        .await;
+    let owner_device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind Circle package replay Store");
+
+    // A freshly published Circle package is a retained replay input: reclamation
+    // refuses it until a superseding cut releases that ownership.
+    assert!(
+        owner_device
+            .circle_package_is_retained_for_replay_for_test(
+                circle_package.clone(),
+                published.clone(),
+            )
+            .await
+            .expect("read Circle package replay retention"),
+        "a freshly published Circle package is retained for replay"
+    );
+    fixture.release_retained_replay_ownership().await;
+
+    let result = fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the covered Circle package");
+    assert!(
+        result.packages_deleted >= 1,
+        "reclamation deleted the snapshot-covered Circle package"
+    );
+
+    // The delete counted above required the production readback-absence check to
+    // pass, so the ciphertext is gone from storage. Its ownership record is retired
+    // and the materialized row is untouched.
+    assert!(
+        !owner_device
+            .circle_package_is_retained_for_replay_for_test(
+                circle_package.clone(),
+                published.clone(),
+            )
+            .await
+            .expect("read Circle package replay retention after reclaim"),
+        "the reclaimed Circle package no longer has an ownership record"
+    );
+    let row_present = fixture
+        .db
+        .test_sql(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM documents WHERE id = '00000000-0000-4000-8000-0000000000c1')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("read the owner's documents projection");
+    assert!(
+        row_present,
+        "reclamation leaves the materialized row intact"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_refuses_a_replay_retained_package() {
+    let fixture = RotationFixture::build("circle-package-replay-retained").await;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let (circle_package, published) = fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000c2")
+        .await;
+    let owner_device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind replay-retained Circle package Store");
+
+    // The snapshot covers the package and every device acknowledged its cut, but
+    // the package is still a retained replay input: the per-Circle guard refuses
+    // reclamation and the object survives.
+    assert!(
+        owner_device
+            .circle_package_is_retained_for_replay_for_test(
+                circle_package.clone(),
+                published.clone(),
+            )
+            .await
+            .expect("read Circle package replay retention"),
+        "the Circle package is retained for replay"
+    );
+    // Reclamation may still delete the member's now-superseded seed bootstrap image
+    // (the member advanced past it), but the replay-retained package itself is never
+    // reclaimed while its ownership survives.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation with the package still retained");
+    assert!(
+        owner_device
+            .circle_package_is_retained_for_replay_for_test(circle_package, published)
+            .await
+            .expect("read Circle package replay retention after refused reclaim"),
+        "the replay-retained Circle package still owns its object"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement() {
+    let fixture = RotationFixture::build("circle-package-seeded-ack").await;
+    let circle_id = fixture.circle_id;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    // The member's projection seeds from a real bootstrap coverage row the install
+    // recorded — the coverage its acknowledgements will name.
+    let member_coverage = fixture
+        .member_db
+        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
+        .await
+        .expect("read member Circle bootstrap coverage")
+        .expect("the member's projection seeded from a real bootstrap coverage row");
+
+    let (circle_package, published) = fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000c3")
+        .await;
+
+    // The member's activated acknowledgement names its exact seed coverage — the
+    // cross-device evidence the owner reads and dominates to prove stability.
+    let member_device_id = fixture
+        .member_db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
+    let member_ack_ref = StoreDatabase::new(&fixture.db)
+        .activated_circle_ack(circle_id, member_device_id)
+        .await
+        .expect("read activated member acknowledgement")
+        .expect("the owner activated the member acknowledgement");
+    let member_ack = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &member_ack_ref)
+        .await
+        .expect("owner reads the member acknowledgement");
+    assert_eq!(
+        member_ack.seeded_from.as_ref(),
+        Some(&member_coverage),
+        "the member's acknowledgement names its exact seed coverage row"
+    );
+
+    // Reclamation proceeds only because the owner could read and dominate that
+    // seed-anchored cross-device acknowledgement.
+    fixture.release_retained_replay_ownership().await;
+    let result = fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim after cross-device verifying the seeded acknowledgement");
+    assert!(
+        result.packages_deleted >= 1,
+        "reclamation proceeded on the strength of the member's seeded acknowledgement"
+    );
+    let owner_device = fixture
+        .store
+        .bind_device(&fixture.db, &fixture.signer)
+        .await
+        .expect("bind reclaimed Circle package Store");
+    assert!(
+        !owner_device
+            .circle_package_is_retained_for_replay_for_test(circle_package, published)
+            .await
+            .expect("read Circle package replay retention after reclaim"),
+        "the reclaimed Circle package no longer owns its object"
+    );
+}
+
+#[tokio::test]
+async fn two_circle_recipients_never_share_one_bootstrap_image() {
+    // A bootstrap image's storage path is keyed by the recipient's slot, so two
+    // recipients bootstrapped from the same underlying snapshot cut land on two
+    // DISTINCT image objects, each owned by exactly the one add-member commit that
+    // activated it. Sharing one image between recipients is therefore structurally
+    // impossible, and the single-owner requirement in the reclaim eligibility check
+    // (`validate_reclaimable_circle_bootstrap_image`) is always satisfiable: deleting
+    // one recipient's seed can never remove another recipient's.
+    let fixture = RotationFixture::build("circle-bootstrap-two-recipients").await;
+    let circle_id = fixture.circle_id;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let first_image = fixture.member_seed_image(circle_id).await;
+    assert_eq!(
+        fixture.bootstrap_image_owner_count(&first_image).await,
+        1,
+        "the first recipient's seed image has exactly one activating owner"
+    );
+
+    // Onboard a second Store member and add it to the same Circle. Its bootstrap is
+    // cut from the Circle's current content, the same underlying state the first
+    // recipient was seeded from.
+    let second = UserKeypair::generate();
+    let second_pubkey = keys::public_key_hex(&second);
+    fixture
+        .store
+        .invite_member(
+            &fixture.db,
+            &fixture.signer,
+            &second_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Rotation Store",
+        )
+        .await
+        .expect("invite the second Store member");
+    let second_db = open_circle_routing_test_db();
+    fixture
+        .store
+        .activate_joined_device(&fixture.db, &second_db, &second, "2026-07-25T02:00:00Z")
+        .await
+        .expect("activate the second member device");
+    fixture
+        .components
+        .add_circle_member(circle_id, second_pubkey.clone(), CircleRole::Member)
+        .await
+        .expect("add the second Circle member");
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("activate the second member's access");
+
+    // Two recipients, two distinct image objects, each with exactly one owner.
+    let images = fixture.live_bootstrap_images().await;
+    assert_eq!(
+        images.len(),
+        2,
+        "each recipient has its own bootstrap image: {images:?}"
+    );
+    let objects = images
+        .iter()
+        .map(|(object, _)| object.slot().logical_key().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        objects.len(),
+        2,
+        "the two recipients' bootstrap images are distinct objects: {objects:?}"
+    );
+    for (object, owners) in &images {
+        assert_eq!(
+            *owners,
+            1,
+            "bootstrap image {} is owned by exactly one activating commit",
+            object.slot().logical_key()
+        );
+    }
+    assert!(
+        images.iter().any(|(object, _)| *object == first_image),
+        "the first recipient's seed image is untouched by the second recipient's activation"
+    );
+}
+
+#[tokio::test]
+async fn circle_bootstrap_reclaim_unblocks_when_recipient_advances_past_its_seed() {
+    let fixture = RotationFixture::build("circle-bootstrap-reclaim-advance").await;
+    let circle_id = fixture.circle_id;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let image_object = fixture.member_seed_image(circle_id).await;
+    assert!(
+        fixture.bootstrap_image_present(&image_object).await,
+        "the recipient's seed image exists before reclamation"
+    );
+
+    // No later Circle snapshot supersedes the recipient's seed yet, so reclamation
+    // leaves the image in place.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation before a later snapshot exists");
+    assert!(
+        fixture.bootstrap_image_present(&image_object).await,
+        "the seed image survives while no later sufficient snapshot supersedes it"
+    );
+
+    // The member pulls a later Circle package and every active-access device
+    // acknowledges a stable snapshot whose cut strictly dominates the seed. The
+    // recipient has moved to a later sufficient snapshot, so its seed is reclaimable.
+    fixture
+        .publish_covered_circle_package(member_view, "00000000-0000-4000-8000-0000000000b1")
+        .await;
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the superseded seed image");
+    assert!(
+        !fixture.bootstrap_image_present(&image_object).await,
+        "the seed image is reclaimed once a later sufficient snapshot supersedes it"
+    );
+}
+
+#[tokio::test]
+async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
+    let fixture = RotationFixture::build("circle-bootstrap-reclaim-removed").await;
+    let circle_id = fixture.circle_id;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+
+    let image_object = fixture.member_seed_image(circle_id).await;
+
+    // The member acknowledges its seed (naming its seed coverage) and the Owner
+    // activates that acknowledgement — the exact evidence the Owner reads after the
+    // member is removed to prove which seed the member held. No later snapshot is
+    // authored, so while the member still holds access its seed is not superseded
+    // and the automatic reclamation in the cycle leaves the image in place.
+    member_view
+        .publish_acknowledgements("2026-07-23T01:00:00Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("owner activates the member acknowledgement");
+    assert!(
+        fixture.bootstrap_image_present(&image_object).await,
+        "an active member's seed survives while no later snapshot supersedes it"
+    );
+
+    // Remove the member from the Circle; the epoch closes and a successor control
+    // activates whose roster excludes the member.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+    assert!(
+        !StoreDatabase::new(&fixture.db)
+            .circle_current_roster_members(circle_id)
+            .await
+            .expect("read successor roster")
+            .contains(&fixture.member_pubkey),
+        "the removed member is absent from the successor roster"
+    );
+
+    // The removed member lost authority under the activated successor control: its
+    // seed image is reclaimed, re-verified from its own signed acknowledgement.
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("reclaim the removed member's seed image");
+    assert!(
+        !fixture.bootstrap_image_present(&image_object).await,
+        "the removed member's seed image is reclaimed under the successor control"
+    );
+}
+
+#[tokio::test]
+async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
+    // Revoking a recipient's STORE membership does not by itself exclude it from the
+    // Circle roster: it marks the Circle rotation-required and waits. The operator's
+    // Circle-member removal then closes the epoch, and the successor roster — the one
+    // piece of evidence the lost-authority arm reads — omits the identity. This proves
+    // the Store-revocation trigger reaches the same roster-exclusion evidence rather
+    // than a second, separate authority path.
+    let fixture = RotationFixture::build("circle-bootstrap-store-revocation").await;
+    let circle_id = fixture.circle_id;
+    let member_view = &fixture.member_device;
+    member_view.pull().await;
+    let image_object = fixture.member_seed_image(circle_id).await;
+
+    // The recipient acknowledges its seed: the signed evidence naming the exact
+    // coverage the Owner will later delete.
+    member_view
+        .publish_acknowledgements("2026-07-25T03:00:00Z")
+        .await;
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("owner activates the member acknowledgement");
+
+    // Revoke the recipient's Store membership. The Circle becomes rotation-required
+    // but its roster still names the identity, so no lost-authority evidence exists
+    // yet and the seed image survives.
+    fixture.remove_store_member().await;
+    assert!(
+        fixture
+            .circles()
+            .await
+            .iter()
+            .find(|circle| circle.id() == circle_id)
+            .expect("affected Circle listed after Store removal")
+            .rotation_required(),
+        "revoking Store membership marks the Circle rotation-required"
+    );
+    assert!(
+        StoreDatabase::new(&fixture.db)
+            .circle_current_roster_members(circle_id)
+            .await
+            .expect("read roster after Store revocation")
+            .contains(&fixture.member_pubkey),
+        "Store revocation alone does not yet exclude the identity from the Circle roster"
+    );
+    fixture
+        .owner_device
+        .reclaim_packages()
+        .await
+        .expect("run reclamation while the roster still names the identity");
+    assert!(
+        fixture.bootstrap_image_present(&image_object).await,
+        "Store revocation alone does not reclaim the recipient's seed image"
+    );
+
+    // Completing the cascade — the Circle-member removal that clears rotation —
+    // activates a successor control whose roster omits the identity. That is the same
+    // evidence the lost-authority arm consumes, and the seed image is now reclaimed.
+    fixture.close_epoch_by_removing_the_circle_member().await;
+    assert!(
+        !StoreDatabase::new(&fixture.db)
+            .circle_current_roster_members(circle_id)
+            .await
+            .expect("read successor roster")
+            .contains(&fixture.member_pubkey),
+        "the cascade excludes the revoked identity from the successor roster"
+    );
+    assert!(
+        !fixture.bootstrap_image_present(&image_object).await,
+        "the revoked identity's seed image is reclaimed once the cascade completes"
+    );
+}
+
+#[tokio::test]
+async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_epoch() {
+    // Each acknowledgement reference names the control that resolves its epoch
+    // key. After rotation, a pre-rotation acknowledgement remains readable through
+    // that retained exact control.
+    let fixture = RotationFixture::build("circle-reclaim-rotated-ack").await;
+    let circle_id = fixture.circle_id;
+    let owner_pk = keys::public_key_hex(&fixture.signer);
+
+    // The owner publishes its Circle acknowledgement under the current (soon-rotated)
+    // epoch.
+    fixture
+        .components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("owner acknowledges under the pre-rotation epoch");
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(circle_id, &owner_pk)
+        .await
+        .expect("pre-rotation Circle authoring context");
+    let old_control = old_authoring.control.coord.clone();
+    let old_epoch = old_authoring.control.value.epoch_id();
+    let owner_device_id = fixture
+        .db
+        .local_store_device_id_for_test()
+        .await
+        .expect("read local Store device id");
+    let owner_ack_ref = StoreDatabase::new(&fixture.db)
+        .activated_circle_ack(circle_id, owner_device_id)
+        .await
+        .expect("read owner activated acknowledgement")
+        .expect("the owner published a Circle acknowledgement");
+
+    // Rotate the epoch: remove the roster member and finalize the close.
+    fixture.remove_store_member().await;
+    fixture.close_epoch_by_removing_the_circle_member().await;
+    let (new_authoring, _) = StoreDatabase::new(&fixture.db)
+        .circle_authoring_context(circle_id, &owner_pk)
+        .await
+        .expect("successor Circle authoring context");
+    let new_control = new_authoring.control.coord.clone();
+    assert_ne!(new_control, old_control, "the epoch rotated");
+
+    // The reclaim ack reader resolves each acknowledgement's epoch key from the
+    // retained activation of the control it names — not from a live keyring. After
+    // the epoch rotates, the old control stays retained, so the reader (the exact
+    // path reclaim stability uses) still reads the pre-rotation acknowledgement.
+    let acknowledgement = fixture
+        .store
+        .load_circle_acknowledgement(&fixture.db, &owner_ack_ref)
+        .await
+        .expect("reclaim reads a rotated-epoch acknowledgement via its retained control");
+    assert_eq!(
+        acknowledgement.epoch_id, old_epoch,
+        "the acknowledgement was sealed under the rotated-away epoch"
+    );
+}

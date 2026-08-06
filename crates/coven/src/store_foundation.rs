@@ -15,11 +15,11 @@ use crate::store_blobs::StoreBlobAccess;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
-use crate::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use coven_database::{Database, StoreDatabase};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
+use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 
 pub(crate) struct StoreFoundation {
     pub(crate) database: StoreDatabase,

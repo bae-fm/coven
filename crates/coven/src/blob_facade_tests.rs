@@ -5,7 +5,7 @@
 //! row, and reading the durable upload queue without touching the drain that
 //! works it. Nothing in the flow names an engine type.
 
-use crate::sync::test_helpers::*;
+use coven_replication::sync::test_helpers::*;
 
 /// A blob-bearing child of a gated root whose bytes stay in the user's own
 /// file — the shape an import produces.
@@ -267,7 +267,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
         .open()
         .expect("open the store");
-    let home = crate::sync::test_helpers::test_cloud_home();
+    let home = coven_replication::sync::test_helpers::test_cloud_home();
     handle
         .create_test_store("blob-facade-test", owner.clone(), home.clone())
         .await
@@ -439,7 +439,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
         .create_test_store(
             "blob-facade-test",
             owner,
-            crate::sync::test_helpers::test_cloud_home(),
+            coven_replication::sync::test_helpers::test_cloud_home(),
         )
         .await
         .expect("create the Store");

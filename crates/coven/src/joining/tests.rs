@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::joining::encode;
-use crate::sync::test_helpers::*;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_replication::sync::test_helpers::*;
 use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the

@@ -21,7 +21,7 @@ impl StoreSync {
         cloud_storage: StoreCloudStorage,
         local_blob_access: LocalStoreBlobAccess,
         blob_access: crate::store_blobs::StoreBlobAccess,
-        local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
+        local_blob_transitions: coven_replication::blob::transition::LocalBlobTransitions,
     ) -> Self {
         Self {
             config_provider,

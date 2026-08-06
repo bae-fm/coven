@@ -27,7 +27,7 @@ impl StoreSync {
 
     pub(crate) async fn restore_membership(
         &self,
-    ) -> Result<crate::sync::store::owner::StoreRestoreMembership, SyncError> {
+    ) -> Result<coven_replication::sync::store::StoreRestoreMembership, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         match self.command_authority().await? {
             CommandAuthority::Connected(sync) => {

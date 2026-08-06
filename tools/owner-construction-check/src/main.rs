@@ -110,11 +110,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "open_read_only",
     ),
     (
-        "crates/coven/src/sync/store/owner/authorized_history/construction.rs",
+        "crates/coven-replication/src/sync/store/owner/authorized_history/construction.rs",
         "AuthorizedStoreHistory",
         "authorize_writer",
     ),
-    ("crates/coven/src/sync/store/owner.rs", "Store", "new"),
+    ("crates/coven-replication/src/sync/store/owner.rs", "Store", "new"),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
     ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
     // The owners a full handle and a read-only handle both hold. Both roots
@@ -125,25 +125,25 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "new",
     ),
     (
-        "crates/coven/src/sync/store/owner/device_join/joiner.rs",
+        "crates/coven-replication/src/sync/store/owner/device_join/joiner.rs",
         "PendingDeviceJoinObservation",
         "into_joining_store",
     ),
-    ("crates/coven/src/sync/store/owner.rs", "Store", "create"),
-    ("crates/coven/src/sync/store/owner.rs", "Store", "open"),
-    ("crates/coven/src/sync/store/owner.rs", "Store", "load"),
+    ("crates/coven-replication/src/sync/store/owner.rs", "Store", "create"),
+    ("crates/coven-replication/src/sync/store/owner.rs", "Store", "open"),
+    ("crates/coven-replication/src/sync/store/owner.rs", "Store", "load"),
     (
-        "crates/coven/src/sync/store/owner/authorized_history/construction.rs",
+        "crates/coven-replication/src/sync/store/owner/authorized_history/construction.rs",
         "AuthorizedStoreHistory",
         "finish_initialization",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operation/snapshot/image.rs",
+        "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot/image.rs",
         "PreparedSnapshotBootstrap",
         "install",
     ),
     (
-        "crates/coven/src/sync/test_owner_graph.rs",
+        "crates/coven-replication/src/sync/test_owner_graph.rs",
         "TestOwnerGraph",
         "new",
     ),
@@ -158,112 +158,112 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operation/acknowledgements/tests.rs",
+        "crates/coven-replication/src/sync/store/owner/writer/operation/acknowledgements/tests.rs",
         "LosingAckFixture",
         "create",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operation/reclaim/tests.rs",
+        "crates/coven-replication/src/sync/store/owner/writer/operation/reclaim/tests.rs",
         "ReclaimJourneyFixture",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operation/operations/tests/merge_fixture.rs",
+        "crates/coven-replication/src/sync/store/owner/writer/operation/operations/tests/merge_fixture.rs",
         "PreparedWriteFixture",
         "prepare",
     ),
     (
-        "crates/coven/src/sync/cycle_tests.rs",
+        "crates/coven-replication/src/sync/cycle_tests.rs",
         "SamePrincipalApprovalFixture",
         "prepare",
     ),
     (
-        "crates/coven/src/sync/store/membership/tests.rs",
+        "crates/coven-replication/src/sync/store/membership/tests.rs",
         "MergeFixture",
         "new",
     ),
     (
-        "crates/coven/src/sync/store_history_checkpoint_tests.rs",
+        "crates/coven-replication/src/sync/store_history_checkpoint_tests.rs",
         "PublishedHistory",
         "publish",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/snapshots/tests.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/snapshots/tests.rs",
         "CircleSnapshotFixture",
         "initialize",
     ),
     (
-        "crates/coven/src/blob/delete_tests.rs",
+        "crates/coven-replication/src/blob/delete_tests.rs",
         "TombstoneCollector",
         "load",
     ),
     (
-        "crates/coven/src/blob/upload_tests.rs",
+        "crates/coven-replication/src/blob/upload_tests.rs",
         "UploadFixture",
         "with_home",
     ),
     (
-        "crates/coven/src/sync/pull_tests.rs",
+        "crates/coven-replication/src/sync/pull_tests.rs",
         "ExactMembershipChain",
         "load",
     ),
     (
-        "crates/coven/src/sync/pull_tests.rs",
+        "crates/coven-replication/src/sync/pull_tests.rs",
         "PersistedCycleRemoval",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/recovery.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/recovery.rs",
         "RevokedOperation",
         "prepare",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/publication.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/publication.rs",
         "ClosingFounderCircle",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/publication.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/publication.rs",
         "SilentParticipantCircle",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/resolution.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/resolution.rs",
         "ConflictFixture",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/rotation_required.rs",
         "RotationFixture",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/rotation_required.rs",
         "CircleWithOneMember",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/circles/tests/rotation_required.rs",
+        "crates/coven-replication/src/sync/store/owner/circles/tests/rotation_required.rs",
         "ActiveMemberCircleSnapshot",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/owner_promotion/tests.rs",
+        "crates/coven-replication/src/sync/store/owner/owner_promotion/tests.rs",
         "PromotionCandidate",
         "build",
     ),
     (
-        "crates/coven/src/sync/store/owner/pull/tests.rs",
+        "crates/coven-replication/src/sync/store/owner/pull/tests.rs",
         "EffectiveAccessFixture",
         "create",
     ),
     (
-        "crates/coven/src/sync/store/owner/writer/operation/snapshot/image_tests.rs",
+        "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot/image_tests.rs",
         "PublishedScopedSnapshot",
         "publish",
     ),
     (
-        "crates/coven/src/sync/store_history_checkpoint_tests.rs",
+        "crates/coven-replication/src/sync/store_history_checkpoint_tests.rs",
         "MemberRemovalHistory",
         "create",
     ),
@@ -273,42 +273,42 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "create",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestDevice",
         "create",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestDevice",
         "create_with_database",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestDevice",
         "load",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestDevice",
         "load_with_database",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestDevice",
         "open_with_database",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "create_with_protection",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "create_with_protection_database",
     ),
     (
-        "crates/coven/src/sync/test_helpers.rs",
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "with_store_and_keypair",
     ),
@@ -2551,7 +2551,7 @@ mod tests {
         )
         .expect("parse fixture");
         let files = vec![RustFile {
-            relative_path: "crates/coven/src/sync/leak.rs".to_string(),
+            relative_path: "crates/coven-replication/src/sync/leak.rs".to_string(),
             syntax: source,
         }];
         let violations = find_database_boundary_violations(&files);
@@ -2593,7 +2593,7 @@ mod tests {
         )
         .expect("parse fixture");
         let files = vec![RustFile {
-            relative_path: "crates/coven/src/sync/leak.rs".to_string(),
+            relative_path: "crates/coven-replication/src/sync/leak.rs".to_string(),
             syntax: source,
         }];
         let violations = find_database_boundary_violations(&files);
@@ -2699,7 +2699,7 @@ mod tests {
                 syntax: schema,
             },
             RustFile {
-                relative_path: "crates/coven/src/sync/leak.rs".to_string(),
+                relative_path: "crates/coven-replication/src/sync/leak.rs".to_string(),
                 syntax: leak,
             },
         ];

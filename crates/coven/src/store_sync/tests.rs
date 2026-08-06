@@ -143,8 +143,10 @@ fn store_sync(
     store_dir: &StoreDir,
 ) -> StoreSync {
     let database = StoreDatabase::from_database(database);
-    let owners =
-        crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
+    let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+        database.clone(),
+        store_dir.clone(),
+    );
     let cloud_keys = keys.clone();
     let security = store_security(keys, master_keys.clone(), identity);
     let clock: ClockRef = Arc::new(SystemClock);
@@ -211,9 +213,12 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let cloud_keys = keys.clone();
     let master_keys: Arc<dyn MasterKeyCustody> = Arc::new(NoKeyCustody);
     let security = store_security(keys, master_keys.clone(), established_identity_custody());
-    let database = StoreDatabase::from_database(crate::sync::test_helpers::open_test_db());
-    let owners =
-        crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
+    let database =
+        StoreDatabase::from_database(coven_replication::sync::test_helpers::open_test_db());
+    let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+        database.clone(),
+        store_dir.clone(),
+    );
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let clock: ClockRef = Arc::new(SystemClock);
     let cloud_storage = store_cloud_storage(&cloud_keys, &security, clock.clone());
@@ -256,7 +261,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
 #[tokio::test]
 async fn connect_rejects_an_opaque_home_without_a_master_key() {
     test_keyring::install();
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let mut config = Config::with_defaults(
         "sync-opaque-no-encryption".to_string(),
         "test-device".to_string(),
@@ -269,7 +274,7 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
         StoreKeys::bind("sync-opaque-no-encryption".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
-        crate::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(),
         &store_dir,
     );
 
@@ -282,7 +287,7 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
 
 #[tokio::test]
 async fn capability_admission_refuses_before_stopping_the_active_loop() {
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let mut initial_config = Config::with_defaults(
         "immutable-admission-before-stop".to_string(),
         "test-device".to_string(),
@@ -291,11 +296,12 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     );
     initial_config.cloud_home.storage = HomeStorage::Browsable;
     let config = Arc::new(RwLock::new(initial_config));
-    let database = crate::sync::test_helpers::open_test_db_with_blob(crate::BlobDecl::new(
-        "photos",
-        crate::Provenance::HostProvided,
-        crate::CacheFill::CacheLazy,
-    ));
+    let database =
+        coven_replication::sync::test_helpers::open_test_db_with_blob(crate::BlobDecl::new(
+            "photos",
+            crate::Provenance::HostProvided,
+            crate::CacheFill::CacheLazy,
+        ));
     let sync = store_sync(
         {
             let config = config.clone();
@@ -355,7 +361,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
 #[tokio::test]
 async fn test_home_replacement_stops_the_previous_loop() {
     test_keyring::install();
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let mut config = Config::with_defaults(
         "sync-restart".to_string(),
         "test-device".to_string(),
@@ -368,7 +374,7 @@ async fn test_home_replacement_stops_the_previous_loop() {
         StoreKeys::bind("sync-restart".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
-        crate::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(),
         &store_dir,
     );
     let home = Arc::new(InMemoryCloudHome::new());
@@ -386,7 +392,7 @@ async fn test_home_replacement_stops_the_previous_loop() {
 #[tokio::test]
 async fn failed_restart_leaves_no_stale_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let mut initial_config = Config::with_defaults(
         "sync-failed-restart".to_string(),
         "test-device".to_string(),
@@ -406,7 +412,7 @@ async fn failed_restart_leaves_no_stale_connection() {
         store_keys,
         custody,
         established_identity_custody(),
-        crate::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(),
         &store_dir,
     );
     connect_test_home(
@@ -430,7 +436,7 @@ async fn failed_restart_leaves_no_stale_connection() {
 #[tokio::test]
 async fn connect_rejects_a_missing_device_identity() {
     test_keyring::install();
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let store_id = "sync-no-device-identity".to_string();
     let keys = StoreKeys::bind(store_id.clone());
     keys.set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
@@ -453,7 +459,7 @@ async fn connect_rejects_a_missing_device_identity() {
         keys,
         Arc::new(NoKeyCustody),
         Arc::new(NoIdentityCustody),
-        crate::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(),
         &store_dir,
     );
 
@@ -469,7 +475,7 @@ async fn connect_rejects_a_missing_device_identity() {
 #[tokio::test]
 async fn foreign_founder_installs_no_connection() {
     test_keyring::install();
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let store_id = "sync-foreign-browsable-founder";
     let mut config = Config::with_defaults(
         store_id.to_string(),
@@ -490,8 +496,8 @@ async fn foreign_founder_installs_no_connection() {
         )
         .expect("build attacker storage"),
     );
-    let attacker_db = crate::sync::test_helpers::open_test_db();
-    let _attacker_device = crate::sync::test_helpers::TestDevice::create(
+    let attacker_db = coven_replication::sync::test_helpers::open_test_db();
+    let _attacker_device = coven_replication::sync::test_helpers::TestDevice::create(
         &attacker_db,
         attacker_storage.clone(),
         store_id,
@@ -501,7 +507,7 @@ async fn foreign_founder_installs_no_connection() {
     .expect("publish attacker Store root");
 
     let victim = coven_keys::keys::UserKeypair::generate();
-    let database = crate::sync::test_helpers::open_test_db();
+    let database = coven_replication::sync::test_helpers::open_test_db();
     let store_keys = StoreKeys::bind(store_id.to_string());
     let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(victim)
         .resolve(&store_keys, &store_dir);
@@ -519,7 +525,7 @@ async fn foreign_founder_installs_no_connection() {
 
     assert!(matches!(
         error,
-        SyncError::Init(crate::sync::cycle::InitSyncError::StoreProtocolRoot(_))
+        SyncError::Init(coven_replication::sync::cycle::InitSyncError::StoreProtocolRoot(_))
     ));
     assert!(!sync.is_connected());
     assert!(!sync.has_remote_storage_for_test());
@@ -535,7 +541,7 @@ async fn foreign_founder_installs_no_connection() {
 #[test]
 fn cipher_resolution_reads_current_custody_each_time() {
     test_keyring::install();
-    let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let store_id = "sync-resolve-cipher-fresh";
     let store_keys = StoreKeys::bind(store_id.to_string());
     let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);

@@ -18,10 +18,6 @@ use crate::restoration::{
     decode_restore_code, encode_restore_code, OwnerRecoveryAuthority, RestoreAuthority,
     RestoreCode, RestoreCodeError,
 };
-use crate::sync::test_helpers::{
-    open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
-    test_synced_tables, test_synced_tables_with_blob, TestDevice,
-};
 use coven_database::Database;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::HomeStorage;
@@ -32,6 +28,10 @@ use coven_keys::keys::{StoreKeys, UserKeypair};
 use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::membership::MembershipFloor;
 use coven_protocol::synced_schema::BlobDecl;
+use coven_replication::sync::test_helpers::{
+    open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
+    test_synced_tables, test_synced_tables_with_blob, TestDevice,
+};
 use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
@@ -1326,7 +1326,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             joiner_keypair.clone(),
         )
         .expect("build joiner cloud storage");
-        let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
+        let components = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
             coven_database::StoreDatabase::new(&db_b),
             lib_b.clone(),
         )
@@ -1380,11 +1380,11 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     let owner = UserKeypair::generate();
     let db_owner = open_test_db();
-    let storage = crate::sync::test_helpers::TestStore::create(
+    let storage = coven_replication::sync::test_helpers::TestStore::create(
         &db_owner,
         "test-lib",
         owner.clone(),
-        crate::sync::test_helpers::test_cloud_home(),
+        coven_replication::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create exact owner Store");
@@ -1412,7 +1412,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .await
         .expect("load pre-removal membership");
     let pre_removal_heads = pre_removal_chain.head_refs().to_vec();
-    let custody = crate::sync::test_helpers::TestCustody::default();
+    let custody = coven_replication::sync::test_helpers::TestCustody::default();
     custody.set_initial_key([42; 32]);
     storage
         .remove_member(
@@ -1553,7 +1553,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         )
         .expect("build owner cycle storage");
         let components = Box::pin(
-            crate::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
                 coven_database::StoreDatabase::new(&db_owner),
                 owner_dir.clone(),
             )
@@ -1749,7 +1749,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         )
         .expect("build restored cloud storage");
         let components = Box::pin(
-            crate::sync::test_owner_graph::TestOwnerGraph::new(
+            coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
                 coven_database::StoreDatabase::new(&restored),
                 lib_b.clone(),
             )

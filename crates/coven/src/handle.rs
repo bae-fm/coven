@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
 use crate::store_foundation::StoreFoundation;
@@ -35,8 +34,6 @@ use crate::store_recovery::StoreRecovery;
 use crate::store_rows::StoreRows;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
-use crate::sync::sync_loop::SyncLoopStatus;
-use crate::sync::{BlobCacheError, BlobStream};
 use coven_database::{Database, DbError, StoreDatabase};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
@@ -50,21 +47,14 @@ use coven_protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use coven_protocol::membership::MemberInfo;
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
+use coven_replication::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
+use coven_replication::sync::sync_loop::SyncLoopStatus;
+use coven_replication::sync::{BlobCacheError, BlobStream};
 #[cfg(any(test, feature = "test-utils"))]
 use coven_storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use coven_storage::CloudCipher;
 use tokio::sync::watch;
-
-/// A Remote blob read needs sync storage; if building it from config fails
-/// (missing credentials or cloud configuration) the read surfaces that as a
-/// configuration fault, not a disk I/O error. The cache error preserves the
-/// setup failure's message at this API boundary.
-impl From<coven_storage::cloud::setup::StorageSetupError> for BlobCacheError {
-    fn from(e: coven_storage::cloud::setup::StorageSetupError) -> Self {
-        BlobCacheError::StorageSetup(e.to_string())
-    }
-}
 
 /// The cipher a store's app-data sealing runs under, resolved from `custody`.
 ///
@@ -1115,7 +1105,7 @@ impl CovenHandle {
         store_id: &str,
         signer: coven_keys::keys::UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
-    ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
+    ) -> Result<std::sync::Arc<coven_replication::sync::test_helpers::TestStore>, String> {
         self.sync.create_test_store(store_id, signer, home).await
     }
 
@@ -1130,7 +1120,7 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn publish_test_store(
         &self,
-        store: &crate::sync::test_helpers::TestStore,
+        store: &coven_replication::sync::test_helpers::TestStore,
     ) -> Result<bool, String> {
         self.sync.publish_test_store(store).await
     }
@@ -1138,10 +1128,10 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn pull_test_store(
         &self,
-        store: &crate::sync::test_helpers::TestStore,
+        store: &coven_replication::sync::test_helpers::TestStore,
     ) -> (
         std::collections::BTreeMap<String, u64>,
-        crate::sync::store::StorePullResult,
+        coven_replication::sync::store::StorePullResult,
     ) {
         self.sync
             .pull_test_store(store)
@@ -1246,7 +1236,7 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn prepare_test_join_snapshot(
         &self,
-        store: &crate::sync::test_helpers::TestStore,
+        store: &coven_replication::sync::test_helpers::TestStore,
         owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
     ) -> Result<(), String> {

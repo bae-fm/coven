@@ -22,12 +22,15 @@ impl EstablishedStoreIdentity {
         &self,
         database: coven_database::StoreDatabase,
         store_dir: coven_foundation::store_dir::StoreDir,
-        local_blob_access: crate::sync::store::blob::LocalStoreBlobAccess,
+        local_blob_access: coven_replication::sync::store::blob::LocalStoreBlobAccess,
         storage: Arc<CloudSyncStorage>,
-        initialization: crate::sync::cycle::StoreInitialization,
+        initialization: coven_replication::sync::cycle::StoreInitialization,
         routing_encryption: Option<EncryptionService>,
-    ) -> Result<crate::sync::cycle::SyncComponents, crate::sync::cycle::InitSyncError> {
-        crate::sync::cycle::PreparedSyncComponents::prepare(
+    ) -> Result<
+        coven_replication::sync::cycle::SyncComponents,
+        coven_replication::sync::cycle::InitSyncError,
+    > {
+        coven_replication::sync::cycle::PreparedSyncComponents::prepare(
             database,
             store_dir,
             local_blob_access,
@@ -46,8 +49,9 @@ impl EstablishedStoreIdentity {
         database: coven_database::StoreDatabase,
         storage: Arc<dyn coven_storage::SyncStorage>,
         store_dir: coven_foundation::store_dir::StoreDir,
-    ) -> Result<crate::sync::Store, crate::sync::store::StoreError> {
-        crate::sync::Store::load(database, storage, store_dir, self.keypair.clone()).await
+    ) -> Result<coven_replication::sync::Store, coven_replication::sync::store::StoreError> {
+        coven_replication::sync::Store::load(database, storage, store_dir, self.keypair.clone())
+            .await
     }
 
     pub(crate) async fn export_activated_device_continuation(

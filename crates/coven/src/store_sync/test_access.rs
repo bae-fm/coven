@@ -30,8 +30,8 @@ impl StoreSync {
         store_id: &str,
         signer: coven_keys::keys::UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
-    ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
-        crate::sync::test_helpers::TestStore::create_with_database(
+    ) -> Result<std::sync::Arc<coven_replication::sync::test_helpers::TestStore>, String> {
+        coven_replication::sync::test_helpers::TestStore::create_with_database(
             self.database.clone(),
             store_id,
             signer,
@@ -43,7 +43,7 @@ impl StoreSync {
     #[cfg(test)]
     pub(crate) async fn publish_test_store(
         &self,
-        store: &crate::sync::test_helpers::TestStore,
+        store: &coven_replication::sync::test_helpers::TestStore,
     ) -> Result<bool, String> {
         store
             .publish_pending_store_database(&self.database, &self.store_dir)
@@ -53,21 +53,24 @@ impl StoreSync {
     #[cfg(test)]
     pub(crate) async fn pull_test_store(
         &self,
-        store: &crate::sync::test_helpers::TestStore,
+        store: &coven_replication::sync::test_helpers::TestStore,
     ) -> Result<
         (
             std::collections::BTreeMap<String, u64>,
-            crate::sync::store::StorePullResult,
+            coven_replication::sync::store::StorePullResult,
         ),
-        crate::sync::cycle::SyncCycleFailure,
+        coven_replication::sync::cycle::SyncCycleFailure,
     > {
         let device = store
             .open_into_store_database(&self.database)
             .await
-            .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
+            .map_err(coven_replication::sync::cycle::SyncCycleFailure::from)?;
         let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let mut authorization = device.authorize_writer().await.map_err(|error| {
-            crate::sync::cycle::SyncCycleFailure::operation("authorize Store writer", error)
+            coven_replication::sync::cycle::SyncCycleFailure::operation(
+                "authorize Store writer",
+                error,
+            )
         })?;
         let result = authorization.pull(Some(&routing_encryption)).await?;
         let sequences = result

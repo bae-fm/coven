@@ -57,7 +57,7 @@ impl StoreJoining {
     #[cfg(test)]
     pub(crate) async fn prepare_test_join_snapshot(
         &self,
-        store: &crate::sync::test_helpers::TestStore,
+        store: &coven_replication::sync::test_helpers::TestStore,
         owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
     ) -> Result<(), String> {

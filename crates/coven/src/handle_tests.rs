@@ -1,12 +1,14 @@
 use super::*;
 
 use crate::store_sync::{ConfigProvider, SyncError};
-use crate::sync::test_helpers::{open_test_db_with_blob, read_test_db, temp_store_dir, TestStore};
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{test_keyring, StoreKeys};
 use coven_protocol::blob::{CacheFill, Provenance};
+use coven_replication::sync::test_helpers::{
+    open_test_db_with_blob, read_test_db, temp_store_dir, TestStore,
+};
 use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
@@ -585,7 +587,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
             };
             let upload_pause = Arc::new(PausedUploadDrain::new());
             let signer = coven_keys::keys::UserKeypair::generate();
-            let home = crate::sync::test_helpers::test_cloud_home();
+            let home = coven_replication::sync::test_helpers::test_cloud_home();
             TestStore::create(&db, "lib-test", signer.clone(), home.clone())
                 .await
                 .expect("create exact test Store");
@@ -724,7 +726,7 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
                 Arc::new(move || config.clone())
             };
             let signer = coven_keys::keys::UserKeypair::generate();
-            let home = crate::sync::test_helpers::test_cloud_home();
+            let home = coven_replication::sync::test_helpers::test_cloud_home();
             TestStore::create(&db, "lib-caller-driven", signer.clone(), home.clone())
                 .await
                 .expect("create exact test Store");
@@ -868,7 +870,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 Arc::new(move || config.clone())
             };
             let signer = coven_keys::keys::UserKeypair::generate();
-            let home = crate::sync::test_helpers::test_cloud_home();
+            let home = coven_replication::sync::test_helpers::test_cloud_home();
             TestStore::create(&db, "lib-chunking", signer.clone(), home.clone())
                 .await
                 .expect("create exact test Store");

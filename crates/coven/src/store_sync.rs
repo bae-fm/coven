@@ -5,13 +5,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tracing::{debug, error, info};
 
-use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_security::StoreSecurity;
-use crate::sync::cycle::SyncComponents;
-use crate::sync::store::blob::LocalStoreBlobAccess;
-use crate::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
-use crate::sync::Store;
 use coven_database::StoreDatabase;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
@@ -19,6 +14,11 @@ use coven_foundation::store_dir::StoreOpenGuard;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
 use coven_protocol::objects::StorageError;
+use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
+use coven_replication::sync::cycle::SyncComponents;
+use coven_replication::sync::store::blob::LocalStoreBlobAccess;
+use coven_replication::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
+use coven_replication::sync::Store;
 use coven_storage::cloud::setup::StorageSetupError;
 #[cfg(any(test, feature = "test-utils"))]
 use coven_storage::cloud::CloudHome;
@@ -28,7 +28,7 @@ use coven_storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
-pub(crate) use crate::sync::SyncError;
+pub(crate) use coven_replication::sync::SyncError;
 
 mod blobs;
 mod commands;
@@ -98,7 +98,7 @@ pub(crate) struct StoreSync {
     cloud_storage: StoreCloudStorage,
     local_blob_access: LocalStoreBlobAccess,
     blob_access: crate::store_blobs::StoreBlobAccess,
-    local_blob_transitions: crate::blob::transition::LocalBlobTransitions,
+    local_blob_transitions: coven_replication::blob::transition::LocalBlobTransitions,
     state: Arc<RwLock<SyncConnection>>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
@@ -142,10 +142,12 @@ impl StoreSync {
         routing_encryption: Option<EncryptionService>,
     ) -> Result<SyncComponents, SyncError> {
         let initialization = match self.database.local_store_root_ref().await? {
-            Some(expected_store_root) => crate::sync::cycle::StoreInitialization::OpenStore {
-                expected_store_root,
-            },
-            None => crate::sync::cycle::StoreInitialization::CreateStore,
+            Some(expected_store_root) => {
+                coven_replication::sync::cycle::StoreInitialization::OpenStore {
+                    expected_store_root,
+                }
+            }
+            None => coven_replication::sync::cycle::StoreInitialization::CreateStore,
         };
         self.security
             .established_identity()?
@@ -170,7 +172,7 @@ impl StoreSync {
         config: Config,
         routing_encryption: Option<EncryptionService>,
     ) -> Arc<SyncLoopHandle> {
-        let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
+        let blob_transitions = coven_replication::blob::transition::ConnectedBlobTransitions::new(
             self.local_blob_transitions.clone(),
             Arc::new(self.blob_access.clone()),
             routing_encryption,

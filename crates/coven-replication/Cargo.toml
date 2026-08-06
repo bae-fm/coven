@@ -1,0 +1,65 @@
+[package]
+name = "coven-replication"
+version = "1.0.0-rc.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Coven's replication engine: sync cycles over a verified store history, and the blob locality machinery they drive"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
+
+[lib]
+name = "coven_replication"
+path = "src/lib.rs"
+
+[dependencies]
+coven-database = { workspace = true }
+coven-foundation = { workspace = true }
+coven-keys = { workspace = true }
+coven-protocol = { workspace = true }
+coven-storage = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+# The test devices `test-utils` exports mint signing keys and store
+# directories directly.
+ed25519-dalek = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The tests that reach past the database's own surface to stage a row.
+rusqlite = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+ed25519-dalek = { workspace = true }
+# A `cfg(test)` build of this crate reaches the lower layers' test hooks, which
+# exist only under those crates' own `test-utils`. `cfg(test)` enables no
+# `[features]` of this crate, so they arrive through these edges.
+coven-database = { workspace = true, features = ["test-utils"] }
+coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-keys = { workspace = true, features = ["test-utils"] }
+coven-protocol = { workspace = true, features = ["test-utils"] }
+coven-storage = { workspace = true, features = ["test-utils"] }
+
+[features]
+# The test devices, stores, and owner graphs the layers above build their
+# replication tests from, together with the lower layers' fixtures they compose.
+test-utils = [
+    "dep:ed25519-dalek",
+    "dep:tempfile",
+    "coven-database/test-utils",
+    "coven-foundation/test-utils",
+    "coven-keys/test-utils",
+    "coven-protocol/test-utils",
+    "coven-storage/test-utils",
+]
+
+[lints]
+workspace = true

@@ -10,7 +10,7 @@ use crate::{
 
 use crate::store_circles::StoreCircles;
 use crate::store_sync::SyncError;
-use crate::sync::store::CircleOperationError;
+use coven_replication::sync::store::CircleOperationError;
 
 /// Why a Circle command or query failed. Maps the internal typed refusals 1:1 with
 /// stable identifiers and carries the ids a caller needs to display or retry.

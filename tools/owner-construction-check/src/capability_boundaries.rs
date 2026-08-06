@@ -164,7 +164,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
             &["Builder", "new_multi_thread"],
         ],
         allowed: &[
-            "crates/coven/src/sync/sync_loop.rs",
+            "crates/coven-replication/src/sync/sync_loop.rs",
             "crates/coven-storage/src/cloud/s3/runtime.rs",
             "crates/coven-storage/src/cloud/resumable.rs",
         ],
@@ -247,12 +247,12 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-keys/src/identity_custody.rs",
     "crates/coven-database/src/",
     "crates/coven-storage/src/",
-    "crates/coven/src/blob/transition.rs",
-    "crates/coven/src/sync/store/blob.rs",
-    "crates/coven/src/sync/store/owner/host_write.rs",
-    "crates/coven/src/sync/store/owner/writer/operation/blob_preparation.rs",
-    "crates/coven/src/sync/store/owner/writer/operation/snapshot.rs",
-    "crates/coven/src/sync/store/owner/writer/operation/snapshot/image.rs",
+    "crates/coven-replication/src/blob/transition.rs",
+    "crates/coven-replication/src/sync/store/blob.rs",
+    "crates/coven-replication/src/sync/store/owner/host_write.rs",
+    "crates/coven-replication/src/sync/store/owner/writer/operation/blob_preparation.rs",
+    "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot.rs",
+    "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot/image.rs",
 ];
 
 pub(crate) struct CapabilityBoundaryViolation {
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn network_crates_are_rejected_outside_their_homes() {
         let files = vec![file(
-            "crates/coven/src/sync/leak.rs",
+            "crates/coven-replication/src/sync/leak.rs",
             r#"
             use reqwest::Client;
             fn serve() { let router = axum::Router::new(); }
@@ -494,7 +494,7 @@ mod tests {
     fn cfg_test_items_and_test_sources_are_exempt() {
         let files = vec![
             file(
-                "crates/coven/src/sync/workflow.rs",
+                "crates/coven-replication/src/sync/workflow.rs",
                 r#"
                 #[cfg(test)]
                 mod tests {
@@ -504,7 +504,7 @@ mod tests {
                 "#,
             ),
             file(
-                "crates/coven/src/sync/workflow_tests.rs",
+                "crates/coven-replication/src/sync/workflow_tests.rs",
                 "use reqwest::Client;",
             ),
         ];
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn signing_primitives_are_rejected_outside_key_custody() {
         let files = vec![file(
-            "crates/coven/src/sync/leak.rs",
+            "crates/coven-replication/src/sync/leak.rs",
             r#"
             use ed25519_dalek::SigningKey;
             fn forge() { let _ = ed25519_dalek::Signature::from_bytes(&[0; 64]); }
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn runtime_construction_is_rejected_outside_declared_owners() {
         let files = vec![file(
-            "crates/coven/src/blob/transfer.rs",
+            "crates/coven-replication/src/blob/transfer.rs",
             r#"
             fn build() {
                 let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn ambient_clock_entropy_and_ids_are_rejected_outside_their_providers() {
         let files = vec![file(
-            "crates/coven/src/sync/leak.rs",
+            "crates/coven-replication/src/sync/leak.rs",
             r#"
             fn stamp() -> std::time::SystemTime { std::time::SystemTime::now() }
             fn when() -> chrono::DateTime<chrono::Utc> { chrono::Utc::now() }
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn raw_filesystem_access_is_rejected_outside_declared_owners() {
         let files = vec![file(
-            "crates/coven/src/sync/leak.rs",
+            "crates/coven-replication/src/sync/leak.rs",
             r#"
             use std::fs;
             fn stage() { let _ = tempfile::NamedTempFile::new(); }
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
         let retained = vec![file(
-            "crates/coven/src/sync/store/owner/host_write.rs",
+            "crates/coven-replication/src/sync/store/owner/host_write.rs",
             r#"
             struct HostWriteBlobStaging { runtime: tokio::runtime::Handle }
             impl HostWriteBlobStaging {
@@ -670,7 +670,7 @@ mod tests {
         assert!(find_capability_boundary_violations(&retained, RUNTIME_BOUNDARY).is_empty());
 
         let acquired = vec![file(
-            "crates/coven/src/sync/workflow.rs",
+            "crates/coven-replication/src/sync/workflow.rs",
             "fn grab() { let _ = tokio::runtime::Handle::current(); }",
         )];
         let violations = find_capability_boundary_violations(&acquired, RUNTIME_BOUNDARY);
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn uuid_validation_is_not_gated_generation() {
         let files = vec![file(
-            "crates/coven/src/sync/session.rs",
+            "crates/coven-replication/src/sync/session.rs",
             r#"
             fn validate(value: &str) -> bool { uuid::Uuid::parse_str(value).is_ok() }
             "#,
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn doc_comments_do_not_trip_capability_boundaries() {
         let files = vec![file(
-            "crates/coven/src/sync/workflow.rs",
+            "crates/coven-replication/src/sync/workflow.rs",
             r#"
             /// Uses reqwest internally via the storage owner; see tokio::runtime docs.
             fn documented() {}

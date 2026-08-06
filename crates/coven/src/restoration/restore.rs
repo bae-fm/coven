@@ -10,7 +10,6 @@ use tokio::sync::watch;
 use tracing::info;
 
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
-use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 use crate::Migration;
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::StoreLayout;
@@ -19,6 +18,9 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::{StoreKeys, UserKeypair};
 use coven_protocol::synced_schema::SyncedTable;
+use coven_replication::sync::store::{
+    PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError,
+};
 use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use coven_storage::oauth::OAuthTokens;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -314,10 +316,11 @@ pub async fn restore_from_cloud(
             return Err(BootstrapError::Cancelled);
         }
         on_status("Downloading store snapshot...");
-        let history_verifier = crate::sync::store::HistoryConstructionAuthority::for_snapshot()
-            .open_pinned(storage.as_ref(), &store_root)
-            .await
-            .map_err(SnapshotError::from)?;
+        let history_verifier =
+            coven_replication::sync::store::HistoryConstructionAuthority::for_snapshot()
+                .open_pinned(storage.as_ref(), &store_root)
+                .await
+                .map_err(SnapshotError::from)?;
         let bootstrap = PreparedSnapshotBootstrap::prepare(
             &storage,
             history_verifier,

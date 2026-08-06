@@ -16,6 +16,7 @@ coven-database = { workspace = true }
 coven-foundation = { workspace = true }
 coven-keys = { workspace = true }
 coven-protocol = { workspace = true }
+coven-replication = { workspace = true }
 coven-storage = { workspace = true }
 
 serde = { workspace = true }
@@ -24,23 +25,20 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
-sha2 = { workspace = true }
-futures-util = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 rusqlite = { workspace = true }
 
 [dev-dependencies]
-# The public cloud-home API an integration test drives takes `Bytes` payloads.
+# The public cloud-home API an integration test drives takes `Bytes` payloads,
+# and reads back a stream.
 bytes = { workspace = true }
+futures-util = { workspace = true }
 keyring-core = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 # The authorize URL an OAuth integration test parses.
 url = { workspace = true }
-# Signing keys appear only in this crate's test fixtures now; key material
-# itself belongs to coven-keys.
-ed25519-dalek = { workspace = true }
 # A `cfg(test)` build of this crate re-exports the foundation and keys test
 # hooks, which exist only under those crates' own `test-utils`. `cfg(test)`
 # enables no `[features]` of this crate, so they arrive through these edges.
@@ -48,6 +46,7 @@ coven-database = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-keys = { workspace = true, features = ["test-utils"] }
 coven-protocol = { workspace = true, features = ["test-utils"] }
+coven-replication = { workspace = true, features = ["test-utils"] }
 coven-storage = { workspace = true, features = ["test-utils"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
@@ -63,6 +62,7 @@ test-utils = [
     "coven-foundation/test-utils",
     "coven-keys/test-utils",
     "coven-protocol/test-utils",
+    "coven-replication/test-utils",
     "coven-storage/test-utils",
 ]
 oauth-providers = ["coven-keys/oauth-providers", "coven-storage/oauth-providers"]

@@ -3,7 +3,7 @@ use super::*;
 impl StoreSync {
     pub(crate) fn host_write_blob_staging(
         &self,
-    ) -> Option<crate::sync::store::HostWriteBlobStaging> {
+    ) -> Option<coven_replication::sync::store::HostWriteBlobStaging> {
         Some(
             self.connected()?
                 .host_write_blob_staging(tokio::runtime::Handle::current()),

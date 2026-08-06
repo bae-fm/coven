@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::sync::test_helpers::TestStore;
 use crate::{WriteId, WriteReceipt};
 use async_trait::async_trait;
 use coven_foundation::config::Config;
@@ -9,6 +8,7 @@ use coven_keys::keys::test_keyring;
 use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
+use coven_replication::sync::test_helpers::TestStore;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
@@ -409,7 +409,7 @@ async fn publish_pending_through_a_test_store(handle: &CovenHandle) -> std::sync
     let storage = merge_test_storage(
         handle,
         &coven_keys::keys::UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
+        coven_replication::sync::test_helpers::test_cloud_home(),
     )
     .await;
     handle
@@ -426,8 +426,12 @@ trait CovenHandleWriteTestOps {
 impl CovenHandleWriteTestOps for CovenHandle {
     async fn publish_current_writes(&self) {
         let keypair = coven_keys::keys::UserKeypair::generate();
-        let storage =
-            merge_test_storage(self, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+        let storage = merge_test_storage(
+            self,
+            &keypair,
+            coven_replication::sync::test_helpers::test_cloud_home(),
+        )
+        .await;
         self.publish_test_store(&storage)
             .await
             .expect("publish pending Store write");
@@ -457,7 +461,7 @@ async fn write_survives_reopen_before_sync_cycle() {
     let storage = merge_test_storage(
         &reopened,
         &keypair,
-        crate::sync::test_helpers::test_cloud_home(),
+        coven_replication::sync::test_helpers::test_cloud_home(),
     )
     .await;
     reopened
@@ -513,7 +517,7 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
     let storage = merge_test_storage(
         &reopened,
         &keypair,
-        crate::sync::test_helpers::test_cloud_home(),
+        coven_replication::sync::test_helpers::test_cloud_home(),
     )
     .await;
     reopened
@@ -722,7 +726,7 @@ async fn pending_write_drains_only_after_changeset_push() {
         .await
         .expect("write before failed push");
     let keypair = coven_keys::keys::UserKeypair::generate();
-    let home = crate::sync::test_helpers::test_cloud_home();
+    let home = coven_replication::sync::test_helpers::test_cloud_home();
     let storage = merge_test_storage(&handle, &keypair, home.clone()).await;
     home.fail_exact_create_before_call(1);
 
@@ -1223,7 +1227,7 @@ impl RemoteOnlyStoreBlob {
             .identity_custody(crate::IdentityCustody::InMemory(signer.clone()))
             .open()
             .expect("open scoped blob store");
-        let home = crate::sync::test_helpers::test_cloud_home();
+        let home = coven_replication::sync::test_helpers::test_cloud_home();
         let store = handle
             .create_test_store("lib-test", signer, home.clone())
             .await
@@ -1637,7 +1641,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
                         .expect("open remote-root store")
                 };
                 let handle = open();
-                let home = crate::sync::test_helpers::test_cloud_home();
+                let home = coven_replication::sync::test_helpers::test_cloud_home();
                 handle
                     .create_test_store("lib-test", signer.clone(), home.clone())
                     .await
@@ -1919,7 +1923,7 @@ impl PendingReplacement {
 
     async fn assert_publishes_in_order(&self, handle: &CovenHandle) {
         let keypair = coven_keys::keys::UserKeypair::generate();
-        let home = crate::sync::test_helpers::test_cloud_home();
+        let home = coven_replication::sync::test_helpers::test_cloud_home();
         let storage = merge_test_storage(handle, &keypair, home.clone()).await;
         handle
             .publish_test_store(&storage)
@@ -2284,7 +2288,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
             .create_test_store(
                 "lib-test",
                 coven_keys::keys::UserKeypair::generate(),
-                crate::sync::test_helpers::test_cloud_home(),
+                coven_replication::sync::test_helpers::test_cloud_home(),
             )
             .await
             .expect("create remote exact test Store"),

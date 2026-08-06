@@ -10,15 +10,15 @@ use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
 use crate::joining::encode;
-use crate::sync::store::{
-    DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
-};
-use crate::sync::test_helpers::*;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::ObjectSlot;
+use coven_replication::sync::store::{
+    DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
+    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
+};
+use coven_replication::sync::test_helpers::*;
 use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
@@ -59,7 +59,8 @@ struct TransportFixture {
     joiner_home: Arc<crate::InMemoryCloudHome>,
     /// The provider-side grant a cross-principal admission needs, or `None`
     /// when both sides are the same principal and no sharing step exists.
-    access_administrator: Option<crate::sync::test_helpers::TestDropboxAccessAdministrator>,
+    access_administrator:
+        Option<coven_replication::sync::test_helpers::TestDropboxAccessAdministrator>,
     _app: tempfile::TempDir,
     _snapshot: tempfile::TempDir,
     _owner_store_tmp: tempfile::TempDir,
@@ -178,12 +179,11 @@ impl TransportFixture {
             )),
             None => home.clone(),
         };
-        let access_administrator =
-            cross_principal.then(
-                || crate::sync::test_helpers::TestDropboxAccessAdministrator {
-                    namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
-                },
-            );
+        let access_administrator = cross_principal.then(|| {
+            coven_replication::sync::test_helpers::TestDropboxAccessAdministrator {
+                namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
+            }
+        });
         let (owner_store_tmp, owner_store_dir) = temp_store_dir();
         Self {
             owner_store,
@@ -301,7 +301,7 @@ impl TransportFixture {
         self.owner_database
             .forget_for_test(
                 bundle.offer.attempt_id,
-                crate::sync::store::DeviceJoinRole::Owner,
+                coven_replication::sync::store::DeviceJoinRole::Owner,
             )
             .await
             .expect("drop the owner journal row");

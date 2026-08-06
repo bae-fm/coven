@@ -11,13 +11,13 @@
 use tokio::sync::watch;
 
 use crate::joining::{BootstrapError, DeviceJoinClient};
-use crate::sync::store::{
+use coven_foundation::config::Config;
+use coven_replication::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStatus,
     DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportTiming,
     DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
-use coven_foundation::config::Config;
 
 /// Everything a joining device needs, in the one blob a host renders as a join
 /// code.
