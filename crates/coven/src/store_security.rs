@@ -4,7 +4,7 @@ use crate::config::{Config, HomeStorage};
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
 use crate::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
-    MasterKeyError, StoreKeys, UserKeypair,
+    MasterKeyError, RoutingEncryptionError, StoreKeys, UserKeypair,
 };
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -58,20 +58,6 @@ impl EstablishedStoreIdentity {
             .export_activated_device_continuation(&self.keypair)
             .await
     }
-}
-
-/// Why a scoped write could not get the Store key its rows are routed under.
-#[derive(Debug, thiserror::Error)]
-pub enum RoutingEncryptionError {
-    /// Custody could not produce the keyring — a wrong passphrase, an
-    /// unreadable backing store. Distinct from [`Self::NotEstablished`], which
-    /// is a legitimate absence rather than a failure.
-    #[error("custody error: {0}")]
-    Custody(#[from] KeyError),
-    /// Custody unlocked no keyring. A scoped write routes each row under the
-    /// Store key, so it cannot proceed before one is established.
-    #[error("a scoped write requires an established Store key")]
-    NotEstablished,
 }
 
 #[derive(Clone)]

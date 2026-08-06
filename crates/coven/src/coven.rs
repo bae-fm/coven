@@ -34,7 +34,7 @@ pub enum CovenError {
     #[error("unsafe blob path: {0}")]
     UnsafeBlobPath(#[from] PathTokenError),
     #[error("row routing key: {0}")]
-    RoutingEncryption(#[from] crate::store_security::RoutingEncryptionError),
+    RoutingEncryption(#[from] crate::keys::RoutingEncryptionError),
     #[error("malformed local path: {0}")]
     MalformedPath(String),
     #[error("the write SQL closure panicked")]

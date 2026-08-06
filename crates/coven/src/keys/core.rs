@@ -358,6 +358,20 @@ pub trait MasterKeyCustody: Send + Sync {
     fn forget(&self) -> Result<(), KeyError>;
 }
 
+/// Why a scoped write could not get the Store key its rows are routed under.
+#[derive(Debug, Error)]
+pub enum RoutingEncryptionError {
+    /// Custody could not produce the keyring — a wrong passphrase, an
+    /// unreadable backing store. Distinct from [`Self::NotEstablished`], which
+    /// is a legitimate absence rather than a failure.
+    #[error("custody error: {0}")]
+    Custody(#[from] KeyError),
+    /// Custody unlocked no keyring. A scoped write routes each row under the
+    /// Store key, so it cannot proceed before one is established.
+    #[error("a scoped write requires an established Store key")]
+    NotEstablished,
+}
+
 /// A device's signing identity's custody FOR ONE STORE: who unlocks it,
 /// where a newly established one is written, and how it is removed. The
 /// signing-key sibling of [`MasterKeyCustody`], same three-method shape and
