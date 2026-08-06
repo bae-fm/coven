@@ -1,8 +1,6 @@
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
-
-use crate::config::{Config, ConfigError};
+use tracing::debug;
 
 /// Why a string is not a safe path token.
 ///
@@ -287,33 +285,6 @@ impl StoreLayout {
             path: self.stores_root().join(store_id),
             db_filename: self.db_filename.clone(),
         }
-    }
-
-    /// Create a store directory, generate a device id, and save `config.yaml`.
-    ///
-    /// The caller is responsible for encryption-key setup and calling
-    /// [`Config::save_to_config_yaml`](crate::config::Config::save_to_config_yaml)
-    /// afterward.
-    pub fn create_store(
-        &self,
-        store_id: String,
-        store_name: String,
-        ids: &dyn crate::id_provider::IdProvider,
-    ) -> Result<Config, ConfigError> {
-        validate_path_token(&store_id)
-            .map_err(|error| ConfigError::Config(format!("invalid store id: {error}")))?;
-        let store_dir = self.store_dir(&store_id);
-        if store_dir.exists() {
-            return Err(ConfigError::StoreExists(store_id));
-        }
-        std::fs::create_dir_all(&*store_dir)?;
-
-        let device_id = ids.new_id();
-        let config = Config::with_defaults(store_id, device_id, store_dir, store_name);
-        config.save_to_config_yaml()?;
-
-        info!("Created store at {}", config.store_dir.display());
-        Ok(config)
     }
 }
 
