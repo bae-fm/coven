@@ -92,7 +92,10 @@ impl StoreRows {
 
     fn routing_encryption(
         &self,
-    ) -> Result<Option<crate::encryption::EncryptionService>, crate::database::DbError> {
+    ) -> Result<
+        Option<crate::encryption::EncryptionService>,
+        crate::store_security::RoutingEncryptionError,
+    > {
         self.security
             .routing_encryption(self.writes.requires_routing_encryption())
     }

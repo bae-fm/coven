@@ -52,6 +52,8 @@ pub enum SyncError {
     OwnerPromotion(String),
     #[error("{0}")]
     Database(#[from] DbError),
+    #[error("row routing key: {0}")]
+    RoutingEncryption(#[from] crate::store_security::RoutingEncryptionError),
     #[error("blob upload drain failed: {0}")]
     BlobUpload(DbError),
     #[error("sync loop error: {0}")]

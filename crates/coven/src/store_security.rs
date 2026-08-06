@@ -60,6 +60,20 @@ impl EstablishedStoreIdentity {
     }
 }
 
+/// Why a scoped write could not get the Store key its rows are routed under.
+#[derive(Debug, thiserror::Error)]
+pub enum RoutingEncryptionError {
+    /// Custody could not produce the keyring — a wrong passphrase, an
+    /// unreadable backing store. Distinct from [`Self::NotEstablished`], which
+    /// is a legitimate absence rather than a failure.
+    #[error("custody error: {0}")]
+    Custody(#[from] KeyError),
+    /// Custody unlocked no keyring. A scoped write routes each row under the
+    /// Store key, so it cannot proceed before one is established.
+    #[error("a scoped write requires an established Store key")]
+    NotEstablished,
+}
+
 #[derive(Clone)]
 pub(crate) struct StoreSecurity {
     keys: StoreKeys,
@@ -160,23 +174,14 @@ impl StoreSecurity {
     pub(crate) fn routing_encryption(
         &self,
         has_scoped_graph: bool,
-    ) -> Result<Option<EncryptionService>, crate::database::DbError> {
+    ) -> Result<Option<EncryptionService>, RoutingEncryptionError> {
         if !has_scoped_graph {
             return Ok(None);
         }
         let keyring = self
             .master_keys
-            .unlock()
-            .map_err(|error| {
-                crate::database::DbError::Message(format!(
-                    "unlock Store key for row routing: {error}"
-                ))
-            })?
-            .ok_or_else(|| {
-                crate::database::DbError::Message(
-                    "Merge scoped write requires an established Store key".to_string(),
-                )
-            })?;
+            .unlock()?
+            .ok_or(RoutingEncryptionError::NotEstablished)?;
         Ok(Some(EncryptionService::from(keyring)))
     }
 
