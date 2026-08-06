@@ -1,5 +1,5 @@
 use crate::keys::UserKeypair;
-use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
+use crate::sync::test_helpers::{open_test_db, temp_store_dir, test_cloud_home, TestStore};
 
 trait ExactFounderGraphDatabaseOps {
     async fn table_count(&self, table: crate::database::DatabaseTestTable) -> i64;
@@ -163,4 +163,33 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
             .await,
         "exact successor"
     );
+}
+
+#[tokio::test]
+async fn store_creation_installs_generation_zero_replay_baseline() {
+    let db = open_test_db();
+    let store = TestStore::create(
+        &db,
+        "retained-replay-genesis",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let baseline = crate::database::StoreDatabase::new(&db)
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("Store creation installs a retained replay baseline");
+
+    assert_eq!(baseline.schema_version, db.schema_version());
+    assert_eq!(baseline.routing_hash, db.sync_routing_hash());
+    match &baseline.authority {
+        crate::database::RetainedReplayAuthority::Genesis(authority) => {
+            assert_eq!(authority.store_root, store.root)
+        }
+        crate::database::RetainedReplayAuthority::StableSnapshot(_) => {
+            panic!("Store creation installed a snapshot replay baseline")
+        }
+    }
+    baseline.validate_image().expect("validate replay image");
 }

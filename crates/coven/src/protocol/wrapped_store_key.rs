@@ -283,8 +283,6 @@ impl PreparedWrappedStoreKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SyncStorage as _;
-    use crate::sync::store::owner::load_wrapped_store_key;
 
     #[test]
     fn wrapped_key_round_trips_and_returns_sealed_bytes() {
@@ -491,118 +489,5 @@ mod tests {
                 payload: 1,
             }),
         ));
-    }
-
-    #[tokio::test]
-    async fn distinct_wraps_at_one_generation_remain_distinct_exact_objects() {
-        let owner = UserKeypair::generate();
-        let recipient = UserKeypair::generate();
-        let recipient_pubkey = hex::encode(recipient.public_key());
-        let db = crate::sync::test_helpers::open_test_db();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &db,
-            "wrapped-key-exact-objects",
-            owner.clone(),
-            crate::sync::test_helpers::test_cloud_home(),
-        )
-        .await
-        .expect("create exact wrapped-key Store");
-        let device = store
-            .bind_device(&db, &owner)
-            .await
-            .expect("bind exact wrapped-key Store");
-        let store_id = store.root.store_root_id.to_string();
-        let first = device
-            .prepare_wrapped_key(
-                &recipient_pubkey,
-                WrappedStoreKey::signed(&store_id, &recipient_pubkey, 3, vec![1; 32], &owner),
-            )
-            .await
-            .expect("prepare first exact wrap");
-        let second = device
-            .prepare_wrapped_key(
-                &recipient_pubkey,
-                WrappedStoreKey::signed(&store_id, &recipient_pubkey, 3, vec![2; 32], &owner),
-            )
-            .await
-            .expect("prepare second exact wrap");
-
-        assert_ne!(first.reference, second.reference);
-        store
-            .storage()
-            .create_protocol_object(&first.object)
-            .await
-            .expect("create first exact wrap");
-        store
-            .storage()
-            .create_protocol_object(&second.object)
-            .await
-            .expect("create second exact wrap");
-        assert_eq!(
-            load_wrapped_store_key(
-                &*store.storage(),
-                store.root.store_root_hash,
-                &first.reference,
-            )
-            .await
-            .expect("load first exact wrap"),
-            first.validate().expect("validate first prepared wrap"),
-        );
-        assert_eq!(
-            load_wrapped_store_key(
-                &*store.storage(),
-                store.root.store_root_hash,
-                &second.reference,
-            )
-            .await
-            .expect("load second exact wrap"),
-            second.validate().expect("validate second prepared wrap"),
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_wrap_ref_rejects_relocated_identity() {
-        let owner = UserKeypair::generate();
-        let recipient = UserKeypair::generate();
-        let recipient_pubkey = hex::encode(recipient.public_key());
-        let db = crate::sync::test_helpers::open_test_db();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &db,
-            "wrapped-key-relocation",
-            owner.clone(),
-            crate::sync::test_helpers::test_cloud_home(),
-        )
-        .await
-        .expect("create relocation Store");
-        let device = store
-            .bind_device(&db, &owner)
-            .await
-            .expect("bind relocation Store");
-        let prepared = device
-            .prepare_wrapped_key(
-                &recipient_pubkey,
-                WrappedStoreKey::signed(
-                    &store.root.store_root_id.to_string(),
-                    &recipient_pubkey,
-                    1,
-                    vec![3; 32],
-                    &owner,
-                ),
-            )
-            .await
-            .expect("prepare exact wrap");
-        store
-            .storage()
-            .create_protocol_object(&prepared.object)
-            .await
-            .expect("create exact wrap");
-        let mut relocated = prepared.reference;
-        relocated.recipient_pubkey = hex::encode(UserKeypair::generate().public_key());
-
-        assert!(
-            load_wrapped_store_key(&*store.storage(), store.root.store_root_hash, &relocated)
-                .await
-                .is_err()
-        );
     }
 }

@@ -9,66 +9,111 @@ use crate::database::*;
 
 use super::fixtures::*;
 
+/// A solely-owned, activated remote record for a Store package, and the package
+/// reference a reclaim of it names. The record's object is the package's own, so
+/// the reclaim closure keyed on that package finds exactly this record.
+fn reclaim_target_package(
+    label: &str,
+    owner: &StoreBatchCommitRef,
+) -> (
+    crate::protocol::store_commit::StorePackageRef,
+    crate::protocol::remote_object::RemoteObjectRecord,
+) {
+    let package = AudiencePackage::store(
+        ObjectHash::digest(format!("{label} Store root").as_bytes()),
+        test_candidate_family(),
+        crate::WriteId::from_generated(format!("{label}-write")),
+        owner.coord.clone(),
+        1,
+        format!("{label} changeset").into_bytes(),
+        Vec::new(),
+    )
+    .expect("build reclaim target package");
+    let semantic = package.to_bytes();
+    let stored = format!("{label} stored package").into_bytes();
+    let object = ExactObjectRef::new(
+        crate::protocol::objects::ObjectSlot::logical(format!(
+            "{}.pkg",
+            crate::protocol::store_commit::package_semantic_prefix(
+                test_candidate_family(),
+                &owner.coord.stream_id.to_string(),
+                owner.coord.sequence(),
+                ObjectHash::digest(&semantic),
+            )
+        ))
+        .expect("valid reclaim package slot"),
+        stored.len() as u64,
+        ObjectHash::digest(&stored),
+    );
+    let reference = crate::protocol::store_commit::StorePackageRef {
+        candidate_family: package.candidate_family(),
+        content_hash: ObjectHash::digest(&semantic),
+        schema_version: package.schema_version(),
+        changeset_size: semantic.len() as u64,
+        object: object.clone(),
+    };
+    let prepared = crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
+        crate::protocol::remote_object::CandidateObjectRecord {
+            identity: crate::protocol::remote_object::CandidateExclusiveTarget {
+                family: package.candidate_family(),
+                domain:
+                    crate::protocol::remote_object::CandidateExclusiveObjectDomain::StorePackage {
+                        reference: reference.clone(),
+                    },
+                semantic_hash: ObjectHash::digest(&semantic),
+                object: object.clone(),
+            },
+            bytes: crate::protocol::remote_object::RemoteObjectBytes::inline(
+                semantic, stored, object,
+            )
+            .expect("reclaim package remote bytes"),
+            state: crate::protocol::remote_object::CandidateObjectState::Prepared {
+                ownership: crate::protocol::remote_object::PendingCandidateOwnership {
+                    pending: std::collections::BTreeSet::from([owner.clone()]),
+                    nonactivated: Vec::new(),
+                },
+            },
+        },
+    );
+    let mut uploaded = prepared;
+    uploaded
+        .mark_uploaded_verified()
+        .expect("mark reclaim package uploaded");
+    let activated = uploaded
+        .into_activated(owner)
+        .expect("activate reclaim package owner");
+    (reference, activated)
+}
+
+/// A Store commit reference at `sequence`, distinct per `label`.
+fn reclaim_commit(label: &str, sequence: u64) -> StoreBatchCommitRef {
+    let coord = StoreCommitCoord {
+        stream_id: crate::protocol::membership::AuthorStreamId::from_bytes([11; 32]),
+        sequence,
+    };
+    let commit_hash = ObjectHash::digest(format!("{label} commit").as_bytes());
+    StoreBatchCommitRef {
+        coord: coord.clone(),
+        commit_hash,
+        object: reclaim_test_object(&format!(
+            "{}.json",
+            crate::protocol::store_commit::commit_semantic_prefix(
+                test_candidate_family(),
+                &coord.stream_id.to_string(),
+                sequence,
+                commit_hash,
+            )
+        )),
+    }
+}
+
 #[tokio::test]
 async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
-    let db = crate::sync::test_helpers::open_test_db();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &db,
-        "closed-reclaimed-package",
-        crate::keys::UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await
-    .expect("create Store");
-    let first_changeset = crate::sync::test_helpers::open_test_db()
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('reclaim-target', 'target', NULL, \
-           '0000000001000-0000-reclaim', '2026-01-01')",
-        ])
-        .await;
-    let target_activation = store
-        .publish_changeset("founder", 1, &first_changeset, db.schema_version())
-        .await
-        .expect("publish target package");
-    let authority_changeset = crate::sync::test_helpers::open_test_db()
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('reclaim-authority', 'authority', NULL, \
-           '0000000002000-0000-reclaim', '2026-01-01')",
-        ])
-        .await;
-    let authorization_activation = store
-        .publish_changeset("founder", 2, &authority_changeset, db.schema_version())
-        .await
-        .expect("publish later Store position");
-    let receipt_changeset = crate::sync::test_helpers::open_test_db()
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('reclaim-receipt', 'receipt', NULL, \
-           '0000000003000-0000-reclaim', '2026-01-01')",
-        ])
-        .await;
-    let receipt_activation = store
-        .publish_changeset("founder", 3, &receipt_changeset, db.schema_version())
-        .await
-        .expect("publish receipt Store position");
-    let founder_authority = store
-        .founder_device_authority()
-        .await
-        .expect("load founder authority");
-    let target_commit = store
-        .founder_device()
-        .await
-        .expect("load founder Store")
-        .load_commit_for_test(&target_activation)
-        .await
-        .expect("load target commit");
-    assert_eq!(target_commit.author(), founder_authority.registration());
-    let target = target_commit
-        .store_package()
-        .expect("target commit has a package")
-        .clone();
+    let target_activation = reclaim_commit("closed-reclaimed-package/target", 1);
+    let (target, package_remote) =
+        reclaim_target_package("closed-reclaimed-package", &target_activation);
+    let authorization_activation = reclaim_commit("closed-reclaimed-package/authority", 2);
+    let receipt_activation = reclaim_commit("closed-reclaimed-package/receipt", 3);
     let authorization = crate::protocol::reclaim::ReclaimAuthorizationRef {
         authorization_hash: ObjectHash::digest(b"closed reclaim authorization"),
         evidence: crate::protocol::reclaim::ReclaimEvidenceRef {
@@ -96,15 +141,8 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     )
     .expect("valid absence closure");
     let object_id = absence.object_id();
-    let mut saved_remote = db
-        .call(move |conn| load_remote_object_on(conn, object_id))
-        .await
-        .expect("load activated package ownership");
-    saved_remote
-        .remove_all_retained_replay_owners()
-        .expect("remove unrelated replay retention from reclaim closure fixture");
-    let closure_db = crate::sync::test_helpers::open_test_db();
-    let saved_remote_for_insert = saved_remote.clone();
+    let closure_db = crate::database::synthetic_store::open_test_db();
+    let saved_remote_for_insert = package_remote.clone();
     closure_db
         .call(move |conn| {
             persist_exact_remote_object_on(
@@ -127,7 +165,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .expect("close reclaimed package");
 
-    let saved_remote_for_revival = saved_remote.clone();
+    let saved_remote_for_revival = package_remote.clone();
     closure_db
         .call(move |conn| {
             assert!(load_remote_object_on(conn, object_id).is_err());

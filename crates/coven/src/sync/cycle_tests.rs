@@ -5719,3 +5719,92 @@ async fn owner_device_creates_a_snapshot() {
         "an owner device must author catalog snapshot metadata",
     );
 }
+
+#[tokio::test]
+async fn malformed_durable_pending_rotation_blocks_session_reopen() {
+    let directory = tempfile::tempdir().expect("pending-rotation database directory");
+    let path = directory.path().join("store.sqlite3");
+    let open = || {
+        crate::database::Database::open(
+            &path,
+            test_synced_tables(),
+            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            "pending-rotation-reopen-device".to_string(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            &test_migrations(),
+        )
+        .expect("open pending-rotation database")
+    };
+    let home = crate::InMemoryCloudHome::new();
+    let signer = UserKeypair::generate();
+    let encryption = crate::encryption::EncryptionService::from_key([17; 32]);
+    let db = open();
+    let store_database = crate::database::StoreDatabase::new(&db);
+    let (_blob_temp, store_dir) = temp_store_dir();
+    let storage = crate::storage::CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        crate::storage::CloudCipher::Encrypted(encryption.clone()),
+        crate::storage::BlobPathScheme::Hashed,
+        "pending-rotation-reopen",
+        signer.clone(),
+    )
+    .expect("construct pending-rotation storage");
+    let components = crate::sync::cycle::PreparedSyncComponents::prepare(
+        store_database.clone(),
+        store_dir.clone(),
+        crate::sync::test_owner_graph::local_blob_access(store_database.clone(), store_dir.clone()),
+        storage,
+        signer.clone(),
+        crate::sync::cycle::StoreInitialization::CreateStore,
+        None,
+    )
+    .await
+    .expect("prepare pending-rotation Store")
+    .initialize()
+    .await
+    .expect("initialize pending-rotation Store");
+    let root = store_database
+        .local_store_root_ref()
+        .await
+        .expect("read pending-rotation Store root")
+        .expect("pending-rotation Store root exists");
+    db.set_protocol_state(
+        crate::protocol::objects::ROTATION_GATE_STATE_KEY,
+        "not-a-rotation-gate",
+    )
+    .await
+    .expect("persist malformed pending rotation");
+    drop(components);
+    drop(db);
+
+    let reopened = open();
+    let storage = crate::storage::CloudSyncStorage::new(
+        Arc::new(home),
+        crate::storage::CloudCipher::Encrypted(encryption),
+        crate::storage::BlobPathScheme::Hashed,
+        "pending-rotation-reopen",
+        signer.clone(),
+    )
+    .expect("reconstruct pending-rotation storage");
+    let result = crate::sync::cycle::PreparedSyncComponents::prepare(
+        crate::database::StoreDatabase::new(&reopened),
+        store_dir.clone(),
+        crate::sync::test_owner_graph::local_blob_access(
+            crate::database::StoreDatabase::new(&reopened),
+            store_dir,
+        ),
+        storage,
+        signer,
+        crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_store_root: root,
+        },
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::sync::cycle::InitSyncError::PendingRotationRestore(_))
+    ));
+}

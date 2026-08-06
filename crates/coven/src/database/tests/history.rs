@@ -1,36 +1,6 @@
 use super::fixtures::*;
 use crate::database::*;
 
-#[tokio::test]
-async fn store_creation_installs_generation_zero_replay_baseline() {
-    let db = crate::sync::test_helpers::open_test_db();
-    let store = crate::sync::test_helpers::TestStore::create(
-        &db,
-        "retained-replay-genesis",
-        crate::keys::UserKeypair::generate(),
-        crate::sync::test_helpers::test_cloud_home(),
-    )
-    .await
-    .expect("create Store");
-    let baseline = db
-        .call(load_generation_zero_replay_baseline_on)
-        .await
-        .expect("load retained replay baseline")
-        .expect("Store creation installs retained replay baseline");
-
-    assert_eq!(baseline.schema_version, db.schema_version());
-    assert_eq!(baseline.routing_hash, db.sync_routing_hash());
-    match &baseline.authority {
-        RetainedReplayAuthority::Genesis(authority) => {
-            assert_eq!(authority.store_root, store.root)
-        }
-        RetainedReplayAuthority::StableSnapshot(_) => {
-            panic!("Store creation installed a snapshot replay baseline")
-        }
-    }
-    baseline.validate_image().expect("validate replay image");
-}
-
 #[test]
 fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate() {
     let stream = crate::protocol::causal_grants::AuthorStreamId::from_bytes([7; 32]);
