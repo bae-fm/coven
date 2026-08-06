@@ -98,3 +98,44 @@ impl ProviderProbeJournal for StoreDatabase {
             .map_err(|error| StorageError::Storage(error.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::objects::ObjectSlot;
+    use crate::protocol::provider::test_fixtures::{
+        test_device_binding, test_exact_receipt, test_store_binding,
+    };
+    use crate::protocol::provider::{ExactProbeJournal, ExactProbeProgress};
+
+    #[tokio::test]
+    async fn database_probe_journal_rejects_a_skipped_progress_state() {
+        let db = crate::database::synthetic_store::open_test_db();
+        let journal = crate::database::StoreDatabase::new(&db);
+        let probe_id = ProviderProbeId::from_bytes([44; 32]);
+        let binding = crate::protocol::objects::ResolvedProviderBinding {
+            store: test_store_binding(),
+            device: test_device_binding(),
+        };
+        let prepared = ProviderProbeJournalRecord::Exact(ExactProbeJournal {
+            probe_id,
+            binding,
+            slot: ObjectSlot::logical("__coven_probe__/exact/journal".to_string()).unwrap(),
+            lost_response_slot: ObjectSlot::logical(
+                "__coven_probe__/lost-response/journal".to_string(),
+            )
+            .unwrap(),
+            progress: ExactProbeProgress::Prepared,
+        });
+        assert_eq!(journal.begin(prepared.clone()).await.unwrap(), prepared);
+        let ProviderProbeJournalRecord::Exact(mut final_record) = prepared.clone() else {
+            unreachable!()
+        };
+        final_record.progress = ExactProbeProgress::ReceiptReady {
+            receipt: test_exact_receipt(),
+        };
+        let final_record = ProviderProbeJournalRecord::Exact(final_record);
+        assert!(journal.advance(&prepared, final_record).await.is_err());
+        assert_eq!(journal.load(probe_id).await.unwrap(), Some(prepared));
+    }
+}

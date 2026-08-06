@@ -1,4 +1,7 @@
 use super::*;
+use crate::protocol::provider::test_fixtures::{
+    test_device_binding, test_exact_receipt, test_store_binding,
+};
 use crate::protocol::store_commit::ObjectHash;
 
 #[test]
@@ -164,37 +167,6 @@ fn provider_admin_replay_cannot_tombstone_a_newly_active_replacement() {
     assert!(state.active().contains(&third.grant_id));
 }
 
-#[tokio::test]
-async fn database_probe_journal_rejects_a_skipped_progress_state() {
-    let db = crate::sync::test_helpers::open_test_db();
-    let journal = crate::database::StoreDatabase::new(&db);
-    let probe_id = ProviderProbeId::from_bytes([44; 32]);
-    let binding = crate::protocol::objects::ResolvedProviderBinding {
-        store: test_store_binding(),
-        device: test_device_binding(),
-    };
-    let prepared = ProviderProbeJournalRecord::Exact(ExactProbeJournal {
-        probe_id,
-        binding,
-        slot: ObjectSlot::logical("__coven_probe__/exact/journal".to_string()).unwrap(),
-        lost_response_slot: ObjectSlot::logical(
-            "__coven_probe__/lost-response/journal".to_string(),
-        )
-        .unwrap(),
-        progress: ExactProbeProgress::Prepared,
-    });
-    assert_eq!(journal.begin(prepared.clone()).await.unwrap(), prepared);
-    let ProviderProbeJournalRecord::Exact(mut final_record) = prepared.clone() else {
-        unreachable!()
-    };
-    final_record.progress = ExactProbeProgress::ReceiptReady {
-        receipt: test_exact_receipt(),
-    };
-    let final_record = ProviderProbeJournalRecord::Exact(final_record);
-    assert!(journal.advance(&prepared, final_record).await.is_err());
-    assert_eq!(journal.load(probe_id).await.unwrap(), Some(prepared));
-}
-
 fn admin_record(id: u8, label: &str) -> ProviderAdminGrantRecord {
     let root_object = crate::protocol::objects::ExactObjectRef::new(
         crate::protocol::objects::ObjectSlot::logical(format!("roots/{label}")).unwrap(),
@@ -245,17 +217,6 @@ fn set_change(
     }
 }
 
-fn test_store_binding() -> crate::protocol::objects::StoreProviderBinding {
-    crate::protocol::objects::StoreProviderBinding::S3 {
-        endpoint: crate::protocol::objects::S3EndpointBinding::Aws {
-            partition: "aws".to_string(),
-        },
-        region: "us-east-1".to_string(),
-        bucket: "bucket".to_string(),
-        key_prefix: None,
-    }
-}
-
 fn private_cloudkit_binding() -> crate::protocol::objects::ResolvedProviderBinding {
     crate::protocol::objects::ResolvedProviderBinding {
         store: crate::protocol::objects::StoreProviderBinding::CloudKit {
@@ -270,70 +231,4 @@ fn private_cloudkit_binding() -> crate::protocol::objects::ResolvedProviderBindi
             },
         },
     }
-}
-
-fn test_device_binding() -> crate::protocol::objects::ProviderDeviceBinding {
-    crate::protocol::objects::ProviderDeviceBinding {
-        principal: crate::protocol::objects::ProviderPrincipalId::Aws {
-            account_id: "123456789012".to_string(),
-            principal: crate::protocol::objects::AwsPrincipal::Root,
-        },
-    }
-}
-
-fn test_exact_receipt() -> ExactSlotProbeReceipt {
-    let probe_id = ProviderProbeId::from_bytes([7; 32]);
-    let slot =
-        crate::protocol::objects::ObjectSlot::logical("store-v1/probes/exact".to_string()).unwrap();
-    let first = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateFirst);
-    let second = probe_payload(&probe_id, ProbePayloadLabel::ExactCreateSecond);
-    let accepted = crate::protocol::objects::ExactObjectRef::new(
-        slot.clone(),
-        first.len() as u64,
-        ObjectHash::digest(&first),
-    );
-    let lost_slot =
-        crate::protocol::objects::ObjectSlot::logical("store-v1/probes/lost".to_string()).unwrap();
-    let lost_payload = probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
-    let lost_ref = crate::protocol::objects::ExactObjectRef::new(
-        lost_slot.clone(),
-        lost_payload.len() as u64,
-        ObjectHash::digest(&lost_payload),
-    );
-    let transcript = ExactSlotProbeTranscript {
-        probe_id,
-        logical_key: slot.logical_key().to_string(),
-        slot,
-        contenders: [
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&first),
-                outcome: ProbeCreateOutcome::Created,
-            },
-            ProbeCreateAttempt {
-                payload_hash: ObjectHash::digest(&second),
-                outcome: ProbeCreateOutcome::RejectedOccupied,
-            },
-        ],
-        accepted: accepted.clone(),
-        full_read_hash: accepted.stored_hash(),
-        range: ProbeRangeReceipt {
-            start: PROBE_RANGE_START,
-            end: PROBE_RANGE_END,
-            bytes_hash: ObjectHash::digest(
-                &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
-            ),
-        },
-        lost_response: LostResponseProbeReceipt {
-            logical_key: "store-v1/probes/lost".to_string(),
-            slot: lost_slot,
-            payload_hash: ObjectHash::digest(&lost_payload),
-            settled: lost_ref,
-            readback_hash: ObjectHash::digest(&lost_payload),
-        },
-    };
-    ExactSlotProbeReceipt::from_transcript(
-        transcript,
-        &test_store_binding(),
-        &test_device_binding(),
-    )
 }

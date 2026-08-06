@@ -6,6 +6,8 @@ pub(crate) mod circle_activation;
 pub(crate) mod circle_control;
 pub(crate) mod circle_journal;
 pub(crate) mod circle_roster;
+#[cfg(test)]
+pub(crate) mod circle_test_fixtures;
 pub(crate) mod device_exclusion_journal;
 pub(crate) mod hlc;
 pub(crate) mod membership;

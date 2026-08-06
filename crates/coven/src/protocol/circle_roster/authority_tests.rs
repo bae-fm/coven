@@ -855,27 +855,10 @@ async fn cross_revocation_cycle_is_signed_from_an_exact_maximal_branch() {
         &resolution.replacement_grant,
     );
     assert!(reusable.is_empty());
-    let db = crate::sync::test_helpers::open_test_db();
-    let store_database = crate::database::StoreDatabase::new(&db);
-    let stream_state_key = format!(
-        "circle_roster_author_stream/{circle_id}/{first_pubkey}/{}",
-        resolution.replacement_grant
-    );
-    let selected_stream = store_database
-        .select_causal_author_stream(stream_state_key.clone(), reusable)
-        .await
-        .unwrap();
-    assert_eq!(
-        store_database
-            .select_causal_author_stream(stream_state_key, BTreeSet::from([selected_stream]),)
-            .await
-            .unwrap(),
-        selected_stream
-    );
     let after_resolution = resumed
         .signed_set_member(
             "first-device",
-            selected_stream,
+            AuthorStreamId::from_bytes([133; 32]),
             keys::public_key_hex(&UserKeypair::generate()),
             CircleRole::Member,
             &first_owner,

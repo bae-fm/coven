@@ -131,4 +131,6 @@ mod ordered_owner_barriers {
 }
 
 #[cfg(test)]
+pub(crate) mod test_fixtures;
+#[cfg(test)]
 mod tests;
