@@ -86,8 +86,9 @@ pub enum LocalRotation {
 }
 
 impl LocalRotation {
-    /// Reported through [`PendingRotation::pending_generation`], which exists for
-    /// status reporting in tests and for hosts built with `test-utils`.
+    /// Reported through the replication layer's `PendingRotation::pending_generation`,
+    /// which exists for status reporting in tests and for hosts built with
+    /// `test-utils`.
     #[cfg(any(test, feature = "test-utils"))]
     fn generation(&self) -> NonZeroU64 {
         match self {
@@ -332,8 +333,8 @@ impl RotationGate {
         ))
     }
 
-    /// The newest generation the gate names. Reported through
-    /// [`PendingRotation::pending_generation`].
+    /// The newest generation the gate names. Reported through the replication
+    /// layer's `PendingRotation::pending_generation`.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn generation(&self) -> NonZeroU64 {
         match self {

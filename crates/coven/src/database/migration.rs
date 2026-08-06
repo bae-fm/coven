@@ -140,7 +140,7 @@ pub(crate) fn supported_version(migrations: &[Migration]) -> u32 {
 }
 
 /// Why running the synced-schema ladder failed. Carried as its own arm of
-/// [`crate::database::OpenError`] at the `Database::open` boundary — not
+/// `OpenError` at the `Database::open` boundary — not
 /// flattened into a [`DbError`] string — so the variants stay typed for the
 /// engine's own tests, the snapshot bootstrap gate, and hosts matching
 /// [`MigrationError::SchemaTooNew`] to prompt an app update.

@@ -349,7 +349,7 @@ impl CovenHandle {
     }
 
     /// Test-only: connect a started sync loop over an injected [`CloudHome`]
-    /// instead of one built from [`Config`], so a host's integration tests drive
+    /// instead of one built from [`crate::Config`], so a host's integration tests drive
     /// the real make-Remote / make-Local / upload-drain and read paths over a mock
     /// cloud with no live provider.
     ///
@@ -359,7 +359,7 @@ impl CovenHandle {
     /// protection directly; custody is never consulted on this path.
     ///
     /// The read path needs no separate hook: `blob_storage`
-    /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
+    /// serves reads from the connected loop's own `CloudSyncStorage`, which here
     /// wraps the injected `home`, so [`read_blob`](Self::read_blob) /
     /// [`pin`](Self::pin) resolve a Remote miss against the same test home the
     /// drain writes to.
@@ -642,7 +642,7 @@ impl CovenHandle {
     /// drifting from it.
     ///
     /// A `Plain` home whose `cloud_path` is absent, or does not name the blob it
-    /// carries, is a surfaced error — see [`CloudSyncStorage::blob_key`].
+    /// carries, is a surfaced error — see `CloudSyncStorage::blob_key`.
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
         self.sync.blob_cloud_key(blob)
     }

@@ -69,8 +69,6 @@ pub struct SyncLoopSuccess {
     /// lagged subscriber can miss it entirely, and several accepted changesets
     /// can touch the same row, so a host re-reads affected rows by primary key
     /// rather than trusting it as exhaustive.
-    ///
-    /// [`StorePullResult::row_changes`]: crate::sync::store::StorePullResult::row_changes
     pub row_changes: Option<Vec<RowChange>>,
     pub alerts: SyncLoopAlerts,
 }

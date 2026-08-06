@@ -460,7 +460,7 @@ pub enum DbError {
     #[error("{0}")]
     CommitNewFile(#[from] coven_foundation::local_file::CommitNewFileError),
     /// Staging a write's audience-move blobs failed. The implementation of
-    /// [`AudienceBlobMoveStaging`] is injected from above, so its failure is
+    /// `AudienceBlobMoveStaging` is injected from above, so its failure is
     /// carried as an opaque source rather than named here.
     #[error("audience blob staging: {0}")]
     AudienceBlobStaging(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),

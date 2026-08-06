@@ -52,7 +52,7 @@ use coven_protocol::blob::RowBlobRef;
 ///   it from the local store, the cache, or a cloud fetch into the per-device cache.
 ///   [`is_pinned`](Self::is_pinned) reports whether a set is kept offline.
 ///
-/// It builds read storage from the current [`Config`] on a cloud miss, exactly as a
+/// It builds read storage from the current [`crate::Config`] on a cloud miss, exactly as a
 /// home-less full handle does — there is no sync loop to reuse.
 #[derive(Clone)]
 pub struct CovenReadHandle {
