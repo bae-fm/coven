@@ -5,7 +5,7 @@ use coven_protocol::membership::MembershipGrantId;
 use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
 use coven_protocol::store_commit::ObjectHash;
 
-use super::authority::target_key;
+use super::journal::target_key;
 use super::journal::OwnerPromotionJournalState;
 
 /// A Merge Store with one activated Member device and the promotion target that

@@ -18,7 +18,7 @@ use coven_protocol::store_commit::{
 };
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 
-use super::authority::target_key;
+use super::journal::target_key;
 use super::journal::{
     owner_promotion_published_objects, OwnerPromotionFinalizationReceipt, OwnerPromotionJournal,
     OwnerPromotionJournalPredecessor, OwnerPromotionJournalState, OwnerPromotionStaleEvidence,

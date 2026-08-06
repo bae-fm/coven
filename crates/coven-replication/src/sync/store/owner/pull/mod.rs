@@ -31,7 +31,6 @@ mod join_activation;
 mod materialization;
 mod membership_control;
 mod model;
-mod root_validation;
 mod snapshot_evidence;
 mod support;
 

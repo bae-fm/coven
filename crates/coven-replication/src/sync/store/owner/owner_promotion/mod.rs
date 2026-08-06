@@ -2,7 +2,6 @@
 
 use super::AuthorizedWriterOperation;
 
-mod authority;
 mod error;
 pub(crate) use coven_protocol::owner_promotion_journal as journal;
 mod operation;
