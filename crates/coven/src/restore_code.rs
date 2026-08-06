@@ -32,7 +32,7 @@ use coven_protocol::recovery::RestoreAuthority;
 /// secrets and print as `<redacted>` so `{:?}` in an error path
 /// cannot leak key material.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct RestoreCode {
+pub(crate) struct RestoreCode {
     /// Wire-format version.
     pub v: u8,
     /// Store ID (UUID).

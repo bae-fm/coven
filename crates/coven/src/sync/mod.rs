@@ -32,7 +32,6 @@ pub(crate) mod test_owner_graph;
 
 #[cfg(test)]
 mod tests;
-pub use coven_protocol::hlc::Hlc;
 pub use error::SyncError;
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use status::DeviceActivity;

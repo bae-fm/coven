@@ -2,7 +2,7 @@
 //! tests.
 //!
 //! Production wires [`SystemClock`] (real `Utc::now()`); tests construct a
-//! deterministic fake ([`FixedClock`] / [`SteppingClock`]) and pass it to the
+//! deterministic fake ([`FixedClock`] / [`ClosureClock`]) and pass it to the
 //! unit under test.
 //!
 //! The hybrid logical clock retains this same clock and derives epoch
@@ -46,13 +46,11 @@ impl Clock for SystemClock {
 // feature, so any crate that consumes `Clock` tests against the same fakes
 // instead of mirroring them.
 #[cfg(any(test, feature = "test-utils"))]
-pub use fakes::{ClosureClock, FixedClock, SteppingClock};
+pub use fakes::{ClosureClock, FixedClock};
 
 #[cfg(any(test, feature = "test-utils"))]
 mod fakes {
     use super::*;
-    use chrono::Duration;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Delegates each read to a supplied test function.
     pub struct ClosureClock<F>(pub F);
@@ -74,31 +72,6 @@ mod fakes {
             self.0
         }
     }
-
-    /// Advances a fixed delta per `now()` call: the first call returns `start`,
-    /// the next `start + step`, and so on. For tests that assert ordering.
-    pub struct SteppingClock {
-        start: DateTime<Utc>,
-        step: Duration,
-        calls: AtomicU64,
-    }
-
-    impl SteppingClock {
-        pub fn new(start: DateTime<Utc>, step: Duration) -> Self {
-            Self {
-                start,
-                step,
-                calls: AtomicU64::new(0),
-            }
-        }
-    }
-
-    impl Clock for SteppingClock {
-        fn now(&self) -> DateTime<Utc> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            self.start + self.step * (n as i32)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -115,17 +88,6 @@ mod tests {
         let clock = FixedClock(instant);
         assert_eq!(clock.now(), instant);
         assert_eq!(clock.now(), instant);
-    }
-
-    #[test]
-    fn stepping_clock_advances_one_step_per_call() {
-        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let clock = SteppingClock::new(start, Duration::seconds(10));
-        assert_eq!(clock.now(), start);
-        assert_eq!(clock.now(), start + Duration::seconds(10));
-        assert_eq!(clock.now(), start + Duration::seconds(20));
     }
 
     #[test]

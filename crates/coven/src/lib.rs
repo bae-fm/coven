@@ -42,9 +42,9 @@ pub use circles::{CircleError, Circles};
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_foundation::atomic_file::{write_atomic, WriteError};
 pub use coven_foundation::changeset::{ChangeOp, RowChange};
-pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_foundation::clock::{FixedClock, SteppingClock};
+pub use coven_foundation::clock::FixedClock;
+pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::config::{
     CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, HomeStorage,
 };
@@ -70,8 +70,8 @@ pub use coven_keys::keys::{
 };
 pub use coven_protocol::blob::{
     content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    ContentHasher, DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure,
-    UploadFailureCause, UploadFailures,
+    DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure, UploadFailureCause,
+    UploadFailures,
 };
 pub use coven_protocol::hlc::Timestamp;
 pub use coven_protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
@@ -82,15 +82,13 @@ pub use coven_protocol::write::{
 };
 pub use coven_protocol::{
     Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
-    CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
-    CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleOperationKind,
-    CircleOperationState, CircleRole, CircleState, CloudKitAcceptedShare, CommitFrontier,
-    CrossPrincipalProbeReceipt, DeviceJoinAttemptId, DeviceJoinAttemptRef, ExactSlotProbeReceipt,
-    MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo, MembershipCoord,
-    ObjectHash, ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange,
-    ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderAdminMembershipChange,
-    ProviderAdminState, ProviderCapabilityProof, ProviderProbeId, StoreBatchCommitRef,
-    StoreCommitCoord, StoreCommitOrder, StoreDeviceId,
+    CircleControlCoord, CircleEpochCloseId, CircleId, CircleMemberInfo, CircleOperationBlock,
+    CircleOperationId, CircleOperationInfo, CircleOperationKind, CircleOperationState, CircleRole,
+    CircleState, CommitFrontier, CrossPrincipalProbeReceipt, DeviceJoinAttemptId,
+    DeviceJoinAttemptRef, ExactSlotProbeReceipt, MemberInfo, MemberRole, MembershipConflictChoice,
+    MembershipConflictInfo, ObjectHash, ProviderAccessLocator, ProviderAccessWithdrawal,
+    ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderCapabilityProof, StoreBatchCommitRef,
+    StoreCommitCoord, StoreDeviceId,
 };
 pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
@@ -118,8 +116,7 @@ pub use oauth::{OAuthClients, OAuthTokens};
 pub use read_handle::CovenReadHandle;
 pub use restoration::{
     decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
-    OwnerRecoveryAuthority, RestoreAuthority, RestoreCode, RestoreCodeError, RestoreCodeInfo,
-    RestoreSource,
+    OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError, RestoreCodeInfo, RestoreSource,
 };
 #[cfg(feature = "oauth-providers")]
 pub use storage::fetch_account_email;
@@ -145,7 +142,7 @@ pub use sync::{
     DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
     DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
-    DeviceRegistrationRequest, Hlc, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
+    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
     ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
     ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
     SyncLoopStatus, SyncLoopSuccess,
