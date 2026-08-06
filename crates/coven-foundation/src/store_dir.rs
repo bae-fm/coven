@@ -545,8 +545,7 @@ impl StoreDir {
     /// blob — fetched on read or eagerly on pull, droppable by the budget sweep. The
     /// folder it lives in, not a table, is what makes it evictable rather than kept.
     /// Segmented by `namespace` so each namespace's budget evicts only its own
-    /// subtree (see [`Self::cache_namespace_dir`]). `Err` if
-    /// `namespace` is unsafe.
+    /// subtree, `storage/cache/<namespace>`. `Err` if `namespace` is unsafe.
     pub fn cache_blob_path(
         &self,
         namespace: &str,
@@ -687,8 +686,8 @@ impl StoreDir {
     }
 
     /// The evictable-cache root, `storage/cache`, holding every namespace's subtree.
-    /// The per-namespace budget sweep walks only one namespace's subtree under it —
-    /// see [`Self::cache_namespace_dir`].
+    /// The per-namespace budget sweep walks only one namespace's subtree under it,
+    /// `storage/cache/<namespace>`.
     pub fn cache_dir(&self) -> PathBuf {
         self.storage_dir().join("cache")
     }
@@ -697,7 +696,7 @@ impl StoreDir {
     /// cache budget enforcement walks only this tree, so
     /// a namespace evicts against its own budget without touching another namespace's
     /// files. `namespace` is validated as a single path token; `Err` if it is unsafe.
-    pub fn cache_namespace_dir(&self, namespace: &str) -> Result<PathBuf, PathTokenError> {
+    fn cache_namespace_dir(&self, namespace: &str) -> Result<PathBuf, PathTokenError> {
         self.cache_folder_namespace_dir("cache", namespace)
     }
 

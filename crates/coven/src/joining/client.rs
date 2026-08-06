@@ -334,7 +334,7 @@ pub struct DeviceJoinClient {
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     test_home: Option<Arc<dyn CloudHome>>,
 }
 
@@ -389,12 +389,12 @@ impl DeviceJoinClient {
             oauth_tokens,
             cloudkit_ops,
             clock,
-            #[cfg(any(test, feature = "test-utils"))]
+            #[cfg(test)]
             test_home: None,
         })
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub(crate) fn with_test_bootstrap_home(mut self, home: Arc<dyn CloudHome>) -> Self {
         self.test_home = Some(home);
         self
@@ -754,7 +754,7 @@ impl DeviceJoinClient {
     }
 
     async fn build_cloud_home(&self) -> Result<Arc<dyn CloudHome>, BootstrapError> {
-        #[cfg(any(test, feature = "test-utils"))]
+        #[cfg(test)]
         if let Some(home) = &self.test_home {
             return Ok(home.clone());
         }

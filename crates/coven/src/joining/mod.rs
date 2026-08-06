@@ -17,8 +17,8 @@ pub use transport::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
     DeviceJoinTransportOutcome,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub use transport::{
+#[cfg(test)]
+pub(crate) use transport::{
     close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
 };
 

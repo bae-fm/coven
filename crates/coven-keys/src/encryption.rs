@@ -1198,7 +1198,7 @@ impl EncryptionService {
     /// Uses HKDF: master_key + "coven-scope-v1:{scope_id}" -> 32-byte key.
     /// Deterministic: same master + scope_id always gives the same key.
     pub fn derive_scoped(&self, scope_id: &str) -> EncryptionService {
-        let derived = self.derive_key(&format!("coven-scope-v1:{scope_id}"));
+        let derived = derive_key_from(&self.key_bytes(), &format!("coven-scope-v1:{scope_id}"));
         EncryptionService::from_key_at_generation(self.current_generation(), derived)
     }
 
@@ -1217,19 +1217,6 @@ impl EncryptionService {
         Ok(EncryptionService::from_key_at_generation(
             generation, derived,
         ))
-    }
-
-    /// Derive a 32-byte key using HKDF-SHA256 with the given info label.
-    ///
-    /// The derivation is deterministic: same master key + same info string always
-    /// produces the same derived key.
-    ///
-    /// - Salt: the constant `"coven-hkdf-salt-v1"` (RFC 5869 permits a fixed,
-    ///   non-secret salt)
-    /// - IKM: master key
-    /// - Info: caller-provided label
-    pub fn derive_key(&self, info: &str) -> [u8; 32] {
-        derive_key_from(&self.key_bytes(), info)
     }
 
     /// Seal `plaintext` for storage in a host's own rows, under this keyring's
@@ -1264,6 +1251,15 @@ impl EncryptionService {
     }
 }
 
+/// Derive a 32-byte key using HKDF-SHA256 with the given info label.
+///
+/// The derivation is deterministic: same input key + same info string always
+/// produces the same derived key.
+///
+/// - Salt: the constant `"coven-hkdf-salt-v1"` (RFC 5869 permits a fixed,
+///   non-secret salt)
+/// - IKM: `key`
+/// - Info: caller-provided label
 fn derive_key_from(key: &[u8; 32], info: &str) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(b"coven-hkdf-salt-v1"), key);
     let mut okm = [0u8; 32];

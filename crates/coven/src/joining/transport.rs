@@ -178,7 +178,7 @@ pub async fn close_scanned_invite_join(
 /// for the admitting side. The provider knobs a real device reads from its
 /// invite code are fixed here, since the home is supplied outright — including
 /// the exact-slot capability, which the injected home has by construction.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 fn scanned_invite_test_client(
     invite: &DeviceJoinInvite,
     join_request_code: &str,
@@ -206,9 +206,9 @@ fn scanned_invite_test_client(
 }
 
 /// Test-only counterpart of [`join_with_scanned_invite`].
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub async fn join_with_scanned_invite_over_test_home(
+pub(crate) async fn join_with_scanned_invite_over_test_home(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
@@ -235,9 +235,9 @@ pub async fn join_with_scanned_invite_over_test_home(
 }
 
 /// Test-only counterpart of [`close_scanned_invite_join`].
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub async fn close_scanned_invite_join_over_test_home(
+pub(crate) async fn close_scanned_invite_join_over_test_home(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,

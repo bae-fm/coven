@@ -110,10 +110,6 @@ pub use joining::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
     DeviceJoinTransportOutcome,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub use joining::{
-    close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
-};
 #[cfg(any(test, feature = "oauth-providers"))]
 pub use oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]

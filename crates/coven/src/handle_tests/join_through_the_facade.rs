@@ -100,7 +100,7 @@ impl FacadeFixture {
         timing: crate::DeviceJoinTransportTiming,
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinTransportOutcome, crate::BootstrapError> {
-        crate::join_with_scanned_invite_over_test_home(
+        crate::joining::join_with_scanned_invite_over_test_home(
             scanned,
             join_request,
             self.layout.clone(),
@@ -121,7 +121,7 @@ impl FacadeFixture {
         join_request: &str,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<(), crate::BootstrapError> {
-        crate::close_scanned_invite_join_over_test_home(
+        crate::joining::close_scanned_invite_join_over_test_home(
             scanned,
             join_request,
             self.layout.clone(),
@@ -312,7 +312,7 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
 
     let cancel = tokio::sync::watch::channel(false).1;
     let (joined, drove) = tokio::join!(
-        Box::pin(crate::join_with_scanned_invite_over_test_home(
+        Box::pin(crate::joining::join_with_scanned_invite_over_test_home(
             &scanned,
             &join_request,
             fixture.layout.clone(),
