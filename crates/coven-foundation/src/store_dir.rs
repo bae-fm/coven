@@ -292,7 +292,8 @@ impl StoreLayout {
     /// Create a store directory, generate a device id, and save `config.yaml`.
     ///
     /// The caller is responsible for encryption-key setup and calling
-    /// [`Config::save_active_store`] afterward.
+    /// [`Config::save_to_config_yaml`](crate::config::Config::save_to_config_yaml)
+    /// afterward.
     pub fn create_store(
         &self,
         store_id: String,

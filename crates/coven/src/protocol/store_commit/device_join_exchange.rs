@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::MembershipGrantId;
 use crate::protocol::objects::{ExactObjectRef, ObjectSlot};
@@ -12,6 +11,7 @@ use crate::protocol::provider::{
 };
 use crate::protocol::store_commit::{Signed, SignedBody};
 use crate::protocol::{ProviderDeviceBinding, StoreProviderBinding};
+use coven_keys::keys::{self, UserKeypair};
 
 use super::device_join::{
     DeviceJoinAbandonmentRef, DeviceJoinAttempt, DeviceJoinAttemptId, DeviceJoinCleanupReceiptRef,

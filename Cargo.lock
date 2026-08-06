@@ -942,9 +942,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 name = "coven"
 version = "1.0.0-rc.1"
 dependencies = [
- "android-native-keyring-store",
  "apple-native-keyring-store",
- "argon2",
  "async-trait",
  "aws-config",
  "aws-credential-types",
@@ -954,10 +952,9 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
- "chacha20poly1305",
  "chrono",
  "coven-foundation",
- "crypto_box",
+ "coven-keys",
  "ed25519-dalek",
  "fallible-streaming-iterator",
  "futures-util",
@@ -969,7 +966,6 @@ dependencies = [
  "rand",
  "reqwest",
  "rusqlite",
- "security-framework",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -980,9 +976,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "windows-native-keyring-store",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -1004,6 +997,34 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "coven-keys"
+version = "1.0.0-rc.1"
+dependencies = [
+ "android-native-keyring-store",
+ "apple-native-keyring-store",
+ "argon2",
+ "base64",
+ "chacha20poly1305",
+ "coven-foundation",
+ "crypto_box",
+ "ed25519-dalek",
+ "hex",
+ "hkdf",
+ "keyring-core",
+ "rand",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "windows-native-keyring-store",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

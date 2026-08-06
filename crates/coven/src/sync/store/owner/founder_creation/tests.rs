@@ -49,7 +49,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         .membership_for_test()
         .await
         .expect("created Store founder chain is immediately readable");
-    assert!(membership.is_founded_by(&crate::keys::public_key_hex(&founder)));
+    assert!(membership.is_founded_by(&coven_keys::keys::public_key_hex(&founder)));
     assert_eq!(initialized.store.store_root(), &root_ref);
 }
 
@@ -316,7 +316,9 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     let storage = Arc::new(
         CloudSyncStorage::new(
             Arc::new(home),
-            CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key([41; 32])),
+            CloudCipher::Encrypted(coven_keys::encryption::EncryptionService::from_key(
+                [41; 32],
+            )),
             BlobPathScheme::Hashed,
             "opaque-founder-graph",
             founder.clone(),

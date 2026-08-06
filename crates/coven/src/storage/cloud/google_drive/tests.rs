@@ -5,8 +5,8 @@ use axum::http::{Request, Response, StatusCode};
 use axum::Router;
 use std::sync::{Arc, Mutex};
 
-use crate::keys::StoreKeys;
 use crate::oauth::OAuthTokens;
+use coven_keys::keys::StoreKeys;
 
 fn home() -> GoogleDriveCloudHome {
     let config = crate::oauth::OAuthClients::for_tests()

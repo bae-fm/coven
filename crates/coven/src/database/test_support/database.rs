@@ -276,7 +276,9 @@ impl Database {
     pub(crate) async fn run_scoped_host_write_for_test(&self, sql: String) {
         crate::database::StoreDatabase::new(self)
             .run_host_store_write_for_test(
-                Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                Some(coven_keys::encryption::EncryptionService::from_key(
+                    [42; 32],
+                )),
                 None,
                 move |transaction| transaction.execute_batch(&sql).map_err(DbError::from),
             )
@@ -539,7 +541,7 @@ impl Database {
         circle_id: crate::protocol::circle::CircleId,
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
-        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let audience_value = circle_id.to_string();
         let row_id = row_id.to_string();
         let stamp = stamp.to_string();
@@ -591,7 +593,7 @@ impl Database {
         audience: Option<crate::protocol::circle::CircleId>,
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
-        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let audience = audience.map(|circle_id| circle_id.to_string());
         let row_id = row_id.to_string();
         let stamp = stamp.to_string();
@@ -618,7 +620,7 @@ impl Database {
         bytes: &[u8],
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
-        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let document_id = document_id.to_string();
         let file_id = file_id.to_string();
         let audience = audience.map(|circle_id| circle_id.to_string());

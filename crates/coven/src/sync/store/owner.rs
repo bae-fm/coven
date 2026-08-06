@@ -137,7 +137,7 @@ impl Store {
                 version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
                 attempt_namespace,
                 slots,
-                seal_key: crate::encryption::MasterKeyring::generate(),
+                seal_key: coven_keys::encryption::MasterKeyring::generate(),
             },
         })
     }
@@ -203,7 +203,7 @@ impl Store {
     }
 
     fn local_author_pubkey(&self) -> String {
-        crate::keys::public_key_hex(&self.identity)
+        coven_keys::keys::public_key_hex(&self.identity)
     }
 
     #[doc(hidden)]
@@ -645,7 +645,7 @@ impl Store {
 
     pub(crate) async fn finalize_owner_promotion(
         &self,
-        encryption: &crate::encryption::EncryptionService,
+        encryption: &coven_keys::encryption::EncryptionService,
         acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<
         crate::protocol::circle_control::StoreMembershipStateRef,
@@ -667,7 +667,7 @@ impl Store {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
-        encryption: &crate::encryption::EncryptionService,
+        encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
@@ -693,8 +693,8 @@ impl Store {
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,
-        encryption: &crate::encryption::EncryptionService,
-        master_keys: &dyn crate::keys::MasterKeyCustody,
+        encryption: &coven_keys::encryption::EncryptionService,
+        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {

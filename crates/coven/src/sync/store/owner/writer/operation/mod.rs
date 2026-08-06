@@ -227,7 +227,7 @@ enum AuthorizationRefreshError {
     #[error("rotation gate database state: {0}")]
     Database(#[source] crate::database::DbError),
     #[error("merge this device's live and selected keyrings: {0}")]
-    InvalidKeyring(#[source] crate::encryption::EncryptionError),
+    InvalidKeyring(#[source] coven_keys::encryption::EncryptionError),
     #[error("adopt committed store-key rotation: {0}")]
-    KeyAdoption(#[source] crate::keys::KeyError),
+    KeyAdoption(#[source] coven_keys::keys::KeyError),
 }

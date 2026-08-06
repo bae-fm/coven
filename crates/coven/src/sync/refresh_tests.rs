@@ -13,9 +13,6 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::encryption::EncryptionService;
-use crate::keys::MasterKeyCustody;
-use crate::keys::UserKeypair;
 use crate::protocol::membership::{MemberRole, MembershipChain};
 use crate::protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
 use crate::storage::SyncStorage;
@@ -24,6 +21,9 @@ use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use coven_foundation::clock::SystemClock;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::MasterKeyCustody;
+use coven_keys::keys::UserKeypair;
 
 const LIB_ID: &str = "lib-refresh-test";
 
@@ -669,7 +669,7 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
     let persisted = ks_b
         .stored_key()
         .expect("merged same-generation keyring persisted");
-    let persisted = crate::encryption::MasterKeyring::from_serialized(&persisted)
+    let persisted = coven_keys::encryption::MasterKeyring::from_serialized(&persisted)
         .expect("parse persisted merged keyring");
     let persisted: EncryptionService = persisted.into();
     assert_eq!(
@@ -1261,7 +1261,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     assert_eq!(
         ks.stored_key(),
         Some(
-            crate::encryption::MasterKeyring::from(EncryptionService::from_key(old_key))
+            coven_keys::encryption::MasterKeyring::from(EncryptionService::from_key(old_key))
                 .to_serialized(),
         ),
         "the failed adoption did not persist a new key",

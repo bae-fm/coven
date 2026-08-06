@@ -1,5 +1,4 @@
 use crate::database::StoreDatabase;
-use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::protocol::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,
     CircleSemanticSlot, CircleTransitionPolicyObjects, PreparedCircleTransition,
@@ -16,6 +15,7 @@ use crate::sync::store::circle_controls::{
     CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive,
     VerifiedCircleReference,
 };
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use std::collections::BTreeSet;
 
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {

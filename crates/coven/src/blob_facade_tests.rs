@@ -41,7 +41,7 @@ fn open_local(dir: crate::StoreDir) -> crate::CovenHandle {
             crate::EncryptionService::from_key([42; 32]),
         )))
         .identity_custody(crate::IdentityCustody::InMemory(
-            crate::keys::UserKeypair::generate(),
+            coven_keys::keys::UserKeypair::generate(),
         ))
         .open()
         .expect("open the store")
@@ -96,7 +96,7 @@ impl ExternalPhotoTestHost for crate::CovenHandle {
 /// the registration can be dropped and remade.
 #[tokio::test]
 async fn an_external_file_reads_back_through_the_handle() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let handle = open_local(crate::StoreDir::new(tmp.path()));
     let user_dir = tempfile::tempdir().expect("user directory");
@@ -171,7 +171,7 @@ async fn an_external_file_reads_back_through_the_handle() {
 /// would be written and never read, so it is refused instead.
 #[tokio::test]
 async fn a_host_provided_table_refuses_an_external_file() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let handle = crate::Coven::builder(config(crate::StoreDir::new(tmp.path())))
         .synced_tables(test_synced_tables_with_blob(crate::BlobDecl::new(
@@ -182,7 +182,7 @@ async fn a_host_provided_table_refuses_an_external_file() {
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::generate()))
         .identity_custody(crate::IdentityCustody::InMemory(
-            crate::keys::UserKeypair::generate(),
+            coven_keys::keys::UserKeypair::generate(),
         ))
         .open()
         .expect("open the store");
@@ -203,7 +203,7 @@ async fn a_host_provided_table_refuses_an_external_file() {
 /// silently registering nothing.
 #[tokio::test]
 async fn registering_against_a_table_with_no_blob_is_refused() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let handle = open_local(crate::StoreDir::new(tmp.path()));
 
@@ -232,7 +232,7 @@ async fn registering_against_a_table_with_no_blob_is_refused() {
 fn reopen(
     dir: crate::StoreDir,
     keyring: crate::MasterKeyring,
-    owner: crate::keys::UserKeypair,
+    owner: coven_keys::keys::UserKeypair,
 ) -> crate::CovenHandle {
     crate::Coven::builder(config(dir))
         .synced_tables(note_tables())
@@ -254,10 +254,10 @@ async fn the_upload_queue_is_readable_before_any_transfer_and_across_a_restart()
 }
 
 async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_restart() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let dir = crate::StoreDir::new(tmp.path());
-    let owner = crate::keys::UserKeypair::generate();
+    let owner = coven_keys::keys::UserKeypair::generate();
     let encryption = crate::EncryptionService::from_key([42; 32]);
     let keyring = crate::MasterKeyring::from(encryption.clone());
     let handle = crate::Coven::builder(config(dir.clone()))
@@ -415,10 +415,10 @@ async fn deleting_a_published_row_queues_its_cloud_object_for_removal() {
 }
 
 async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let dir = crate::StoreDir::new(tmp.path());
-    let owner = crate::keys::UserKeypair::generate();
+    let owner = coven_keys::keys::UserKeypair::generate();
     let encryption = crate::EncryptionService::from_key([42; 32]);
     // A blob coven copies and publishes, so the row ends up with a cloud
     // object behind it — the thing a tombstone removes.
@@ -540,7 +540,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
 /// tombstone and the enqueue says so rather than queueing a phantom removal.
 #[tokio::test]
 async fn a_local_only_blob_has_no_cloud_object_to_remove() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let handle = open_local(crate::StoreDir::new(tmp.path()));
     let user_dir = tempfile::tempdir().expect("user directory");
@@ -573,7 +573,7 @@ async fn a_local_only_blob_has_no_cloud_object_to_remove() {
 /// longer points at one.
 #[tokio::test]
 async fn the_handle_reports_where_a_row_s_user_file_lives() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
     let handle = open_local(crate::StoreDir::new(tmp.path()));
     let user_dir = tempfile::tempdir().expect("user directory");

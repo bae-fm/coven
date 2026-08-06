@@ -9,11 +9,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::custody::KeyCustody;
-use crate::encryption::{EncryptionService, MasterKeyring};
-use crate::identity_custody::IdentityCustody;
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
-use crate::keys::{StoreKeys, UserKeypair};
 use crate::oauth::OAuthTokens;
 use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
@@ -22,6 +18,10 @@ use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, Snaps
 use crate::Migration;
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::StoreLayout;
+use coven_keys::custody::KeyCustody;
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::identity_custody::IdentityCustody;
+use coven_keys::keys::{StoreKeys, UserKeypair};
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they
@@ -472,19 +472,19 @@ pub async fn restore_from_code(
             &recovery.owner_identity_secret
         }
     };
-    let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(identity_secret)
+    let signing_key: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] = hex::decode(identity_secret)
         .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?
         .try_into()
         .map_err(|_| {
             BootstrapError::InvalidSigningKey(format!(
                 "Signing key must be {} bytes",
-                crate::keys::SIGN_SECRETKEYBYTES
+                coven_keys::keys::SIGN_SECRETKEYBYTES
             ))
         })?;
     let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(BootstrapError::Key)?;
     let continuation_device_signer = match &parsed.authority {
         crate::protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
-            let bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
+            let bytes: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] =
                 hex::decode(&continuation.device_signing_secret)
                     .map_err(|error| {
                         BootstrapError::InvalidSigningKey(format!(
@@ -495,7 +495,7 @@ pub async fn restore_from_code(
                     .map_err(|_| {
                         BootstrapError::InvalidSigningKey(format!(
                             "Device signing key must be {} bytes",
-                            crate::keys::SIGN_SECRETKEYBYTES
+                            coven_keys::keys::SIGN_SECRETKEYBYTES
                         ))
                     })?;
             Some(UserKeypair::from_signing_key_bytes(&bytes).map_err(BootstrapError::Key)?)
@@ -556,7 +556,7 @@ mod tests {
     /// arm, so it stands in for Google Drive and OneDrive here.
     #[tokio::test]
     async fn restore_dropbox_open_cloud_home_persists_oauth_tokens() {
-        crate::keys::test_keyring::install();
+        coven_keys::keys::test_keyring::install();
 
         let store_id = "restore-dropbox-persist-test";
         let tokens = OAuthTokens {

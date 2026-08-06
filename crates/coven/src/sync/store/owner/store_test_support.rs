@@ -50,7 +50,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn open_membership_keyring_for_test(
         &self,
-    ) -> Result<crate::encryption::EncryptionService, String> {
+    ) -> Result<coven_keys::encryption::EncryptionService, String> {
         let authorization = self.authorize().await.map_err(|error| error.to_string())?;
         authorization
             .open_membership_keyring_for_test()
@@ -520,7 +520,7 @@ impl Store {
     > {
         let (successor, _) = self
             .database
-            .circle_authoring_context(circle_id, &crate::keys::public_key_hex(&self.identity))
+            .circle_authoring_context(circle_id, &coven_keys::keys::public_key_hex(&self.identity))
             .await?;
         let crate::protocol::circle::CircleControlState::ActiveEpoch(active) =
             successor.control.value.state()

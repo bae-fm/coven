@@ -3,13 +3,13 @@ use super::{
     MembershipMutationProgress, ReplacementWrappedKey, RevokeMembershipPublication,
     RevokeMutationPlan,
 };
-use crate::encryption::{self, EncryptionService};
-use crate::keys;
 use crate::protocol::membership::{
     self, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
 };
 use crate::storage as cloud_storage;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, RevokeOutcome};
+use coven_keys::encryption::{self, EncryptionService};
+use coven_keys::keys;
 
 pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     operation: &'operation mut crate::sync::store::owner::AuthorizedWriterOperation<'storage>,

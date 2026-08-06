@@ -5,7 +5,7 @@ impl LocalStoreWriter {
         &self,
         history: &mut crate::sync::store::owner::writer::AuthorizedStoreHistory<'_>,
         membership: &crate::protocol::membership::MembershipChain,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<
         crate::sync::store::owner::writer::pull::StorePullExecution,
         crate::sync::store::owner::writer::pull::StorePullError,
@@ -199,7 +199,7 @@ impl LocalStoreWriter {
             write_id: crate::WriteId,
             registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
             registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-            signer: &crate::keys::UserKeypair,
+            signer: &coven_keys::keys::UserKeypair,
             input: crate::protocol::store_commit::StoreCommitOperationsInput<'_>,
         ) -> Result<
             crate::protocol::store_commit::StoreBatchCommit,

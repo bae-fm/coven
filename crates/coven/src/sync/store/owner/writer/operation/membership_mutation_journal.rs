@@ -1,6 +1,5 @@
 use crate::database::DurableMembershipMutation;
 use crate::database::StoreDatabase;
-use crate::encryption::EncryptionService;
 use crate::protocol::membership::{
     self, MemberRole, MembershipChange, MembershipEntry, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
@@ -15,6 +14,7 @@ use crate::protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
 use crate::storage::SyncStorage;
+use coven_keys::encryption::EncryptionService;
 
 use crate::sync::store::membership::InviteError;
 

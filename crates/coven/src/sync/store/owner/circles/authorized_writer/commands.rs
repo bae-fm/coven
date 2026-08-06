@@ -429,7 +429,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn retry_circle_operation(
         &mut self,
         operation_id: &crate::protocol::circle::CircleOperationId,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
         let journal = self
             .database

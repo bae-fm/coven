@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 coven-foundation = { workspace = true }
+coven-keys = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,12 +26,6 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hkdf = { workspace = true }
-argon2 = { workspace = true }
-zeroize = { workspace = true }
-chacha20poly1305 = { workspace = true }
-ed25519-dalek = { workspace = true }
-crypto_box = { workspace = true }
-x25519-dalek = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
@@ -51,32 +46,28 @@ aws-sdk-sts = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-smithy-http-client = { workspace = true }
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-apple-native-keyring-store = { workspace = true }
-# Only for downcasting the OSStatus out of `keyring_core::Error::PlatformFailure`
-# in `map_keyring_error` (see crates/coven/src/keys.rs) — coven never calls the
-# Security framework directly otherwise.
-security-framework = { workspace = true }
-
-[target.'cfg(target_os = "android")'.dependencies]
-android-native-keyring-store = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = { workspace = true }
-
 [dev-dependencies]
 keyring-core = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-# A `cfg(test)` build of this crate re-exports the foundation clock and id
-# fakes, which exist only under that crate's own `test-utils`. `cfg(test)`
-# enables no `[features]` of this crate, so the fakes arrive through this edge.
+# Signing keys appear only in this crate's test fixtures now; key material
+# itself belongs to coven-keys.
+ed25519-dalek = { workspace = true }
+# A `cfg(test)` build of this crate re-exports the foundation and keys test
+# hooks, which exist only under those crates' own `test-utils`. `cfg(test)`
+# enables no `[features]` of this crate, so they arrive through these edges.
 coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-keys = { workspace = true, features = ["test-utils"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
+# The Apple keyring integration test asserts against the real store's own
+# types; coven itself reaches the platform keyring only through coven-keys.
+apple-native-keyring-store = { workspace = true }
 
 [features]
 # Hosts building test doubles against Coven get the same fakes Coven itself
-# tests with, foundation clock and id fakes included.
-test-utils = ["coven-foundation/test-utils"]
-oauth-providers = ["dep:open"]
+# tests with: the foundation clock and id fakes, and the keys test hooks.
+test-utils = ["coven-foundation/test-utils", "coven-keys/test-utils"]
+oauth-providers = ["dep:open", "coven-keys/oauth-providers"]
 
 [lints]
 workspace = true

@@ -16,9 +16,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::CloudHomeError;
-use crate::keys::StoreKeys;
 use crate::oauth::{self, OAuthConfig, OAuthTokens};
 use coven_foundation::clock::ClockRef;
+use coven_keys::keys::StoreKeys;
 
 /// Waits out one retry delay. A field so tests exercise the retry schedule
 /// (attempt count, honored `Retry-After`) without sleeping real seconds.
@@ -492,7 +492,7 @@ mod tests {
             r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
         )
         .await;
-        crate::keys::test_keyring::install();
+        coven_keys::keys::test_keyring::install();
         let key_service = StoreKeys::bind("oauth-persist-failure".to_string());
         fail_next_cloud_credentials_write(&key_service);
         let session = OAuthSession::new(

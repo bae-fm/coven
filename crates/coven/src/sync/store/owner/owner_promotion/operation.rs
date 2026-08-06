@@ -1,5 +1,3 @@
-use crate::encryption::EncryptionService;
-use crate::keys;
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::StoreMembershipRoleGrant;
 use crate::protocol::membership_mutation::{
@@ -17,6 +15,8 @@ use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::sync::store::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys;
 
 use super::authority::target_key;
 use super::journal::{

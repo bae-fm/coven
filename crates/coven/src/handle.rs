@@ -27,10 +27,6 @@ use std::sync::Arc;
 
 use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
 use crate::database::{Database, DbError, StoreDatabase};
-use crate::encryption::SealError;
-use crate::keys::{
-    DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
-};
 use crate::protocol::blob::DrainOutcome;
 use crate::protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::protocol::membership::MemberInfo;
@@ -54,6 +50,10 @@ use crate::sync::{BlobCacheError, BlobStream};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
 use coven_foundation::store_dir::StoreOpenGuard;
+use coven_keys::encryption::SealError;
+use coven_keys::keys::{
+    DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
+};
 use tokio::sync::watch;
 
 /// A Remote blob read needs sync storage; if building it from config fails
@@ -1113,7 +1113,7 @@ impl CovenHandle {
     pub(crate) async fn create_test_store(
         &self,
         store_id: &str,
-        signer: crate::keys::UserKeypair,
+        signer: coven_keys::keys::UserKeypair,
         home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
         self.sync.create_test_store(store_id, signer, home).await
@@ -1247,7 +1247,7 @@ impl CovenHandle {
     pub(crate) async fn prepare_test_join_snapshot(
         &self,
         store: &crate::sync::test_helpers::TestStore,
-        owner: &crate::keys::UserKeypair,
+        owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
     ) -> Result<(), String> {
         self.joining

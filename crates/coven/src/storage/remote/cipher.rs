@@ -15,27 +15,27 @@ pub(crate) trait CloudCipherAccess: Send + Sync {
     fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError>;
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError>;
 
     fn adopt_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<String, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<String, coven_keys::keys::KeyError> {
         if let Some(fingerprint) = self.merge_key_rotation(new_encryption, custody)? {
             return Ok(fingerprint);
         }
         let CloudCipher::Encrypted(live) = self.snapshot() else {
-            return Err(crate::keys::KeyError::Crypto(
+            return Err(coven_keys::keys::KeyError::Crypto(
                 "cannot rotate the key of a plaintext cloud home".to_string(),
             ));
         };
         let retained = live
             .merged_with(new_encryption)
-            .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
+            .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))?;
         if retained.key_count() != live.key_count() {
-            return Err(crate::keys::KeyError::Crypto(
+            return Err(coven_keys::keys::KeyError::Crypto(
                 "live keyring changed without retaining an adopted rotation".to_string(),
             ));
         }
@@ -75,10 +75,10 @@ impl CloudCipherState {
     pub(crate) fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         let CloudCipherMode::Encrypted(live) = &self.mode else {
-            return Err(crate::keys::KeyError::Crypto(
+            return Err(coven_keys::keys::KeyError::Crypto(
                 "cannot rotate the key of a plaintext cloud home".to_string(),
             ));
         };
@@ -102,8 +102,8 @@ impl CloudCipherAccess for CloudCipherState {
     fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         CloudCipherState::merge_key_rotation(self, new_encryption, custody)
     }
 }
@@ -116,8 +116,8 @@ impl<T: CloudCipherAccess + ?Sized> CloudCipherAccess for Arc<T> {
     fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         (**self).merge_key_rotation(new_encryption, custody)
     }
 }
@@ -132,15 +132,15 @@ impl<T: CloudCipherAccess + ?Sized> CloudCipherAccess for Arc<T> {
 fn merge_into(
     live: &mut EncryptionService,
     new_encryption: &EncryptionService,
-    custody: &dyn crate::keys::MasterKeyCustody,
-) -> Result<Option<String>, crate::keys::KeyError> {
+    custody: &dyn coven_keys::keys::MasterKeyCustody,
+) -> Result<Option<String>, coven_keys::keys::KeyError> {
     let merged = live
         .merged_with(new_encryption)
-        .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
+        .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))?;
     if merged.key_count() == live.key_count() {
         return Ok(None);
     }
-    custody.persist(&crate::encryption::MasterKeyring::from(merged.clone()))?;
+    custody.persist(&coven_keys::encryption::MasterKeyring::from(merged.clone()))?;
     *live = merged;
     Ok(Some(live.fingerprint()))
 }
@@ -154,11 +154,11 @@ impl CloudCipherAccess for RwLock<CloudCipher> {
     fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         let mut cipher = self.write().unwrap();
         let CloudCipher::Encrypted(live) = &mut *cipher else {
-            return Err(crate::keys::KeyError::Crypto(
+            return Err(coven_keys::keys::KeyError::Crypto(
                 "cannot rotate the key of a plaintext cloud home".to_string(),
             ));
         };

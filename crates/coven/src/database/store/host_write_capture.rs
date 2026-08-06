@@ -12,8 +12,8 @@ use crate::database::{
     validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, CirclePartitionControl,
     Gates, RoutingChanges,
 };
-use crate::encryption::EncryptionService;
 use crate::{AffectedRow, Provenance, SyncedTable, WriteId, WriteReceipt, WriteStatus};
+use coven_keys::encryption::EncryptionService;
 
 use super::*;
 

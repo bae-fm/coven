@@ -24,8 +24,6 @@ use std::sync::Arc;
 use crate::coven::CovenResult;
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::encryption::SealError;
-use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::protocol::blob::RowBlobRef;
 use crate::store_blobs::StoreBlobs;
 use crate::store_foundation::StoreFoundation;
@@ -34,6 +32,8 @@ use crate::store_sync::ConfigProvider;
 use crate::sync::{BlobCacheError, BlobStream};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::encryption::SealError;
+use coven_keys::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 
 /// A read-only handle over one coven store, for a same-store secondary reader.
 ///

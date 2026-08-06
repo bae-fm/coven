@@ -40,7 +40,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .protocol()
             .descriptor
             .founder_pubkey
-            == crate::keys::public_key_hex(identity);
+            == coven_keys::keys::public_key_hex(identity);
         if device_id.is_none() && !identity_is_founder {
             return Err(StoreInitializationError::ProtocolRoot(
                 "opening a Store for a non-founder requires an installed local device".to_string(),
@@ -94,7 +94,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let storage = self.storage;
         let root = self.history_verifier.verified_root().reference();
         let founder = self.history_verifier.load_founder_registration().await?;
-        if founder.value.author_pubkey != crate::keys::public_key_hex(signer) {
+        if founder.value.author_pubkey != coven_keys::keys::public_key_hex(signer) {
             return Err(
                 crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
                     "Store founder registration belongs to another identity".to_string(),

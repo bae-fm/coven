@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::keys::UserKeypair;
 use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::membership::MemberRole;
@@ -29,6 +28,7 @@ use crate::sync::test_helpers::{
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::keys::UserKeypair;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -145,7 +145,7 @@ async fn storage_with_chain(
             &pubkey_hex(&member),
             None,
             MemberRole::Member,
-            &crate::encryption::EncryptionService::from_key([42; 32]),
+            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             "Test Store",
         )
         .await

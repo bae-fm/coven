@@ -245,7 +245,7 @@ impl StoreMemberProviderAccessGrant {
         administrator: StoreDeviceRegistrationRef,
         store: &StoreProviderBinding,
         administrator_registration: &StoreDeviceRegistration,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
     ) -> Result<Self, ProviderProbeError> {
         administrator
             .verify_registration(administrator_registration)

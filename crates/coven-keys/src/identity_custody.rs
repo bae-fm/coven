@@ -35,7 +35,7 @@ impl IdentityCustody {
     /// [`IdentityCustody::Keyring`] and `store_dir` for
     /// [`IdentityCustody::Passphrase`].
     ///
-    /// Public to match [`KeyCustody::resolve`](crate::KeyCustody::resolve): a
+    /// Public to match [`KeyCustody::resolve`](crate::custody::KeyCustody::resolve): a
     /// host can resolve either policy against the same retained store-key
     /// capability used by the store boundary.
     pub fn resolve(

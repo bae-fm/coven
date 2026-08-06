@@ -41,7 +41,7 @@ pub struct BlobChunking {
 impl BlobChunking {
     /// 64 KiB chunks read one mebibyte of stored bytes at a time.
     pub const DEFAULT: Self = Self {
-        chunk: crate::encryption::DEFAULT_BLOB_CHUNK_SIZE,
+        chunk: coven_keys::encryption::DEFAULT_BLOB_CHUNK_SIZE,
         window: match std::num::NonZeroU64::new(1 << 20) {
             Some(window) => window,
             None => unreachable!(),
@@ -74,7 +74,7 @@ impl BlobChunking {
 pub(crate) struct BlobRangeReader {
     pub(super) exact: Arc<dyn ExactSlotStorage>,
     pub(super) slot: crate::protocol::objects::ObjectSlot,
-    pub(super) opener: crate::encryption::SealedBlobOpener,
+    pub(super) opener: coven_keys::encryption::SealedBlobOpener,
     pub(super) plaintext_size: u64,
     pub(super) window: std::num::NonZeroU64,
 }
@@ -148,7 +148,7 @@ impl BlobRangeReader {
 pub(super) enum ExactBlobOpening {
     Browsable,
     Opaque {
-        opener: crate::encryption::SealedBlobOpener,
+        opener: coven_keys::encryption::SealedBlobOpener,
         next_chunk: u64,
     },
 }
@@ -288,12 +288,19 @@ impl ExactBlobPlaintextReader {
 /// the object.
 pub(crate) fn split_sealed_blob(
     stored: &[u8],
-) -> Result<(crate::encryption::KeyFingerprint, SealedBlobHeader, &[u8]), EncryptionError> {
+) -> Result<
+    (
+        coven_keys::encryption::KeyFingerprint,
+        SealedBlobHeader,
+        &[u8],
+    ),
+    EncryptionError,
+> {
     let (fingerprint, rest) = KeyTag::read(stored)?;
     let header = SealedBlobHeader::parse(rest)
         .map_err(|error| EncryptionError::Decryption(error.to_string()))?;
     Ok((
-        crate::encryption::KeyFingerprint::from_bytes(fingerprint),
+        coven_keys::encryption::KeyFingerprint::from_bytes(fingerprint),
         header,
         &rest[header.prefix_len() as usize..],
     ))
@@ -306,11 +313,11 @@ pub(crate) fn split_sealed_blob(
 pub(super) fn verified_sealed_blob_opener(
     prefix: &[u8],
     blob: &crate::protocol::blob::locator::StoredBlobRef,
-    key_fingerprint: &crate::encryption::KeyFingerprint,
+    key_fingerprint: &coven_keys::encryption::KeyFingerprint,
     scope: &crate::protocol::blob::BlobScope,
     master: &EncryptionService,
     aad_context: &[u8],
-) -> Result<crate::encryption::SealedBlobOpener, StorageError> {
+) -> Result<coven_keys::encryption::SealedBlobOpener, StorageError> {
     let locator = blob.locator();
     let (fingerprint, header, _) = split_sealed_blob(prefix).map_err(|error| {
         StorageError::Decryption(format!("blob {}: {error}", locator.locator_hash()))

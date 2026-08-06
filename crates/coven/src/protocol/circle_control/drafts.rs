@@ -137,7 +137,7 @@ pub(super) struct CircleAccessDraft<'identity> {
     access_root: ObjectHash,
     leaves: Vec<PreparedAccessLeaf>,
     proofs: Vec<Vec<MerkleStep>>,
-    signer: &'identity dyn crate::keys::IdentityKeyAuthority,
+    signer: &'identity dyn coven_keys::keys::IdentityKeyAuthority,
 }
 
 impl<'identity> CircleAccessDraft<'identity> {
@@ -155,7 +155,7 @@ impl<'identity> CircleAccessDraft<'identity> {
         store_members: &[(String, MemberRole)],
         bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
         ids: &dyn coven_foundation::id_provider::IdProvider,
-        signer: &'identity dyn crate::keys::IdentityKeyAuthority,
+        signer: &'identity dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let author_pubkey = keys::public_key_hex(signer);
         let leaves = store_members
@@ -314,7 +314,7 @@ pub(super) fn circle_successor_context<'a>(
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
-    signer: &dyn crate::keys::IdentityKeyAuthority,
+    signer: &dyn coven_keys::keys::IdentityKeyAuthority,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     let epoch = current_control
         .value
@@ -342,7 +342,7 @@ pub(super) fn circle_delete_successor_context<'a>(
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
-    signer: &dyn crate::keys::IdentityKeyAuthority,
+    signer: &dyn coven_keys::keys::IdentityKeyAuthority,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     let epoch = current_control.value.access_epoch();
     circle_authored_successor_context(
@@ -362,7 +362,7 @@ pub(super) fn circle_authored_successor_context<'a>(
     current_roster: &CircleMaterializedRoster,
     current_metadata: &CircleMetadata,
     keyring: &str,
-    signer: &dyn crate::keys::IdentityKeyAuthority,
+    signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     epoch: &'a MergeActiveCircleEpoch,
 ) -> Result<CircleSuccessorContext<'a>, CircleTransitionError> {
     if !current_control.verify()

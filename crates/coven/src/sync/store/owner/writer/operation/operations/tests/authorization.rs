@@ -6,7 +6,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     let owner = UserKeypair::generate();
     let writer = UserKeypair::generate();
     let writer_pubkey = pubkey_hex(&writer);
-    let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store = TestStore::create(
         &owner_db,
         "operation-predecessor-membership",
@@ -87,7 +87,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     let owner = UserKeypair::generate();
     let writer = UserKeypair::generate();
     let writer_pubkey = pubkey_hex(&writer);
-    let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store = TestStore::create(
         &owner_db,
         "direct-removal-predecessor-membership",
@@ -180,7 +180,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
 async fn merge_outbound_authorization_admits_direct_membership_after_its_predecessor() {
     let owner_db = open_test_db();
     let owner = UserKeypair::generate();
-    let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store = TestStore::create(
         &owner_db,
         "new-direct-predecessor-membership",

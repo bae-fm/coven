@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::encryption::{EncryptionService, MasterKeyring, SealError};
-use crate::keys::{
-    CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
-    MasterKeyError, RoutingEncryptionError, StoreKeys, UserKeypair,
-};
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
 use coven_foundation::config::{Config, HomeStorage};
+use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
+use coven_keys::keys::{
+    CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
+    MasterKeyError, RoutingEncryptionError, StoreKeys, UserKeypair,
+};
 
 pub(crate) struct EstablishedStoreIdentity {
     keypair: UserKeypair,
@@ -15,7 +15,7 @@ pub(crate) struct EstablishedStoreIdentity {
 
 impl EstablishedStoreIdentity {
     pub(crate) fn public_key_hex(&self) -> String {
-        crate::keys::public_key_hex(&self.keypair)
+        coven_keys::keys::public_key_hex(&self.keypair)
     }
 
     pub(crate) async fn initialize_sync_components(
@@ -108,12 +108,12 @@ impl StoreSecurity {
         }
         let identity = UserKeypair::generate();
         self.identity.persist(&identity)?;
-        Ok(crate::keys::public_key_hex(&identity))
+        Ok(coven_keys::keys::public_key_hex(&identity))
     }
 
     pub(crate) fn established_identity(&self) -> Result<EstablishedStoreIdentity, KeyError> {
         Ok(EstablishedStoreIdentity {
-            keypair: crate::keys::require_identity(self.identity.as_ref())?,
+            keypair: coven_keys::keys::require_identity(self.identity.as_ref())?,
         })
     }
 

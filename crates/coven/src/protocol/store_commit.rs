@@ -12,7 +12,6 @@ use super::membership::{
     MembershipEntry, MembershipEntryRef, MembershipGrantCreationAuthority, MembershipGrantId,
     MembershipHeadRef, StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{
     AccessLeafId, CircleBootstrapCoverageRef, CircleBootstrapRef, CircleControlCoord,
     CircleEpochId, CircleId, CircleMetadataCoord, CircleMetadataHeadRef,
@@ -23,6 +22,7 @@ use crate::protocol::objects::ObjectSlot;
 use crate::protocol::objects::{ExactObjectRef, ProviderDeviceBinding};
 use crate::KeyFingerprint;
 use crate::WriteId;
+use coven_keys::keys::{self, UserKeypair};
 
 mod ack_snapshot;
 mod batch_commit;

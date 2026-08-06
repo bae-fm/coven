@@ -78,23 +78,23 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         crates: &["ed25519_dalek"],
         path_patterns: &[],
         allowed: &[
-            "crates/coven/src/keys/",
-            "crates/coven/src/identity_custody.rs",
+            "crates/coven-keys/src/keys/",
+            "crates/coven-keys/src/identity_custody.rs",
         ],
     },
     GatedCapability {
         kind: "sealed-box keys (crypto_box / x25519-dalek)",
         crates: &["crypto_box", "x25519_dalek"],
         path_patterns: &[],
-        allowed: &["crates/coven/src/keys/"],
+        allowed: &["crates/coven-keys/src/keys/"],
     },
     GatedCapability {
         kind: "AEAD cipher (chacha20poly1305)",
         crates: &["chacha20poly1305"],
         path_patterns: &[],
         allowed: &[
-            "crates/coven/src/encryption.rs",
-            "crates/coven/src/envelope.rs",
+            "crates/coven-keys/src/encryption.rs",
+            "crates/coven-keys/src/envelope.rs",
         ],
     },
     GatedCapability {
@@ -102,9 +102,9 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         crates: &["argon2"],
         path_patterns: &[],
         allowed: &[
-            "crates/coven/src/custody.rs",
-            "crates/coven/src/envelope.rs",
-            "crates/coven/src/identity_custody.rs",
+            "crates/coven-keys/src/custody.rs",
+            "crates/coven-keys/src/envelope.rs",
+            "crates/coven-keys/src/identity_custody.rs",
         ],
     },
     GatedCapability {
@@ -112,7 +112,7 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         crates: &["hkdf"],
         path_patterns: &[],
         allowed: &[
-            "crates/coven/src/encryption.rs",
+            "crates/coven-keys/src/encryption.rs",
             "crates/coven/src/protocol/circle.rs",
         ],
     },
@@ -140,8 +140,8 @@ pub(crate) const KEYRING_BOUNDARY: &[GatedCapability] = &[GatedCapability {
     ],
     path_patterns: &[],
     allowed: &[
-        "crates/coven/src/keys/",
-        "crates/coven/src/keyring_backend.rs",
+        "crates/coven-keys/src/keys/",
+        "crates/coven-keys/src/keyring_backend.rs",
     ],
 }];
 
@@ -195,9 +195,9 @@ pub(crate) const AMBIENT_BOUNDARY: &[GatedCapability] = &[
         crates: &["rand"],
         path_patterns: &[&["OsRng"], &["thread_rng"], &["ThreadRng"]],
         allowed: &[
-            "crates/coven/src/keys/",
-            "crates/coven/src/encryption.rs",
-            "crates/coven/src/envelope.rs",
+            "crates/coven-keys/src/keys/",
+            "crates/coven-keys/src/encryption.rs",
+            "crates/coven-keys/src/envelope.rs",
             "crates/coven/src/oauth.rs",
             "crates/coven/src/storage/cloud/oauth_session.rs",
         ],
@@ -242,9 +242,9 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-foundation/src/local_file.rs",
     "crates/coven-foundation/src/store_dir.rs",
     "crates/coven-foundation/src/config.rs",
-    "crates/coven/src/custody.rs",
-    "crates/coven/src/envelope.rs",
-    "crates/coven/src/identity_custody.rs",
+    "crates/coven-keys/src/custody.rs",
+    "crates/coven-keys/src/envelope.rs",
+    "crates/coven-keys/src/identity_custody.rs",
     "crates/coven/src/database/",
     "crates/coven/src/storage/",
     "crates/coven/src/blob/transition.rs",
@@ -533,7 +533,7 @@ mod tests {
                 "crates/coven/src/protocol/circle_control.rs",
                 "use hmac::Mac;",
             ),
-            file("crates/coven/src/encryption.rs", "use hkdf::Hkdf;"),
+            file("crates/coven-keys/src/encryption.rs", "use hkdf::Hkdf;"),
         ];
         assert!(find_capability_boundary_violations(&files, CRYPTO_BOUNDARY).is_empty());
     }
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn a_local_item_sharing_a_gated_crate_name_is_not_a_crate_reference() {
         let files = vec![file(
-            "crates/coven/src/envelope.rs",
+            "crates/coven-keys/src/envelope.rs",
             r#"
             fn open(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Vec<u8> { Vec::new() }
             fn unlock() { let _ = open(&[], &[], &[]); }
@@ -649,7 +649,7 @@ mod tests {
         )];
         assert!(find_capability_boundary_violations(&files, NETWORK_BOUNDARY).is_empty());
 
-        let import = vec![file("crates/coven/src/envelope.rs", "use open;")];
+        let import = vec![file("crates/coven-keys/src/envelope.rs", "use open;")];
         assert_eq!(
             find_capability_boundary_violations(&import, NETWORK_BOUNDARY).len(),
             1

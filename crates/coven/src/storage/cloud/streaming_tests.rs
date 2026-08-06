@@ -1,5 +1,5 @@
 use super::*;
-use crate::encryption::EncryptionService;
+use coven_keys::encryption::EncryptionService;
 const CHUNK_SIZE: usize = DEFAULT_BLOB_CHUNK_SIZE.get() as usize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,11 +21,11 @@ async fn sealed_body(
     let reader = crate::storage::local_file::open_reader(&path)
         .await
         .unwrap();
-    let policy = crate::encryption::NoncePolicy::DerivedFromContext {
+    let policy = coven_keys::encryption::NoncePolicy::DerivedFromContext {
         context: b"storage-cloud-test".to_vec(),
     };
-    let header = crate::encryption::SealedBlobHeader::new(
-        crate::encryption::DEFAULT_BLOB_CHUNK_SIZE,
+    let header = coven_keys::encryption::SealedBlobHeader::new(
+        coven_keys::encryption::DEFAULT_BLOB_CHUNK_SIZE,
         plaintext.len() as u64,
         &policy,
     );
@@ -75,13 +75,13 @@ async fn sealed_body_streams_then_decrypts() {
                 expected_len,
                 "streamed length wrong for len={len} min={min}"
             );
-            let header = crate::encryption::SealedBlobHeader::parse(&sealed).unwrap();
+            let header = coven_keys::encryption::SealedBlobHeader::parse(&sealed).unwrap();
             assert_eq!(header.plaintext_len(), len as u64);
             assert_eq!(
                 service
                     .blob_opener(
                         header,
-                        &crate::encryption::NoncePolicy::DerivedFromContext {
+                        &coven_keys::encryption::NoncePolicy::DerivedFromContext {
                             context: b"storage-cloud-test".to_vec(),
                         },
                         b"storage-cloud-test",

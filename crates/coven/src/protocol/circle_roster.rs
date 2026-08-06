@@ -12,8 +12,8 @@ use super::causal_grants::{
 use super::circle::{CircleId, CircleRole};
 use super::membership::MembershipGrantId;
 use super::store_commit::{ObjectHash, Signed, SignedBody, StoreDeviceRegistration, SuccessorLink};
-use crate::keys::{self, UserKeypair};
 use crate::protocol::objects::ExactObjectRef;
+use coven_keys::keys::{self, UserKeypair};
 
 mod chain;
 mod conflict;
@@ -166,7 +166,7 @@ impl CircleRosterEntry {
         device_id: &str,
         stream_id: AuthorStreamId,
         owner_grant: MembershipGrantId,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Self {
         let author_pubkey = keys::public_key_hex(signer);
         Signed::sign(

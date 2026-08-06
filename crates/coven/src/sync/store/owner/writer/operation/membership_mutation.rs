@@ -29,7 +29,7 @@ pub(super) fn validate_revoke_rotation_adoption(
         ));
     }
     let planned_generation =
-        crate::encryption::EncryptionService::from_keyring_payload(plan.keyring_payload)
+        coven_keys::encryption::EncryptionService::from_keyring_payload(plan.keyring_payload)
             .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
             .current_generation();
     if planned_generation != adopted_generation {

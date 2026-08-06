@@ -668,7 +668,7 @@ impl CircleRosterChain {
         stream_id: AuthorStreamId,
         member_pubkey: String,
         role: CircleRole,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<CircleRosterEntry, CircleRosterError> {
         self.signed_change(device_id, stream_id, member_pubkey, Some(role), signer)
     }
@@ -678,7 +678,7 @@ impl CircleRosterChain {
         device_id: &str,
         stream_id: AuthorStreamId,
         member_pubkey: String,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<CircleRosterEntry, CircleRosterError> {
         if self.active_grants(&member_pubkey).is_empty() {
             return Err(CircleRosterError::NotAMember(member_pubkey));
@@ -692,7 +692,7 @@ impl CircleRosterChain {
         stream_id: AuthorStreamId,
         member_pubkey: String,
         role: Option<CircleRole>,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<CircleRosterEntry, CircleRosterError> {
         if matches!(self.status, CircleRosterStatus::Conflict(_)) {
             return Err(CircleRosterError::Conflict);
@@ -767,7 +767,7 @@ impl CircleRosterChain {
     pub(crate) fn signed_cycle_resolution(
         &self,
         resolver_branch_heads: Vec<CircleRosterHeadRef>,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<CircleRosterConflictResolution, CircleRosterError> {
         let CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
             conflict_hash,

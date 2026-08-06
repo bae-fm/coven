@@ -287,7 +287,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn resume_operations(
         &mut self,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), SyncCycleFailure> {
         self.device_exclusion()
             .resume()

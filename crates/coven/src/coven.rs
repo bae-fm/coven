@@ -5,11 +5,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::custody::KeyCustody;
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
-use crate::identity_custody::IdentityCustody;
-use crate::keys::StoreKeys;
 use crate::protocol::blob::BlobTransitionObserver;
 use crate::protocol::synced_schema::SyncedTable;
 use crate::store_sync::ConfigProvider;
@@ -18,6 +15,9 @@ use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::StoreOpenGuard;
 use coven_foundation::store_dir::{LocalBlobStoreError, PathTokenError};
+use coven_keys::custody::KeyCustody;
+use coven_keys::identity_custody::IdentityCustody;
+use coven_keys::keys::StoreKeys;
 
 pub type CovenResult<T> = Result<T, CovenError>;
 
@@ -34,7 +34,7 @@ pub enum CovenError {
     #[error("unsafe blob path: {0}")]
     UnsafeBlobPath(#[from] PathTokenError),
     #[error("row routing key: {0}")]
-    RoutingEncryption(#[from] crate::keys::RoutingEncryptionError),
+    RoutingEncryption(#[from] coven_keys::keys::RoutingEncryptionError),
     #[error("malformed local path: {0}")]
     MalformedPath(String),
     #[error("the write SQL closure panicked")]
@@ -420,8 +420,8 @@ fn resolve_custody(
     identity_custody: IdentityCustody,
 ) -> (
     StoreKeys,
-    Arc<dyn crate::keys::MasterKeyCustody>,
-    Arc<dyn crate::keys::DeviceIdentityCustody>,
+    Arc<dyn coven_keys::keys::MasterKeyCustody>,
+    Arc<dyn coven_keys::keys::DeviceIdentityCustody>,
 ) {
     let key_service = StoreKeys::bind(config.store_id.clone());
     let master = key_custody.resolve(&key_service, &config.store_dir);

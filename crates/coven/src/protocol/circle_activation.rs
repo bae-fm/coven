@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::protocol::circle::{
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleBootstrapRef, CircleControl,
     CircleControlCoord, CircleEpochCloseId, CircleId, CircleMetadata, PreparedAccessLeaf,
@@ -14,6 +13,7 @@ use crate::protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
+use coven_keys::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 
 /// The local device's own exclusion from a Circle epoch close, derived strictly
 /// from the verified successor outcome at materialization. It records the exact

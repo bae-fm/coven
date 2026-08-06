@@ -7,8 +7,6 @@ use async_trait::async_trait;
 
 use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
-use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
 use crate::protocol::blob::DrainOutcome;
 use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::protocol::objects::ObjectSlot;
@@ -23,6 +21,8 @@ use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";

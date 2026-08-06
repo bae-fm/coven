@@ -154,7 +154,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             ));
         }
         let expected_registration = attempt.expected_registration.clone();
-        if expected_registration.author_pubkey != crate::keys::public_key_hex(identity) {
+        if expected_registration.author_pubkey != coven_keys::keys::public_key_hex(identity) {
             return Err(StoreRegistrationError::Invalid(
                 "joiner identity differs from the signed device registration request".to_string(),
             ));
@@ -334,7 +334,7 @@ pub(super) async fn verify_offer(
     offer: &DeviceJoinOffer,
 ) -> Result<(), DeviceJoinError> {
     let root = history.verified_root();
-    if crate::keys::public_key_hex(identity) != offer.member_pubkey
+    if coven_keys::keys::public_key_hex(identity) != offer.member_pubkey
         || storage.provider_binding().await?.store != offer.provider
         || root.protocol().descriptor.provider != offer.provider
         || root.reference() != &offer.store_root

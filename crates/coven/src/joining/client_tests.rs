@@ -5,14 +5,14 @@ use super::*;
 /// directory nor the keyring entries a live store depends on.
 #[test]
 fn guard_refuses_a_completed_store_and_leaves_it_untouched() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
     let store_dir = StoreDir::new(tmp.path().join("completed"));
     std::fs::create_dir_all(&*store_dir).expect("create store dir");
     std::fs::write(store_dir.config_path(), b"store_id: completed\n")
         .expect("seed completion marker");
     let store_keys = StoreKeys::bind("guard-completed-test".to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     custody
         .persist(&MasterKeyring::generate())
         .expect("seed the master key");
@@ -43,14 +43,14 @@ fn guard_refuses_a_completed_store_and_leaves_it_untouched() {
 /// retries from a clean slate.
 #[test]
 fn guard_clears_a_torn_bootstrap_and_lets_the_retry_proceed() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
     let store_dir = StoreDir::new(tmp.path().join("torn"));
     std::fs::create_dir_all(&*store_dir).expect("create store dir");
     // Partial bootstrap residue: a torn database image, no config marker.
     std::fs::write(store_dir.db_path(), b"half-written-db").expect("seed torn db");
     let store_keys = StoreKeys::bind("guard-torn-test".to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     custody
         .persist(&MasterKeyring::generate())
         .expect("seed the master key");
@@ -105,12 +105,12 @@ fn guard_clears_a_torn_bootstrap_and_lets_the_retry_proceed() {
 /// tolerated, not a failure — see the dedicated test below).
 #[test]
 fn cleanup_failure_carries_the_original_bootstrap_cause() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
     let blocked = StoreDir::new(tmp.path().join("blocked-by-a-file"));
     std::fs::write(&*blocked, b"not a directory").expect("seed a file at the store dir path");
     let store_keys = StoreKeys::bind("cleanup-failure-cause-test".to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &blocked);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &blocked);
     let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &blocked);
 
     let cleanup = BootstrapCleanup::new(
@@ -137,12 +137,12 @@ fn cleanup_failure_carries_the_original_bootstrap_cause() {
 /// unchanged — no `Cleanup` wrapper — and the partial store dir is gone.
 #[test]
 fn successful_cleanup_returns_the_cause_unchanged() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
     let store_dir = StoreDir::new(tmp.path().join("to-remove"));
     std::fs::create_dir_all(&*store_dir).expect("create store dir");
     let store_keys = StoreKeys::bind("successful-cleanup-test".to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
 
     let cleanup = BootstrapCleanup::new(
@@ -167,11 +167,11 @@ fn successful_cleanup_returns_the_cause_unchanged() {
 /// pre-directory failure still reports as the plain original cause.
 #[test]
 fn cleanup_tolerates_a_store_dir_that_was_never_created() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
     let never_created = StoreDir::new(tmp.path().join("never-created"));
     let store_keys = StoreKeys::bind("never-created-dir-test".to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &never_created);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &never_created);
     let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &never_created);
 
     let cleanup = BootstrapCleanup::new(
@@ -196,18 +196,18 @@ fn cleanup_tolerates_a_store_dir_that_was_never_created() {
 /// cleanup leaves none behind.
 #[test]
 fn cleanup_also_removes_both_keyring_accounts() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
     let store_dir = StoreDir::new(tmp.path().join("keyring-cleanup-test"));
     std::fs::create_dir_all(&*store_dir).expect("create store dir");
     let store_keys = StoreKeys::bind("keyring-cleanup-test".to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     custody
         .persist(&MasterKeyring::generate())
         .expect("seed the master key via custody");
     let identity_custody = IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
     identity_custody
-        .persist(&crate::keys::UserKeypair::generate())
+        .persist(&coven_keys::keys::UserKeypair::generate())
         .expect("seed this store's identity via custody");
     store_keys
         .set_cloud_home_credentials(&CloudHomeCredentials::S3 {

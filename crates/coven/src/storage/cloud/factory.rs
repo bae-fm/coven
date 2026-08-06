@@ -2,13 +2,13 @@ use super::{cloudkit, CloudHome, CloudHomeError};
 
 #[derive(Clone)]
 pub(crate) struct CloudHomeFactory {
-    key_service: crate::keys::StoreKeys,
+    key_service: coven_keys::keys::StoreKeys,
     oauth_clients: crate::oauth::OAuthClients,
 }
 
 impl CloudHomeFactory {
     pub(crate) fn new(
-        key_service: crate::keys::StoreKeys,
+        key_service: coven_keys::keys::StoreKeys,
         oauth_clients: crate::oauth::OAuthClients,
     ) -> Self {
         Self {
@@ -60,7 +60,7 @@ impl CloudHomeFactory {
                     .map_err(|error| {
                     CloudHomeError::Configuration(format!("S3 credentials error: {error}"))
                 })? {
-                    Some(crate::keys::CloudHomeCredentials::S3 {
+                    Some(coven_keys::keys::CloudHomeCredentials::S3 {
                         access_key,
                         secret_key,
                     }) => (access_key, secret_key),

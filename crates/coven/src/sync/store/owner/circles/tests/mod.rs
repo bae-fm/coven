@@ -4,8 +4,6 @@ use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
 use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
-use crate::encryption::{EncryptionService, MasterKeyring};
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleId, CircleOperationId,
     CircleOperationKind, CircleOperationState, CircleRole, CircleRosterDraftPolicy,
@@ -27,6 +25,8 @@ use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
 };
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::keys::{self, UserKeypair};
 
 async fn create_test_store_in_its_own_task(
     db: &Database,

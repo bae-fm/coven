@@ -134,7 +134,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let store = crate::sync::test_helpers::TestStore::create(
         &database,
         "shared-spool-test",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await

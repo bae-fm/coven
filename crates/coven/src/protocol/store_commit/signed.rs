@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{domain_json, ObjectHash, StoreProtocolError, STORE_PROTOCOL_VERSION};
-use crate::keys;
+use coven_keys::keys;
 
 /// A value that travels signed. The body names the domain its signature is
 /// bound to, so a signature over one artifact can never be replayed as another.

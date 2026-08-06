@@ -39,7 +39,7 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(crate) async fn pull(
         &mut self,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<pull::StorePullResult, pull::StorePullError> {
         let execution = self
             .history

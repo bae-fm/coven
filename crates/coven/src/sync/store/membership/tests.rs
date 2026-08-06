@@ -1,8 +1,6 @@
 use super::*;
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::encryption::{EncryptionService, MasterKeyring};
-use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::protocol::membership::{
     validate_membership_floor, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
@@ -13,6 +11,8 @@ use crate::protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolOb
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::keys::{MasterKeyCustody, UserKeypair};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
@@ -798,7 +798,7 @@ async fn head_cursor_rejects_a_reference_from_another_author_stream() {
 #[tokio::test]
 async fn pruned_membership_author_stream_is_replaced_and_persisted() {
     let db = open_test_db();
-    let author = hex::encode([3; crate::keys::SIGN_PUBLICKEYBYTES]);
+    let author = hex::encode([3; coven_keys::keys::SIGN_PUBLICKEYBYTES]);
     let grant = MembershipGrantId(crate::protocol::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));

@@ -7,8 +7,6 @@ use super::{
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
 use crate::database::StoreDatabase;
-use crate::encryption::{EncryptionService, MasterKeyring};
-use crate::keys;
 use crate::protocol::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
     circle_semantic_prefix, CircleAccessDisposition, CircleMetadataHeadRef, CircleOperationId,
@@ -26,6 +24,8 @@ use crate::protocol::store_commit::{
     StoreOperationMembershipAuthority, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
 use crate::storage::SyncStorage;
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::keys;
 
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     announcement_stream_id: crate::protocol::membership::AuthorStreamId,
@@ -1305,14 +1305,16 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             circle_id: request.circle_id,
                         },
                     );
-                    let keyring_value = crate::encryption::MasterKeyring::from_serialized(keyring)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse Circle bootstrap keyring: {error}"
-                            ))
-                        })?;
+                    let keyring_value = coven_keys::encryption::MasterKeyring::from_serialized(
+                        keyring,
+                    )
+                    .map_err(|error| {
+                        CircleOperationError::InvalidState(format!(
+                            "parse Circle bootstrap keyring: {error}"
+                        ))
+                    })?;
                     let circle_encryption =
-                        crate::encryption::EncryptionService::from(keyring_value);
+                        coven_keys::encryption::EncryptionService::from(keyring_value);
                     let recipient_slot = crate::protocol::circle::recipient_slot(
                         signer,
                         &request.member_pubkey,

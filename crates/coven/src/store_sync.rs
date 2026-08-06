@@ -7,7 +7,6 @@ use tracing::{debug, error, info};
 
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::database::StoreDatabase;
-use crate::encryption::EncryptionService;
 use crate::protocol::blob::{BlobRef, BlobTransitionObserver};
 use crate::protocol::objects::StorageError;
 use crate::storage::cloud::setup::StorageSetupError;
@@ -25,6 +24,7 @@ use crate::sync::Store;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreOpenGuard;
+use coven_keys::encryption::EncryptionService;
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
@@ -89,7 +89,7 @@ enum CommandAuthority {
 pub(crate) struct StoreSync {
     config_provider: ConfigProvider,
     security: StoreSecurity,
-    master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
+    master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
     database: StoreDatabase,
     store_dir: coven_foundation::store_dir::StoreDir,
     clock: ClockRef,

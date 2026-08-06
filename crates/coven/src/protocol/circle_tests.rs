@@ -1,8 +1,8 @@
 use super::*;
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle_control::{merkle_root_and_proofs, verify_merkle_proof};
 use crate::protocol::circle_test_fixtures::merge_membership_ref;
 use crate::protocol::{membership, store_commit};
+use coven_keys::keys::{self, UserKeypair};
 
 fn candidate_family(label: &str) -> store_commit::CandidateFamilyId {
     store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(label.as_bytes()))
@@ -27,10 +27,10 @@ fn merkle_proofs_verify_for_every_leaf_in_even_and_odd_layers() {
 
 #[test]
 fn founder_payload_is_complete_and_acyclic() {
-    let owner = crate::keys::UserKeypair::generate();
-    let peer = crate::keys::UserKeypair::generate();
-    let owner_pubkey = crate::keys::public_key_hex(&owner);
-    let peer_pubkey = crate::keys::public_key_hex(&peer);
+    let owner = coven_keys::keys::UserKeypair::generate();
+    let peer = coven_keys::keys::UserKeypair::generate();
+    let owner_pubkey = coven_keys::keys::public_key_hex(&owner);
+    let peer_pubkey = coven_keys::keys::public_key_hex(&peer);
     let members = vec![
         (owner_pubkey.clone(), membership::MemberRole::Owner),
         (peer_pubkey.clone(), membership::MemberRole::Member),
@@ -110,10 +110,10 @@ fn founder_payload_is_complete_and_acyclic() {
 
 #[test]
 fn access_verification_rejects_signed_context_and_proof_substitution() {
-    let owner = crate::keys::UserKeypair::generate();
-    let peer = crate::keys::UserKeypair::generate();
-    let owner_pubkey = crate::keys::public_key_hex(&owner);
-    let peer_pubkey = crate::keys::public_key_hex(&peer);
+    let owner = coven_keys::keys::UserKeypair::generate();
+    let peer = coven_keys::keys::UserKeypair::generate();
+    let owner_pubkey = coven_keys::keys::public_key_hex(&owner);
+    let peer_pubkey = coven_keys::keys::public_key_hex(&peer);
     let members = vec![
         (owner_pubkey.clone(), membership::MemberRole::Owner),
         (peer_pubkey.clone(), membership::MemberRole::Member),
@@ -207,7 +207,7 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
     else {
         panic!("founder access must be active")
     };
-    *keyring = crate::encryption::MasterKeyring::generate().to_serialized();
+    *keyring = coven_keys::encryption::MasterKeyring::generate().to_serialized();
     wrong_keyring_leaf.resign(&owner);
     let bytes = keys::seal_box_encrypt(
         &serde_json::to_vec(&wrong_keyring_leaf).expect("serialize wrong-keyring leaf"),

@@ -28,7 +28,7 @@ impl CircleSnapshotFixture {
         let store = TestStore::create_browsable(
             &database,
             "circle-snapshot-store",
-            crate::keys::UserKeypair::generate(),
+            coven_keys::keys::UserKeypair::generate(),
             crate::sync::test_helpers::test_cloud_home(),
         )
         .await
@@ -67,7 +67,7 @@ impl CircleSnapshotFixture {
                 self.directory.path().join("snap-temp"),
                 self.database.schema_version(),
                 "2026-07-16T00:00:00Z",
-                &crate::encryption::EncryptionService::from_key([42; 32]),
+                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             )
             .await
             .expect("author Circle snapshots");
@@ -109,7 +109,7 @@ impl CircleSnapshotFixture {
     async fn outsider_cannot_read_snapshot_meta(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        encryption: coven_keys::encryption::EncryptionService,
     ) -> bool {
         self.store
             .circle_snapshot_meta_is_unreadable(circle_id, encryption)
@@ -143,7 +143,7 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
 
     let image = fixture.read_snapshot_image(&selected, &access).await;
     let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
+        &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         fixture.store_root_hash(),
     )
     .expect("derive Circle row routing key");
@@ -164,7 +164,7 @@ async fn non_member_cannot_decrypt_circle_snapshot() {
     let (circle_id, _control) = fixture.install_active_circle().await;
     fixture.push_snapshots().await;
 
-    let outsider = crate::encryption::EncryptionService::from_key([7u8; 32]);
+    let outsider = coven_keys::encryption::EncryptionService::from_key([7u8; 32]);
     assert!(
         fixture
             .outsider_cannot_read_snapshot_meta(circle_id, outsider)

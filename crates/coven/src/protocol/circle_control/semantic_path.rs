@@ -171,7 +171,7 @@ pub(crate) struct CircleSemanticPathError {
 }
 
 pub(crate) fn recipient_slot(
-    owner: &dyn crate::keys::IdentityKeyAuthority,
+    owner: &dyn coven_keys::keys::IdentityKeyAuthority,
     recipient_pubkey: &str,
     circle_id: CircleId,
 ) -> Result<String, CircleTransitionError> {
@@ -179,7 +179,7 @@ pub(crate) fn recipient_slot(
 }
 
 pub(crate) fn recipient_slot_with_peer(
-    local_identity: &dyn crate::keys::IdentityKeyAuthority,
+    local_identity: &dyn coven_keys::keys::IdentityKeyAuthority,
     peer_pubkey: &str,
     circle_id: CircleId,
 ) -> Result<String, CircleTransitionError> {

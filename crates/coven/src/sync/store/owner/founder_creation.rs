@@ -118,26 +118,26 @@ impl<'operation> FounderStoreCreation<'operation> {
             .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let probes =
             StoreCreationProbeIds::new(crate::protocol::provider::ProviderProbeId::from_bytes(
-                crate::encryption::generate_random_key(),
+                coven_keys::encryption::generate_random_key(),
             ));
         let access =
             crate::protocol::provider::ProviderAccessLocator::for_current_administrator(&binding)
                 .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let initialized = StoreCreationAttempt::Initialized(StoreCreationAuthority {
             creation_id: StoreCreationId::from_random_bytes(
-                crate::encryption::generate_random_key(),
+                coven_keys::encryption::generate_random_key(),
             ),
             founder_grant: crate::protocol::membership::MembershipGrantId(ObjectHash::from_digest(
-                crate::encryption::generate_random_key(),
+                coven_keys::encryption::generate_random_key(),
             )),
             provider_admin_grant:
                 crate::protocol::provider::ProviderAdminGrantId::from_random_bytes(
-                    crate::encryption::generate_random_key(),
+                    coven_keys::encryption::generate_random_key(),
                 ),
             probes,
             binding: binding.clone(),
             access,
-            founder_pubkey: crate::keys::public_key_hex(signer),
+            founder_pubkey: coven_keys::keys::public_key_hex(signer),
             founder_timestamp: founder_timestamp.to_string(),
             schema_version: db.schema_version(),
             sync_routing_hash: db.sync_routing_hash(),
@@ -148,7 +148,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
         let authority = creation_authority(&attempt);
         if authority.binding != binding
-            || authority.founder_pubkey != crate::keys::public_key_hex(signer)
+            || authority.founder_pubkey != coven_keys::keys::public_key_hex(signer)
             || authority.founder_timestamp != founder_timestamp
             || authority.schema_version != db.schema_version()
             || authority.sync_routing_hash != db.sync_routing_hash()
@@ -825,7 +825,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             database.sync_routing_hash(),
         )
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-        if protocol_root.descriptor.founder_pubkey != crate::keys::public_key_hex(identity) {
+        if protocol_root.descriptor.founder_pubkey != coven_keys::keys::public_key_hex(identity) {
             return Err(StoreProtocolRootError::Database(
                 "durable Store founder differs from the creation signer".to_string(),
             ));

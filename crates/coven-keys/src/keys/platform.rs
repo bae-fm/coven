@@ -5,8 +5,8 @@ use super::core::{
     SIGN_SECRETKEYBYTES,
 };
 
-/// Why a [`CovenHandle`](crate::CovenHandle) master-key lifecycle call
-/// (`initialize_master_key`, `import_master_key`) failed.
+/// Why a host's master-key lifecycle call (`initialize_master_key`,
+/// `import_master_key`) failed.
 #[derive(Debug, thiserror::Error)]
 pub enum MasterKeyError {
     /// `initialize_master_key` found a master key already established —
@@ -20,8 +20,7 @@ pub enum MasterKeyError {
     Encryption(#[from] crate::encryption::EncryptionError),
 }
 
-/// Why a [`CovenHandle`](crate::CovenHandle) [`initialize_identity`](crate::CovenHandle::initialize_identity)
-/// call failed.
+/// Why a host's `initialize_identity` call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
     /// `initialize_identity` found an identity already established for this
@@ -367,9 +366,7 @@ pub fn apple_keyring_entry_facts_for_test(
 /// [`KeyError::NoDeviceIdentity`] when none is established — the caller must
 /// complete create/join/restore for this store first. Never mints: a
 /// connect/join precondition, not a query.
-pub(crate) fn require_identity(
-    custody: &dyn DeviceIdentityCustody,
-) -> Result<UserKeypair, KeyError> {
+pub fn require_identity(custody: &dyn DeviceIdentityCustody) -> Result<UserKeypair, KeyError> {
     custody.unlock()?.ok_or(KeyError::NoDeviceIdentity)
 }
 
@@ -385,7 +382,7 @@ pub(crate) fn require_identity(
 /// established store's identity, there is no store yet to select a custody
 /// policy for, and a pending identity's lifetime is short (a join round trip,
 /// not a store's lifetime).
-pub(crate) fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
+pub fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
     let keypair = UserKeypair::generate();
     registered_keyring()?.write(
         &KeyringSlot::PendingIdentity(public_key_hex(&keypair)),
@@ -400,7 +397,7 @@ pub(crate) fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
 /// traffic with, and what it establishes in the store's own custody before
 /// the completion marker. [`KeyError::NoPendingIdentity`] if none is held
 /// under that key.
-pub(crate) fn peek_pending_identity(request_public_key_hex: &str) -> Result<UserKeypair, KeyError> {
+pub fn peek_pending_identity(request_public_key_hex: &str) -> Result<UserKeypair, KeyError> {
     read_pending_identity_slot(&KeyringSlot::PendingIdentity(
         request_public_key_hex.to_string(),
     ))
@@ -426,7 +423,7 @@ fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyErro
 /// request abandoned without completing, or one whose identity the completed
 /// join has already established in the store's own custody. `Ok` whether or
 /// not one was pending.
-pub(crate) fn discard_pending_identity(request_public_key_hex: &str) -> Result<(), KeyError> {
+pub fn discard_pending_identity(request_public_key_hex: &str) -> Result<(), KeyError> {
     registered_keyring()?
         .delete(&KeyringSlot::PendingIdentity(
             request_public_key_hex.to_string(),
@@ -590,10 +587,8 @@ impl StoreKeys {
             .map_err(map_keyring_error)
     }
 
-    #[cfg(test)]
-    pub(crate) fn cloud_home_credentials_entry_for_test(
-        &self,
-    ) -> Result<keyring_core::Entry, KeyError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn cloud_home_credentials_entry_for_test(&self) -> Result<keyring_core::Entry, KeyError> {
         self.keyring
             .service()?
             .entry(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()).account())
@@ -628,13 +623,17 @@ impl DeviceIdentityCustody for StoreKeys {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_keyring {
+/// Installs keyring-core's in-memory mock store and registers the key service
+/// against it, once per process. Every crate that tests against the key
+/// service uses this rather than mirroring the mock, so no test reaches the
+/// real OS keychain.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_keyring {
     use std::sync::Once;
 
     static INSTALL: Once = Once::new();
 
-    pub(crate) fn install() {
+    pub fn install() {
         INSTALL.call_once(|| {
             // Install the in-memory mock before registering the service so
             // `set_keyring_service` keeps it instead of reaching for the OS

@@ -4,11 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{CircleControlHead, PreparedCircleControl};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::store_commit::ObjectHash;
 use crate::protocol::{membership, store_commit};
+use coven_keys::keys::{self, UserKeypair};
 
 pub(crate) fn exact_object(label: &str, bytes: &[u8]) -> crate::protocol::objects::ExactObjectRef {
     crate::protocol::objects::ExactObjectRef::new(

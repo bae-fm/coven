@@ -65,7 +65,7 @@ pub(crate) struct ProtocolObjectContext {
 pub(crate) enum ProtocolObjectProtection {
     StoreEncrypted,
     SignedPlaintext,
-    Circle(crate::encryption::EncryptionService),
+    Circle(coven_keys::encryption::EncryptionService),
     RecipientSealed,
 }
 
@@ -95,7 +95,7 @@ impl ProtocolObjectContext {
     pub(crate) fn circle(
         store_root_hash: ObjectHash,
         domain: CircleProtocolObjectDomain,
-        encryption: crate::encryption::EncryptionService,
+        encryption: coven_keys::encryption::EncryptionService,
     ) -> Self {
         Self {
             store_root_hash,
@@ -176,7 +176,7 @@ impl ProtocolObjectContext {
 /// Protection selected by the audience authority that prepares a blob spool.
 #[derive(Clone)]
 pub(crate) enum BlobSpoolProtection {
-    Opaque(crate::encryption::EncryptionService),
+    Opaque(coven_keys::encryption::EncryptionService),
     Browsable,
 }
 

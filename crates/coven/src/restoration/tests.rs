@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
-use crate::encryption::EncryptionService;
 use crate::joining::BootstrapError;
-use crate::keys::{StoreKeys, UserKeypair};
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::membership::MembershipFloor;
 use crate::protocol::synced_schema::BlobDecl;
@@ -40,6 +38,8 @@ use coven_foundation::clock::SystemClock;
 use coven_foundation::config::HomeStorage;
 use coven_foundation::id_provider::SequentialIdProvider;
 use coven_foundation::store_dir::StoreLayout;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::{StoreKeys, UserKeypair};
 
 struct RestoreCloudKitOps {
     records: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
@@ -350,9 +350,9 @@ fn store_root_ref(label: &str) -> crate::protocol::store_commit::StoreRootRef {
 }
 
 fn serialized_keyring(byte: u8) -> String {
-    crate::encryption::MasterKeyring::from(crate::encryption::EncryptionService::from_key(
-        [byte; 32],
-    ))
+    coven_keys::encryption::MasterKeyring::from(
+        coven_keys::encryption::EncryptionService::from_key([byte; 32]),
+    )
     .to_serialized()
 }
 
@@ -424,7 +424,7 @@ impl OwnerRecoveryTestDevice for TestDevice {
 /// fail at once — but a malicious `sid` is refused at decode, well before that.
 fn restore_code_with_sid(sid: &str) -> String {
     let root = store_root_ref("restore test store protocol root");
-    let owner = crate::keys::UserKeypair::generate();
+    let owner = coven_keys::keys::UserKeypair::generate();
     let code = RestoreCode {
         v: crate::restore_code::RESTORE_CODE_VERSION,
         sid: sid.to_string(),
@@ -460,8 +460,8 @@ async fn restore_result_for(
         &test_synced_tables(),
         &test_migrations(),
         Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
+        coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::oauth::OAuthClients::empty(),
         None,
         None,
@@ -476,10 +476,10 @@ async fn restore_result_for(
 
 #[tokio::test]
 async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let store_id = "restore-immutable-google-drive";
     let root = store_root_ref("restore root");
-    let owner = crate::keys::UserKeypair::generate();
+    let owner = coven_keys::keys::UserKeypair::generate();
     let code = encode_restore_code(&RestoreCode {
         v: crate::restore_code::RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
@@ -505,8 +505,8 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         &tables,
         &test_migrations(),
         None,
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
+        coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::oauth::OAuthClients::empty(),
         None,
         None,
@@ -626,7 +626,7 @@ async fn restore_refuses_when_completed_store_exists_and_leaves_it_untouched() {
 /// config-less directory would block every retry forever.
 #[tokio::test]
 async fn restore_clears_a_torn_bootstrap_and_proceeds() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let encoded = restore_code_with_sid("torn-restore-123");
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -661,7 +661,7 @@ async fn restore_clears_a_torn_bootstrap_and_proceeds() {
 /// create sits under `stores/`.
 #[tokio::test]
 async fn restore_accepts_a_normal_lid_past_decode() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let encoded = restore_code_with_sid("abc-123");
     let decoded = decode_restore_code(&encoded).expect("a normal sid decodes");
     assert_eq!(decoded.sid, "abc-123");
@@ -691,8 +691,8 @@ async fn restore_with_cancel(
         &test_synced_tables(),
         &test_migrations(),
         Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
+        coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::oauth::OAuthClients::empty(),
         None,
         None,
@@ -711,7 +711,7 @@ async fn restore_with_cancel(
 /// cancelled restore leaves no residue, the same guarantee a failed one gives.
 #[tokio::test]
 async fn restore_cancelled_before_snapshot_leaves_no_residue() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let encoded = restore_code_with_sid("cancel-preset");
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -732,7 +732,7 @@ async fn restore_cancelled_before_snapshot_leaves_no_residue() {
         "a cancelled restore must leave no store directory at {}",
         store_dir.display(),
     );
-    let store_keys = crate::keys::StoreKeys::bind("cancel-preset".to_string());
+    let store_keys = coven_keys::keys::StoreKeys::bind("cancel-preset".to_string());
     assert_eq!(
         store_keys.get_encryption_key().expect("read keyring"),
         None,
@@ -753,7 +753,7 @@ async fn restore_cancelled_before_snapshot_leaves_no_residue() {
 /// failure-cleanup.
 #[tokio::test]
 async fn restore_cancelled_via_status_callback_leaves_no_residue() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let encoded = restore_code_with_sid("cancel-status");
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -792,7 +792,7 @@ async fn restore_cancelled_via_status_callback_leaves_no_residue() {
 /// rather than a completed store it refuses.
 #[tokio::test]
 async fn failed_restore_does_not_block_a_retry_with_store_exists() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let encoded = restore_code_with_sid("retry-postcondition-test");
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -816,7 +816,7 @@ async fn failed_restore_does_not_block_a_retry_with_store_exists() {
 /// recovery publication left by the failed local completion.
 #[tokio::test]
 async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
 
     let store_id = "late-step-rollback-test";
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -827,8 +827,8 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
     );
     let owner_keypair = UserKeypair::generate();
-    let master_key = crate::encryption::MasterKeyring::from(
-        crate::encryption::EncryptionService::from_key([0xbb; 32]),
+    let master_key = coven_keys::encryption::MasterKeyring::from(
+        coven_keys::encryption::EncryptionService::from_key([0xbb; 32]),
     );
     let serialized_keyring = master_key.to_serialized();
     let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key.clone()));
@@ -875,7 +875,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     let joiner_keypair = owner_keypair.clone();
     let store_keys = StoreKeys::bind(store_id.to_string());
     let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
+        coven_keys::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
     let authority = owner_device.published_owner_recovery_authority(&owner_keypair);
     let migrations = test_migrations();
     let reached_config_save = std::cell::Cell::new(false);
@@ -886,8 +886,8 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "Late Step Test",
         &tables,
         &migrations,
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
+        coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::restoration::RestoreSource {
             join_info: CloudHomeJoinInfo::CloudKit,
             custom_s3_exact_slots: None,
@@ -969,8 +969,8 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "Late Step Test",
         &tables,
         &migrations,
-        crate::custody::KeyCustody::Keyring,
-        crate::identity_custody::IdentityCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
+        coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::restoration::RestoreSource {
             join_info: CloudHomeJoinInfo::CloudKit,
             custom_s3_exact_slots: None,
@@ -1032,8 +1032,8 @@ impl OwnerRecoveryRestoreFixture {
             &tables,
             &migrations,
             None,
-            crate::custody::KeyCustody::Keyring,
-            crate::identity_custody::IdentityCustody::Keyring,
+            coven_keys::custody::KeyCustody::Keyring,
+            coven_keys::identity_custody::IdentityCustody::Keyring,
             crate::oauth::OAuthClients::empty(),
             None,
             Some(cloudkit_ops),
@@ -1082,7 +1082,7 @@ impl OwnerRecoveryRestoreFixture {
 }
 
 async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let store_id = "owner-recovery-restore";
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
@@ -1156,7 +1156,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
 #[tokio::test]
 async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
     Box::pin(async {
-        crate::keys::test_keyring::install();
+        coven_keys::keys::test_keyring::install();
 
         let store_id = "restore-anti-clobber-test";
         let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
@@ -1262,8 +1262,8 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
                 &restore_tables,
                 &test_migrations(),
                 None,
-                crate::custody::KeyCustody::Keyring,
-                crate::identity_custody::IdentityCustody::Keyring,
+                coven_keys::custody::KeyCustody::Keyring,
+                coven_keys::identity_custody::IdentityCustody::Keyring,
                 crate::oauth::OAuthClients::empty(),
                 None,
                 Some(restore_cloudkit),
@@ -1282,7 +1282,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         let lib_b = config.store_dir.clone();
         let store_keys = StoreKeys::bind(store_id.to_string());
         let identity_custody =
-            crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
+            coven_keys::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
 
         // The config is saved, and a saved config implies the identity was imported
         // before it — the restored device's signing identity resolves in custody.
@@ -1295,10 +1295,11 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             "a completed restore has its signing identity in custody",
         );
         let other_store_keys = StoreKeys::bind("restore-anti-clobber-other-store".to_string());
-        let other_identity_custody = crate::identity_custody::IdentityCustody::Keyring.resolve(
-            &other_store_keys,
-            &layout.store_dir("restore-anti-clobber-other-store"),
-        );
+        let other_identity_custody = coven_keys::identity_custody::IdentityCustody::Keyring
+            .resolve(
+                &other_store_keys,
+                &layout.store_dir("restore-anti-clobber-other-store"),
+            );
         assert!(
             other_identity_custody
                 .unlock()
@@ -1478,7 +1479,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
 #[tokio::test]
 async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     Box::pin(async {
-        crate::keys::test_keyring::install();
+        coven_keys::keys::test_keyring::install();
 
         let store_id = "restore-blob-backfill-test";
         let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
@@ -1486,7 +1487,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
         );
         let master_key =
-            crate::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
+            coven_keys::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
         let serialized_keyring = master_key.to_serialized();
         let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key));
         let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
@@ -1630,7 +1631,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             expected_device_snapshots.insert(reference);
             assert_eq!(commit.author(), &source_registration);
         }
-        let device_signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
+        let device_signing_key: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] =
             hex::decode(&continuation.device_signing_secret)
                 .expect("decode continuation device signing key")
                 .try_into()
@@ -1646,8 +1647,8 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             "Restored Store",
             &tables,
             &test_migrations(),
-            crate::custody::KeyCustody::Keyring,
-            crate::identity_custody::IdentityCustody::Keyring,
+            coven_keys::custody::KeyCustody::Keyring,
+            coven_keys::identity_custody::IdentityCustody::Keyring,
             crate::restoration::RestoreSource {
                 join_info: CloudHomeJoinInfo::CloudKit,
                 custom_s3_exact_slots: None,

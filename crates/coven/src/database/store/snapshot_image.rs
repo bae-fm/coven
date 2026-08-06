@@ -112,7 +112,7 @@ impl SnapshotDatabaseImage {
         connection: &Connection,
         root: &crate::protocol::store_commit::StoreRootRef,
         tables: &[SyncedTable],
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         audience: &crate::protocol::circle::Audience,
     ) -> Result<CreatedSnapshot, SnapshotImageError> {
         if tables.is_empty() {
@@ -603,7 +603,7 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         tables: Vec<SyncedTable>,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<
         (
             CreatedSnapshot,
@@ -639,7 +639,7 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         tables: Vec<SyncedTable>,
-        routing_encryption: crate::encryption::EncryptionService,
+        routing_encryption: coven_keys::encryption::EncryptionService,
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<
         (
@@ -677,7 +677,7 @@ impl StoreDatabase {
         root: crate::protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         tables: Vec<SyncedTable>,
-        routing_encryption: crate::encryption::EncryptionService,
+        routing_encryption: coven_keys::encryption::EncryptionService,
         routing_key: crate::protocol::circle::RowRoutingKey,
         circle_id: crate::protocol::circle::CircleId,
         cutoff: crate::protocol::store_commit::CommitFrontier,
@@ -728,7 +728,7 @@ impl StoreDatabase {
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<u8>, DbError> {
         let tables = self.synced_tables().to_vec();
         self.connection
@@ -754,7 +754,7 @@ impl StoreDatabase {
         &self,
         root: crate::protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
-        routing_encryption: crate::encryption::EncryptionService,
+        routing_encryption: coven_keys::encryption::EncryptionService,
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<Vec<u8>, DbError> {
         let tables = self.synced_tables().to_vec();

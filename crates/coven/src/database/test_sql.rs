@@ -493,7 +493,7 @@ impl DatabaseTestSql<'_> {
         row_id: &str,
     ) -> Result<crate::protocol::circle::RowRoutingId, DbError> {
         let root_hash = self.store_root_hash()?;
-        let encryption = crate::encryption::EncryptionService::from_key(generation_one_key);
+        let encryption = coven_keys::encryption::EncryptionService::from_key(generation_one_key);
         let key = crate::protocol::circle::derive_row_routing_key(&encryption, root_hash)
             .map_err(|error| DbError::Message(error.to_string()))?;
         Ok(crate::protocol::circle::row_routing_id(&key, table, row_id))
@@ -1613,14 +1613,14 @@ impl DatabaseTestSql<'_> {
             StoreProtocolRoot,
         };
 
-        let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
+        let keypair_bytes: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
             "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
             "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
         ))
         .expect("fixed test signing key is hexadecimal")
         .try_into()
         .expect("fixed test signing key is 64 bytes");
-        let signer = crate::keys::UserKeypair::from_signing_key_bytes(&keypair_bytes)
+        let signer = coven_keys::keys::UserKeypair::from_signing_key_bytes(&keypair_bytes)
             .expect("fixed test signing key is valid");
         let sync_routing_hash: ObjectHash = self
             .required_protocol_state(crate::database::SYNC_ROUTING_HASH_STATE_KEY)?
@@ -1644,7 +1644,7 @@ impl DatabaseTestSql<'_> {
             },
             schema_version: 1,
             sync_routing_hash,
-            founder_pubkey: crate::keys::public_key_hex(&signer),
+            founder_pubkey: coven_keys::keys::public_key_hex(&signer),
             founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
                 &format!("{label} founder grant"),
             ),

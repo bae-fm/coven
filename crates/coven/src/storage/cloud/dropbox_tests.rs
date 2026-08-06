@@ -7,8 +7,8 @@ use axum::http::{Request, Response, StatusCode};
 use axum::Router;
 use std::sync::{Arc, Mutex};
 
-use crate::keys::StoreKeys;
 use crate::oauth::OAuthTokens;
+use coven_keys::keys::StoreKeys;
 
 fn home() -> DropboxCloudHome {
     home_with_folder("/Apps/your-app/my-store")

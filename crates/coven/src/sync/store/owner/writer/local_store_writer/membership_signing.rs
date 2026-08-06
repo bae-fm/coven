@@ -5,8 +5,8 @@ impl LocalStoreWriter {
         &self,
         store_id: String,
         recipient: String,
-        recipient_key: [u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: crate::encryption::EncryptionService,
+        recipient_key: [u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: coven_keys::encryption::EncryptionService,
     ) -> Result<
         crate::protocol::wrapped_store_key::WrappedStoreKey,
         crate::sync::store::membership::InviteError,
@@ -64,11 +64,11 @@ impl LocalStoreWriter {
         &self,
         store_id: &str,
         recipient: &str,
-        recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: &crate::encryption::EncryptionService,
+        recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: &coven_keys::encryption::EncryptionService,
     ) -> Result<
         crate::protocol::wrapped_store_key::WrappedStoreKey,
-        crate::encryption::EncryptionError,
+        coven_keys::encryption::EncryptionError,
     > {
         crate::protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
             store_id,

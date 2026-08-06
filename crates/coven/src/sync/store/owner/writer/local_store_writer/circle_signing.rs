@@ -158,7 +158,7 @@ impl LocalStoreWriter {
         frontier: crate::protocol::store_commit::CommitFrontier,
         control: crate::protocol::circle::CircleControlCoord,
         epoch_id: crate::protocol::circle::CircleEpochId,
-        key_fingerprint: crate::encryption::KeyFingerprint,
+        key_fingerprint: coven_keys::encryption::KeyFingerprint,
         seeded_from: Option<crate::protocol::circle::CircleBootstrapCoverageRef>,
         sync_time: String,
         predecessor: Option<crate::protocol::objects::ExactObjectRef>,

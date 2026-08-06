@@ -1,9 +1,9 @@
 use crate::database::StoreDatabase;
-use crate::encryption::EncryptionService;
-use crate::keys::{self, UserKeypair};
 use crate::protocol::membership::MembershipGrantId;
 use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
 use crate::protocol::store_commit::ObjectHash;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::{self, UserKeypair};
 
 use super::authority::target_key;
 use super::journal::OwnerPromotionJournalState;

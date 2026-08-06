@@ -67,7 +67,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::encryption::EncryptionService;
 use crate::protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
 use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::protocol::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
@@ -89,6 +88,7 @@ use crate::protocol::store_commit::{
 };
 use crate::protocol::synced_schema::SyncedTable;
 use crate::write::{WriteId, WriteStatus};
+use coven_keys::encryption::EncryptionService;
 use rusqlite::{Connection, OptionalExtension};
 
 pub use rusqlite;
@@ -450,7 +450,7 @@ pub enum DbError {
     #[error("{0}")]
     ChangesetIdentity(#[from] crate::database::ChangesetIdentityError),
     #[error("{0}")]
-    Encryption(#[from] crate::encryption::EncryptionError),
+    Encryption(#[from] coven_keys::encryption::EncryptionError),
     #[error("{0}")]
     SnapshotImage(#[from] crate::database::store::SnapshotImageError),
     #[error("{0}")]

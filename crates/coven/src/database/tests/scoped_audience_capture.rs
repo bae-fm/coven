@@ -7,8 +7,8 @@ use crate::{Migration, RowIdentity, StoreDir, SyncedTable, WriteBatch, WriteRece
 const CIRCLE_LABEL: &str = "circle-a";
 
 /// The key a scoped store routes its rows under.
-fn routing_encryption() -> crate::encryption::EncryptionService {
-    crate::encryption::EncryptionService::from_key([7; 32])
+fn routing_encryption() -> coven_keys::encryption::EncryptionService {
+    coven_keys::encryption::EncryptionService::from_key([7; 32])
 }
 
 /// A scoped store over its own file, and the host-write service that captures

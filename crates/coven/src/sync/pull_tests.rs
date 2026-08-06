@@ -11,8 +11,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::database::Database;
-use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use crate::protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
@@ -22,6 +20,8 @@ use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 use crate::Migration;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
@@ -3972,8 +3972,8 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     assert_eq!(
         store_database(&receiver)
             .get_circles(
-                &crate::keys::public_key_hex(&owner),
-                std::collections::BTreeSet::from([crate::keys::public_key_hex(&owner)]),
+                &coven_keys::keys::public_key_hex(&owner),
+                std::collections::BTreeSet::from([coven_keys::keys::public_key_hex(&owner)]),
             )
             .await
             .expect("read ordered Circle result")

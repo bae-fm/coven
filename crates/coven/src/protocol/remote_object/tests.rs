@@ -98,7 +98,7 @@ fn test_stored_blob(label: &str) -> crate::protocol::blob::locator::StoredBlobRe
 
 fn test_membership_resolution() -> (membership::StoreMembershipConflictResolutionRef, Vec<u8>) {
     let conflict_hash = ObjectHash::digest(b"remote-object membership conflict");
-    let resolver_pubkey = "22".repeat(crate::keys::SIGN_PUBLICKEYBYTES);
+    let resolver_pubkey = "22".repeat(coven_keys::keys::SIGN_PUBLICKEYBYTES);
     let replacement_grant =
         membership::derive_store_resolution_grant(&conflict_hash, &resolver_pubkey);
     let registration_bytes = b"resolution registration";

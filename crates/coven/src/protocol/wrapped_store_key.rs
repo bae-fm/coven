@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::keys::{self, UserKeypair};
 use crate::protocol::objects::{ExactObjectRef, PreparedExactObject, StorageError};
 use crate::protocol::store_commit::ObjectHash;
+use coven_keys::keys::{self, UserKeypair};
 
 /// A Store encryption keyring sealed to one member and signed by an Owner.
 ///
@@ -70,9 +70,9 @@ pub(crate) enum WrappedKeyringError {
     #[error("{0}")]
     Authentication(#[from] WrappedKeyError),
     #[error("decrypt sealed Store keyring: {0}")]
-    Decryption(#[from] crate::keys::KeyError),
+    Decryption(#[from] coven_keys::keys::KeyError),
     #[error("decode Store keyring payload: {0}")]
-    Payload(#[from] crate::encryption::EncryptionError),
+    Payload(#[from] coven_keys::encryption::EncryptionError),
     #[error(
         "wrapped Store-key ref declares generation {reference}, but its keyring declares {payload}"
     )]
@@ -84,9 +84,9 @@ impl WrappedStoreKey {
         store_id: &str,
         recipient_pubkey: &str,
         recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
-        encryption: &crate::encryption::EncryptionService,
+        encryption: &coven_keys::encryption::EncryptionService,
         owner: &UserKeypair,
-    ) -> Result<Self, crate::encryption::EncryptionError> {
+    ) -> Result<Self, coven_keys::encryption::EncryptionError> {
         let payload = encryption.to_keyring_payload()?;
         Ok(Self::signed(
             store_id,
@@ -166,11 +166,11 @@ impl WrappedStoreKey {
         recipient_pubkey: &str,
         expected_owners: impl IntoIterator<Item = &'a str>,
         expected_generation: u64,
-        recipient: &dyn crate::keys::IdentityKeyAuthority,
-    ) -> Result<crate::encryption::EncryptionService, WrappedKeyringError> {
+        recipient: &dyn coven_keys::keys::IdentityKeyAuthority,
+    ) -> Result<coven_keys::encryption::EncryptionService, WrappedKeyringError> {
         let sealed = self.verify_and_unwrap(store_id, recipient_pubkey, expected_owners)?;
         let plaintext = keys::seal_box_decrypt(&sealed, &recipient.to_x25519_secret_key())?;
-        let keyring = crate::encryption::EncryptionService::from_keyring_payload(plaintext)?;
+        let keyring = coven_keys::encryption::EncryptionService::from_keyring_payload(plaintext)?;
         if keyring.current_generation() != expected_generation {
             return Err(WrappedKeyringError::GenerationMismatch {
                 reference: expected_generation,
@@ -463,7 +463,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let recipient = UserKeypair::generate();
         let recipient_pubkey = keys::public_key_hex(&recipient);
-        let keyring = crate::encryption::EncryptionService::from_key([7; 32]);
+        let keyring = coven_keys::encryption::EncryptionService::from_key([7; 32]);
         let sealed = keys::seal_box_encrypt(
             &keyring.to_keyring_payload().expect("serialize keyring"),
             &recipient.to_x25519_public_key(),

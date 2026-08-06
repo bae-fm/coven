@@ -69,10 +69,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         public_key_hex: &str,
         timestamp: &str,
-        current_encryption: &crate::encryption::EncryptionService,
+        current_encryption: &coven_keys::encryption::EncryptionService,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<
-        crate::encryption::EncryptionService,
+        coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipOpsError,
     > {
         self.revoke_member_without_local_adoption(

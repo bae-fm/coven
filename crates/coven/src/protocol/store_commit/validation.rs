@@ -624,7 +624,7 @@ pub(super) fn validate_membership_authority(
                     reference.resolver_pubkey.clone(),
                 )
             })?;
-            if resolver.len() != crate::keys::SIGN_PUBLICKEYBYTES {
+            if resolver.len() != coven_keys::keys::SIGN_PUBLICKEYBYTES {
                 return Err(StoreProtocolError::InvalidMembershipResolutionAuthority(
                     reference.resolver_pubkey.clone(),
                 ));

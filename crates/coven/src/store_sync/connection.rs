@@ -12,7 +12,7 @@ impl StoreSync {
     pub(crate) fn new(
         config_provider: ConfigProvider,
         security: StoreSecurity,
-        master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
+        master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
         database: StoreDatabase,
         store_dir: coven_foundation::store_dir::StoreDir,
         clock: ClockRef,

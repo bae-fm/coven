@@ -1,9 +1,9 @@
-use crate::keys::UserKeypair;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::objects::ObjectSlot;
 use crate::protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
 use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
+use coven_keys::keys::UserKeypair;
 
 fn store_database(db: &crate::database::Database) -> crate::database::StoreDatabase {
     crate::database::StoreDatabase::new(db)
@@ -431,7 +431,7 @@ impl MemberRemovalHistory {
         let owner = UserKeypair::generate();
         let member = UserKeypair::generate();
         let member_pubkey = crate::sync::test_helpers::pubkey_hex(&member);
-        let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let store = TestStore::create(
             &db,
             "retained-removal-proof",

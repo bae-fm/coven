@@ -1,6 +1,6 @@
-use crate::keys::{self, UserKeypair};
 use crate::protocol::membership::MemberRole;
 use crate::protocol::store_commit::ObjectHash;
+use coven_keys::keys::{self, UserKeypair};
 
 #[tokio::test]
 async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {

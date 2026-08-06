@@ -84,7 +84,7 @@ impl CircleEpochCloseIntent {
         predecessor_roster: MergeCircleRosterStateRef,
         removal: CircleRosterEntry,
         remaining_roster_state_hash: ObjectHash,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let body = CircleEpochCloseIntentBody {
             store_root_hash,
@@ -328,7 +328,7 @@ impl CircleEpochCloseExclusion {
     pub(crate) fn signed(
         control: &PreparedCircleControl,
         excluded: StoreDeviceRegistrationRef,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -513,7 +513,7 @@ impl CircleEpochCloseOutcome {
         intent: &CircleEpochCloseIntent,
         responses: Vec<CircleEpochCloseSettlement>,
         successor: CircleEpochSuccessor,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -708,7 +708,7 @@ pub(crate) type CircleEpochCloseCancellation = Signed<CircleEpochCloseCancellati
 impl CircleEpochCloseCancellation {
     pub(crate) fn signed(
         control: &PreparedCircleControl,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);

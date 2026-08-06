@@ -21,7 +21,7 @@ impl CircleTransitionDraft {
         provisional_frontier: CommitFrontier,
         outcome_slot: ObjectSlot,
         ids: &dyn coven_foundation::id_provider::IdProvider,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
             store_members,
@@ -166,7 +166,7 @@ impl CircleTransitionDraft {
         intent: CircleEpochCloseIntent,
         responses: Vec<CircleEpochCloseSettlement>,
         ids: &dyn coven_foundation::id_provider::IdProvider,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);
@@ -225,7 +225,10 @@ impl CircleTransitionDraft {
             .checked_add(1)
             .ok_or(CircleTransitionError::SequenceOverflow)?;
         let encryption = old_encryption
-            .with_appended_generation(new_generation, crate::encryption::generate_random_key())
+            .with_appended_generation(
+                new_generation,
+                coven_keys::encryption::generate_random_key(),
+            )
             .map_err(|_| CircleTransitionError::InvalidCurrentState)?;
         let keyring = encryption
             .to_keyring_string()
@@ -401,7 +404,7 @@ impl CircleTransitionDraft {
         current_metadata: &CircleMetadata,
         keyring: &str,
         ids: &dyn coven_foundation::id_provider::IdProvider,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {
             return Err(CircleTransitionError::InvalidCurrentState);

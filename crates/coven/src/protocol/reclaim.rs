@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{CircleBootstrapCoverageRef, CircleControlCoord, CircleId};
 use crate::protocol::circle_control::StoreMembershipStateRef;
 use crate::protocol::membership::MembershipGrantId;
@@ -14,6 +13,7 @@ use crate::protocol::store_commit::{
     SnapshotImageRef, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StorePackageRef, StoreProtocolError, StoreSnapshotLocator,
 };
+use coven_keys::keys::{self, UserKeypair};
 
 const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
 const RECLAIM_AUTHORIZATION_DOMAIN: &[u8] = b"coven.store-reclaim-authorization.v1\0";

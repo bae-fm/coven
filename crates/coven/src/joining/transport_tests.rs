@@ -9,9 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
-use crate::encryption::EncryptionService;
 use crate::joining::encode;
-use crate::keys::UserKeypair;
 use crate::protocol::objects::ObjectSlot;
 use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::store::{
@@ -20,6 +18,8 @@ use crate::sync::store::{
 };
 use crate::sync::test_helpers::*;
 use coven_foundation::clock::SystemClock;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -92,7 +92,7 @@ impl TransportFixture {
         store_id: &str,
         joiner_principal: Option<crate::ProviderPrincipalId>,
     ) -> Self {
-        crate::keys::test_keyring::install();
+        coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
         let owner_db = open_test_db();
         let owner_database = crate::database::StoreDatabase::from_database(owner_db.clone());
@@ -243,8 +243,8 @@ impl TransportFixture {
             self.tables.clone(),
             test_migrations(),
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-            crate::custody::KeyCustody::Keyring,
-            crate::identity_custody::IdentityCustody::Keyring,
+            coven_keys::custody::KeyCustody::Keyring,
+            coven_keys::identity_custody::IdentityCustody::Keyring,
             crate::oauth::OAuthClients::empty(),
             None,
             None,

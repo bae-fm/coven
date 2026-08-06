@@ -6,7 +6,7 @@ use crate::protocol::circle_activation_test_fixtures::{
 use std::collections::BTreeSet;
 
 fn owner_pubkey() -> String {
-    crate::keys::public_key_hex(&test_circle_owner_keypair())
+    coven_keys::keys::public_key_hex(&test_circle_owner_keypair())
 }
 
 fn active_state() -> CircleCurrentState {

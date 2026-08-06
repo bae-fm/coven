@@ -1,5 +1,3 @@
-use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
 use crate::protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
 use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use crate::protocol::store_commit::{
@@ -7,6 +5,8 @@ use crate::protocol::store_commit::{
     CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
 };
 use crate::storage::SyncStorage;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 use tracing::warn;
 
 use super::bootstrap_blobs::CircleBootstrapBlobVerification;
@@ -449,7 +449,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
 
     pub(crate) async fn capture_circle_snapshot_cut(
         &self,
-        routing_encryption: &crate::encryption::EncryptionService,
+        routing_encryption: &coven_keys::encryption::EncryptionService,
         circle_id: crate::protocol::circle::CircleId,
     ) -> Result<SnapshotCut, crate::database::DbError> {
         let (snapshot, coverage) = self
@@ -467,7 +467,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
 
     pub(crate) async fn capture_circle_snapshot_at_cutoff(
         &self,
-        routing_encryption: &crate::encryption::EncryptionService,
+        routing_encryption: &coven_keys::encryption::EncryptionService,
         circle_id: crate::protocol::circle::CircleId,
         cutoff: CommitFrontier,
     ) -> Result<SnapshotCut, crate::database::DbError> {
@@ -507,7 +507,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         &mut self,
         schema_version: u32,
         created_at: &str,
-        store_routing: Option<&crate::encryption::EncryptionService>,
+        store_routing: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), SnapshotError> {
         let inputs = self
             .database
@@ -869,7 +869,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         temp_dir: std::path::PathBuf,
         schema_version: u32,
         created_at: &str,
-        store_routing: &crate::encryption::EncryptionService,
+        store_routing: &coven_keys::encryption::EncryptionService,
     ) -> Result<CircleSnapshotMeta, SnapshotError> {
         let input = self
             .database

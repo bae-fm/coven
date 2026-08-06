@@ -14,7 +14,7 @@ pub enum StorageSetupError {
     #[error("failed to build cloud home: {0}")]
     CloudHome(#[from] super::CloudHomeError),
     #[error("key error: {0}")]
-    Key(#[from] crate::keys::KeyError),
+    Key(#[from] coven_keys::keys::KeyError),
     #[error("no encryption key found for an encrypted cloud home")]
     NoEncryptionKey,
     #[error("{provider:?} cannot provide exact protocol and blob slots with this configuration")]

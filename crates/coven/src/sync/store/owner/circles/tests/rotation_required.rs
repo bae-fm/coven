@@ -2,9 +2,9 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::keys::MasterKeyCustody;
 use crate::sync::cycle::SyncComponents;
 use crate::sync::test_helpers::TestDevice;
+use coven_keys::keys::MasterKeyCustody;
 
 fn circle_routing_migrations() -> Vec<crate::Migration> {
     vec![crate::Migration::sql(
@@ -699,7 +699,7 @@ async fn re_adding_the_store_member_clears_rotation_required() {
             &fixture.member_pubkey,
             None,
             MemberRole::Member,
-            &crate::encryption::EncryptionService::from(
+            &coven_keys::encryption::EncryptionService::from(
                 fixture
                     .custody
                     .unlock()

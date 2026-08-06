@@ -33,8 +33,8 @@ struct FacadeFixture {
 
 impl FacadeFixture {
     async fn build(store_id: &str) -> Self {
-        crate::keys::test_keyring::install();
-        let owner = crate::keys::UserKeypair::generate();
+        coven_keys::keys::test_keyring::install();
+        let owner = coven_keys::keys::UserKeypair::generate();
         // The same key `TestStore::create` seals this store's objects with, so
         // the store key the invite wraps opens the snapshot the joining device
         // bootstraps from.

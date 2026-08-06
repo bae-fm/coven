@@ -335,7 +335,7 @@ impl OAuthClients {
     /// resulting tokens in the store key service.
     pub async fn sign_in_google_drive(
         &self,
-        key_service: &crate::keys::StoreKeys,
+        key_service: &coven_keys::keys::StoreKeys,
         store_name: &str,
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn coven_foundation::clock::Clock,
@@ -446,7 +446,7 @@ impl OAuthClients {
     /// tokens in the store key service.
     pub async fn sign_in_dropbox(
         &self,
-        key_service: &crate::keys::StoreKeys,
+        key_service: &coven_keys::keys::StoreKeys,
         store_name: &str,
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn coven_foundation::clock::Clock,
@@ -504,7 +504,7 @@ impl OAuthClients {
     /// resulting tokens in the store key service.
     pub async fn sign_in_onedrive(
         &self,
-        key_service: &crate::keys::StoreKeys,
+        key_service: &coven_keys::keys::StoreKeys,
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<(String, String), crate::storage::cloud::SetupError> {
@@ -601,7 +601,7 @@ impl OAuthClients {
     }
 }
 
-pub use crate::keys::OAuthTokens;
+pub use coven_keys::keys::OAuthTokens;
 
 #[cfg(any(test, feature = "oauth-providers"))]
 #[derive(Error, Debug)]

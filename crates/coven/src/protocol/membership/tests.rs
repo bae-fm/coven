@@ -822,7 +822,7 @@ fn direct_owner_assignment_is_rejected() {
             test_wrapped_key_ref(
                 &keys::public_key_hex(&founder),
                 &candidate_pubkey,
-                crate::encryption::INITIAL_KEY_GENERATION,
+                coven_keys::encryption::INITIAL_KEY_GENERATION,
                 b"direct Owner assignment",
             ),
             "direct Owner assignment".to_string(),
@@ -841,7 +841,7 @@ fn membership_candidates_require_exact_wrapped_key_recipient_coverage() {
     let wrong_recipient = test_wrapped_key_ref(
         &owner_pubkey,
         &owner_pubkey,
-        crate::encryption::INITIAL_KEY_GENERATION,
+        coven_keys::encryption::INITIAL_KEY_GENERATION,
         b"wrong invitation recipient",
     );
     assert!(matches!(

@@ -3,12 +3,12 @@
 //! and slots, and provider rollback at the correct slot fails the stored hash
 //! check before any plaintext is published locally.
 
-use crate::encryption::EncryptionService;
 use crate::protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
 use crate::protocol::objects::{BlobSpoolProtection, StorageError};
 use crate::storage::cloud::ExactSlotStorage;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::TestStore;
+use coven_keys::encryption::EncryptionService;
 
 const BLOB_ID: &str = "blobxxxx";
 const STORE_KEY: [u8; 32] = [42; 32];
@@ -24,7 +24,7 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let store = TestStore::create(
         &database,
         "blob-reference-substitution",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         home,
     )
     .await
@@ -74,7 +74,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     let store = TestStore::create(
         &database,
         "blob-provider-rollback",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         home.clone(),
     )
     .await

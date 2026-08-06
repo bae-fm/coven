@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use crate::keys::UserKeypair;
 use crate::protocol::objects::{ExactObjectRef, ObjectSlot, StorageError};
 use crate::protocol::provider::*;
 use crate::protocol::provider::{
@@ -14,6 +13,7 @@ use crate::protocol::provider::{
 use crate::protocol::store_commit::ObjectHash;
 use crate::protocol::StoreProviderBinding;
 use crate::storage::cloud::{BlobBody, CloudHomeError, ExactSlotStorage};
+use coven_keys::keys::UserKeypair;
 
 pub(crate) struct ProviderProbeStorage {
     primary: Arc<dyn ExactSlotStorage>,
@@ -47,7 +47,7 @@ impl ProviderProbeStorage {
         probe_id: ProviderProbeId,
         store: &StoreProviderBinding,
         context: &CrossPrincipalChallengeContext,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
     ) -> Result<CrossPrincipalProbeChallenge, ProviderProbeError> {
         let administrator_live = self
             .primary
@@ -144,7 +144,7 @@ impl ProviderProbeStorage {
         peer_signer: &UserKeypair,
     ) -> Result<CrossPrincipalProbeResponse, ProviderProbeError> {
         challenge.verify(&context.challenge, store, administrator_signing_pubkey)?;
-        let peer_pubkey = crate::keys::public_key_hex(peer_signer);
+        let peer_pubkey = coven_keys::keys::public_key_hex(peer_signer);
         if context.challenge.member_pubkey != peer_pubkey {
             return invalid("cross-principal peer signer is not the joining member");
         }
@@ -232,7 +232,7 @@ impl ProviderProbeStorage {
         response: &CrossPrincipalProbeResponse,
         context: &CrossPrincipalResponseContext,
         store: &StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
         peer_signing_pubkey: &str,
     ) -> Result<CrossPrincipalProbeReceipt, ProviderProbeError> {
         let administrator_pubkey = administrator_signer.public_key_hex();

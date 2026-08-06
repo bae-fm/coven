@@ -11,7 +11,7 @@
 //!         │            commits · identities · signed operations
 //!         ├──────────► Database
 //!         ├──────────► Storage
-//!         └──────────► Keys / encryption
+//!         └──────────► coven-keys ───► coven-foundation
 //! ```
 //!
 //! Every top-level module of the coven crate is assigned to a region, and a
@@ -44,15 +44,17 @@ use crate::{is_test_source, RustFile};
 /// Region rank orders the layers bottom-up. A reference from module A to
 /// module B is allowed when B's region rank is strictly lower than A's, or the
 /// regions are equal.
+///
+/// A region whose every module has become a crate leaves this enum along with
+/// its table rows — `coven-foundation` and `coven-keys` sit below everything
+/// here, and Cargo will not resolve a reference back up into `coven`. What
+/// remains ranks the regions still sharing the `coven` crate.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Region {
-    /// Injectable primitives and value modules with no coven dependencies of
-    /// their own. The clock, id, staged-file, store-layout, and configuration
-    /// modules now live in the `coven-foundation` crate; what remains here are
-    /// the value modules still inside `coven`.
+    /// The value modules with no coven dependencies of their own that are
+    /// still inside `coven`; the clock, id, staged-file, store-layout, and
+    /// configuration modules are the `coven-foundation` crate.
     Foundation,
-    /// Key custody, encryption, and sealed-secret owners.
-    Keys,
     /// The deterministic protocol model: signed values, parsing, validation.
     Protocol,
     /// The SQLite boundary.
@@ -72,12 +74,6 @@ pub(crate) enum Region {
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("write", Region::Foundation),
-    ("custody", Region::Keys),
-    ("encryption", Region::Keys),
-    ("envelope", Region::Keys),
-    ("identity_custody", Region::Keys),
-    ("keyring_backend", Region::Keys),
-    ("keys", Region::Keys),
     ("protocol", Region::Protocol),
     ("database", Region::Database),
     ("join_code", Region::Storage),

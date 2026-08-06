@@ -15,8 +15,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::protocol::store_commit::SnapshotMeta;
 use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
@@ -27,6 +25,8 @@ use crate::sync::cycle;
 use crate::sync::test_helpers::*;
 use coven_foundation::clock::{FixedClock, SystemClock};
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 
 const T0: &str = "2024-01-01T00:00:00Z";
 
@@ -889,7 +889,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             crate::storage::CloudSyncStorage::new(
                 peer_home.clone(),
                 crate::storage::CloudCipher::Encrypted(
-                    crate::encryption::EncryptionService::from_key([42; 32]),
+                    coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 ),
                 crate::storage::BlobPathScheme::Hashed,
                 "cross-principal-revocation-store",
@@ -1476,7 +1476,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .expect("remove source blob before restore");
     let (restore_temp, restore_dir) = temp_store_dir();
     let restore_path = restore_dir.db_path();
-    let restorer_identity = crate::keys::UserKeypair::generate();
+    let restorer_identity = coven_keys::keys::UserKeypair::generate();
     let bootstrap = storage
         .prepare_snapshot_bootstrap(
             &restore_membership.membership_floor,
@@ -5757,7 +5757,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     };
     let home = crate::InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
-    let encryption = crate::encryption::EncryptionService::from_key([17; 32]);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([17; 32]);
     let db = open();
     let store_database = crate::database::StoreDatabase::new(&db);
     let (_blob_temp, store_dir) = temp_store_dir();

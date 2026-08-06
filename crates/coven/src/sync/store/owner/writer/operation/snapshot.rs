@@ -13,8 +13,6 @@ use crate::database::{CreatedSnapshot, SnapshotBlobAudience};
 use tracing::{info, warn};
 
 use super::SnapshotHistoryConstruction;
-#[cfg(test)]
-use crate::keys::UserKeypair;
 use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 #[cfg(test)]
 use crate::protocol::store_commit::StoreSnapshotRef;
@@ -22,6 +20,8 @@ use crate::protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
     SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
+#[cfg(test)]
+use coven_keys::keys::UserKeypair;
 
 pub(crate) struct SnapshotCut {
     pub(crate) snapshot: CreatedSnapshot,
@@ -44,7 +44,7 @@ impl super::AuthorizedWriterOperation<'_> {
     pub(crate) async fn publish_due_snapshots(
         &mut self,
         created_at: &str,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
         let resumed = self
@@ -179,7 +179,7 @@ impl super::AuthorizedWriterOperation<'_> {
     pub(crate) async fn capture_snapshot_cut(
         &self,
         tables: Vec<crate::protocol::synced_schema::SyncedTable>,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StoreSnapshotCut, crate::database::DbError> {
         let (snapshot, coverage) = self
             .database

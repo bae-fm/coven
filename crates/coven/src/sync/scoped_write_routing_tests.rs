@@ -6,11 +6,11 @@
 
 use crate::database::StoreDatabase;
 use crate::database::*;
-use crate::encryption::EncryptionService;
 use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
 use crate::protocol::synced_schema::SyncedTable;
 use crate::sync::test_helpers::{test_cloud_home, TestStore};
 use crate::{Migration, WriteStatus};
+use coven_keys::encryption::EncryptionService;
 use std::path::Path;
 
 async fn capture_scoped_write_then_reopen(
@@ -49,7 +49,7 @@ async fn capture_scoped_write_then_reopen(
     TestStore::create(
         &db,
         name,
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await
@@ -245,7 +245,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
     TestStore::create(
         &db,
         "circle-only",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await
@@ -357,7 +357,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     TestStore::create(
         &db,
         "cross-circle-move",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await
@@ -490,7 +490,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
     TestStore::create(
         &db,
         "foreign-key-move",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await

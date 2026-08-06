@@ -60,8 +60,8 @@ use std::sync::Arc;
 
 use futures_util::Stream;
 
-use crate::encryption::{SealedBlobSealer, DEFAULT_BLOB_CHUNK_SIZE};
 use crate::storage::local_file::PlaintextReader;
+use coven_keys::encryption::{SealedBlobSealer, DEFAULT_BLOB_CHUNK_SIZE};
 
 /// Errors from raw cloud storage operations.
 #[derive(Debug, thiserror::Error)]

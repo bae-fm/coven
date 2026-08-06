@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::encryption::KeyFingerprint;
 use crate::protocol::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::protocol::circle::CircleId;
 use crate::protocol::circle_control::CircleControlCoord;
@@ -9,6 +8,7 @@ use crate::protocol::store_commit::{
     STORE_PROTOCOL_VERSION,
 };
 use crate::WriteId;
+use coven_keys::encryption::KeyFingerprint;
 
 /// The Store or Circle whose exact package bytes carry a changeset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

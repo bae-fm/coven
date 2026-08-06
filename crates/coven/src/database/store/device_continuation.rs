@@ -20,7 +20,7 @@ impl StoreDatabase {
 
     pub(crate) async fn export_activated_device_continuation(
         &self,
-        identity_signer: &crate::keys::UserKeypair,
+        identity_signer: &coven_keys::keys::UserKeypair,
     ) -> Result<crate::protocol::recovery::ActivatedContinuation, DbError> {
         let durable = self
             .latest_local_store_device_registration()
@@ -87,8 +87,8 @@ impl StoreDatabase {
     pub(crate) async fn install_activated_device_continuation(
         &self,
         continuation: crate::protocol::recovery::ActivatedContinuation,
-        identity_signer: &crate::keys::UserKeypair,
-        device_signer: &crate::keys::UserKeypair,
+        identity_signer: &coven_keys::keys::UserKeypair,
+        device_signer: &coven_keys::keys::UserKeypair,
         ack_chain: Vec<(StoreAckRef, StoreAck)>,
         latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
     ) -> Result<(), DbError> {

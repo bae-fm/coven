@@ -4,7 +4,6 @@ use std::sync::Arc;
 use super::*;
 use crate::database::Database;
 use crate::database::{AuthorExclusionLocatorTamper, StoreDatabase};
-use crate::keys::UserKeypair;
 use crate::protocol::store_commit::{
     StoreAckExclusionState, StoreCommitCoord, StoreDeviceExclusionRef, StoreDeviceRegistrationRef,
 };
@@ -15,6 +14,7 @@ use crate::sync::test_helpers::{
     open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
 };
 use crate::{StoreDir, WriteId};
+use coven_keys::keys::UserKeypair;
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(

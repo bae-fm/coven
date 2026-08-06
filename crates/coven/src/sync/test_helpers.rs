@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
-use crate::encryption::MasterKeyring;
-use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::SyncStorage;
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::encryption::MasterKeyring;
+use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
 
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
@@ -39,7 +39,7 @@ pub(crate) struct TestCustody {
 impl TestCustody {
     pub(crate) fn set_initial_key(&self, key: [u8; 32]) {
         *self.value.lock().unwrap() = Some(
-            MasterKeyring::from(crate::encryption::EncryptionService::from_key(key))
+            MasterKeyring::from(coven_keys::encryption::EncryptionService::from_key(key))
                 .to_serialized(),
         );
     }
@@ -89,7 +89,7 @@ impl MasterKeyCustody for TestCustody {
 /// Hex-encoded ed25519 public key, as membership entries and the wrapped-key
 /// store identify a member.
 pub(crate) fn pubkey_hex(kp: &UserKeypair) -> String {
-    crate::keys::public_key_hex(kp)
+    coven_keys::keys::public_key_hex(kp)
 }
 
 /// Ed25519 identity derived from exact test-owned seed bytes.
@@ -392,9 +392,9 @@ mod test_device {
 
         pub(crate) fn adopt_key_rotation(
             &self,
-            encryption: &crate::encryption::EncryptionService,
-            custody: &dyn crate::keys::MasterKeyCustody,
-        ) -> Result<String, crate::keys::KeyError> {
+            encryption: &coven_keys::encryption::EncryptionService,
+            custody: &dyn coven_keys::keys::MasterKeyCustody,
+        ) -> Result<String, coven_keys::keys::KeyError> {
             self.storage
                 .adopt_key_rotation_for_test(encryption, custody)
         }
@@ -548,7 +548,7 @@ mod test_device {
 
         pub(crate) async fn finalize_owner_promotion(
             &self,
-            encryption: &crate::encryption::EncryptionService,
+            encryption: &coven_keys::encryption::EncryptionService,
             acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
         ) -> Result<
             crate::protocol::circle_control::StoreMembershipStateRef,
@@ -990,8 +990,8 @@ mod test_device {
         pub(crate) async fn remove_member(
             &self,
             public_key_hex: &str,
-            encryption: &crate::encryption::EncryptionService,
-            master_keys: &dyn crate::keys::MasterKeyCustody,
+            encryption: &coven_keys::encryption::EncryptionService,
+            master_keys: &dyn coven_keys::keys::MasterKeyCustody,
             cipher: &dyn crate::storage::CloudCipherAccess,
             pending_rotation: &dyn crate::storage::CloudRotationAccess,
         ) -> Result<String, crate::sync::store::MembershipOpsError> {
@@ -1258,7 +1258,7 @@ mod test_device {
             member_pubkey: &str,
             invitee_email: Option<&str>,
             role: crate::protocol::membership::MemberRole,
-            encryption: &crate::encryption::EncryptionService,
+            encryption: &coven_keys::encryption::EncryptionService,
             store_id: &str,
             store_name: &str,
         ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
@@ -1278,7 +1278,7 @@ mod test_device {
             &self,
             store_dir: &StoreDir,
             clock: &dyn coven_foundation::clock::Clock,
-            routing_encryption: Option<&crate::encryption::EncryptionService>,
+            routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
             self.store
@@ -1540,7 +1540,7 @@ mod test_device {
                 .await
                 .expect("load exact blob write authority");
             let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
-            let protection = crate::encryption::EncryptionService::from_key([42; 32]);
+            let protection = coven_keys::encryption::EncryptionService::from_key([42; 32]);
             let locator = crate::protocol::blob::locator::BlobLocator::opaque(
                 namespace,
                 id,
@@ -1668,7 +1668,7 @@ mod test_device {
         pub(crate) async fn run_cycle_with(
             &self,
             clock: &dyn coven_foundation::clock::Clock,
-            master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
+            master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
@@ -1687,7 +1687,7 @@ mod test_device {
         pub(crate) async fn run_cycle_with_interceptor<I>(
             &self,
             clock: &dyn coven_foundation::clock::Clock,
-            master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
+            master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
             interceptor: I,
@@ -1710,7 +1710,7 @@ mod test_device {
             store: std::sync::Arc<crate::sync::store::Store>,
             storage: std::sync::Arc<S>,
             clock: &dyn coven_foundation::clock::Clock,
-            master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
+            master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
@@ -1735,7 +1735,7 @@ mod test_device {
 
         pub(crate) fn current_encryption_for_test(
             &self,
-        ) -> Option<crate::encryption::EncryptionService> {
+        ) -> Option<coven_keys::encryption::EncryptionService> {
             self.storage.current_encryption()
         }
 
@@ -1808,7 +1808,7 @@ mod test_device {
             operation_id: &crate::protocol::circle::CircleOperationId,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
             let routing_key = crate::protocol::circle::derive_row_routing_key(
-                &crate::encryption::EncryptionService::from_key([42; 32]),
+                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 self.store.store_root().store_root_hash,
             )
             .expect("derive Circle test routing key");
@@ -1823,7 +1823,7 @@ mod test_device {
             &self,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
             let routing_key = crate::protocol::circle::derive_row_routing_key(
-                &crate::encryption::EncryptionService::from_key([42; 32]),
+                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 self.store.store_root().store_root_hash,
             )
             .expect("derive Circle test routing key");
@@ -1842,7 +1842,9 @@ mod test_device {
                 .circles()
                 .retry_circle_operation(
                     operation_id,
-                    Some(&crate::encryption::EncryptionService::from_key([42; 32])),
+                    Some(&coven_keys::encryption::EncryptionService::from_key(
+                        [42; 32],
+                    )),
                 )
                 .await
         }
@@ -2147,7 +2149,7 @@ mod test_device {
             crate::sync::store::CircleOperationError,
         > {
             let routing_key = crate::protocol::circle::derive_row_routing_key(
-                &crate::encryption::EncryptionService::from_key([42; 32]),
+                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 commit.store_root_hash,
             )
             .expect("derive Circle test routing key");
@@ -2216,7 +2218,7 @@ mod test_device {
         #[cfg(test)]
         pub(crate) async fn open_membership_keyring(
             &self,
-        ) -> Result<crate::encryption::EncryptionService, String> {
+        ) -> Result<coven_keys::encryption::EncryptionService, String> {
             self.store.open_membership_keyring_for_test().await
         }
 
@@ -2456,7 +2458,7 @@ mod test_device {
             ),
             TestPullError,
         > {
-            let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
             self.pull_store_with_encryption(store_dir, &routing_encryption)
                 .await
         }
@@ -2464,7 +2466,7 @@ mod test_device {
         pub(crate) async fn pull_store_with_encryption(
             &self,
             store_dir: &StoreDir,
-            routing_encryption: &crate::encryption::EncryptionService,
+            routing_encryption: &coven_keys::encryption::EncryptionService,
         ) -> Result<
             (
                 std::collections::BTreeMap<String, u64>,
@@ -2612,7 +2614,7 @@ impl TestStore {
         database: &Database,
         storage: Arc<dyn crate::storage::SyncStorage>,
         store_dir: &StoreDir,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let store = crate::sync::store::Store::load(
             crate::database::StoreDatabase::new(database),
@@ -2638,7 +2640,7 @@ impl TestStore {
         let owner_grant = protocol_root.descriptor.founder_grant.clone();
         let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
             &self.root,
-            &crate::keys::public_key_hex(&self.signer),
+            &coven_keys::keys::public_key_hex(&self.signer),
             &owner_grant,
             &protocol_root.descriptor.founder_recovery,
         )
@@ -2745,7 +2747,7 @@ impl TestStore {
         member_db: &Database,
         owner: &UserKeypair,
         member: &UserKeypair,
-        encryption: &crate::encryption::EncryptionService,
+        encryption: &coven_keys::encryption::EncryptionService,
     ) -> Result<crate::protocol::circle_control::StoreMembershipStateRef, String> {
         let owner_device = self.bind_device(owner_db, owner).await?;
         let member_device = self.bind_device(member_db, member).await?;
@@ -2804,9 +2806,9 @@ impl TestStore {
             store_id,
             signer,
             home,
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
+            crate::storage::CloudCipher::Encrypted(
+                coven_keys::encryption::EncryptionService::from_key([42; 32]),
+            ),
             crate::storage::BlobPathScheme::Hashed,
         ))
         .await
@@ -2817,7 +2819,7 @@ impl TestStore {
         store_id: &str,
         signer: UserKeypair,
         home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
-        encryption: crate::encryption::EncryptionService,
+        encryption: coven_keys::encryption::EncryptionService,
     ) -> Result<Arc<Self>, String> {
         Self::create_with_protection(
             db,
@@ -2841,9 +2843,9 @@ impl TestStore {
             store_id,
             signer,
             home,
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
+            crate::storage::CloudCipher::Encrypted(
+                coven_keys::encryption::EncryptionService::from_key([42; 32]),
+            ),
             crate::storage::BlobPathScheme::Hashed,
         ))
         .await
@@ -2925,7 +2927,7 @@ impl TestStore {
     }
 
     pub(crate) fn protocol_founder_pubkey(&self) -> String {
-        crate::keys::public_key_hex(&self.signer)
+        coven_keys::keys::public_key_hex(&self.signer)
     }
 
     /// The storage handle tests hand to code that takes a [`SyncStorage`].
@@ -3499,7 +3501,7 @@ impl TestStore {
         database: &crate::database::StoreDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         clock: &dyn coven_foundation::clock::Clock,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
     ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
         let store = self
@@ -3575,7 +3577,7 @@ impl TestStore {
             .begin_joining_store(joining_database, &bootstrap_store_dir)
             .await
             .map_err(|error| format!("begin joining Store: {error}"))?;
-        let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let bootstrap_pull = joining
             .pull_store_history(Some(&routing_encryption))
             .await
@@ -3632,7 +3634,7 @@ impl TestStore {
         member_pubkey: &str,
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
-        encryption: &crate::encryption::EncryptionService,
+        encryption: &coven_keys::encryption::EncryptionService,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
         let device = self.bind_device(db, identity).await.map_err(|error| {
@@ -3664,7 +3666,7 @@ impl TestStore {
             &pubkey_hex(peer),
             None,
             crate::protocol::membership::MemberRole::Member,
-            &crate::encryption::EncryptionService::from_key([42; 32]),
+            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             "Test Store",
         )
         .await
@@ -3678,8 +3680,8 @@ impl TestStore {
         db: &Database,
         identity: &UserKeypair,
         member_pubkey: &str,
-        encryption: &crate::encryption::EncryptionService,
-        master_keys: &dyn crate::keys::MasterKeyCustody,
+        encryption: &coven_keys::encryption::EncryptionService,
+        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, crate::sync::store::MembershipOpsError> {
         let device = self.bind_device(db, identity).await.map_err(|error| {
             crate::sync::store::MembershipOpsError::Chain(
@@ -3849,7 +3851,7 @@ impl TestStore {
                 crate::storage::CloudSyncStorage::new(
                     peer_home.clone(),
                     crate::storage::CloudCipher::Encrypted(
-                        crate::encryption::EncryptionService::from_key([42; 32]),
+                        coven_keys::encryption::EncryptionService::from_key([42; 32]),
                     ),
                     crate::storage::BlobPathScheme::Hashed,
                     "cross-principal-test-store",
@@ -3958,7 +3960,7 @@ impl TestStore {
         temp_dir: std::path::PathBuf,
         schema_version: u32,
         created_at: &str,
-        store_routing: &crate::encryption::EncryptionService,
+        store_routing: &coven_keys::encryption::EncryptionService,
     ) -> Result<crate::protocol::store_commit::CircleSnapshotMeta, crate::sync::store::SnapshotError>
     {
         self.bind_device(db, &self.signer)
@@ -4010,7 +4012,7 @@ impl TestStore {
         db: &Database,
         circle_id: crate::protocol::circle::CircleId,
         access: &crate::protocol::circle_activation::CircleEpochAccess,
-        store_routing: &crate::encryption::EncryptionService,
+        store_routing: &coven_keys::encryption::EncryptionService,
     ) -> Result<(), crate::sync::store::SnapshotError> {
         self.bind_device(db, &self.signer)
             .await
@@ -4087,7 +4089,7 @@ impl TestStore {
     pub(crate) async fn circle_snapshot_meta_is_unreadable(
         &self,
         circle_id: crate::protocol::circle::CircleId,
-        encryption: crate::encryption::EncryptionService,
+        encryption: coven_keys::encryption::EncryptionService,
     ) -> bool {
         let context = crate::protocol::objects::ProtocolObjectContext::circle(
             self.root.store_root_hash,
@@ -4356,9 +4358,9 @@ where
 
     fn merge_key_rotation(
         &self,
-        new_encryption: &crate::encryption::EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError> {
+        new_encryption: &coven_keys::encryption::EncryptionService,
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         self.inner.merge_key_rotation(new_encryption, custody)
     }
 }

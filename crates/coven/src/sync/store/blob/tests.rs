@@ -122,9 +122,14 @@ async fn create_store(
     db: &Database,
     home: std::sync::Arc<crate::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
-    TestStore::create(db, "test-store", crate::keys::UserKeypair::generate(), home)
-        .await
-        .expect("create exact test Store for the test database")
+    TestStore::create(
+        db,
+        "test-store",
+        coven_keys::keys::UserKeypair::generate(),
+        home,
+    )
+    .await
+    .expect("create exact test Store for the test database")
 }
 
 struct ExactRemoteBlobFixture<'a> {
@@ -1315,7 +1320,7 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     let storage = TestStore::create_browsable(
         &db,
         "browsable-store",
-        crate::keys::UserKeypair::generate(),
+        coven_keys::keys::UserKeypair::generate(),
         home.clone(),
     )
     .await

@@ -17,8 +17,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         identity: &UserKeypair,
         membership: &MembershipChain,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
-    {
+    ) -> Result<
+        coven_keys::encryption::EncryptionService,
+        crate::sync::store::membership::InviteError,
+    > {
         self.keyrings.open(identity, membership).await
     }
 

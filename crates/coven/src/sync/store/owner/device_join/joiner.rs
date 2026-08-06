@@ -262,7 +262,7 @@ impl<'storage> JoiningStore<'storage> {
 
     pub(crate) async fn pull_store_history(
         &mut self,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, DeviceJoinError> {
         let membership = self.membership.clone();
         let execution = self
@@ -281,7 +281,7 @@ impl<'storage> JoiningStore<'storage> {
     ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
         let offer = &bootstrap.bootstrap.request.approval.request.offer;
         if &offer.store_root != self.history.root()
-            || offer.member_pubkey != crate::keys::public_key_hex(&self.identity)
+            || offer.member_pubkey != coven_keys::keys::public_key_hex(&self.identity)
             || self.history.device_join().sync_routing_hash()
                 != self
                     .history

@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     CircleActivationVerifier, CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
 };
-use crate::encryption::EncryptionService;
 use crate::protocol::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleRosterHeadRef,
     CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedCircleControl, ResolvedCircleRoster,
@@ -15,6 +14,7 @@ use crate::protocol::store_commit::{
     StreamActivationId,
 };
 use crate::sync::store::circle_controls::CircleOperationError;
+use coven_keys::encryption::EncryptionService;
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(super) async fn load_circle_roster_state(

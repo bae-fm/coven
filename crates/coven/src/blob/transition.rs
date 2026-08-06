@@ -340,7 +340,7 @@ impl LocalBlobTransitions {
         &self,
         root_table: &str,
         root_id: &str,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<PreparedMakeLocal, MakeLocalError> {
         let tables = self.database.synced_tables().to_vec();
         self.database
@@ -398,7 +398,7 @@ impl LocalBlobTransitions {
         root_table: &str,
         root_id: &str,
         gate_column: &str,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         records: Vec<crate::database::MaterializedLocalBlob>,
     ) -> Result<(), DbError> {
         self.database
@@ -434,7 +434,7 @@ pub(crate) trait VerifiedLocalCopyStaging: Send + Sync {
 pub(crate) struct ConnectedBlobTransitions {
     local: LocalBlobTransitions,
     blob_access: Arc<dyn VerifiedLocalCopyStaging>,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
+    routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
@@ -442,7 +442,7 @@ impl ConnectedBlobTransitions {
     pub(crate) fn new(
         local: LocalBlobTransitions,
         blob_access: Arc<dyn VerifiedLocalCopyStaging>,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
         Self {

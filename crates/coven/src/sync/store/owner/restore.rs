@@ -47,7 +47,7 @@ impl<'storage> RestoringStore<'storage> {
         let membership = &self.membership;
         let root = self.root.clone();
         let protocol = self.protocol.clone();
-        let owner_pubkey = crate::keys::public_key_hex(identity_signer);
+        let owner_pubkey = coven_keys::keys::public_key_hex(identity_signer);
         if owner_pubkey != protocol.descriptor.founder_pubkey
             || authority.owner_grant != protocol.descriptor.founder_grant
             || membership.active_owner_grant(&owner_pubkey).as_ref() != Some(&authority.owner_grant)

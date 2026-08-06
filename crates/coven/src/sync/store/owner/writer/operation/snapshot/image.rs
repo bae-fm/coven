@@ -126,7 +126,7 @@ pub(crate) struct PreparedSnapshotBootstrap<'storage> {
     founder_registration: crate::protocol::objects::VerifiedObject<
         crate::protocol::store_commit::StoreDeviceRegistration,
     >,
-    restorer_identity: crate::keys::UserKeypair,
+    restorer_identity: coven_keys::keys::UserKeypair,
     snapshot: crate::database::PublishedStoreSnapshot,
     coverage: crate::protocol::store_commit::CommitFrontier,
     stability: crate::database::VerifiedStoreSnapshotStability,
@@ -157,7 +157,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         membership_floor: &crate::protocol::membership::MembershipFloor,
         binary_schema_version: u32,
         target_path: &Path,
-        restorer_identity: &crate::keys::UserKeypair,
+        restorer_identity: &coven_keys::keys::UserKeypair,
     ) -> Result<Self, SnapshotError> {
         let root = history_verifier.verified_root();
         if root.protocol().descriptor.store_root_id() != root.reference().store_root_id {
@@ -280,7 +280,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
         let PreparedSnapshotBootstrap {
             database_image,

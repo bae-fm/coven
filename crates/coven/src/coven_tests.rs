@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::keys::test_keyring;
 use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::protocol::objects::ObjectSlot;
 use crate::protocol::synced_schema::BlobDecl;
@@ -15,6 +14,7 @@ use crate::{WriteId, WriteReceipt};
 use async_trait::async_trait;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::keys::test_keyring;
 use rusqlite::{params, OptionalExtension};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -394,7 +394,7 @@ fn open_files_handle_in(dir: StoreDir) -> CovenHandle {
 
 async fn merge_test_storage(
     handle: &CovenHandle,
-    keypair: &crate::keys::UserKeypair,
+    keypair: &coven_keys::keys::UserKeypair,
     home: std::sync::Arc<crate::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
     handle
@@ -408,7 +408,7 @@ async fn merge_test_storage(
 async fn publish_pending_through_a_test_store(handle: &CovenHandle) -> std::sync::Arc<TestStore> {
     let storage = merge_test_storage(
         handle,
-        &crate::keys::UserKeypair::generate(),
+        &coven_keys::keys::UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await;
@@ -425,7 +425,7 @@ trait CovenHandleWriteTestOps {
 
 impl CovenHandleWriteTestOps for CovenHandle {
     async fn publish_current_writes(&self) {
-        let keypair = crate::keys::UserKeypair::generate();
+        let keypair = coven_keys::keys::UserKeypair::generate();
         let storage =
             merge_test_storage(self, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
         self.publish_test_store(&storage)
@@ -453,7 +453,7 @@ async fn write_survives_reopen_before_sync_cycle() {
     drop(handle);
 
     let reopened = open_files_handle_in(dir);
-    let keypair = crate::keys::UserKeypair::generate();
+    let keypair = coven_keys::keys::UserKeypair::generate();
     let storage = merge_test_storage(
         &reopened,
         &keypair,
@@ -509,7 +509,7 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
         .await
         .expect("subscribe after restart");
     assert_eq!(*first_status.borrow(), crate::WriteStatus::Pending);
-    let keypair = crate::keys::UserKeypair::generate();
+    let keypair = coven_keys::keys::UserKeypair::generate();
     let storage = merge_test_storage(
         &reopened,
         &keypair,
@@ -721,7 +721,7 @@ async fn pending_write_drains_only_after_changeset_push() {
         })
         .await
         .expect("write before failed push");
-    let keypair = crate::keys::UserKeypair::generate();
+    let keypair = coven_keys::keys::UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
     let storage = merge_test_storage(&handle, &keypair, home.clone()).await;
     home.fail_exact_create_before_call(1);
@@ -1214,7 +1214,7 @@ impl RemoteOnlyStoreBlob {
     async fn create() -> Self {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
-        let signer = crate::keys::UserKeypair::generate();
+        let signer = coven_keys::keys::UserKeypair::generate();
         let encryption = crate::EncryptionService::from_key([42; 32]);
         let handle = Coven::builder(config(dir.clone()))
             .synced_tables(vec![scoped_files_table()])
@@ -1548,7 +1548,7 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
     fixture
         .handle
         .invite_member(
-            &crate::keys::public_key_hex(
+            &coven_keys::keys::public_key_hex(
                 &crate::protocol::circle_activation_test_fixtures::test_circle_owner_keypair(),
             ),
             None,
@@ -1624,7 +1624,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
             tokio::task::spawn_local(async {
                 let tmp = tempfile::tempdir().expect("temp dir");
                 let dir = StoreDir::new(tmp.path());
-                let signer = crate::keys::UserKeypair::generate();
+                let signer = coven_keys::keys::UserKeypair::generate();
                 let keyring =
                     crate::MasterKeyring::from(crate::EncryptionService::from_key([42; 32]));
                 let open = || {
@@ -1918,7 +1918,7 @@ impl PendingReplacement {
     }
 
     async fn assert_publishes_in_order(&self, handle: &CovenHandle) {
-        let keypair = crate::keys::UserKeypair::generate();
+        let keypair = coven_keys::keys::UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let storage = merge_test_storage(handle, &keypair, home.clone()).await;
         handle
@@ -2283,7 +2283,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
         source
             .create_test_store(
                 "lib-test",
-                crate::keys::UserKeypair::generate(),
+                coven_keys::keys::UserKeypair::generate(),
                 crate::sync::test_helpers::test_cloud_home(),
             )
             .await

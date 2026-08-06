@@ -2,7 +2,6 @@
 //! bytes, their reference, and the remote-object records a candidate or
 //! activation derives from them.
 
-use crate::keys::UserKeypair;
 use crate::protocol::membership_mutation::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
@@ -14,6 +13,7 @@ use crate::protocol::store_commit::{
     ActivatedStoreDeviceRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreControl,
     StoreDeviceHead, StoreDeviceHeadRef,
 };
+use coven_keys::keys::UserKeypair;
 
 /// A prepared commit whose parts contradict each other or cannot form valid
 /// remote-object records. Workflow errors wrap it at the operation boundary.

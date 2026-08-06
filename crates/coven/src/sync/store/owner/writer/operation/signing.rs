@@ -18,11 +18,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         store_id: &str,
         recipient: &str,
-        recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: &crate::encryption::EncryptionService,
+        recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: &coven_keys::encryption::EncryptionService,
     ) -> Result<
         crate::protocol::wrapped_store_key::WrappedStoreKey,
-        crate::encryption::EncryptionError,
+        coven_keys::encryption::EncryptionError,
     > {
         self.writer
             .seal_keyring(store_id, recipient, recipient_key, keyring)
@@ -54,8 +54,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         store_id: &str,
         recipient: &str,
-        recipient_key: &[u8; crate::keys::CURVE25519_PUBLICKEYBYTES],
-        keyring: &crate::encryption::EncryptionService,
+        recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
+        keyring: &coven_keys::encryption::EncryptionService,
     ) -> Result<PreparedWrappedStoreKey, InviteError> {
         let wrapped = self
             .writer

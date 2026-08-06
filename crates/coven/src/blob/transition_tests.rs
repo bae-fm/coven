@@ -23,7 +23,6 @@ use tokio::sync::watch;
 use crate::blob::transition::LocalBlobTransitions;
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::keys::UserKeypair;
 use crate::protocol::blob::DeferredLocalBlobDisposition;
 use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use crate::protocol::store_commit::ObjectHash;
@@ -38,6 +37,7 @@ use crate::sync::test_owner_graph::TestOwnerGraph;
 use crate::Migration;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::keys::UserKeypair;
 
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -814,7 +814,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"scoped-managed-photo".to_vec();
-    let routing_encryption = crate::encryption::EncryptionService::from_key([5; 32]);
+    let routing_encryption = coven_keys::encryption::EncryptionService::from_key([5; 32]);
     owners
         .seed_remote_release(
             &storage,
@@ -951,7 +951,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"scoped-user-photo";
-    let routing_encryption = crate::encryption::EncryptionService::from_key([7; 32]);
+    let routing_encryption = coven_keys::encryption::EncryptionService::from_key([7; 32]);
     db.execute_test_sql(&format!(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n-user-scoped', 'Scoped user fixture', NULL, 0, \
@@ -1088,7 +1088,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     let (_tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database, lib.clone());
     let bytes = b"scoped-host-cover";
-    let routing_encryption = crate::encryption::EncryptionService::from_key([9; 32]);
+    let routing_encryption = coven_keys::encryption::EncryptionService::from_key([9; 32]);
     db.execute_test_sql(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host-scoped', 'Scoped host fixture', NULL, 0, \

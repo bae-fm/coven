@@ -1,10 +1,10 @@
-use crate::encryption::EncryptionService;
-use crate::keys::{IdentityKeyAuthority, UserKeypair};
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use crate::protocol::wrapped_store_key::{
     PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
 };
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::{IdentityKeyAuthority, UserKeypair};
 
 use crate::sync::store::membership::InviteError;
 
@@ -179,10 +179,10 @@ pub(crate) async fn load_wrapped_store_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::UserKeypair;
     use crate::protocol::wrapped_store_key::WrappedStoreKey;
     use crate::storage::SyncStorage as _;
     use crate::sync::test_helpers::{open_test_db, test_cloud_home, TestStore};
+    use coven_keys::keys::UserKeypair;
 
     #[tokio::test]
     async fn distinct_wraps_at_one_generation_remain_distinct_exact_objects() {

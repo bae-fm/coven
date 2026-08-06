@@ -11,7 +11,6 @@ use super::{
     RegistrationOutbox, StoreKeyrings,
 };
 use crate::database::DeviceJoinBootstrapPlan;
-use crate::keys::UserKeypair;
 use crate::protocol::objects::ObjectSlot;
 use crate::protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
 use crate::protocol::provider::{
@@ -27,6 +26,7 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::SyncStorage;
 use crate::sync::store::{Store, StoreDatabase};
+use coven_keys::keys::UserKeypair;
 
 mod authorized_join;
 mod cleanup;

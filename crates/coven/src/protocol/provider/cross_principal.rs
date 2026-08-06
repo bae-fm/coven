@@ -122,7 +122,7 @@ impl CrossPrincipalProbeReceipt {
         transcript: CrossPrincipalProbeTranscript,
         context: &CrossPrincipalResponseContext,
         store: &StoreProviderBinding,
-        administrator_signer: &dyn crate::keys::DeviceSigningAuthority,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
     ) -> Result<Self, ProviderProbeError> {
         validate_cross_transcript_payloads(&transcript, context)?;
         let transcript_hash = cross_transcript_hash(store, context, &transcript);
@@ -165,7 +165,7 @@ impl CrossPrincipalProbeReceipt {
         if self.transcript_hash != expected_hash {
             return invalid("cross-principal transcript hash does not match its join context");
         }
-        if !crate::keys::verify_signature_hex(
+        if !coven_keys::keys::verify_signature_hex(
             administrator_signing_pubkey,
             &self.administrator_completion_signature,
             self.transcript_hash.as_bytes(),
@@ -189,7 +189,7 @@ impl CrossPrincipalProbeChallenge {
         if self.challenge_hash != expected_hash {
             return invalid("cross-principal challenge hash does not match its join context");
         }
-        if !crate::keys::verify_signature_hex(
+        if !coven_keys::keys::verify_signature_hex(
             administrator_signing_pubkey,
             &self.administrator_signature,
             self.challenge_hash.as_bytes(),
@@ -224,7 +224,7 @@ impl CrossPrincipalProbeResponse {
         if self.response_hash != expected_hash {
             return invalid("cross-principal response hash does not match its join context");
         }
-        if !crate::keys::verify_signature_hex(
+        if !coven_keys::keys::verify_signature_hex(
             peer_signing_pubkey,
             &self.peer_signature,
             self.response_hash.as_bytes(),

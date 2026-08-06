@@ -12,7 +12,7 @@ pub(crate) struct AuthorizedPull<'operation, 'storage> {
     package_schema: std::sync::Arc<crate::database::TableSchema>,
     membership: &'operation MembershipChain,
     identity: Option<&'operation UserKeypair>,
-    routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
+    routing_encryption: Option<&'operation coven_keys::encryption::EncryptionService>,
 }
 
 impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
@@ -20,7 +20,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         history: &'operation mut super::AuthorizedStoreHistory<'storage>,
         membership: &'operation MembershipChain,
         identity: Option<&'operation UserKeypair>,
-        routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
+        routing_encryption: Option<&'operation coven_keys::encryption::EncryptionService>,
     ) -> Result<Self, StorePullError> {
         let package_schema = history.pull_package_schema().await.map_err(|error| {
             StorePullError::Database(crate::database::DbError::context(

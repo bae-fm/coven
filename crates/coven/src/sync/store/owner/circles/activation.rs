@@ -3,8 +3,6 @@
 use std::collections::BTreeSet;
 
 use crate::database::StoreDatabase;
-use crate::encryption::{EncryptionService, MasterKeyring};
-use crate::keys::{self, UserKeypair};
 use crate::protocol::circle::{
     circle_epoch_close_intent_semantic_prefix, circle_semantic_prefix, recipient_slot_with_peer,
     verify_circle_semantic_prefix, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
@@ -21,6 +19,8 @@ use crate::protocol::store_commit::{
 };
 use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::keys::{self, UserKeypair};
 
 mod metadata;
 mod roster;

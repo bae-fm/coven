@@ -97,7 +97,7 @@ pub(crate) struct SyncLoopHandle {
 struct SyncLoopHandleInner {
     components: SyncComponents,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
-    master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
+    master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
     clock: ClockRef,
     config: Config,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -166,7 +166,7 @@ impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
         blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
-        master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
+        master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
         clock: ClockRef,
         config: Config,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -928,7 +928,7 @@ impl SyncLoopHandle {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
         self.inner
             .components
             .open_sealed_blob_for_test(stored, aad_context)
@@ -937,8 +937,8 @@ impl SyncLoopHandle {
     #[cfg(test)]
     pub(crate) fn adopt_key_rotation_for_test(
         &self,
-        encryption: crate::encryption::EncryptionService,
-    ) -> Result<String, crate::keys::KeyError> {
+        encryption: coven_keys::encryption::EncryptionService,
+    ) -> Result<String, coven_keys::keys::KeyError> {
         self.inner
             .components
             .adopt_key_rotation(encryption, self.inner.master_keys.as_ref())

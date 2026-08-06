@@ -11,16 +11,10 @@
 pub(crate) mod blob;
 pub(crate) mod circles;
 pub(crate) mod coven;
-pub(crate) mod custody;
 pub(crate) mod database;
-pub(crate) mod encryption;
-pub(crate) mod envelope;
 mod handle;
-pub(crate) mod identity_custody;
 pub(crate) mod join_code;
 pub(crate) mod joining;
-pub(crate) mod keyring_backend;
-pub(crate) mod keys;
 pub(crate) mod oauth;
 pub(crate) mod protocol;
 mod read_handle;
@@ -60,17 +54,28 @@ pub use coven_foundation::config::{
 pub use coven_foundation::id_provider::SequentialIdProvider;
 pub use coven_foundation::id_provider::{IdProvider, IdRef, UuidProvider};
 pub use coven_foundation::store_dir::{StoreDir, StoreLayout};
-pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
+pub use coven_keys::custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_keys::encryption::EncryptionService;
+pub use coven_keys::encryption::{
+    EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE,
+};
+pub use coven_keys::identity_custody::{rewrap_passphrase_identity_custody, IdentityCustody};
+#[cfg(all(
+    any(test, feature = "test-utils"),
+    any(target_os = "macos", target_os = "ios")
+))]
+pub use coven_keys::keys::{apple_keyring_entry_facts_for_test, AppleKeyringEntryFacts};
+pub use coven_keys::keys::{
+    keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,
+    IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
+};
 pub use database::{
     BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
     QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
 };
 pub use database::{Migration, MigrationContext, MigrationError, MigrationStep};
-#[cfg(any(test, feature = "test-utils"))]
-pub use encryption::EncryptionService;
-pub use encryption::{EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE};
 pub use handle::CovenHandle;
-pub use identity_custody::{rewrap_passphrase_identity_custody, IdentityCustody};
 pub use joining::{
     abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
     BootstrapError, DeviceJoinClient, InviteCodeInfo, JoinCodeError, JoinRequestCode,
@@ -82,15 +87,6 @@ pub use joining::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use joining::{
     close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
-};
-#[cfg(all(
-    any(test, feature = "test-utils"),
-    any(target_os = "macos", target_os = "ios")
-))]
-pub use keys::{apple_keyring_entry_facts_for_test, AppleKeyringEntryFacts};
-pub use keys::{
-    keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,
-    IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
 };
 #[cfg(any(test, feature = "oauth-providers"))]
 pub use oauth::OAuthError;

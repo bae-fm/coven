@@ -1,11 +1,11 @@
 use crate::database::StoreDatabase;
-use crate::keys::UserKeypair;
 use crate::protocol::membership::MembershipChain;
 use crate::protocol::store_commit::{
     ReferencedStoreDeviceRegistration, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
     StoreDeviceRegistrationRef, StoreRootRef,
 };
 use crate::sync::store::StoreError;
+use coven_keys::keys::UserKeypair;
 
 use super::history::AuthorizedStoreHistory;
 
@@ -303,8 +303,10 @@ impl<'storage> AuthorizedStore<'storage> {
     #[cfg(test)]
     pub(super) async fn open_membership_keyring_for_test(
         &self,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
-    {
+    ) -> Result<
+        coven_keys::encryption::EncryptionService,
+        crate::sync::store::membership::InviteError,
+    > {
         self.history
             .open_keyring(self.identity, &self.membership)
             .await

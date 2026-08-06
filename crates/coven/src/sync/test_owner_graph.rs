@@ -68,7 +68,7 @@ impl TestOwnerGraph {
     pub(crate) async fn seed_remote_release(
         &self,
         store: &crate::sync::test_helpers::TestStore,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         note_id: &str,
         photo_id: &str,
         cloud_path: &str,
@@ -166,7 +166,7 @@ impl TestOwnerGraph {
     pub(crate) async fn make_local(
         &self,
         storage: Arc<dyn SyncStorage>,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         observer: Option<Arc<dyn crate::protocol::blob::BlobTransitionObserver>>,
         root_table: &str,
         root_id: &str,
@@ -253,7 +253,7 @@ impl TestOwnerGraph {
     pub(crate) fn connected_blob_transitions(
         &self,
         storage: Arc<dyn SyncStorage>,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         observer: Option<Arc<dyn crate::protocol::blob::BlobTransitionObserver>>,
     ) -> ConnectedBlobTransitions {
         ConnectedBlobTransitions::new(
@@ -273,7 +273,7 @@ impl TestOwnerGraph {
     pub(crate) async fn prepare_sync(
         &self,
         storage: impl Into<std::sync::Arc<crate::storage::CloudSyncStorage>>,
-        identity: crate::keys::UserKeypair,
+        identity: coven_keys::keys::UserKeypair,
     ) -> Result<crate::sync::cycle::SyncComponents, String> {
         let expected_store_root = self
             .database

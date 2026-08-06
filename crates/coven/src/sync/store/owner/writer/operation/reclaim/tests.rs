@@ -1,9 +1,9 @@
 use super::*;
-use crate::keys::{self, UserKeypair};
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::objects::ObjectSlot;
 use crate::protocol::store_commit::{StoreCommitCoord, StoreProtocolError};
 use crate::storage::SyncStorage;
+use coven_keys::keys::{self, UserKeypair};
 use std::collections::BTreeMap;
 
 fn proof_object(path: &str) -> ExactObjectRef {

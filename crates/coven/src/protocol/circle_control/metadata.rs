@@ -60,7 +60,7 @@ impl CircleMetadata {
         owner_grant: MembershipGrantId,
         author_roster: CircleRosterStateRef,
         key_fingerprint: KeyFingerprint,
-        signer: &dyn crate::keys::IdentityKeyAuthority,
+        signer: &dyn coven_keys::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if name.trim().is_empty() {
             return Err(CircleTransitionError::EmptyName);

@@ -17,11 +17,11 @@ use tracing::info;
 pub(crate) const NONCE_SIZE: usize = 24;
 
 /// Poly1305 auth tag size (16 bytes).
-pub(crate) const TAG_SIZE: usize = 16;
+pub const TAG_SIZE: usize = 16;
 
 /// 64KB plaintext chunks
 pub const CHUNK_SIZE: usize = 65536;
-pub(crate) const INITIAL_KEY_GENERATION: u64 = 1;
+pub const INITIAL_KEY_GENERATION: u64 = 1;
 
 const KEY_TAG_MARKER: &[u8; 3] = b"CKF";
 
@@ -49,12 +49,12 @@ const KEY_TAG_VERSION: u8 = 1;
 /// because it differs by kind — app data resolves the fingerprint against the
 /// keyring directly, a scoped blob re-derives its scope key from the master key
 /// the fingerprint names.
-pub(crate) struct KeyTag;
+pub struct KeyTag;
 
 impl KeyTag {
-    pub(crate) const LEN: usize = KEY_TAG_MARKER.len() + 1 + 32;
+    pub const LEN: usize = KEY_TAG_MARKER.len() + 1 + 32;
 
-    pub(crate) fn write(fingerprint: &[u8; 32]) -> Vec<u8> {
+    pub fn write(fingerprint: &[u8; 32]) -> Vec<u8> {
         Self::tagged(fingerprint, KEY_TAG_VERSION)
     }
 
@@ -75,7 +75,7 @@ impl KeyTag {
 
     /// Split `stored` into the key fingerprint its tag names and the body that
     /// follows it.
-    pub(crate) fn read(stored: &[u8]) -> Result<([u8; 32], &[u8]), KeyTagError> {
+    pub fn read(stored: &[u8]) -> Result<([u8; 32], &[u8]), KeyTagError> {
         if stored.len() < Self::LEN {
             return Err(KeyTagError::Truncated);
         }
@@ -205,7 +205,7 @@ impl<'de> serde::Deserialize<'de> for KeyFingerprint {
 pub struct KeyFingerprintParseError(String);
 
 /// Generate a random 32-byte key.
-pub(crate) fn generate_random_key() -> [u8; 32] {
+pub fn generate_random_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     rand::rng().fill_bytes(&mut key);
     key
@@ -213,7 +213,7 @@ pub(crate) fn generate_random_key() -> [u8; 32] {
 
 /// The sealed length of a whole-object payload of `plaintext_len` bytes — what
 /// a streaming upload declares before a byte is sealed.
-pub(crate) fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
+pub fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
     whole_object_header(plaintext_len).sealed_len()
 }
 
@@ -281,14 +281,14 @@ pub(crate) const SEALED_BLOB_VERSION: u8 = 1;
 /// The chunk size a blob is sealed at when the host configures none. A read
 /// honors whatever its own header records, so this is only ever the *writer's*
 /// choice and can change without touching a blob already stored.
-pub(crate) const DEFAULT_BLOB_CHUNK_SIZE: NonZeroU32 = NonZeroU32::new(64 * 1024).expect("64 KiB");
+pub const DEFAULT_BLOB_CHUNK_SIZE: NonZeroU32 = NonZeroU32::new(64 * 1024).expect("64 KiB");
 
 /// `[version: 1][nonce policy: 1][chunk_size: 4 LE][plaintext_len: 8 LE]` — the
 /// fixed part of the header every sealed payload carries ahead of its first
 /// chunk. A payload under [`NoncePolicy::RandomStored`] follows it with the
-/// [`NONCE_SIZE`]-byte base nonce; [`SealedBlobHeader::prefix_len`] is the whole
+/// 24-byte base nonce; [`SealedBlobHeader::prefix_len`] is the whole
 /// of it either way.
-pub(crate) const SEALED_BLOB_HEADER_LEN: usize = 1 + 1 + 4 + 8;
+pub const SEALED_BLOB_HEADER_LEN: usize = 1 + 1 + 4 + 8;
 
 const BLOB_AEAD_LABEL: &[u8] = b"coven-blob-aead-v1";
 const BLOB_NONCE_INFO: &[u8] = b"coven-blob-nonce-v1";
@@ -313,7 +313,7 @@ const RANDOM_NONCE_TAG: u8 = 1;
 pub enum NoncePolicy {
     /// A base nonce drawn at random and written into the header, ahead of the
     /// chunks. Safe however the payload is addressed, at the cost of
-    /// [`NONCE_SIZE`] stored bytes and a base only the stored header carries.
+    /// 24 stored bytes and a base only the stored header carries.
     RandomStored,
     /// A base nonce derived by HKDF from the sealing key and `context`, stored
     /// nowhere, so the same payload always seals to the same bytes and a reader

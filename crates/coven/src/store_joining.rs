@@ -58,7 +58,7 @@ impl StoreJoining {
     pub(crate) async fn prepare_test_join_snapshot(
         &self,
         store: &crate::sync::test_helpers::TestStore,
-        owner: &crate::keys::UserKeypair,
+        owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
     ) -> Result<(), String> {
         let owner_device = store.bind_store_device(&self.database, owner).await?;

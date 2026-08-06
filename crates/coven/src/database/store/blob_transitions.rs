@@ -166,7 +166,7 @@ impl StoreDatabase {
         &self,
         entry: &OutboxEntry,
         stamp: String,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<PostUpload, DbError> {
         let OutboxOperation::Upload {
             root_table,
@@ -325,7 +325,7 @@ impl StoreDatabase {
         root_id: &str,
         gate_column: &str,
         stamp: String,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         materialized: Vec<MaterializedLocalBlob>,
     ) -> Result<(), DbError> {
         let root_table = root_table.to_string();

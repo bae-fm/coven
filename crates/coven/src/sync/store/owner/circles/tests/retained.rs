@@ -1,5 +1,5 @@
 use super::*;
-use crate::keys::MasterKeyCustody;
+use coven_keys::keys::MasterKeyCustody;
 
 #[tokio::test]
 async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
@@ -55,7 +55,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .remove_member(&db, &founder, &successor_pubkey, &encryption, &custody)
         .await
         .expect("remove successor through the production membership path");
-    let rotated_encryption = crate::encryption::EncryptionService::from(
+    let rotated_encryption = coven_keys::encryption::EncryptionService::from(
         custody
             .unlock()
             .expect("load rotated Store keyring")

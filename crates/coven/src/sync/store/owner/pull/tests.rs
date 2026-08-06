@@ -1,11 +1,11 @@
 use super::*;
 use crate::database::Database;
-use crate::keys::MasterKeyCustody;
 use crate::protocol::store_commit::OpenedRetainedMergeHistorySummary;
 use crate::sync::store::owner::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
+use coven_keys::keys::MasterKeyCustody;
 
 #[path = "tests/effective_access_failure.rs"]
 mod effective_access_failure;
@@ -13,12 +13,12 @@ mod effective_access_failure;
 async fn one_retained_checkpoint() -> (
     Database,
     std::sync::Arc<crate::sync::test_helpers::TestStore>,
-    crate::keys::UserKeypair,
+    coven_keys::keys::UserKeypair,
     MembershipChain,
     OpenedRetainedMergeHistorySummary,
 ) {
     let db = crate::sync::test_helpers::open_test_db();
-    let signer = crate::keys::UserKeypair::generate();
+    let signer = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &db,
         "retained-checkpoint-conflict",
@@ -168,7 +168,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
 #[tokio::test]
 async fn progressive_discovery_replays_same_history_in_canonical_order() {
     let founder = crate::sync::test_helpers::open_test_db();
-    let identity = crate::keys::UserKeypair::generate();
+    let identity = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &founder,
         "progressive-canonical-replay",
@@ -307,8 +307,8 @@ struct EffectiveAccessFixture {
     owner_database: Database,
     owner_device: crate::sync::test_helpers::TestDevice,
     member_device: crate::sync::test_helpers::TestDevice,
-    owner: crate::keys::UserKeypair,
-    member: crate::keys::UserKeypair,
+    owner: coven_keys::keys::UserKeypair,
+    member: coven_keys::keys::UserKeypair,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     home: std::sync::Arc<crate::InMemoryCloudHome>,
     circle_id: crate::protocol::circle::CircleId,
@@ -317,8 +317,8 @@ struct EffectiveAccessFixture {
 impl EffectiveAccessFixture {
     fn effective_access_members(&self) -> std::collections::BTreeSet<String> {
         std::collections::BTreeSet::from([
-            crate::keys::public_key_hex(&self.owner),
-            crate::keys::public_key_hex(&self.member),
+            coven_keys::keys::public_key_hex(&self.owner),
+            coven_keys::keys::public_key_hex(&self.member),
         ])
     }
 
@@ -399,8 +399,8 @@ impl EffectiveAccessFixture {
         member_store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Self {
         let owner_database = open_scoped_replay_database();
-        let owner = crate::keys::UserKeypair::generate();
-        let member = crate::keys::UserKeypair::generate();
+        let owner = coven_keys::keys::UserKeypair::generate();
+        let member = coven_keys::keys::UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &owner_database,
@@ -418,10 +418,10 @@ impl EffectiveAccessFixture {
             .invite_member(
                 &owner_database,
                 &owner,
-                &crate::keys::public_key_hex(&member),
+                &coven_keys::keys::public_key_hex(&member),
                 None,
                 crate::protocol::membership::MemberRole::Member,
-                &crate::encryption::EncryptionService::from_key([42; 32]),
+                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 "Effective Access Store",
             )
             .await
@@ -446,9 +446,9 @@ impl EffectiveAccessFixture {
             .expect("create effective-access Circle");
         let owner_storage = crate::storage::CloudSyncStorage::new(
             home.clone(),
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
+            crate::storage::CloudCipher::Encrypted(
+                coven_keys::encryption::EncryptionService::from_key([42; 32]),
+            ),
             crate::storage::BlobPathScheme::Hashed,
             label,
             owner.clone(),
@@ -466,7 +466,9 @@ impl EffectiveAccessFixture {
             crate::sync::cycle::StoreInitialization::OpenStore {
                 expected_store_root: store.root.clone(),
             },
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
         .expect("prepare effective-access owner sync")
@@ -476,7 +478,7 @@ impl EffectiveAccessFixture {
         components
             .add_circle_member(
                 circle_id,
-                crate::keys::public_key_hex(&member),
+                coven_keys::keys::public_key_hex(&member),
                 crate::protocol::circle::CircleRole::Member,
             )
             .await
@@ -554,10 +556,10 @@ async fn newly_discovered_store_admission_activates_circle_access() {
     assert_eq!(
         StoreDatabase::new(&member_database)
             .get_circles(
-                &crate::keys::public_key_hex(&fixture.member),
+                &coven_keys::keys::public_key_hex(&fixture.member),
                 std::collections::BTreeSet::from([
-                    crate::keys::public_key_hex(&fixture.owner),
-                    crate::keys::public_key_hex(&fixture.member),
+                    coven_keys::keys::public_key_hex(&fixture.owner),
+                    coven_keys::keys::public_key_hex(&fixture.member),
                 ]),
             )
             .await
@@ -637,8 +639,8 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .remove_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::keys::public_key_hex(&fixture.member),
-            &crate::encryption::EncryptionService::from_key([42; 32]),
+            &coven_keys::keys::public_key_hex(&fixture.member),
+            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             &custody,
         )
         .await
@@ -657,7 +659,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     assert!(!latest_membership
         .current_members()
         .iter()
-        .any(|(member, _)| member == &crate::keys::public_key_hex(&fixture.member)));
+        .any(|(member, _)| member == &coven_keys::keys::public_key_hex(&fixture.member)));
 
     fixture.home.clear_exact_reads();
     member_database.fail_next_merge_materialization_at(
@@ -704,8 +706,8 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     assert_eq!(state.route, None);
     assert!(StoreDatabase::new(&member_database)
         .get_circles(
-            &crate::keys::public_key_hex(&fixture.member),
-            std::collections::BTreeSet::from([crate::keys::public_key_hex(&fixture.owner)]),
+            &coven_keys::keys::public_key_hex(&fixture.member),
+            std::collections::BTreeSet::from([coven_keys::keys::public_key_hex(&fixture.owner)]),
         )
         .await
         .expect("list Circles after Store membership removal")
@@ -713,7 +715,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     assert!(StoreDatabase::new(&member_database)
         .circle_authoring_context(
             fixture.circle_id,
-            &crate::keys::public_key_hex(&fixture.member),
+            &coven_keys::keys::public_key_hex(&fixture.member),
         )
         .await
         .is_err());
@@ -744,8 +746,8 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     }
 
     let circle_id = fixture.circle_id;
-    let member_pubkey = crate::keys::public_key_hex(&fixture.member);
-    let owner_pubkey = crate::keys::public_key_hex(&fixture.owner);
+    let member_pubkey = coven_keys::keys::public_key_hex(&fixture.member);
+    let owner_pubkey = coven_keys::keys::public_key_hex(&fixture.owner);
     drop(fixture);
     std::thread::spawn(move || drop(member_database))
         .join()
@@ -835,8 +837,8 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .remove_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::keys::public_key_hex(&fixture.member),
-            &crate::encryption::EncryptionService::from_key([42; 32]),
+            &coven_keys::keys::public_key_hex(&fixture.member),
+            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             &custody,
         )
         .await
@@ -871,15 +873,15 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .invite_member(
             &fixture.owner_database,
             &fixture.owner,
-            &crate::keys::public_key_hex(&fixture.member),
+            &coven_keys::keys::public_key_hex(&fixture.member),
             None,
             crate::protocol::membership::MemberRole::Member,
-            &crate::encryption::EncryptionService::from_key([42; 32]),
+            &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             "Effective Access Store",
         )
         .await
         .expect("re-add effective-access Store member");
-    let rotated_store_encryption = crate::encryption::EncryptionService::from(
+    let rotated_store_encryption = coven_keys::encryption::EncryptionService::from(
         custody
             .unlock()
             .expect("load rotated Store keyring")
@@ -928,10 +930,10 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     assert_eq!(
         StoreDatabase::new(&member_database)
             .get_circles(
-                &crate::keys::public_key_hex(&fixture.member),
+                &coven_keys::keys::public_key_hex(&fixture.member),
                 std::collections::BTreeSet::from([
-                    crate::keys::public_key_hex(&fixture.owner),
-                    crate::keys::public_key_hex(&fixture.member),
+                    coven_keys::keys::public_key_hex(&fixture.owner),
+                    coven_keys::keys::public_key_hex(&fixture.member),
                 ]),
             )
             .await
@@ -973,7 +975,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         RoutingConflict::MoveLocal,
     ] {
         let founder = open_scoped_replay_database();
-        let identity = crate::keys::UserKeypair::generate();
+        let identity = coven_keys::keys::UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &founder,
@@ -1222,7 +1224,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     .await
     .expect("create Merge Store");
     let candidate = crate::sync::test_helpers::user_keypair_from_seed([43; 32]);
-    let encryption = crate::encryption::EncryptionService::from_key([73; 32]);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([73; 32]);
     store
         .invite_member(
             &founder_db,
@@ -1388,7 +1390,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
 #[tokio::test]
 async fn merge_gap_reports_the_exact_signed_predecessor() {
     let source = crate::sync::test_helpers::open_test_db();
-    let signer = crate::keys::UserKeypair::generate();
+    let signer = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
         "exact-predecessor-test",
@@ -1562,7 +1564,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     let owner_circles = StoreDatabase::new(&fixture.owner_database)
         .get_circles(
-            &crate::keys::public_key_hex(&fixture.owner),
+            &coven_keys::keys::public_key_hex(&fixture.owner),
             fixture.effective_access_members(),
         )
         .await
@@ -1611,7 +1613,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     let member_circles = StoreDatabase::new(&member_database)
         .get_circles(
-            &crate::keys::public_key_hex(&fixture.member),
+            &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
         )
         .await
@@ -1626,7 +1628,9 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let circle_id = fixture.circle_id;
     let error = StoreDatabase::new(&fixture.owner_database)
         .run_host_store_write_for_test(
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
             None,
             move |transaction| {
                 transaction
@@ -1676,7 +1680,7 @@ async fn a_non_owner_is_refused_circle_deletion() {
     // The Circle is untouched — still active on the member.
     let circles = StoreDatabase::new(&member_database)
         .get_circles(
-            &crate::keys::public_key_hex(&fixture.member),
+            &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
         )
         .await
@@ -1741,7 +1745,7 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
         .is_none());
     let circles = StoreDatabase::new(&member_database)
         .get_circles(
-            &crate::keys::public_key_hex(&fixture.member),
+            &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
         )
         .await

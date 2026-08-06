@@ -1,7 +1,7 @@
 use crate::database::query_mapped_rows;
 use crate::database::*;
-use crate::encryption::EncryptionService;
 use crate::protocol::store_commit::StoreBatchCommitRef;
+use coven_keys::encryption::EncryptionService;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::*;
@@ -495,14 +495,13 @@ impl StoreDatabase {
                 else {
                     return Ok(None);
                 };
-                let parsed = crate::encryption::MasterKeyring::from_serialized(keyring).map_err(
-                    |error| {
+                let parsed = coven_keys::encryption::MasterKeyring::from_serialized(keyring)
+                    .map_err(|error| {
                         DbError::context(
                             format!("parse Circle {circle_id} historical package keyring"),
                             error,
                         )
-                    },
-                )?;
+                    })?;
                 let encryption = EncryptionService::from(parsed);
                 if encryption
                     .service_for_fingerprint(expected_key_fingerprint.as_bytes())
@@ -1183,15 +1182,15 @@ mod tests {
 
     #[tokio::test]
     async fn control_history_caches_the_verified_access_owner_and_rejects_second_genesis() {
-        let author = crate::keys::UserKeypair::generate();
-        let author_pubkey = crate::keys::public_key_hex(&author);
+        let author = coven_keys::keys::UserKeypair::generate();
+        let author_pubkey = coven_keys::keys::public_key_hex(&author);
         let earlier_owner = loop {
-            let candidate = crate::keys::UserKeypair::generate();
-            if crate::keys::public_key_hex(&candidate) < author_pubkey {
+            let candidate = coven_keys::keys::UserKeypair::generate();
+            if coven_keys::keys::public_key_hex(&candidate) < author_pubkey {
                 break candidate;
             }
         };
-        let earlier_owner_pubkey = crate::keys::public_key_hex(&earlier_owner);
+        let earlier_owner_pubkey = coven_keys::keys::public_key_hex(&earlier_owner);
         let members = vec![
             (author_pubkey.clone(), membership::MemberRole::Owner),
             (earlier_owner_pubkey.clone(), membership::MemberRole::Owner),

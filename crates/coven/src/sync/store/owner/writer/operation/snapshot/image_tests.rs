@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::database::{verify_circle_bootstrap_image, StoreDatabase};
-use crate::keys::UserKeypair;
 use crate::protocol::store_commit::CommitFrontier;
+use coven_keys::keys::UserKeypair;
 
 fn open_scoped_snapshot_test_db() -> Database {
     crate::sync::test_helpers::open_test_db_schema(
@@ -47,7 +47,9 @@ async fn seed_scoped_snapshot_rows(source: &Database) -> crate::protocol::circle
     let write_circle = circle;
     database
         .run_host_store_write_for_test(
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
             None,
             move |transaction| {
                 transaction.execute(
@@ -153,7 +155,7 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
-            crate::encryption::EncryptionService::from_key([42; 32]),
+            coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
@@ -190,13 +192,13 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
-            crate::encryption::EncryptionService::from_key([42; 32]),
+            coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
         .expect("create Circle projection for Store-row tampering");
     let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
+        &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
             .local_store_root_ref()
             .await
@@ -302,7 +304,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
-            crate::encryption::EncryptionService::from_key([42; 32]),
+            coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
@@ -321,7 +323,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     });
     let reference = circle_bootstrap_reference(&source, &image);
     let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
+        &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
             .local_store_root_ref()
             .await
@@ -393,7 +395,9 @@ impl PublishedScopedSnapshot {
             .capture_snapshot_image_for_test(
                 root,
                 image_path,
-                Some(crate::encryption::EncryptionService::from_key([42; 32])),
+                Some(coven_keys::encryption::EncryptionService::from_key(
+                    [42; 32],
+                )),
             )
             .await
             .expect("create published scoped snapshot image");
@@ -474,7 +478,7 @@ impl PublishedScopedSnapshot {
         &'storage self,
         database_path: &Path,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {
-        let restorer_identity = crate::keys::UserKeypair::generate();
+        let restorer_identity = coven_keys::keys::UserKeypair::generate();
         let bootstrap = self
             .store
             .prepare_snapshot_bootstrap(
@@ -484,7 +488,7 @@ impl PublishedScopedSnapshot {
                 &restorer_identity,
             )
             .await?;
-        let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+        let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         bootstrap
             .install(
                 &self.store_dir,
@@ -533,7 +537,9 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
         .capture_snapshot_image_for_test(
             root,
             image_path,
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
         .expect("create scoped snapshot image");
@@ -580,7 +586,7 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
-            crate::encryption::EncryptionService::from_key([42; 32]),
+            coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
@@ -672,7 +678,9 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     let write_circle_id = circle_id;
     database
         .run_host_store_write_for_test(
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
             None,
             move |transaction| {
                 transaction.execute(
@@ -711,14 +719,14 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
-            crate::encryption::EncryptionService::from_key([42; 32]),
+            coven_keys::encryption::EncryptionService::from_key([42; 32]),
             circle_id,
         )
         .await
         .expect("create Circle snapshot with Store parent");
     let reference = circle_bootstrap_reference(&source, &image);
     let routing_key = crate::protocol::circle::derive_row_routing_key(
-        &crate::encryption::EncryptionService::from_key([42; 32]),
+        &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
             .local_store_root_ref()
             .await
@@ -799,7 +807,9 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
         .capture_snapshot_image_for_test(
             root,
             image_path,
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await;
     let error = match result {
@@ -875,7 +885,9 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         .expect("project scoped migration membership");
     StoreDatabase::new(&source)
         .run_host_store_write_for_test(
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
             None,
             move |transaction| {
                 transaction
@@ -901,7 +913,9 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         .capture_snapshot_image_for_test(
             root,
             image_path,
-            Some(crate::encryption::EncryptionService::from_key([42; 32])),
+            Some(coven_keys::encryption::EncryptionService::from_key(
+                [42; 32],
+            )),
         )
         .await
         .expect("create pre-migration scoped snapshot");
@@ -937,7 +951,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         )
         .await
         .expect("verify pre-migration scoped snapshot");
-    let routing = crate::encryption::EncryptionService::from_key([42; 32]);
+    let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store_dir = coven_foundation::store_dir::StoreDir::new(destination.path());
     let database = bootstrap
         .install(
@@ -1393,9 +1407,9 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         .expect("stage source blob");
         let writer = crate::storage::CloudSyncStorage::new(
             home,
-            crate::storage::CloudCipher::Encrypted(crate::encryption::EncryptionService::from_key(
-                [42; 32],
-            )),
+            crate::storage::CloudCipher::Encrypted(
+                coven_keys::encryption::EncryptionService::from_key([42; 32]),
+            ),
             crate::storage::BlobPathScheme::Hashed,
             "snapshot-blob-ownership-graph",
             signer.clone(),

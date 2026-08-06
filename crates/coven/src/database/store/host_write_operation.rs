@@ -1,9 +1,9 @@
 use crate::database::local_blob_cleanup_intents::LocalBlobCleanupIntent;
 use crate::database::DbError;
-use crate::encryption::EncryptionService;
 use crate::protocol::blob::BlobRef;
 use crate::WriteReceipt;
 use coven_foundation::store_dir::{PathTokenError, StoreDir};
+use coven_keys::encryption::EncryptionService;
 
 use super::host_sql_transaction::HostSqlTransaction;
 use super::{SqlContext, StoreDatabase};

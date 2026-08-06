@@ -195,7 +195,6 @@ where
 #[cfg(all(test, feature = "oauth-providers"))]
 mod tests {
     use super::*;
-    use crate::keys::StoreKeys;
     use crate::oauth::test_support::oauth_config;
     use crate::oauth::OAuthTokens;
     use axum::body::Body;
@@ -204,6 +203,7 @@ mod tests {
     use axum::Router;
     use chrono::{TimeZone, Utc};
     use coven_foundation::clock::FixedClock;
+    use coven_keys::keys::StoreKeys;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -315,7 +315,7 @@ mod tests {
     ) -> Result<(Arc<Mutex<Vec<String>>>, tokio::sync::oneshot::Sender<()>), CloudHomeError> {
         let (endpoint, requests, shutdown) =
             spawn_permissions_endpoint(target_on_second_page, second_page_end, delete_status).await;
-        crate::keys::test_keyring::install();
+        coven_keys::keys::test_keyring::install();
         let session = OAuthSession::new(
             OAuthTokens {
                 access_token: "access-token".to_string(),

@@ -93,7 +93,7 @@ pub struct JoinRequestCode {
 /// Generate a join request code containing this device's Ed25519 public key and
 /// optionally a contact email the inviter can use to recognize the device.
 pub(crate) fn generate_join_request_for_keypair(
-    keypair: &crate::keys::UserKeypair,
+    keypair: &coven_keys::keys::UserKeypair,
     email: Option<String>,
 ) -> String {
     let code = JoinRequestCode {
@@ -117,16 +117,16 @@ pub fn decode_join_request(s: &str) -> Result<JoinRequestCode, JoinCodeError> {
 
 /// Build a join request and retain its pending device identity until the join
 /// completes or the request is abandoned.
-pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
-    let keypair = crate::keys::mint_pending_identity()?;
+pub fn generate_join_request(email: Option<String>) -> Result<String, coven_keys::keys::KeyError> {
+    let keypair = coven_keys::keys::mint_pending_identity()?;
     Ok(generate_join_request_for_keypair(&keypair, email))
 }
 
 /// Discard the pending device identity retained for an abandoned join request.
-pub fn abandon_join_request(request_code: &str) -> Result<(), crate::keys::KeyError> {
+pub fn abandon_join_request(request_code: &str) -> Result<(), coven_keys::keys::KeyError> {
     let request = decode_join_request(request_code)
-        .map_err(|error| crate::keys::KeyError::Crypto(error.to_string()))?;
-    crate::keys::discard_pending_identity(&request.public_key)
+        .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))?;
+    coven_keys::keys::discard_pending_identity(&request.public_key)
 }
 
 /// UI-ready info from a decoded invite code.

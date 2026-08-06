@@ -3,10 +3,10 @@
 //! These are the high-level orchestration functions that download the membership
 //! chain from the storage, perform the operation, and upload the results.
 
-use crate::keys::KeyError;
 use crate::protocol::membership::MembershipConflict;
 use crate::protocol::objects::StorageError;
 use crate::protocol::objects::StoreObjectError;
+use coven_keys::keys::KeyError;
 
 /// Why a high-level membership operation (list members, invite, remove, rotate)
 /// failed. The security-critical orchestration layer that downloads the chain,

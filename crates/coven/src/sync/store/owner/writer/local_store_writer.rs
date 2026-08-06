@@ -1,5 +1,5 @@
 use super::StoreKeyrings;
-use crate::keys::UserKeypair;
+use coven_keys::keys::UserKeypair;
 use std::sync::Arc;
 
 pub(crate) struct StoreOperationSigningContext {
@@ -39,7 +39,7 @@ impl LocalStoreWriter {
     }
 
     pub(crate) fn author_pubkey(&self) -> String {
-        crate::keys::public_key_hex(&self.identity)
+        coven_keys::keys::public_key_hex(&self.identity)
     }
 
     pub(crate) fn circle_device_id(&self) -> String {
@@ -353,26 +353,26 @@ impl LocalStoreWriter {
     }
 }
 
-impl crate::keys::DeviceSigningAuthority for LocalStoreWriter {
+impl coven_keys::keys::DeviceSigningAuthority for LocalStoreWriter {
     fn public_key_hex(&self) -> String {
-        crate::keys::public_key_hex(&self.device_signer)
+        coven_keys::keys::public_key_hex(&self.device_signer)
     }
 
-    fn sign(&self, message: &[u8]) -> [u8; crate::keys::SIGN_BYTES] {
+    fn sign(&self, message: &[u8]) -> [u8; coven_keys::keys::SIGN_BYTES] {
         self.device_signer.sign(message)
     }
 }
 
-impl crate::keys::IdentityKeyAuthority for LocalStoreWriter {
-    fn public_key(&self) -> [u8; crate::keys::SIGN_PUBLICKEYBYTES] {
+impl coven_keys::keys::IdentityKeyAuthority for LocalStoreWriter {
+    fn public_key(&self) -> [u8; coven_keys::keys::SIGN_PUBLICKEYBYTES] {
         self.identity.public_key()
     }
 
-    fn sign(&self, message: &[u8]) -> [u8; crate::keys::SIGN_BYTES] {
+    fn sign(&self, message: &[u8]) -> [u8; coven_keys::keys::SIGN_BYTES] {
         self.identity.sign(message)
     }
 
-    fn to_x25519_secret_key(&self) -> [u8; crate::keys::CURVE25519_SECRETKEYBYTES] {
+    fn to_x25519_secret_key(&self) -> [u8; coven_keys::keys::CURVE25519_SECRETKEYBYTES] {
         self.identity.to_x25519_secret_key()
     }
 }
@@ -393,17 +393,21 @@ impl<'storage> LocalWriterKeyrings<'storage> {
     pub(super) async fn open(
         &self,
         membership: &crate::protocol::membership::MembershipChain,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
-    {
+    ) -> Result<
+        coven_keys::encryption::EncryptionService,
+        crate::sync::store::membership::InviteError,
+    > {
         self.keyrings.open(self.writer.as_ref(), membership).await
     }
 
     pub(super) async fn open_or(
         &self,
         membership: &crate::protocol::membership::MembershipChain,
-        initial: &crate::encryption::EncryptionService,
-    ) -> Result<crate::encryption::EncryptionService, crate::sync::store::membership::InviteError>
-    {
+        initial: &coven_keys::encryption::EncryptionService,
+    ) -> Result<
+        coven_keys::encryption::EncryptionService,
+        crate::sync::store::membership::InviteError,
+    > {
         self.keyrings
             .open_or(self.writer.as_ref(), membership, initial)
             .await

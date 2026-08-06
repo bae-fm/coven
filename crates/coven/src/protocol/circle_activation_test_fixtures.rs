@@ -1,8 +1,8 @@
 //! The founder Circle activation every Circle test starts from: the signed
 //! protocol values, and the current state they derive.
 
-use crate::keys::{UserKeypair, SIGN_SECRETKEYBYTES};
 use crate::protocol::circle_activation::{CircleCurrentState, VerifiedCircleReference};
+use coven_keys::keys::{UserKeypair, SIGN_SECRETKEYBYTES};
 
 pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
     let keypair_bytes: [u8; SIGN_SECRETKEYBYTES] = hex::decode(concat!(
@@ -59,7 +59,7 @@ pub(crate) fn test_circle_activation(label: &str, active: bool) -> TestCircleAct
     }
 
     let owner = test_circle_owner_keypair();
-    let owner_pubkey = crate::keys::public_key_hex(&owner);
+    let owner_pubkey = coven_keys::keys::public_key_hex(&owner);
     let store_root_hash = ObjectHash::digest(format!("{label} Store root").as_bytes());
     let root_bytes = format!("{label} root").into_bytes();
     let root = StoreRootRef {

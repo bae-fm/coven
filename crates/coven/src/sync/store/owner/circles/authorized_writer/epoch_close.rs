@@ -89,7 +89,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn finalize_ready_circle_epoch_closes(
         &mut self,
         metadata_stamp: &str,
-        routing_encryption: &crate::encryption::EncryptionService,
+        routing_encryption: &coven_keys::encryption::EncryptionService,
     ) -> Result<(), CircleOperationError> {
         let journals = self.database.waiting_circle_operations().await?;
         if journals.is_empty() {

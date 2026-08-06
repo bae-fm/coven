@@ -155,7 +155,7 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
         return Err(RestoreCodeError::CloudKitShareNotRestorable);
     }
     if let Some(serialized_keyring) = &code.ek {
-        crate::encryption::EncryptionService::new(serialized_keyring)
+        coven_keys::encryption::EncryptionService::new(serialized_keyring)
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
     }
     match &code.authority {
@@ -236,9 +236,9 @@ mod tests {
     }
 
     fn test_keyring(byte: u8) -> String {
-        crate::encryption::MasterKeyring::from(crate::encryption::EncryptionService::from_key(
-            [byte; 32],
-        ))
+        coven_keys::encryption::MasterKeyring::from(
+            coven_keys::encryption::EncryptionService::from_key([byte; 32]),
+        )
         .to_serialized()
     }
 

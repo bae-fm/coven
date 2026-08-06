@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::encryption::EncryptionService;
 use crate::joining::encode;
-use crate::keys::UserKeypair;
 use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::test_helpers::*;
 use coven_foundation::clock::SystemClock;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -24,7 +24,7 @@ async fn device_join_client_four_transfer_retries_and_process_restarts_preserve_
 }
 
 async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let store_id = "device-join-client-state-machine";
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
@@ -93,8 +93,8 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             tables.clone(),
             test_migrations(),
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
-            crate::custody::KeyCustody::Keyring,
-            crate::identity_custody::IdentityCustody::Keyring,
+            coven_keys::custody::KeyCustody::Keyring,
+            coven_keys::identity_custody::IdentityCustody::Keyring,
             crate::oauth::OAuthClients::empty(),
             None,
             None,

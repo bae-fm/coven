@@ -184,8 +184,8 @@ struct AuthorizedSyncCycle<'cycle, 'store> {
     clock: &'cycle dyn coven_foundation::clock::Clock,
     cipher: &'cycle dyn CloudCipherAccess,
     pending_rotation: &'cycle dyn CloudRotationAccess,
-    master_keys: Option<&'cycle dyn crate::keys::MasterKeyCustody>,
-    routing_encryption: Option<&'cycle crate::encryption::EncryptionService>,
+    master_keys: Option<&'cycle dyn coven_keys::keys::MasterKeyCustody>,
+    routing_encryption: Option<&'cycle coven_keys::encryption::EncryptionService>,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
     observer: Option<&'cycle dyn BlobTransitionObserver>,
     authorization: AuthorizedWriterOperation<'store>,
@@ -479,10 +479,10 @@ pub(crate) struct PreparedSyncComponents {
     store_dir: StoreDir,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: std::sync::Arc<CloudSyncStorage>,
-    identity: crate::keys::UserKeypair,
+    identity: coven_keys::keys::UserKeypair,
     initialization: StoreInitialization,
     store_id: String,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
+    routing_encryption: Option<coven_keys::encryption::EncryptionService>,
 }
 
 impl PreparedSyncComponents {
@@ -491,9 +491,9 @@ impl PreparedSyncComponents {
         store_dir: StoreDir,
         local_blob_access: super::store::blob::LocalStoreBlobAccess,
         storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
-        identity: crate::keys::UserKeypair,
+        identity: coven_keys::keys::UserKeypair,
         initialization: StoreInitialization,
-        routing_encryption: Option<crate::encryption::EncryptionService>,
+        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Self, InitSyncError> {
         let storage = storage.into();
         if !storage.uses_identity(&identity) {
@@ -607,7 +607,7 @@ pub(crate) struct SyncComponents {
     /// other's.
     store_id: String,
     device_id: String,
-    routing_encryption: Option<crate::encryption::EncryptionService>,
+    routing_encryption: Option<coven_keys::encryption::EncryptionService>,
 }
 
 impl SyncComponents {
@@ -874,7 +874,7 @@ impl SyncComponents {
         self.store.blob_path_scheme()
     }
 
-    fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
+    fn current_encryption(&self) -> Option<coven_keys::encryption::EncryptionService> {
         match self.storage.snapshot() {
             crate::storage::CloudCipher::Encrypted(encryption) => Some(encryption),
             crate::storage::CloudCipher::Plaintext => None,
@@ -923,7 +923,7 @@ impl SyncComponents {
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,
-        master_keys: &dyn crate::keys::MasterKeyCustody,
+        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, super::store::MembershipOpsError> {
         let encryption = self
             .current_encryption()
@@ -1091,7 +1091,7 @@ impl SyncComponents {
     pub(crate) async fn run_cycle(
         &self,
         clock: &dyn coven_foundation::clock::Clock,
-        master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
+        master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
         let authorization =
@@ -1165,7 +1165,7 @@ impl SyncComponents {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), String> {
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
         let encryption = self
             .current_encryption()
             .ok_or_else(|| "session is not encrypted".to_string())?;
@@ -1174,7 +1174,7 @@ impl SyncComponents {
         let plaintext = encryption
             .blob_opener(
                 header,
-                &crate::encryption::NoncePolicy::DerivedFromContext {
+                &coven_keys::encryption::NoncePolicy::DerivedFromContext {
                     context: aad_context.to_vec(),
                 },
                 aad_context,
@@ -1188,9 +1188,9 @@ impl SyncComponents {
     #[cfg(test)]
     pub(crate) fn adopt_key_rotation(
         &self,
-        encryption: crate::encryption::EncryptionService,
-        master_keys: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<String, crate::keys::KeyError> {
+        encryption: coven_keys::encryption::EncryptionService,
+        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<String, coven_keys::keys::KeyError> {
         CloudCipherAccess::adopt_key_rotation(self.storage.as_ref(), &encryption, master_keys)
     }
 }

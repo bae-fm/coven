@@ -19,10 +19,10 @@ use super::store_commit::{
     StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     SuccessorLink,
 };
-use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
-use crate::keys::{self, UserKeypair};
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::objects::ObjectSlot;
+use coven_keys::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
+use coven_keys::keys::{self, UserKeypair};
 
 const RECIPIENT_SLOT_DOMAIN: &[u8] = b"coven.circle-recipient-slot.v1\0";
 const METADATA_DOMAIN: &[u8] = b"coven.circle-metadata.v1\0";

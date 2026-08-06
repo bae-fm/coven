@@ -10,10 +10,10 @@
 
 use std::sync::Arc;
 
-use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
 use crate::protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 use crate::protocol::membership::MemberRole;
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::UserKeypair;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version.

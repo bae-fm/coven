@@ -9,12 +9,7 @@ use tracing::{info, warn};
 
 use crate::database::supported_version;
 use crate::database::Database;
-use crate::encryption::{EncryptionError, EncryptionService, MasterKeyring};
-use crate::identity_custody::IdentityCustody;
 use crate::join_code::InviteCode;
-use crate::keys::{
-    CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
-};
 use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -24,6 +19,11 @@ use crate::sync::store::{
 use crate::Migration;
 use coven_foundation::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use coven_foundation::store_dir::{StoreDir, StoreLayout};
+use coven_keys::encryption::{EncryptionError, EncryptionService, MasterKeyring};
+use coven_keys::identity_custody::IdentityCustody;
+use coven_keys::keys::{
+    CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
+};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -352,7 +352,7 @@ impl DeviceJoinClient {
         synced_tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
         custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
-        key_custody: crate::custody::KeyCustody,
+        key_custody: coven_keys::custody::KeyCustody,
         identity_custody: IdentityCustody,
         oauth_clients: crate::oauth::OAuthClients,
         oauth_tokens: Option<crate::oauth::OAuthTokens>,
@@ -405,7 +405,7 @@ impl DeviceJoinClient {
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceProviderAccessRequest, BootstrapError> {
         self.require_offer(&offer)?;
-        let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
+        let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
@@ -456,7 +456,7 @@ impl DeviceJoinClient {
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::JoinerJoinTerminal, BootstrapError> {
-        let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
+        let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
@@ -514,7 +514,7 @@ impl DeviceJoinClient {
                 failures: failures.join("; "),
             });
         }
-        crate::keys::discard_pending_identity(&self.member_pubkey)?;
+        coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
         pending.complete_joiner_cleanup(activation)?;
         Ok(())
     }
@@ -525,7 +525,7 @@ impl DeviceJoinClient {
     ) -> Result<crate::DeviceRegistrationRequest, BootstrapError> {
         let offer = &approval.request.offer;
         self.require_offer(offer)?;
-        let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
+        let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
         let storage: Arc<dyn crate::storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
@@ -561,7 +561,7 @@ impl DeviceJoinClient {
         if *cancel.borrow() {
             return Err(BootstrapError::Cancelled);
         }
-        let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
+        let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
         let join = self.build_storage(&signer).await?;
         let store_dir = self.layout.store_dir(&self.code.store_id);
         if let Some(readiness) = pending.completed_joiner_readiness(attempt)? {
@@ -649,8 +649,8 @@ impl DeviceJoinClient {
             return Err(crate::DeviceJoinError::JournalConflict.into());
         }
         let signer = match completed_config.as_ref() {
-            Some(_) => crate::keys::require_identity(self.identity_custody.as_ref())?,
-            None => crate::keys::peek_pending_identity(&self.member_pubkey)?,
+            Some(_) => coven_keys::keys::require_identity(self.identity_custody.as_ref())?,
+            None => coven_keys::keys::peek_pending_identity(&self.member_pubkey)?,
         };
         let join = self.build_storage(&signer).await?;
         let pending_readiness = pending.observe_joiner_activation_if_pending(&activation)?;
@@ -734,7 +734,7 @@ impl DeviceJoinClient {
         }
         config.save_to_config_yaml()?;
         joining.complete(activation).await?;
-        crate::keys::discard_pending_identity(&self.member_pubkey)?;
+        coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
         info!(store_id = %self.code.store_id, "joined Store device");
         Ok(config)
     }
@@ -777,7 +777,7 @@ impl DeviceJoinClient {
     /// so they need no store key — which is what lets a joiner publish its
     /// access request before it has unwrapped the store keyring at all.
     pub(crate) async fn transport_storage(&self) -> Result<CloudSyncStorage, BootstrapError> {
-        let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
+        let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
         let cloud = self.build_cloud_home().await?;
         self.plaintext_storage(cloud, &signer)
     }

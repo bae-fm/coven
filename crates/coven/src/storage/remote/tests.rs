@@ -23,7 +23,7 @@ fn encrypted_cloud_object_tag_carries_the_full_key_digest() {
     assert_eq!(&tagged, fingerprint.as_bytes());
     assert_eq!(
         body.len() as u64,
-        crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
+        coven_keys::encryption::chunked_encrypted_len(plaintext.len() as u64),
         "a protocol object keeps the whole-object chunked format the blob namespace left",
     );
     assert_eq!(cipher.open(stored, aad).unwrap(), plaintext);
@@ -276,7 +276,7 @@ async fn ranged_reads_transfer_only_the_chunks_they_cover() {
 
     // Each range covers one chunk except the boundary-straddling last, which
     // covers two. Every sealed chunk here is a full one.
-    let sealed_chunk = (CHUNK + crate::encryption::TAG_SIZE as u32) as u64;
+    let sealed_chunk = (CHUNK + coven_keys::encryption::TAG_SIZE as u32) as u64;
     assert_eq!(
         home.exact_range_read_bytes(),
         5 * sealed_chunk,
@@ -424,7 +424,7 @@ async fn blobs_sealed_at_different_chunk_sizes_coexist() {
             &plaintext[1000..1100],
         );
         let fetched = home.exact_range_read_bytes();
-        let covering = chunk.min(plaintext.len() as u64) + crate::encryption::TAG_SIZE as u64;
+        let covering = chunk.min(plaintext.len() as u64) + coven_keys::encryption::TAG_SIZE as u64;
         assert_eq!(
             fetched, covering,
             "the read fetched one chunk of this blob's own declared size",
@@ -540,7 +540,7 @@ async fn a_tampered_header_fails_the_first_open() {
     // row's declared size all agree — and re-frames where each chunk starts.
     // Nothing but the tag over the header refuses this.
     const NUDGED: u32 = CHUNK + 1;
-    let derived = crate::encryption::NoncePolicy::DerivedFromContext {
+    let derived = coven_keys::encryption::NoncePolicy::DerivedFromContext {
         context: b"unused by the length arithmetic".to_vec(),
     };
     let unaltered = SealedBlobHeader::new(
@@ -719,7 +719,7 @@ async fn ranged_reads_sweep_every_boundary() {
 #[tokio::test]
 async fn the_fetch_window_splits_requests_without_changing_the_bytes() {
     const CHUNK: u32 = 1024;
-    let sealed_chunk = CHUNK as u64 + crate::encryption::TAG_SIZE as u64;
+    let sealed_chunk = CHUNK as u64 + coven_keys::encryption::TAG_SIZE as u64;
     let plaintext = ramp(20 * CHUNK as usize);
     let mut totals = Vec::new();
     for window in [sealed_chunk, 4 * sealed_chunk, 1 << 20] {
@@ -818,7 +818,7 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
     let opened = circle_key
         .blob_opener(
             header,
-            &crate::encryption::NoncePolicy::DerivedFromContext {
+            &coven_keys::encryption::NoncePolicy::DerivedFromContext {
                 context: cloud_aad_context("circle-blob-spool", &locator.semantic_key()),
             },
             &cloud_aad_context("circle-blob-spool", &locator.semantic_key()),

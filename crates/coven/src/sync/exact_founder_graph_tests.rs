@@ -1,5 +1,5 @@
-use crate::keys::UserKeypair;
 use crate::sync::test_helpers::{open_test_db, temp_store_dir, test_cloud_home, TestStore};
+use coven_keys::keys::UserKeypair;
 
 trait ExactFounderGraphDatabaseOps {
     async fn table_count(&self, table: crate::database::DatabaseTestTable) -> i64;

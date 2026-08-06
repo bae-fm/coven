@@ -18,7 +18,7 @@ impl PackageFailure {
 #[tokio::test]
 async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() {
     let owner_database = open_scoped_replay_database();
-    let owner = crate::keys::UserKeypair::generate();
+    let owner = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &owner_database,
         "unresolved-effective-access",
@@ -27,14 +27,14 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     )
     .await
     .expect("create unresolved-membership Store");
-    let second_owner = crate::keys::UserKeypair::generate();
+    let second_owner = coven_keys::keys::UserKeypair::generate();
     let second_owner_database = open_scoped_replay_database();
-    let encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+    let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     store
         .invite_member(
             &owner_database,
             &owner,
-            &crate::keys::public_key_hex(&second_owner),
+            &coven_keys::keys::public_key_hex(&second_owner),
             None,
             crate::protocol::membership::MemberRole::Member,
             &encryption,
@@ -78,8 +78,8 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .authorize_writer()
         .await
         .expect("authorize the second owner before either assignment");
-    let target = crate::keys::UserKeypair::generate();
-    let target_pubkey = crate::keys::public_key_hex(&target);
+    let target = coven_keys::keys::UserKeypair::generate();
+    let target_pubkey = coven_keys::keys::public_key_hex(&target);
     founder_writer
         .invite_member(
             &target_pubkey,

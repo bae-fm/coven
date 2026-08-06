@@ -55,7 +55,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
     })
     .await
     .expect("remove malformed authority");
-    let signer = crate::keys::UserKeypair::generate();
+    let signer = coven_keys::keys::UserKeypair::generate();
     let founder_provider_admin =
         crate::protocol::provider::FounderProviderAdminGrant::from_test_label(
             "required-store-root",
@@ -74,7 +74,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         },
         schema_version: db.schema_version(),
         sync_routing_hash: db.sync_routing_hash(),
-        founder_pubkey: crate::keys::public_key_hex(&signer),
+        founder_pubkey: coven_keys::keys::public_key_hex(&signer),
         founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
             "required-store-root founder",
         ),

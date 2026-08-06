@@ -43,7 +43,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn open_keyring(
         &self,
     ) -> Result<
-        crate::encryption::EncryptionService,
+        coven_keys::encryption::EncryptionService,
         crate::sync::store::owner::writer::membership::InviteError,
     > {
         self.keyrings.open(&self.membership).await
@@ -53,7 +53,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         membership: &crate::protocol::membership::MembershipChain,
     ) -> Result<
-        crate::encryption::EncryptionService,
+        coven_keys::encryption::EncryptionService,
         crate::sync::store::owner::writer::membership::InviteError,
     > {
         self.keyrings.open(membership).await
@@ -62,9 +62,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) async fn open_keyring_or_for_membership(
         &self,
         membership: &crate::protocol::membership::MembershipChain,
-        initial: &crate::encryption::EncryptionService,
+        initial: &coven_keys::encryption::EncryptionService,
     ) -> Result<
-        crate::encryption::EncryptionService,
+        coven_keys::encryption::EncryptionService,
         crate::sync::store::owner::writer::membership::InviteError,
     > {
         self.keyrings.open_or(membership, initial).await
@@ -263,7 +263,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn pull(
         &mut self,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, SyncCycleFailure> {
         let membership = self.membership.clone();
         let execution = self
@@ -312,7 +312,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
-        master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
+        master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Result<(), SyncCycleFailure> {
         let result = async {
             if cipher.snapshot().is_plaintext() {

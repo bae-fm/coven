@@ -4,14 +4,14 @@
 //! signing identity — and protects them the same three ways: from the OS
 //! keyring, from a value supplied for the session, or from a passphrase-wrapped
 //! file in the store directory. Only the keyring preset differs between them
-//! (see [`KeyCustody::resolve`](crate::KeyCustody::resolve) and
-//! [`IdentityCustody::resolve`](crate::IdentityCustody::resolve)); the other two
+//! (see [`KeyCustody::resolve`](crate::custody::KeyCustody::resolve) and
+//! [`IdentityCustody::resolve`](crate::identity_custody::IdentityCustody::resolve)); the other two
 //! differ only in which file the secret lives in and how it converts to bytes,
 //! which is what [`CustodySecret`] names.
 //!
 //! Both stay behind their own public trait —
-//! [`MasterKeyCustody`](crate::MasterKeyCustody) and
-//! [`DeviceIdentityCustody`](crate::DeviceIdentityCustody) — because a host
+//! [`MasterKeyCustody`](crate::keys::MasterKeyCustody) and
+//! [`DeviceIdentityCustody`](crate::keys::DeviceIdentityCustody) — because a host
 //! implements one or the other for a specific secret, not a generic one.
 
 use std::marker::PhantomData;

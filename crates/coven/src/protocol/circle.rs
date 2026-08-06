@@ -10,7 +10,7 @@ use sha2::Sha256;
 
 use super::membership::MembershipGrantId;
 use super::store_commit::ObjectHash;
-use crate::encryption::EncryptionService;
+use coven_keys::encryption::EncryptionService;
 
 pub use super::circle_control::*;
 pub(crate) use super::circle_roster::*;

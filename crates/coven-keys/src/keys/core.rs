@@ -3,11 +3,11 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) const SIGN_PUBLICKEYBYTES: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
-pub(crate) const SIGN_SECRETKEYBYTES: usize = ed25519_dalek::KEYPAIR_LENGTH;
-pub(crate) const SIGN_BYTES: usize = ed25519_dalek::SIGNATURE_LENGTH;
-pub(crate) const CURVE25519_PUBLICKEYBYTES: usize = crypto_box::KEY_SIZE;
-pub(crate) const CURVE25519_SECRETKEYBYTES: usize = crypto_box::KEY_SIZE;
+pub const SIGN_PUBLICKEYBYTES: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
+pub const SIGN_SECRETKEYBYTES: usize = ed25519_dalek::KEYPAIR_LENGTH;
+pub const SIGN_BYTES: usize = ed25519_dalek::SIGNATURE_LENGTH;
+pub const CURVE25519_PUBLICKEYBYTES: usize = crypto_box::KEY_SIZE;
+pub const CURVE25519_SECRETKEYBYTES: usize = crypto_box::KEY_SIZE;
 #[cfg(test)]
 pub(crate) const SEALBYTES: usize = crypto_box::SEALBYTES;
 
@@ -119,13 +119,13 @@ pub struct UserKeypair {
 }
 
 /// A retained capability that can sign as one device without exposing its key.
-pub(crate) trait DeviceSigningAuthority: Send + Sync {
+pub trait DeviceSigningAuthority: Send + Sync {
     fn public_key_hex(&self) -> String;
     fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES];
 }
 
 /// A retained capability that acts as one Store identity without exposing its key.
-pub(crate) trait IdentityKeyAuthority: Send + Sync {
+pub trait IdentityKeyAuthority: Send + Sync {
     fn public_key(&self) -> [u8; SIGN_PUBLICKEYBYTES];
     fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES];
     fn to_x25519_secret_key(&self) -> [u8; CURVE25519_SECRETKEYBYTES];
@@ -187,7 +187,7 @@ impl UserKeypair {
         self.signing_key.to_keypair_bytes()
     }
 
-    pub(crate) fn derive_signing_key(&self, domain: &[u8], context: &[u8]) -> Self {
+    pub fn derive_signing_key(&self, domain: &[u8], context: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
 
         let mut derivation = Sha256::new();
@@ -217,15 +217,12 @@ impl UserKeypair {
 }
 
 /// Hex-encode the public key attached to `keypair`.
-pub(crate) fn public_key_hex<A: IdentityKeyAuthority + ?Sized>(keypair: &A) -> String {
+pub fn public_key_hex<A: IdentityKeyAuthority + ?Sized>(keypair: &A) -> String {
     hex::encode(keypair.public_key())
 }
 
 /// Sign `message` and return the hex-encoded public key and detached signature.
-pub(crate) fn sign_hex<A: IdentityKeyAuthority + ?Sized>(
-    keypair: &A,
-    message: &[u8],
-) -> (String, String) {
+pub fn sign_hex<A: IdentityKeyAuthority + ?Sized>(keypair: &A, message: &[u8]) -> (String, String) {
     (public_key_hex(keypair), hex::encode(keypair.sign(message)))
 }
 
@@ -245,9 +242,10 @@ pub(crate) fn verify_signature(
 /// Verify a hex-encoded detached Ed25519 signature (`sig_hex`) over `message`
 /// against a hex-encoded public key (`pk_hex`). Malformed hex, a wrong-length key
 /// or signature, or a non-matching signature all fail closed (false). The shared
-/// hex front-end of [`verify_signature`], used by signed Store objects and
+/// hex front-end of this crate's raw signature check, used by signed Store
+/// objects and
 /// membership entries so the decode-and-verify path lives in one place.
-pub(crate) fn verify_signature_hex(pk_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
+pub fn verify_signature_hex(pk_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
     let Ok(pk_bytes) = hex::decode(pk_hex) else {
         return false;
     };
@@ -265,7 +263,7 @@ pub(crate) fn verify_signature_hex(pk_hex: &str, sig_hex: &str, message: &[u8]) 
 
 /// Encrypt a message to a recipient's X25519 public key using a sealed box.
 /// The sender is anonymous -- only the recipient can decrypt.
-pub(crate) fn seal_box_encrypt(
+pub fn seal_box_encrypt(
     message: &[u8],
     recipient_x25519_pk: &[u8; CURVE25519_PUBLICKEYBYTES],
 ) -> Vec<u8> {
@@ -276,7 +274,7 @@ pub(crate) fn seal_box_encrypt(
 
 /// Decrypt a sealed box using the recipient's X25519 secret key.
 /// `crypto_box::SecretKey::unseal` derives the recipient public key internally.
-pub(crate) fn seal_box_decrypt(
+pub fn seal_box_decrypt(
     ciphertext: &[u8],
     recipient_x25519_sk: &[u8; CURVE25519_SECRETKEYBYTES],
 ) -> Result<Vec<u8>, KeyError> {
@@ -292,7 +290,7 @@ pub(crate) fn seal_box_decrypt(
 /// This is used when we only have a remote user's Ed25519 public key (hex string)
 /// and need to encrypt something to them via sealed box. The `UserKeypair` methods
 /// handle the local case; this handles the remote case.
-pub(crate) fn ed25519_to_x25519_public_key(
+pub fn ed25519_to_x25519_public_key(
     ed25519_pk: &[u8; SIGN_PUBLICKEYBYTES],
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
     let vk = ed25519_dalek::VerifyingKey::from_bytes(ed25519_pk)
@@ -305,7 +303,7 @@ pub(crate) fn ed25519_to_x25519_public_key(
     Ok(vk.to_montgomery().to_bytes())
 }
 
-pub(crate) fn ed25519_hex_to_x25519_public_key(
+pub fn ed25519_hex_to_x25519_public_key(
     ed25519_pubkey_hex: &str,
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
     let public_key: [u8; SIGN_PUBLICKEYBYTES] = hex::decode(ed25519_pubkey_hex)
@@ -318,7 +316,7 @@ pub(crate) fn ed25519_hex_to_x25519_public_key(
 /// Derive an X25519 shared secret after rejecting public inputs that cannot
 /// identify a peer. Low-order public keys produce the all-zero shared secret;
 /// that result is never usable as recipient identity material.
-pub(crate) fn x25519_shared_secret(
+pub fn x25519_shared_secret(
     local_secret: [u8; CURVE25519_SECRETKEYBYTES],
     peer_public: [u8; CURVE25519_PUBLICKEYBYTES],
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {

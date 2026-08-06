@@ -80,7 +80,7 @@ fn restore_authority() -> crate::protocol::recovery::RestoreAuthority {
     crate::protocol::recovery::RestoreAuthority::OwnerRecovery(
         crate::protocol::recovery::OwnerRecoveryAuthority {
             owner_identity_secret: hex::encode(
-                crate::keys::UserKeypair::generate().to_keypair_bytes(),
+                coven_keys::keys::UserKeypair::generate().to_keypair_bytes(),
             ),
             owner_grant: owner_grant.clone(),
             recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
@@ -118,14 +118,14 @@ fn store_security(
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
 ) -> StoreSecurity {
-    let identity = crate::identity_custody::IdentityCustody::InMemory(UserKeypair::generate())
+    let identity = coven_keys::identity_custody::IdentityCustody::InMemory(UserKeypair::generate())
         .resolve(&keys, &config.store_dir);
     StoreSecurity::new(keys, master_keys, identity)
 }
 
 #[test]
 fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     let dir = tempfile::tempdir().expect("store directory");
     let mut config = Config::with_defaults(
         "local-assertion-wire-test".to_string(),
@@ -141,14 +141,15 @@ fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
     config.cloud_home.s3_exact_slots = Some(crate::CustomS3ExactSlots::StandardConditionalRequests);
     let key_service = StoreKeys::bind(config.store_id.clone());
     key_service
-        .set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
+        .set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
             access_key: "access".to_string(),
             secret_key: "secret".to_string(),
         })
         .expect("store credentials");
-    let custody =
-        crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate())
-            .resolve(&key_service, &config.store_dir);
+    let custody = coven_keys::custody::KeyCustody::InMemory(
+        coven_keys::encryption::MasterKeyring::generate(),
+    )
+    .resolve(&key_service, &config.store_dir);
     let security = store_security(&config, key_service, custody);
     let encoded = security
         .generate_restore_code(
@@ -179,11 +180,11 @@ fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
 /// restoring device's own empty private zone.
 #[test]
 fn generate_restore_code_rejects_a_share_joined_cloudkit_config() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
 
     let config = cloudkit_config(Some(("owner-name", "zone-name")));
     let key_service = StoreKeys::bind(config.store_id.clone());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
     let security = store_security(&config, key_service, custody);
     let err = security
         .generate_restore_code(
@@ -205,11 +206,11 @@ fn generate_restore_code_rejects_a_share_joined_cloudkit_config() {
 /// restore code that decodes back to `CloudHomeJoinInfo::CloudKit`.
 #[test]
 fn generate_restore_code_private_cloudkit_round_trips() {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
 
     let config = cloudkit_config(None);
     let key_service = StoreKeys::bind(config.store_id.clone());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
     let security = store_security(&config, key_service, custody);
     let code = security
         .generate_restore_code(

@@ -3,9 +3,9 @@
 //! refusals below it.
 
 use crate::database::DbError;
-use crate::keys::KeyError;
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::CloudHomeError;
+use coven_keys::keys::KeyError;
 
 use super::cycle::InitSyncError;
 use super::sync_loop::SyncLoopError;
@@ -53,7 +53,7 @@ pub enum SyncError {
     #[error("{0}")]
     Database(#[from] DbError),
     #[error("row routing key: {0}")]
-    RoutingEncryption(#[from] crate::keys::RoutingEncryptionError),
+    RoutingEncryption(#[from] coven_keys::keys::RoutingEncryptionError),
     #[error("blob upload drain failed: {0}")]
     BlobUpload(DbError),
     #[error("sync loop error: {0}")]

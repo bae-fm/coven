@@ -32,7 +32,7 @@ pub(crate) fn no_progress() -> impl Fn(u64) + Send + Sync {
 /// in-memory control object / the test backend.
 pub struct BlobBody {
     /// Total bytes this body will yield: the encrypted length (see
-    /// [`crate::encryption::chunked_encrypted_len`]) for a sealed body, or the
+    /// [`coven_keys::encryption::chunked_encrypted_len`]) for a sealed body, or the
     /// plaintext length for a passthrough one.
     len: u64,
     source: BlobSource,

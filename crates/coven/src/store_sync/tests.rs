@@ -1,8 +1,6 @@
 use std::sync::{Arc, RwLock};
 
 use super::*;
-use crate::encryption::MasterKeyring;
-use crate::keys::{test_keyring, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys};
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
@@ -12,6 +10,10 @@ use coven_foundation::clock::SystemClock;
 use coven_foundation::config::{CloudProvider, HomeStorage};
 use coven_foundation::store_dir::StoreDir;
 use coven_foundation::store_dir::StoreOpenGuard;
+use coven_keys::encryption::MasterKeyring;
+use coven_keys::keys::{
+    test_keyring, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys,
+};
 
 struct NoImmutableCopyHome;
 
@@ -85,11 +87,11 @@ impl MasterKeyCustody for NoKeyCustody {
 struct NoIdentityCustody;
 
 impl DeviceIdentityCustody for NoIdentityCustody {
-    fn unlock(&self) -> Result<Option<crate::keys::UserKeypair>, KeyError> {
+    fn unlock(&self) -> Result<Option<coven_keys::keys::UserKeypair>, KeyError> {
         Ok(None)
     }
 
-    fn persist(&self, _keypair: &crate::keys::UserKeypair) -> Result<(), KeyError> {
+    fn persist(&self, _keypair: &coven_keys::keys::UserKeypair) -> Result<(), KeyError> {
         Ok(())
     }
 
@@ -101,8 +103,10 @@ impl DeviceIdentityCustody for NoIdentityCustody {
 fn established_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     test_keyring::install();
     let store_keys = StoreKeys::bind("unused-store-id".to_string());
-    crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
-        .resolve(&store_keys, &StoreDir::new("unused-store-dir"))
+    coven_keys::identity_custody::IdentityCustody::InMemory(
+        coven_keys::keys::UserKeypair::generate(),
+    )
+    .resolve(&store_keys, &StoreDir::new("unused-store-dir"))
 }
 
 fn store_security(
@@ -392,7 +396,7 @@ async fn failed_restart_leaves_no_stale_connection() {
     initial_config.cloud_home.storage = HomeStorage::Browsable;
     let config = Arc::new(RwLock::new(initial_config));
     let store_keys = StoreKeys::bind("sync-failed-restart".to_string());
-    let custody = crate::custody::KeyCustody::InMemory(MasterKeyring::generate())
+    let custody = coven_keys::custody::KeyCustody::InMemory(MasterKeyring::generate())
         .resolve(&store_keys, &StoreDir::new("unused-store-dir"));
     let sync = store_sync(
         {
@@ -429,7 +433,7 @@ async fn connect_rejects_a_missing_device_identity() {
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let store_id = "sync-no-device-identity".to_string();
     let keys = StoreKeys::bind(store_id.clone());
-    keys.set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
+    keys.set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
         access_key: "ak".to_string(),
         secret_key: "sk".to_string(),
     })
@@ -475,7 +479,7 @@ async fn foreign_founder_installs_no_connection() {
     );
     config.cloud_home.storage = HomeStorage::Browsable;
     let home = Arc::new(InMemoryCloudHome::new());
-    let attacker = crate::keys::UserKeypair::generate();
+    let attacker = coven_keys::keys::UserKeypair::generate();
     let attacker_storage = Arc::new(
         CloudSyncStorage::new(
             home.clone(),
@@ -496,11 +500,11 @@ async fn foreign_founder_installs_no_connection() {
     .await
     .expect("publish attacker Store root");
 
-    let victim = crate::keys::UserKeypair::generate();
+    let victim = coven_keys::keys::UserKeypair::generate();
     let database = crate::sync::test_helpers::open_test_db();
     let store_keys = StoreKeys::bind(store_id.to_string());
-    let identity_custody =
-        crate::identity_custody::IdentityCustody::InMemory(victim).resolve(&store_keys, &store_dir);
+    let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(victim)
+        .resolve(&store_keys, &store_dir);
     let sync = store_sync(
         Arc::new(move || config.clone()),
         store_keys,
@@ -534,7 +538,7 @@ fn cipher_resolution_reads_current_custody_each_time() {
     let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let store_id = "sync-resolve-cipher-fresh";
     let store_keys = StoreKeys::bind(store_id.to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let key_a = MasterKeyring::generate();
     custody.persist(&key_a).expect("establish key A");
     let security = store_security(store_keys, custody.clone(), established_identity_custody());

@@ -399,7 +399,7 @@ pub(crate) enum BlobOpeningAuthority<'a> {
     Circle {
         circle_id: crate::protocol::circle::CircleId,
         control: &'a crate::protocol::circle::CircleControlCoord,
-        key_fingerprint: crate::encryption::KeyFingerprint,
+        key_fingerprint: coven_keys::encryption::KeyFingerprint,
     },
 }
 

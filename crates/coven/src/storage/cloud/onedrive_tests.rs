@@ -5,8 +5,8 @@ use axum::http::{Request, Response, StatusCode};
 use axum::Router;
 use std::sync::{Arc, Mutex};
 
-use crate::keys::StoreKeys;
 use crate::oauth::OAuthTokens;
+use coven_keys::keys::StoreKeys;
 
 #[test]
 fn onedrive_does_not_accept_drive_cancellation_status() {

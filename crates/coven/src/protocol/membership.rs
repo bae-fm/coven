@@ -27,8 +27,8 @@ use super::store_commit::{
     OwnerPromotionRequestBody, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
 };
 use super::wrapped_store_key::WrappedStoreKeyRef;
-use crate::keys::{self, UserKeypair};
 use crate::protocol::objects::ExactObjectRef;
+use coven_keys::keys::{self, UserKeypair};
 
 mod authoring;
 mod authority;
@@ -762,13 +762,13 @@ pub(crate) enum LocalStoreMembership {
 impl LocalStoreMembership {
     pub(crate) fn from_membership(
         membership: &MembershipChain,
-        identity: Option<&crate::keys::UserKeypair>,
+        identity: Option<&coven_keys::keys::UserKeypair>,
     ) -> Result<Self, crate::protocol::membership::MembershipError> {
         membership.ensure_resolved()?;
         let Some(identity) = identity else {
             return Ok(Self::IdentityNotSupplied);
         };
-        let identity = crate::keys::public_key_hex(identity);
+        let identity = coven_keys::keys::public_key_hex(identity);
         if membership
             .current_members()
             .iter()

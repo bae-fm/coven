@@ -13,11 +13,11 @@ use tracing::warn;
 
 use crate::database::DbError;
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
-use crate::encryption::EncryptionService;
 use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use crate::protocol::blob::{
     BlobTransitionObserver, DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
 };
+use coven_keys::encryption::EncryptionService;
 
 use super::AuthorizedWriterOperation;
 

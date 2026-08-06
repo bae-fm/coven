@@ -7,7 +7,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: crate::protocol::membership::MemberRole,
-        encryption: &crate::encryption::EncryptionService,
+        encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
@@ -57,7 +57,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 None => {
                     let stream_id = self.select_membership_author_stream(&chain).await?;
                     let invitee_x25519_pk =
-                        crate::keys::ed25519_hex_to_x25519_public_key(public_key_hex)?;
+                        coven_keys::keys::ed25519_hex_to_x25519_public_key(public_key_hex)?;
                     let authorized_keyring = self
                         .open_keyring_or_for_membership(&chain, encryption)
                         .await?;
@@ -252,8 +252,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) async fn remove_member(
         &mut self,
         public_key_hex: &str,
-        current_encryption: &crate::encryption::EncryptionService,
-        master_keys: &dyn crate::keys::MasterKeyCustody,
+        current_encryption: &coven_keys::encryption::EncryptionService,
+        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
@@ -283,10 +283,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         public_key_hex: &str,
         timestamp: &str,
-        current_encryption: &crate::encryption::EncryptionService,
+        current_encryption: &coven_keys::encryption::EncryptionService,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
     ) -> Result<
-        crate::encryption::EncryptionService,
+        coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipOpsError,
     > {
         let mut membership = self.resolved_membership()?.clone();

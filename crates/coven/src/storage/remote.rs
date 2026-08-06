@@ -14,11 +14,6 @@ use std::sync::{Arc, RwLock};
 
 use super::provider_probe::ProviderProbeStorage;
 use super::SyncStorage;
-use crate::encryption::{
-    EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
-    SEALED_BLOB_HEADER_LEN,
-};
-use crate::keys::UserKeypair;
 use crate::protocol::objects::ObjectSlot;
 #[cfg(test)]
 use crate::protocol::objects::ProtocolObjectDomain;
@@ -28,6 +23,11 @@ use crate::protocol::objects::{
 };
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::{BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage};
+use coven_keys::encryption::{
+    EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
+    SEALED_BLOB_HEADER_LEN,
+};
+use coven_keys::keys::UserKeypair;
 
 mod blob_io;
 mod cipher;
@@ -378,8 +378,8 @@ impl CloudSyncStorage {
     pub(crate) fn adopt_key_rotation_for_test(
         &self,
         encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<String, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<String, coven_keys::keys::KeyError> {
         CloudCipherAccess::adopt_key_rotation(self, encryption, custody)
     }
 
@@ -407,8 +407,8 @@ impl CloudCipherAccess for CloudSyncStorage {
     fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
-        custody: &dyn crate::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, crate::keys::KeyError> {
+        custody: &dyn coven_keys::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         self.cipher.merge_key_rotation(new_encryption, custody)
     }
 }

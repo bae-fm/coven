@@ -1,7 +1,5 @@
 use super::*;
 
-use crate::encryption::EncryptionService;
-use crate::keys::{test_keyring, StoreKeys};
 use crate::protocol::blob::{CacheFill, Provenance};
 use crate::storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
@@ -14,6 +12,8 @@ use crate::store_sync::{ConfigProvider, SyncError};
 use crate::sync::test_helpers::{open_test_db_with_blob, read_test_db, temp_store_dir, TestStore};
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys::{test_keyring, StoreKeys};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -34,16 +34,17 @@ struct TestCloudKitOps {
 /// methods — the blob/storage/status tests in this module. Seeded
 /// in-memory so it needs no keyring registration.
 fn test_store_keys(store_id: &str) -> StoreKeys {
-    crate::keys::test_keyring::install();
+    coven_keys::keys::test_keyring::install();
     StoreKeys::bind(store_id.to_string())
 }
 
-fn test_key_custody() -> Arc<dyn crate::keys::MasterKeyCustody> {
+fn test_key_custody() -> Arc<dyn coven_keys::keys::MasterKeyCustody> {
     let store_keys = test_store_keys("unused-store-id");
-    crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate()).resolve(
-        &store_keys,
-        &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
-    )
+    coven_keys::custody::KeyCustody::InMemory(coven_keys::encryption::MasterKeyring::generate())
+        .resolve(
+            &store_keys,
+            &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
+        )
 }
 
 /// A ready-to-use identity custody for the same tests, seeded in-memory
@@ -51,11 +52,13 @@ fn test_key_custody() -> Arc<dyn crate::keys::MasterKeyCustody> {
 /// [`test_key_custody`].
 fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     let store_keys = test_store_keys("unused-store-id");
-    crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
-        .resolve(
-            &store_keys,
-            &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
-        )
+    coven_keys::identity_custody::IdentityCustody::InMemory(
+        coven_keys::keys::UserKeypair::generate(),
+    )
+    .resolve(
+        &store_keys,
+        &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
+    )
 }
 
 fn host_blob_test_db(namespace: &str) -> Database {
@@ -272,7 +275,7 @@ fn test_handle_with_custody(
     store_id: &str,
     store_dir: StoreDir,
     db: Database,
-    key_custody: crate::custody::KeyCustody,
+    key_custody: coven_keys::custody::KeyCustody,
 ) -> CovenHandle {
     let store_keys = test_store_keys(store_id);
     let key_custody = key_custody.resolve(&store_keys, &store_dir);
@@ -283,7 +286,7 @@ fn test_handle_with_custody_and_storage(
     store_id: &str,
     store_dir: StoreDir,
     db: Database,
-    key_custody: Arc<dyn crate::keys::MasterKeyCustody>,
+    key_custody: Arc<dyn coven_keys::keys::MasterKeyCustody>,
     storage: HomeStorage,
 ) -> CovenHandle {
     let mut config = Config::with_defaults(
@@ -581,13 +584,13 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 Arc::new(move || config.clone())
             };
             let upload_pause = Arc::new(PausedUploadDrain::new());
-            let signer = crate::keys::UserKeypair::generate();
+            let signer = coven_keys::keys::UserKeypair::generate();
             let home = crate::sync::test_helpers::test_cloud_home();
             TestStore::create(&db, "lib-test", signer.clone(), home.clone())
                 .await
                 .expect("create exact test Store");
             let store_keys = test_store_keys("lib-test");
-            let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+            let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(signer)
                 .resolve(&store_keys, &store_dir);
 
             let handle = CovenHandle::new(
@@ -720,13 +723,13 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
                 let config = config.clone();
                 Arc::new(move || config.clone())
             };
-            let signer = crate::keys::UserKeypair::generate();
+            let signer = coven_keys::keys::UserKeypair::generate();
             let home = crate::sync::test_helpers::test_cloud_home();
             TestStore::create(&db, "lib-caller-driven", signer.clone(), home.clone())
                 .await
                 .expect("create exact test Store");
             let store_keys = test_store_keys("lib-caller-driven");
-            let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+            let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(signer)
                 .resolve(&store_keys, &store_dir);
 
             let handle = CovenHandle::new(
@@ -865,13 +868,13 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 let config = config.clone();
                 Arc::new(move || config.clone())
             };
-            let signer = crate::keys::UserKeypair::generate();
+            let signer = coven_keys::keys::UserKeypair::generate();
             let home = crate::sync::test_helpers::test_cloud_home();
             TestStore::create(&db, "lib-chunking", signer.clone(), home.clone())
                 .await
                 .expect("create exact test Store");
             let store_keys = test_store_keys("lib-chunking");
-            let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+            let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(signer)
                 .resolve(&store_keys, &store_dir);
             // Holds the loop off the upload queue so this test's explicit
             // `drain_uploads` is the call that seals the object.
@@ -947,8 +950,8 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
 
             // `[key tag][header][chunks]` — the header the sealer wrote is what every
             // later reader frames the object by.
-            let header = crate::encryption::SealedBlobHeader::parse(
-                &at_rest[crate::encryption::KeyTag::LEN..],
+            let header = coven_keys::encryption::SealedBlobHeader::parse(
+                &at_rest[coven_keys::encryption::KeyTag::LEN..],
             )
             .expect("stored blob carries a sealed header");
             assert_eq!(
@@ -1046,17 +1049,18 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
             config.cloud_home.storage = HomeStorage::Opaque;
 
             let key_service = test_store_keys(store_id);
-            let custody = crate::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
+            let custody =
+                coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
             custody
-                .persist(&crate::encryption::MasterKeyring::generate())
+                .persist(&coven_keys::encryption::MasterKeyring::generate())
                 .expect("establish a master key");
 
             // Exact opaque blob locators bind their uploader registration, so establish
             // the writer's signing identity before connecting storage.
-            let identity_custody =
-                crate::identity_custody::IdentityCustody::Keyring.resolve(&key_service, &store_dir);
+            let identity_custody = coven_keys::identity_custody::IdentityCustody::Keyring
+                .resolve(&key_service, &store_dir);
             identity_custody
-                .persist(&crate::keys::UserKeypair::generate())
+                .persist(&coven_keys::keys::UserKeypair::generate())
                 .expect("establish this store's signing identity");
 
             let ops = Arc::new(TestCloudKitOps::new());
@@ -1140,7 +1144,7 @@ async fn initialize_master_key_refuses_a_second_call() {
         "lib-init-master-key-twice",
         store_dir,
         db,
-        crate::custody::KeyCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
     );
 
     let fingerprint = handle
@@ -1158,7 +1162,7 @@ async fn initialize_master_key_refuses_a_second_call() {
         .expect_err("a second call must refuse rather than generate over an existing key");
     assert!(matches!(
         error,
-        crate::keys::MasterKeyError::AlreadyEstablished
+        coven_keys::keys::MasterKeyError::AlreadyEstablished
     ));
 }
 
@@ -1198,9 +1202,9 @@ async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back()
             };
 
             let store_keys = test_store_keys(store_id);
-            let custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
-            let identity_custody =
-                crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
+            let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+            let identity_custody = coven_keys::identity_custody::IdentityCustody::Keyring
+                .resolve(&store_keys, &store_dir);
             let handle = CovenHandle::new(
                 db.clone(),
                 db.clone(),
@@ -1297,7 +1301,7 @@ async fn import_master_key_accepts_the_current_serialized_keyring() {
     let db = read_test_db("images");
     let handle = test_handle("lib-import-master-key", store_dir, db);
 
-    let keyring = crate::encryption::MasterKeyring::generate();
+    let keyring = coven_keys::encryption::MasterKeyring::generate();
     let imported_fingerprint = handle
         .import_master_key(&keyring.to_serialized())
         .expect("import the serialized keyring");
@@ -1329,7 +1333,7 @@ fn test_handle_with_real_identity(
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let store_keys = test_store_keys(store_id);
     let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
+        coven_keys::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &store_dir);
     CovenHandle::new(
         db.clone(),
         db.clone(),
@@ -1368,7 +1372,7 @@ async fn initialize_identity_refuses_a_second_call() {
         .expect_err("a second call must refuse rather than generate over an existing identity");
     assert!(matches!(
         error,
-        crate::keys::IdentityError::AlreadyEstablished
+        coven_keys::keys::IdentityError::AlreadyEstablished
     ));
 }
 
@@ -1455,7 +1459,7 @@ async fn seal_and_open_app_data_round_trip_through_the_handle() {
         store_id,
         store_dir.clone(),
         db,
-        crate::custody::KeyCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
     );
     handle
         .initialize_master_key()
@@ -1496,7 +1500,7 @@ async fn open_app_data_round_trips_through_the_read_handle() {
         store_id,
         store_dir.clone(),
         db.clone(),
-        crate::custody::KeyCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
     );
     writer
         .initialize_master_key()
@@ -1515,7 +1519,7 @@ async fn open_app_data_round_trips_through_the_read_handle() {
         Arc::new(move || config.clone())
     };
     let store_keys = test_store_keys(store_id);
-    let key_custody = crate::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let key_custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let reader = crate::read_handle::CovenReadHandle::new(
         db,
         store_dir.clone(),
@@ -1551,7 +1555,7 @@ async fn app_data_is_locked_when_no_master_key_is_established() {
         store_id,
         store_dir.clone(),
         db,
-        crate::custody::KeyCustody::Keyring,
+        coven_keys::custody::KeyCustody::Keyring,
     );
     assert!(
         handle.master_key_fingerprint().unwrap().is_none(),
@@ -1590,7 +1594,7 @@ async fn plaintext_membership_operations_are_typed() {
                         .expect("connect plaintext home");
 
                     let public_key_hex =
-                        hex::encode(crate::keys::UserKeypair::generate().public_key());
+                        hex::encode(coven_keys::keys::UserKeypair::generate().public_key());
                     let invite = handle
                         .invite_member(&public_key_hex, None, MemberRole::Member)
                         .await;
@@ -1623,12 +1627,12 @@ async fn create_circle_returns_after_merge_activation_is_materialized() {
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let keyring = crate::encryption::MasterKeyring::generate();
+        let keyring = coven_keys::encryption::MasterKeyring::generate();
         let handle = test_handle_with_custody(
             "lib-create-circle-merge",
             store_dir,
             db.clone(),
-            crate::custody::KeyCustody::InMemory(keyring.clone()),
+            coven_keys::custody::KeyCustody::InMemory(keyring.clone()),
         );
         handle
             .connect_sync_with_test_home(
@@ -1715,12 +1719,12 @@ async fn circles_namespace_round_trips_across_states() {
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let keyring = crate::encryption::MasterKeyring::generate();
+        let keyring = coven_keys::encryption::MasterKeyring::generate();
         let handle = test_handle_with_custody(
             "lib-circles-namespace",
             store_dir,
             db.clone(),
-            crate::custody::KeyCustody::InMemory(keyring.clone()),
+            coven_keys::custody::KeyCustody::InMemory(keyring.clone()),
         );
         handle
             .connect_sync_with_test_home(
@@ -1772,12 +1776,12 @@ async fn circle_write_commands_dispatch_through_their_command_arms() {
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let keyring = crate::encryption::MasterKeyring::generate();
+        let keyring = coven_keys::encryption::MasterKeyring::generate();
         let handle = test_handle_with_custody(
             "lib-circles-dispatch",
             store_dir,
             db,
-            crate::custody::KeyCustody::InMemory(keyring.clone()),
+            coven_keys::custody::KeyCustody::InMemory(keyring.clone()),
         );
         handle
             .connect_sync_with_test_home(
@@ -1789,7 +1793,7 @@ async fn circle_write_commands_dispatch_through_their_command_arms() {
 
         let circles = handle.circles();
         let circle_id = circles.create("Family").await.expect("create the Circle");
-        let member = hex::encode(crate::keys::UserKeypair::generate().public_key());
+        let member = hex::encode(coven_keys::keys::UserKeypair::generate().public_key());
 
         // Distinct typed refusals: a swapped arm would return a different one.
         assert!(

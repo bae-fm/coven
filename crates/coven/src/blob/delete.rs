@@ -42,11 +42,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::database::{OutboxEntry, OutboxOperation};
-use crate::keys::{self, UserKeypair};
 use crate::protocol::blob::locator::StoredBlobRef;
 use crate::protocol::objects::StorageError;
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipherAccess, CloudRotationAccess};
+use coven_keys::keys::{self, UserKeypair};
 
 /// The cloud key-prefix under which tombstones live. The suffix after this prefix
 /// is the hash of the exact immutable provider object reference.

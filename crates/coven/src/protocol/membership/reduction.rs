@@ -180,7 +180,7 @@ pub(super) fn membership_causal_generation(
         })
         .map(|reference| reference.generation)
         .max()
-        .unwrap_or(crate::encryption::INITIAL_KEY_GENERATION)
+        .unwrap_or(coven_keys::encryption::INITIAL_KEY_GENERATION)
 }
 
 pub(super) fn reduce_store_membership(

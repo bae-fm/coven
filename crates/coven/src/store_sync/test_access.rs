@@ -28,7 +28,7 @@ impl StoreSync {
     pub(crate) async fn create_test_store(
         &self,
         store_id: &str,
-        signer: crate::keys::UserKeypair,
+        signer: coven_keys::keys::UserKeypair,
         home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
         crate::sync::test_helpers::TestStore::create_with_database(
@@ -65,7 +65,7 @@ impl StoreSync {
             .open_into_store_database(&self.database)
             .await
             .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
-        let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
+        let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let mut authorization = device.authorize_writer().await.map_err(|error| {
             crate::sync::cycle::SyncCycleFailure::operation("authorize Store writer", error)
         })?;
@@ -159,7 +159,7 @@ impl StoreSync {
         &self,
         bytes: &[u8],
         context: &[u8],
-    ) -> Result<(crate::encryption::KeyFingerprint, Vec<u8>), StorageError> {
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), StorageError> {
         self.connected()
             .ok_or_else(|| StorageError::Storage("sync connection is not installed".to_string()))?
             .open_sealed_blob_for_test(bytes, context)

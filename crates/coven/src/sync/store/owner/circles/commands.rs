@@ -143,7 +143,7 @@ impl<'store> StoreCircleCommands<'store> {
     pub(crate) async fn retry_circle_operation(
         &self,
         operation_id: &crate::protocol::circle::CircleOperationId,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
         let mut writer = self.writer().await?;
         writer

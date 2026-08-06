@@ -1,5 +1,4 @@
 use super::*;
-use crate::keys::StoreKeys;
 use crate::storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
@@ -7,6 +6,7 @@ use crate::storage::cloud::cloudkit::{
 use coven_foundation::clock::FixedClock;
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
 use coven_foundation::store_dir::StoreDir;
+use coven_keys::keys::StoreKeys;
 use std::sync::Mutex;
 
 struct ScopeRecordingOps {

@@ -7,14 +7,14 @@ use super::RegistrationOutbox;
 #[cfg(test)]
 use crate::database::Database;
 #[cfg(test)]
-use crate::keys::UserKeypair;
-#[cfg(test)]
 use crate::protocol::objects::ProtocolObjectDomain;
 #[cfg(test)]
 use crate::protocol::store_commit::{
     owner_recovery_semantic_prefix, StoreCommitCoord, StoreDeviceRegistration,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
 };
+#[cfg(test)]
+use coven_keys::keys::UserKeypair;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreRegistrationError {
@@ -286,7 +286,7 @@ mod tests {
                             &context,
                             &recovery_slot,
                             &owner_recovery_semantic_prefix(
-                                &crate::keys::public_key_hex(&signer),
+                                &coven_keys::keys::public_key_hex(&signer),
                                 authority.owner_grant.clone(),
                                 1,
                             ),
@@ -353,7 +353,7 @@ mod tests {
                         &context,
                         &recovery_slot,
                         &owner_recovery_semantic_prefix(
-                            &crate::keys::public_key_hex(&signer),
+                            &coven_keys::keys::public_key_hex(&signer),
                             authority.owner_grant.clone(),
                             1,
                         ),

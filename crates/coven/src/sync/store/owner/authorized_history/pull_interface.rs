@@ -5,7 +5,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         membership: &crate::protocol::membership::MembershipChain,
         identity: Option<&UserKeypair>,
-        routing_encryption: Option<&crate::encryption::EncryptionService>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<pull::StorePullExecution, pull::StorePullError> {
         pull::AuthorizedPull::load(self, membership, identity, routing_encryption)
             .await?

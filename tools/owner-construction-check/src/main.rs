@@ -760,7 +760,7 @@ fn main() {
             }
             if !result.module_dependencies.is_empty() {
                 eprintln!(
-                    "module references point down the architecture: host → domain → replication → protocol/database/storage → keys → foundation"
+                    "module references point down the architecture: host → domain → replication → protocol/database/storage, and below those the coven-keys and coven-foundation crates"
                 );
             }
             std::process::exit(1);
