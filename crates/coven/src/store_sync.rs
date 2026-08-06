@@ -89,6 +89,7 @@ enum CommandAuthority {
 pub(crate) struct StoreSync {
     config_provider: ConfigProvider,
     security: StoreSecurity,
+    master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
     database: StoreDatabase,
     store_dir: crate::store_dir::StoreDir,
     clock: ClockRef,
@@ -178,7 +179,7 @@ impl StoreSync {
         Arc::new(SyncLoopHandle::new(
             components,
             blob_transitions,
-            self.security.master_keys(),
+            self.master_keys.clone(),
             self.clock.clone(),
             config,
             self.observer.clone(),

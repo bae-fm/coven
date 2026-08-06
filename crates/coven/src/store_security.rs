@@ -124,12 +124,6 @@ impl StoreSecurity {
             .map(|identity| identity.public_key()))
     }
 
-    /// The master-key custody this Store's security owner retains, for the
-    /// layers below that unlock or re-protect the keyring themselves.
-    pub(crate) fn master_keys(&self) -> Arc<dyn MasterKeyCustody> {
-        self.master_keys.clone()
-    }
-
     pub(crate) fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
         self.keys.set_host_secret(name, value)
     }

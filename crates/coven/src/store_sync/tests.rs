@@ -142,7 +142,7 @@ fn store_sync(
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
     let cloud_keys = keys.clone();
-    let security = store_security(keys, master_keys, identity);
+    let security = store_security(keys, master_keys.clone(), identity);
     let clock: ClockRef = Arc::new(SystemClock);
     let cloud_storage = store_cloud_storage(&cloud_keys, &security, clock.clone());
     let blob_storage = crate::store_blobs::StoreBlobAccess::new(
@@ -154,6 +154,7 @@ fn store_sync(
     StoreSync::new(
         config_provider,
         security,
+        master_keys,
         database,
         store_dir.clone(),
         clock,
@@ -204,7 +205,8 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         &CloudCipher::Plaintext,
     );
     let cloud_keys = keys.clone();
-    let security = store_security(keys, Arc::new(NoKeyCustody), established_identity_custody());
+    let master_keys: Arc<dyn MasterKeyCustody> = Arc::new(NoKeyCustody);
+    let security = store_security(keys, master_keys.clone(), established_identity_custody());
     let database = StoreDatabase::from_database(crate::sync::test_helpers::open_test_db());
     let owners =
         crate::sync::test_owner_graph::TestOwnerGraph::new(database.clone(), store_dir.clone());
@@ -220,6 +222,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let sync = StoreSync::new(
         config_provider,
         security.clone(),
+        master_keys,
         database,
         store_dir.clone(),
         clock,

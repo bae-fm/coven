@@ -12,6 +12,7 @@ impl StoreSync {
     pub(crate) fn new(
         config_provider: ConfigProvider,
         security: StoreSecurity,
+        master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
         database: StoreDatabase,
         store_dir: crate::store_dir::StoreDir,
         clock: ClockRef,
@@ -25,6 +26,7 @@ impl StoreSync {
         Self {
             config_provider,
             security,
+            master_keys,
             database,
             store_dir,
             clock,

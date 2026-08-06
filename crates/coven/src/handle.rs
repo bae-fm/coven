@@ -164,7 +164,7 @@ impl CovenHandle {
             &store_dir,
             config_provider.clone(),
             key_service,
-            key_custody,
+            key_custody.clone(),
             identity_custody,
             oauth_clients,
             clock.clone(),
@@ -176,6 +176,7 @@ impl CovenHandle {
         let sync = StoreSync::new(
             config_provider,
             security.clone(),
+            key_custody.clone(),
             database.clone(),
             store_dir.clone(),
             clock,
