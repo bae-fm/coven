@@ -80,8 +80,8 @@ impl DatabaseTestTransaction<'_, '_> {
         stream_id: &str,
         sequence: u64,
     ) -> Result<(), DbError> {
-        let sequence = i64::try_from(sequence)
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+        let sequence =
+            i64::try_from(sequence).map_err(|error| DbError::context("invalid sequence", error))?;
         self.transaction
             .execute(
                 "DELETE FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
@@ -101,8 +101,7 @@ impl DatabaseTestTransaction<'_, '_> {
             .optional()
             .map_err(DbError::from)?
             .map(|sequence| {
-                u64::try_from(sequence)
-                    .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))
+                u64::try_from(sequence).map_err(|error| DbError::context("invalid sequence", error))
             })
             .transpose()
     }

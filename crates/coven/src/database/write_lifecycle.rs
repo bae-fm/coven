@@ -7,7 +7,7 @@ impl Database {
         status: &WriteStatus,
     ) -> Result<(), DbError> {
         let status = serde_json::to_string(status)
-            .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
+            .map_err(|error| DbError::context("serialize write status", error))?;
         let updated = conn
             .execute(
                 "UPDATE store_writes SET status = ?2 WHERE write_id = ?1",

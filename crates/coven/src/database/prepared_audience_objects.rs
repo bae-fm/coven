@@ -19,7 +19,7 @@ impl PreparedAudiencePackage {
     pub(super) fn from_remote(remote: RemoteObjectRecord) -> Result<Self, DbError> {
         remote
             .validate()
-            .map_err(|error| DbError::Message(format!("prepared remote package: {error}")))?;
+            .map_err(|error| DbError::context("prepared remote package", error))?;
         let is_package = match &remote {
             RemoteObjectRecord::CandidateCommit(_) | RemoteObjectRecord::RetainedAuthority(_) => {
                 false
@@ -61,10 +61,10 @@ impl PreparedAudiencePackage {
         object: ExactObjectRef,
     ) -> Result<Self, DbError> {
         let package = AudiencePackage::parse(&semantic_bytes)
-            .map_err(|error| DbError::Message(format!("prepared audience package: {error}")))?;
-        object.verify(&stored_bytes).map_err(|error| {
-            DbError::Message(format!("prepared audience package stored bytes: {error}"))
-        })?;
+            .map_err(|error| DbError::context("prepared audience package", error))?;
+        object
+            .verify(&stored_bytes)
+            .map_err(|error| DbError::context("prepared audience package stored bytes", error))?;
         Ok(Self {
             remote_object_id,
             package,
@@ -112,7 +112,7 @@ impl PreparedAudienceBlob {
     ) -> Result<Self, DbError> {
         remote
             .validate()
-            .map_err(|error| DbError::Message(format!("prepared remote blob: {error}")))?;
+            .map_err(|error| DbError::context("prepared remote blob", error))?;
         if !matches!(
             &remote,
             RemoteObjectRecord::SharedLiveSet(record)
@@ -123,7 +123,7 @@ impl PreparedAudienceBlob {
             ));
         }
         let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
-            .map_err(|error| DbError::Message(format!("prepared blob locator: {error}")))?;
+            .map_err(|error| DbError::context("prepared blob locator", error))?;
         if locator.locator_hash().to_string() != expected_locator_hash {
             return Err(DbError::Message(format!(
                 "prepared blob locator hashes to {}, indexed as {expected_locator_hash}",
@@ -152,7 +152,7 @@ impl PreparedAudienceBlob {
             ));
         }
         let blob = StoredBlobRef::new(locator, remote.object().clone())
-            .map_err(|error| DbError::Message(format!("prepared blob reference: {error}")))?;
+            .map_err(|error| DbError::context("prepared blob reference", error))?;
         Ok(Self {
             remote_object_id: remote.object_id(),
             audience,

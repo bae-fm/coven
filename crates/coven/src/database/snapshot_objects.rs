@@ -101,7 +101,7 @@ pub(crate) fn validate_snapshot_blob_plans_on(
     for blob in blobs {
         blob.remote
             .validate()
-            .map_err(|error| DbError::Message(format!("snapshot remote blob: {error}")))?;
+            .map_err(|error| DbError::context("snapshot remote blob", error))?;
         let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
         if owners != [owner] {
             return Err(DbError::Message(
@@ -173,7 +173,7 @@ pub(crate) fn persist_snapshot_image_on(
     label: &str,
 ) -> Result<(), DbError> {
     let image = RemoteObjectRecord::snapshot_activated_image(image, owner)
-        .map_err(|error| DbError::Message(format!("{label} ownership: {error}")))?;
+        .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
     persist_exact_remote_object_on(conn, &image, label)
 }
 
@@ -197,7 +197,7 @@ pub(super) fn validate_snapshot_object_owner_records_on(
     drop(statement);
     for object_id in object_ids {
         let parsed = object_id.parse().map_err(|error| {
-            DbError::Message(format!("snapshot remote object id {object_id:?}: {error}"))
+            DbError::context(format!("snapshot remote object id {object_id:?}"), error)
         })?;
         let remote = load_remote_object_on(conn, parsed)?;
         for owner in remote.snapshot_owners() {
@@ -228,14 +228,14 @@ pub(crate) fn install_snapshot_blob_plan_on(
         for owner in blob.remote.snapshot_owners() {
             existing
                 .merge_snapshot_owner(blob.bindings[0].blob(), owner.clone())
-                .map_err(|error| DbError::Message(format!("merge snapshot blob owner: {error}")))?;
+                .map_err(|error| DbError::context("merge snapshot blob owner", error))?;
         }
         existing
     } else {
         blob.remote.clone()
     };
     let encoded = serde_json::to_string(&merged)
-        .map_err(|error| DbError::Message(format!("serialize snapshot blob: {error}")))?;
+        .map_err(|error| DbError::context("serialize snapshot blob", error))?;
     conn.execute(
         "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
          ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
@@ -253,7 +253,7 @@ pub(crate) fn install_snapshot_blob_plan_on(
     .map_err(DbError::from)?;
     validate_stored_locator_on(conn, blob.bindings[0].blob())?;
     let authority = serde_json::to_string(&blob.authority)
-        .map_err(|error| DbError::Message(format!("serialize snapshot blob authority: {error}")))?;
+        .map_err(|error| DbError::context("serialize snapshot blob authority", error))?;
     for binding in &blob.bindings {
         conn.execute(
             "INSERT INTO row_blob_locators

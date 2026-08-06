@@ -15,17 +15,15 @@ pub(crate) fn local_store_authority_on(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(DbError::from)?;
-    let stored_reference: StoreDeviceRegistrationRef =
-        serde_json::from_str(&encoded).map_err(|error| {
-            DbError::Message(format!("local Store registration exact ref: {error}"))
-        })?;
+    let stored_reference: StoreDeviceRegistrationRef = serde_json::from_str(&encoded)
+        .map_err(|error| DbError::context("local Store registration exact ref", error))?;
     if stored_reference != reference {
         return Err(DbError::Message(
             "local Store registration changed during exact load".to_string(),
         ));
     }
     let registration = StoreDeviceRegistration::parse_at(&bytes, &root, reference.device_id)
-        .map_err(|error| DbError::Message(format!("local Store registration: {error}")))?;
+        .map_err(|error| DbError::context("local Store registration", error))?;
     reference
         .verify_registration(&registration)
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -55,10 +53,8 @@ pub(crate) fn local_activated_registration_ref_on(
     let Some(encoded) = encoded else {
         return Ok(None);
     };
-    let reference: StoreDeviceRegistrationRef =
-        serde_json::from_str(&encoded).map_err(|error| {
-            DbError::Message(format!("local Store registration exact ref: {error}"))
-        })?;
+    let reference: StoreDeviceRegistrationRef = serde_json::from_str(&encoded)
+        .map_err(|error| DbError::context("local Store registration exact ref", error))?;
     if reference.device_id.to_string() != device_id {
         return Err(DbError::Message(
             "local Store device state differs from its activated registration".to_string(),

@@ -54,10 +54,13 @@ pub(super) fn live_blob_row(
         ))
     })?;
     let plaintext_hash = plaintext_hash.parse().map_err(|error| {
-        DbError::Message(format!(
-            "winning blob row {:?}/{:?} has invalid plaintext hash: {error}",
-            table, row_id
-        ))
+        DbError::context(
+            format!(
+                "winning blob row {:?}/{:?} has invalid plaintext hash",
+                table, row_id
+            ),
+            error,
+        )
     })?;
     Ok(Some(LiveBlobRow {
         stamp,
@@ -144,14 +147,16 @@ pub(super) fn validate_stored_locator_on(
     }
     let locator =
         BlobLocator::parse(remote.bytes().canonical_semantic_bytes()).map_err(|error| {
-            DbError::Message(format!(
-                "stored blob locator {locator_hash} is invalid: {error}"
-            ))
+            DbError::context(
+                format!("stored blob locator {locator_hash} is invalid"),
+                error,
+            )
         })?;
     let actual = StoredBlobRef::new(locator, remote.object().clone()).map_err(|error| {
-        DbError::Message(format!(
-            "stored blob reference {locator_hash} is invalid: {error}"
-        ))
+        DbError::context(
+            format!("stored blob reference {locator_hash} is invalid"),
+            error,
+        )
     })?;
     if &actual != expected {
         return Err(DbError::Message(format!(
@@ -181,9 +186,8 @@ pub(super) fn validate_stored_row_binding_on(
         )
         .map_err(DbError::from)?;
     let actual_authority: crate::protocol::audience_package::PackageAudience =
-        serde_json::from_str(&audience_authority).map_err(|error| {
-            DbError::Message(format!("parse stored row blob audience authority: {error}"))
-        })?;
+        serde_json::from_str(&audience_authority)
+            .map_err(|error| DbError::context("parse stored row blob audience authority", error))?;
     if &actual_authority != expected_authority
         || remote_object_id != expected_remote_object_id.to_string()
     {
@@ -236,7 +240,7 @@ pub(crate) fn load_prepared_audience_objects_on(
         .map(|encoded| {
             let object_id = encoded
                 .parse()
-                .map_err(|error| DbError::Message(format!("stored remote object id: {error}")))?;
+                .map_err(|error| DbError::context("stored remote object id", error))?;
             PreparedAudiencePackage::from_remote(load_remote_object_on(conn, object_id)?)
         })
         .collect::<Result<Vec<_>, DbError>>()?;
@@ -245,7 +249,7 @@ pub(crate) fn load_prepared_audience_objects_on(
         .map(|(encoded, audience, locator_hash, spool_path)| {
             let object_id = encoded
                 .parse()
-                .map_err(|error| DbError::Message(format!("stored remote object id: {error}")))?;
+                .map_err(|error| DbError::context("stored remote object id", error))?;
             PreparedAudienceBlob::from_remote(
                 parse_remote_audience_db(&audience)?,
                 &locator_hash,
@@ -275,14 +279,14 @@ pub(crate) fn load_activated_registration_on(
         )
         .map_err(DbError::from)?;
     let stored: StoreDeviceRegistrationRef = serde_json::from_str(&encoded)
-        .map_err(|error| DbError::Message(format!("activated Store registration ref: {error}")))?;
+        .map_err(|error| DbError::context("activated Store registration ref", error))?;
     if stored != *reference {
         return Err(DbError::Message(
             "activated Store registration differs from its exact reference".to_string(),
         ));
     }
     let registration = StoreDeviceRegistration::parse_at(&bytes, root, reference.device_id)
-        .map_err(|error| DbError::Message(format!("activated Store registration: {error}")))?;
+        .map_err(|error| DbError::context("activated Store registration", error))?;
     reference
         .verify_registration(&registration)
         .map_err(|error| DbError::Message(error.to_string()))?;
@@ -333,10 +337,10 @@ pub(crate) fn previous_row_blob_for_write_on(
     };
     let authority: crate::protocol::audience_package::PackageAudience =
         serde_json::from_str(&authority)
-            .map_err(|error| DbError::Message(format!("prior row blob authority: {error}")))?;
+            .map_err(|error| DbError::context("prior row blob authority", error))?;
     let object_id = object_id
         .parse()
-        .map_err(|error| DbError::Message(format!("prior row blob object id: {error}")))?;
+        .map_err(|error| DbError::context("prior row blob object id", error))?;
     let remote = load_remote_object_on(conn, object_id)?;
     if !remote.is_activated_stored_blob() {
         return Err(DbError::Message(format!(
@@ -344,7 +348,7 @@ pub(crate) fn previous_row_blob_for_write_on(
         )));
     }
     let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
-        .map_err(|error| DbError::Message(format!("prior row blob locator: {error}")))?;
+        .map_err(|error| DbError::context("prior row blob locator", error))?;
     if !crate::protocol::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash)
     {
         return Ok(None);
@@ -355,7 +359,7 @@ pub(crate) fn previous_row_blob_for_write_on(
         )));
     }
     let stored = StoredBlobRef::new(locator, remote.object().clone())
-        .map_err(|error| DbError::Message(format!("prior row blob reference: {error}")))?;
+        .map_err(|error| DbError::context("prior row blob reference", error))?;
     Ok(Some(StoreWriteRemoteBlob { authority, stored }))
 }
 
@@ -370,7 +374,8 @@ pub(super) fn parse_remote_audience_db(value: &str) -> Result<RemoteAudience, Db
     if value == "store" {
         return Ok(RemoteAudience::Store);
     }
-    value.parse().map(RemoteAudience::Circle).map_err(|error| {
-        DbError::Message(format!("invalid stored blob audience {value:?}: {error}"))
-    })
+    value
+        .parse()
+        .map(RemoteAudience::Circle)
+        .map_err(|error| DbError::context(format!("invalid stored blob audience {value:?}"), error))
 }

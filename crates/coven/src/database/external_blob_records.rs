@@ -123,10 +123,7 @@ impl<'connection> ExternalBlobRecords<'connection> {
             ))
         })?;
         let hash: crate::protocol::store_commit::ObjectHash = hash.parse().map_err(|error| {
-            DbError::Message(format!(
-                "external blob {} hash: {error}",
-                reference.blob().id
-            ))
+            DbError::context(format!("external blob {} hash", reference.blob().id), error)
         })?;
         if size != reference.plaintext_size()
             || hash != reference.plaintext_hash()

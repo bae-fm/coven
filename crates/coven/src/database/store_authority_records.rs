@@ -16,7 +16,7 @@ pub(crate) struct DurableFounderGraph {
 impl DurableFounderGraph {
     pub(crate) fn validate(&self) -> Result<(), DbError> {
         let root = StoreProtocolRoot::parse(&self.root.bytes)
-            .map_err(|error| DbError::Message(format!("founder Store root: {error}")))?;
+            .map_err(|error| DbError::context("founder Store root", error))?;
         if root != self.root.value
             || root.object_hash() != self.root.value.object_hash()
             || self.root.object != *self.root.prepared.reference()
@@ -35,7 +35,7 @@ impl DurableFounderGraph {
             &root_ref,
             self.registration.value.device_id,
         )
-        .map_err(|error| DbError::Message(format!("founder Store registration: {error}")))?;
+        .map_err(|error| DbError::context("founder Store registration", error))?;
         if registration != self.registration.value
             || self.registration.object != *self.registration.prepared.reference()
             || registration.author_pubkey != root.descriptor.founder_pubkey
@@ -60,7 +60,7 @@ impl DurableFounderGraph {
             &self.initial_ack_ref,
             &registration,
         )
-        .map_err(|error| DbError::Message(format!("founder initial acknowledgement: {error}")))?;
+        .map_err(|error| DbError::context("founder initial acknowledgement", error))?;
         if initial_ack != self.initial_ack.value
             || self.initial_ack_ref.registration != registration_ref
             || self.initial_ack_ref.sequence != 1
@@ -80,7 +80,7 @@ impl DurableFounderGraph {
             let head = &self.membership.head;
             let head_ref = &self.membership.head_ref;
             let parsed_entry: MembershipEntry = serde_json::from_slice(&entry.bytes)
-                .map_err(|error| DbError::Message(format!("founder membership entry: {error}")))?;
+                .map_err(|error| DbError::context("founder membership entry", error))?;
             if parsed_entry != entry.value
                 || root
                     .descriptor
@@ -95,7 +95,7 @@ impl DurableFounderGraph {
                 ));
             }
             let parsed_head: AuthorHead = serde_json::from_slice(&head.bytes)
-                .map_err(|error| DbError::Message(format!("founder membership head: {error}")))?;
+                .map_err(|error| DbError::context("founder membership head", error))?;
             let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
                 DbError::Message("founder entry has no Store membership anchor".to_string())
             })?;
@@ -169,12 +169,10 @@ impl DurableFounderMembershipJournal {
     }
 
     pub(super) fn into_graph(self) -> Result<DurableFounderMembership, DbError> {
-        let entry_value: MembershipEntry =
-            serde_json::from_slice(&self.entry_bytes).map_err(|error| {
-                DbError::Message(format!("local founder membership entry: {error}"))
-            })?;
+        let entry_value: MembershipEntry = serde_json::from_slice(&self.entry_bytes)
+            .map_err(|error| DbError::context("local founder membership entry", error))?;
         let head_value: AuthorHead = serde_json::from_slice(&self.head_bytes)
-            .map_err(|error| DbError::Message(format!("local founder membership head: {error}")))?;
+            .map_err(|error| DbError::context("local founder membership head", error))?;
         Ok(DurableFounderMembership {
             entry: ExactProtocolObject {
                 value: entry_value,
@@ -250,12 +248,12 @@ pub(crate) fn load_store_root_authority_on(
     .map_err(DbError::from)?
     .map(|(hash, bytes, object)| {
         let value = StoreProtocolRoot::parse(&bytes)
-            .map_err(|error| DbError::Message(format!("Store root authority bytes: {error}")))?;
-        let store_root_hash: ObjectHash = hash.parse().map_err(|error| {
-            DbError::Message(format!("Store root authority semantic hash: {error}"))
-        })?;
+            .map_err(|error| DbError::context("Store root authority bytes", error))?;
+        let store_root_hash: ObjectHash = hash
+            .parse()
+            .map_err(|error| DbError::context("Store root authority semantic hash", error))?;
         let object: ExactObjectRef = serde_json::from_str(&object)
-            .map_err(|error| DbError::Message(format!("Store root authority object: {error}")))?;
+            .map_err(|error| DbError::context("Store root authority object", error))?;
         if value.object_hash() != store_root_hash {
             return Err(DbError::Message(
                 "Store root authority hash differs from its signed bytes".to_string(),
@@ -287,14 +285,14 @@ pub(crate) fn install_store_root_authority_on(
     bytes: &[u8],
 ) -> Result<(), DbError> {
     let value = StoreProtocolRoot::parse(bytes)
-        .map_err(|error| DbError::Message(format!("install Store root authority: {error}")))?;
+        .map_err(|error| DbError::context("install Store root authority", error))?;
     if value.object_hash() != reference.store_root_hash {
         return Err(DbError::Message(
             "installed Store root reference differs from its signed bytes".to_string(),
         ));
     }
     let object = serde_json::to_string(&reference.object)
-        .map_err(|error| DbError::Message(format!("serialize Store root authority: {error}")))?;
+        .map_err(|error| DbError::context("serialize Store root authority", error))?;
     let existing = load_store_root_authority_on(conn)?;
     if let Some((existing_reference, existing_value)) = existing {
         if existing_reference == *reference && existing_value == value {
@@ -350,9 +348,7 @@ pub(super) fn validate_replay_authority_on(
         .map_err(DbError::from)?;
     let authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation =
         serde_json::from_str(&authority).map_err(|error| {
-            DbError::Message(format!(
-                "retained replay founder activation authority: {error}"
-            ))
+            DbError::context("retained replay founder activation authority", error)
         })?;
     if founder.store_root != root_ref
         || authority
@@ -420,34 +416,35 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
     let schema_version = u32::try_from(stored.schema_version)
         .map_err(|_| DbError::Message("retained replay schema version exceeds u32".to_string()))?;
     let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
-        .map_err(|error| DbError::Message(format!("retained replay exact cut: {error}")))?;
+        .map_err(|error| DbError::context("retained replay exact cut", error))?;
     let authority: RetainedReplayAuthority = serde_json::from_slice(&stored.authority_bytes)
-        .map_err(|error| DbError::Message(format!("retained replay authority: {error}")))?;
-    if serde_json::to_string(&parsed_exact_cut).map_err(|error| {
-        DbError::Message(format!("serialize retained replay exact cut: {error}"))
-    })? != stored.exact_cut
-        || serde_json::to_vec(&authority).map_err(|error| {
-            DbError::Message(format!("serialize retained replay authority: {error}"))
-        })? != stored.authority_bytes
+        .map_err(|error| DbError::context("retained replay authority", error))?;
+    if serde_json::to_string(&parsed_exact_cut)
+        .map_err(|error| DbError::context("serialize retained replay exact cut", error))?
+        != stored.exact_cut
+        || serde_json::to_vec(&authority)
+            .map_err(|error| DbError::context("serialize retained replay authority", error))?
+            != stored.authority_bytes
     {
         return Err(DbError::Message(
             "retained replay baseline metadata is not canonical".to_string(),
         ));
     }
-    let baseline =
-        RetainedReplayBaseline {
-            generation,
-            exact_cut: parsed_exact_cut,
-            schema_version,
-            routing_hash: stored.routing_hash.parse().map_err(|error| {
-                DbError::Message(format!("retained replay routing hash: {error}"))
-            })?,
-            image_hash: stored.image_hash.parse().map_err(|error| {
-                DbError::Message(format!("retained replay image hash: {error}"))
-            })?,
-            image_bytes: stored.image_bytes,
-            authority,
-        };
+    let baseline = RetainedReplayBaseline {
+        generation,
+        exact_cut: parsed_exact_cut,
+        schema_version,
+        routing_hash: stored
+            .routing_hash
+            .parse()
+            .map_err(|error| DbError::context("retained replay routing hash", error))?,
+        image_hash: stored
+            .image_hash
+            .parse()
+            .map_err(|error| DbError::context("retained replay image hash", error))?,
+        image_bytes: stored.image_bytes,
+        authority,
+    };
     baseline.validate_image()?;
     validate_replay_authority_on(conn, &baseline)?;
     let image = baseline.open_image()?;
@@ -509,7 +506,7 @@ pub(super) fn insert_retained_replay_baseline_on(
                 DbError::Message("retained replay generation exceeds SQLite INTEGER".to_string())
             })?,
             serde_json::to_string(&baseline.exact_cut).map_err(|error| {
-                DbError::Message(format!("serialize retained replay exact cut: {error}"))
+                DbError::context("serialize retained replay exact cut", error)
             })?,
             i64::from(baseline.schema_version),
             baseline.routing_hash.to_string(),
@@ -600,12 +597,10 @@ pub(crate) fn install_store_founder_state_on(
         founder.author_pubkey.clone(),
         founder.device_signing_pubkey.clone(),
         founder_bytes.to_vec(),
-        serde_json::to_string(founder_reference).map_err(|error| {
-            DbError::Message(format!("serialize Store founder registration ref: {error}"))
-        })?,
-        serde_json::to_string(&founder_authority).map_err(|error| {
-            DbError::Message(format!("serialize Store founder activation: {error}"))
-        })?,
+        serde_json::to_string(founder_reference)
+            .map_err(|error| DbError::context("serialize Store founder registration ref", error))?,
+        serde_json::to_string(&founder_authority)
+            .map_err(|error| DbError::context("serialize Store founder activation", error))?,
     );
     conn.execute(
         "INSERT INTO store_device_registration_activations
@@ -648,7 +643,7 @@ pub(crate) fn install_store_founder_state_on(
         ));
     }
     let genesis = serde_json::to_string(genesis)
-        .map_err(|error| DbError::Message(format!("serialize Store device genesis: {error}")))?;
+        .map_err(|error| DbError::context("serialize Store device genesis", error))?;
     conn.execute(
         "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
         (STORE_DEVICE_GENESIS_STATE_KEY, &genesis),
@@ -727,16 +722,15 @@ pub(crate) fn load_local_store_founder_graph_on(
         membership_graph,
     ) = raw;
     let registration_state: LocalDeviceRegistrationState =
-        serde_json::from_str(&registration_state).map_err(|error| {
-            DbError::Message(format!("local registration journal state: {error}"))
-        })?;
+        serde_json::from_str(&registration_state)
+            .map_err(|error| DbError::context("local registration journal state", error))?;
     let root_value = StoreProtocolRoot::parse(&root_bytes)
-        .map_err(|error| DbError::Message(format!("local founder Store root: {error}")))?;
+        .map_err(|error| DbError::context("local founder Store root", error))?;
     let root_prepared: PreparedExactObject = serde_json::from_str(&root_prepared)
-        .map_err(|error| DbError::Message(format!("local founder Store root object: {error}")))?;
+        .map_err(|error| DbError::context("local founder Store root object", error))?;
     let store_root_hash: ObjectHash = root_hash
         .parse()
-        .map_err(|error| DbError::Message(format!("local founder Store root hash: {error}")))?;
+        .map_err(|error| DbError::context("local founder Store root hash", error))?;
     if store_root_hash != root_value.object_hash() {
         return Err(DbError::Message(
             "local founder Store root hash differs from its bytes".to_string(),
@@ -749,37 +743,34 @@ pub(crate) fn load_local_store_founder_graph_on(
     };
     let parsed_device_id = device_id
         .parse()
-        .map_err(|error| DbError::Message(format!("local founder device id: {error}")))?;
+        .map_err(|error| DbError::context("local founder device id", error))?;
     let registration_value =
         StoreDeviceRegistration::parse_at(&registration_bytes, &root_ref, parsed_device_id)
-            .map_err(|error| {
-                DbError::Message(format!("local founder Store registration: {error}"))
-            })?;
-    let parsed_registration_hash: ObjectHash = registration_hash.parse().map_err(|error| {
-        DbError::Message(format!("local founder Store registration hash: {error}"))
-    })?;
+            .map_err(|error| DbError::context("local founder Store registration", error))?;
+    let parsed_registration_hash: ObjectHash = registration_hash
+        .parse()
+        .map_err(|error| DbError::context("local founder Store registration hash", error))?;
     if parsed_registration_hash != registration_value.registration_hash() {
         return Err(DbError::Message(
             "local founder registration hash differs from its bytes".to_string(),
         ));
     }
-    let registration_prepared: PreparedExactObject = serde_json::from_str(&registration_prepared)
-        .map_err(|error| {
-        DbError::Message(format!("local founder registration object: {error}"))
-    })?;
+    let registration_prepared: PreparedExactObject =
+        serde_json::from_str(&registration_prepared)
+            .map_err(|error| DbError::context("local founder registration object", error))?;
     let initial_ack_ref: StoreAckRef = serde_json::from_str(&initial_ack_ref)
-        .map_err(|error| DbError::Message(format!("local founder initial ack ref: {error}")))?;
+        .map_err(|error| DbError::context("local founder initial ack ref", error))?;
     let initial_ack_value = StoreAck::parse_at(
         &initial_ack_bytes,
         &root_ref,
         &initial_ack_ref,
         &registration_value,
     )
-    .map_err(|error| DbError::Message(format!("local founder initial ack: {error}")))?;
+    .map_err(|error| DbError::context("local founder initial ack", error))?;
     let initial_ack_prepared: PreparedExactObject = serde_json::from_str(&initial_ack_prepared)
-        .map_err(|error| DbError::Message(format!("local founder initial ack object: {error}")))?;
+        .map_err(|error| DbError::context("local founder initial ack object", error))?;
     let membership = serde_json::from_str::<DurableFounderMembershipJournal>(&membership_graph)
-        .map_err(|error| DbError::Message(format!("local founder membership graph: {error}")))?
+        .map_err(|error| DbError::context("local founder membership graph", error))?
         .into_graph()?;
     let graph = DurableFounderGraph {
         root: ExactProtocolObject {

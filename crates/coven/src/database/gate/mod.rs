@@ -147,7 +147,7 @@ fn row_value_to_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<
 }
 
 #[derive(Debug)]
-pub(crate) enum GateError {
+pub enum GateError {
     Ffi(&'static str, c_int),
     Session {
         operation: String,

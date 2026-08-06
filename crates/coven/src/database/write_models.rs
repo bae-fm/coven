@@ -220,7 +220,7 @@ impl InitialStoreMembershipAuthority {
             let value = row.map_err(DbError::from)?;
             let reference: crate::protocol::membership::MembershipHeadRef =
                 serde_json::from_str(&value).map_err(|error| {
-                    DbError::Message(format!("membership head cursor is malformed: {error}"))
+                    DbError::context("membership head cursor is malformed", error)
                 })?;
             if reference.coord.seq == 0 {
                 return Err(DbError::Message(
@@ -238,7 +238,7 @@ impl InitialStoreMembershipAuthority {
             if let Some(existing) = get_protocol_state_on(conn, &key)? {
                 let existing: crate::protocol::membership::MembershipHeadRef =
                     serde_json::from_str(&existing).map_err(|error| {
-                        DbError::Message(format!("membership head cursor is malformed: {error}"))
+                        DbError::context("membership head cursor is malformed", error)
                     })?;
                 if existing.coord.stream_key() != reference.coord.stream_key() {
                     return Err(DbError::Message(
@@ -257,9 +257,8 @@ impl InitialStoreMembershipAuthority {
                     ));
                 }
             }
-            let value = serde_json::to_string(reference).map_err(|error| {
-                DbError::Message(format!("serialize membership head cursor: {error}"))
-            })?;
+            let value = serde_json::to_string(reference)
+                .map_err(|error| DbError::context("serialize membership head cursor", error))?;
             set_protocol_state_on(conn, &key, &value)?;
         }
         Ok(())

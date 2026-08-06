@@ -171,10 +171,9 @@ impl<'connection> CloudOutboxRecords<'connection> {
             ))
         })?;
         let encoded = serde_json::to_string(row)
-            .map_err(|error| DbError::Message(format!("serialize row blob ref: {error}")))?;
-        let pending = serde_json::to_string(&OutboxUploadState::Pending).map_err(|error| {
-            DbError::Message(format!("serialize pending blob upload state: {error}"))
-        })?;
+            .map_err(|error| DbError::context("serialize row blob ref", error))?;
+        let pending = serde_json::to_string(&OutboxUploadState::Pending)
+            .map_err(|error| DbError::context("serialize pending blob upload state", error))?;
         self.connection
             .execute(
                 "INSERT INTO cloud_outbox
@@ -228,7 +227,7 @@ impl<'connection> CloudOutboxRecords<'connection> {
         created_at: &str,
     ) -> Result<(), DbError> {
         let encoded = serde_json::to_string(stored)
-            .map_err(|error| DbError::Message(format!("serialize stored blob ref: {error}")))?;
+            .map_err(|error| DbError::context("serialize stored blob ref", error))?;
         crate::database::with_coven_sql_authority(|| {
             self.connection
                 .execute(
@@ -346,7 +345,7 @@ pub(crate) fn outbox_identity(operation: &OutboxOperation) -> Result<OutboxIdent
         OutboxOperation::Delete { stored } => Ok(OutboxIdentity::Stored {
             operation: "delete",
             stored: serde_json::to_string(stored).map_err(|error| {
-                DbError::Message(format!("serialize stored blob outbox identity: {error}"))
+                DbError::context("serialize stored blob outbox identity", error)
             })?,
         }),
     }

@@ -27,10 +27,10 @@ pub(super) fn scan_max_updated_at(
         let value: Option<String> = conn
             .query_row(&sql, [&seed_bound], |r| r.get::<_, Option<String>>(0))
             .map_err(|e| {
-                DbError::Message(format!(
-                    "register-floor scan over synced table {}: {e}",
-                    t.name()
-                ))
+                DbError::context(
+                    format!("register-floor scan over synced table {}", t.name()),
+                    e,
+                )
             })?;
         if let Some(v) = value {
             overall = Some(match overall {
@@ -49,13 +49,13 @@ pub(crate) fn attach_session<'c>(
     synced_tables: &[SyncedTable],
 ) -> Result<rusqlite::session::Session<'c>, DbError> {
     let mut session = rusqlite::session::Session::new(conn)
-        .map_err(|e| DbError::Message(format!("failed to create capture session: {e}")))?;
+        .map_err(|e| DbError::context("failed to create capture session", e))?;
     for t in synced_tables {
         session.attach(Some(t.name())).map_err(|e| {
-            DbError::Message(format!(
-                "failed to attach synced table {} to session: {e}",
-                t.name()
-            ))
+            DbError::context(
+                format!("failed to attach synced table {} to session", t.name()),
+                e,
+            )
         })?;
     }
     Ok(session)

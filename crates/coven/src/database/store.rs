@@ -379,9 +379,10 @@ impl StoreDatabase {
         let key = cache_budget_state_key(namespace);
         match self.get_protocol_state(&key).await? {
             Some(raw) => raw.parse::<u64>().map(Some).map_err(|error| {
-                DbError::Message(format!(
-                    "cache budget for {namespace:?} in protocol_state is not a byte count: {error}"
-                ))
+                DbError::context(
+                    format!("cache budget for {namespace:?} in protocol_state is not a byte count"),
+                    error,
+                )
             }),
             None => Ok(None),
         }
@@ -412,7 +413,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 serde_json::from_str(&raw)
-                    .map_err(|error| DbError::Message(format!("write {write_id} status: {error}")))
+                    .map_err(|error| DbError::context(format!("write {write_id} status"), error))
             })
             .await
     }
@@ -502,9 +503,8 @@ impl StoreDatabase {
         &self,
         initialized: crate::protocol::store_creation::StoreCreationAttempt,
     ) -> Result<crate::protocol::store_creation::StoreCreationAttempt, DbError> {
-        let value = serde_json::to_string(&initialized).map_err(|error| {
-            DbError::Message(format!("serialize Store creation attempt: {error}"))
-        })?;
+        let value = serde_json::to_string(&initialized)
+            .map_err(|error| DbError::context("serialize Store creation attempt", error))?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -522,9 +522,8 @@ impl StoreDatabase {
                     crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?;
                 tx.commit().map_err(DbError::from)?;
-                serde_json::from_str(&actual).map_err(|error| {
-                    DbError::Message(format!("parse Store creation attempt: {error}"))
-                })
+                serde_json::from_str(&actual)
+                    .map_err(|error| DbError::context("parse Store creation attempt", error))
             })
             .await
     }
@@ -539,9 +538,8 @@ impl StoreDatabase {
                     crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?
                 .map(|value| {
-                    serde_json::from_str(&value).map_err(|error| {
-                        DbError::Message(format!("parse Store creation attempt: {error}"))
-                    })
+                    serde_json::from_str(&value)
+                        .map_err(|error| DbError::context("parse Store creation attempt", error))
                 })
                 .transpose()
             })
@@ -553,12 +551,10 @@ impl StoreDatabase {
         previous: crate::protocol::store_creation::StoreCreationAttempt,
         next: crate::protocol::store_creation::StoreCreationAttempt,
     ) -> Result<(), DbError> {
-        let previous = serde_json::to_string(&previous).map_err(|error| {
-            DbError::Message(format!("serialize Store creation predecessor: {error}"))
-        })?;
-        let next = serde_json::to_string(&next).map_err(|error| {
-            DbError::Message(format!("serialize Store creation successor: {error}"))
-        })?;
+        let previous = serde_json::to_string(&previous)
+            .map_err(|error| DbError::context("serialize Store creation predecessor", error))?;
+        let next = serde_json::to_string(&next)
+            .map_err(|error| DbError::context("serialize Store creation successor", error))?;
         self.connection
             .call(move |conn| {
                 let changed = conn

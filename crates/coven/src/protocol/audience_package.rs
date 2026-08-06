@@ -328,7 +328,7 @@ impl AudiencePackage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum AudiencePackageError {
+pub enum AudiencePackageError {
     #[error("unsupported audience package version {0}")]
     UnsupportedVersion(u32),
     #[error("invalid audience package Store commit coordinate: {0}")]

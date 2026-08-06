@@ -18,8 +18,7 @@ impl Database {
         clock: crate::clock::ClockRef,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
-        let hlc = Hlc::try_new(device_id, clock)
-            .map_err(|e| DbError::Message(format!("device_id {e}")))?;
+        let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
@@ -41,8 +40,7 @@ impl Database {
         clock: crate::clock::ClockRef,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
-        let hlc = Hlc::try_new(device_id, clock)
-            .map_err(|e| DbError::Message(format!("device_id {e}")))?;
+        let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
@@ -105,8 +103,7 @@ impl Database {
         clock: crate::clock::ClockRef,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
-        let hlc = Hlc::try_new(device_id, clock)
-            .map_err(|e| DbError::Message(format!("device_id {e}")))?;
+        let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
         let (core, state) = DatabaseCore::open_read_only(
             path,
             synced_tables,

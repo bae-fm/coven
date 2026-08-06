@@ -35,21 +35,19 @@ impl Database {
                 remote
                     .merge_blob_activation(stored, owner)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "merge pulled blob activation {object_id}: {error}"
-                        ))
+                        DbError::context(format!("merge pulled blob activation {object_id}"), error)
                     })?;
                 remote
             } else {
                 RemoteObjectRecord::activated_blob(stored, owner.clone()).map_err(|error| {
-                    DbError::Message(format!(
-                        "construct pulled blob activation {object_id}: {error}"
-                    ))
+                    DbError::context(
+                        format!("construct pulled blob activation {object_id}"),
+                        error,
+                    )
                 })?
             };
-            let state = serde_json::to_string(&remote).map_err(|error| {
-                DbError::Message(format!("serialize pulled blob activation: {error}"))
-            })?;
+            let state = serde_json::to_string(&remote)
+                .map_err(|error| DbError::context("serialize pulled blob activation", error))?;
             conn.execute(
                 "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2) \
                  ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
@@ -79,9 +77,10 @@ impl Database {
             let remote = load_remote_object_on(conn, object_id)?;
             let mut remote = if matches!(remote, RemoteObjectRecord::CandidateExclusive(_)) {
                 remote.into_activated(commit_ref).map_err(|error| {
-                    DbError::Message(format!(
-                        "activate locally prepared pulled package {object_id}: {error}"
-                    ))
+                    DbError::context(
+                        format!("activate locally prepared pulled package {object_id}"),
+                        error,
+                    )
                 })?
             } else {
                 remote
@@ -89,18 +88,20 @@ impl Database {
             remote
                 .merge_package_activation(&domain, package, commit_ref)
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "merge pulled package activation {object_id}: {error}"
-                    ))
+                    DbError::context(
+                        format!("merge pulled package activation {object_id}"),
+                        error,
+                    )
                 })?;
             update_remote_object_on(conn, object_id, &remote)
         } else {
             let remote =
                 RemoteObjectRecord::activated_external_package(domain, package, commit_ref.clone())
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "construct pulled package activation {object_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("construct pulled package activation {object_id}"),
+                            error,
+                        )
                     })?;
             persist_exact_remote_object_on(conn, &remote, "pulled audience package")
         }
@@ -131,9 +132,10 @@ impl Database {
                 remote
                     .merge_retained_authority_activation(expected, commit_ref)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "merge pulled Merge membership authority {object_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("merge pulled Merge membership authority {object_id}"),
+                            error,
+                        )
                     })?;
                 update_remote_object_on(conn, object_id, &remote)?;
             } else {
@@ -280,18 +282,24 @@ impl Database {
         })?;
         let audience =
             gate::live_row_audience(conn, gates, table.name(), row_id).map_err(|error| {
-                DbError::Message(format!(
-                    "resolve blob row audience for {:?}/{row_id:?}: {error}",
-                    table.name()
-                ))
+                DbError::context(
+                    format!(
+                        "resolve blob row audience for {:?}/{row_id:?}",
+                        table.name()
+                    ),
+                    error,
+                )
             })?;
         let (authority, stored) = match RemoteAudience::try_from(audience.clone()) {
             Err(_) if audience == Audience::Local => (RowBlobAuthority::Local, None),
             Err(error) => {
-                return Err(DbError::Message(format!(
-                    "blob row {:?}/{row_id:?} has invalid audience: {error}",
-                    table.name()
-                )));
+                return Err(DbError::context(
+                    format!(
+                        "blob row {:?}/{row_id:?} has invalid audience",
+                        table.name()
+                    ),
+                    error,
+                ));
             }
             Ok(remote_audience) => {
                 let installed: Option<(String, String)> = conn
@@ -312,16 +320,16 @@ impl Database {
                 let exact = if let Some((authority_json, remote_object_id)) = installed {
                     let package_authority: crate::protocol::audience_package::PackageAudience =
                         serde_json::from_str(&authority_json).map_err(|error| {
-                            DbError::Message(format!(
-                                "remote blob row {:?}/{row_id:?} has invalid audience authority: {error}",
-                                table.name()
-                            ))
+                            DbError::context(format!("remote blob row {:?}/{row_id:?} has invalid audience authority", table.name()), error)
                         })?;
                     let remote_object_id = remote_object_id.parse().map_err(|error| {
-                        DbError::Message(format!(
-                            "remote blob row {:?}/{row_id:?} has invalid prepared object id: {error}",
-                            table.name()
-                        ))
+                        DbError::context(
+                            format!(
+                                "remote blob row {:?}/{row_id:?} has invalid prepared object id",
+                                table.name()
+                            ),
+                            error,
+                        )
                     })?;
                     let remote = load_remote_object_on(conn, remote_object_id)?;
                     if !remote.is_activated_stored_blob() {
@@ -332,17 +340,17 @@ impl Database {
                     }
                     let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
                         .map_err(|error| {
-                            DbError::Message(format!(
-                                "remote blob row {:?}/{row_id:?} has invalid locator: {error}",
-                                table.name()
-                            ))
+                            DbError::context(
+                                format!(
+                                    "remote blob row {:?}/{row_id:?} has invalid locator",
+                                    table.name()
+                                ),
+                                error,
+                            )
                         })?;
                     let stored = StoredBlobRef::new(locator, remote.object().clone()).map_err(
                         |error| {
-                            DbError::Message(format!(
-                                "remote blob row {:?}/{row_id:?} has invalid stored blob reference: {error}",
-                                table.name()
-                            ))
+                            DbError::context(format!("remote blob row {:?}/{row_id:?} has invalid stored blob reference", table.name()), error)
                         },
                     )?;
                     Some((package_authority, stored))

@@ -42,10 +42,8 @@ fn initialize_coven_metadata_on(
         apply_coven_routing_schema(conn).map_err(DbError::from)?;
     }
     let schema_manifest = validate_live_coven_schema(conn, install_routing_schema)?;
-    let contract_json =
-        String::from_utf8(sync_routing_contract.bytes().to_vec()).map_err(|error| {
-            DbError::Message(format!("encode sync-routing contract metadata: {error}"))
-        })?;
+    let contract_json = String::from_utf8(sync_routing_contract.bytes().to_vec())
+        .map_err(|error| DbError::context("encode sync-routing contract metadata", error))?;
     conn.execute(
         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
         (SYNC_ROUTING_CONTRACT_STATE_KEY, contract_json),
@@ -81,7 +79,7 @@ fn validate_live_coven_schema(conn: &Connection, include_routing: bool) -> Resul
         )));
     }
     serde_json::to_string(&expected)
-        .map_err(|error| DbError::Message(format!("serialize Coven schema manifest: {error}")))
+        .map_err(|error| DbError::context("serialize Coven schema manifest", error))
 }
 
 pub(super) fn validate_initialized_coven_schema(
@@ -95,9 +93,8 @@ pub(super) fn validate_initialized_coven_schema(
                 "Store database is missing required Coven schema manifest metadata".to_string(),
             )
         })?;
-    let stored: CovenSchemaManifest = serde_json::from_str(&stored_json).map_err(|error| {
-        DbError::Message(format!("Store Coven schema manifest is invalid: {error}"))
-    })?;
+    let stored: CovenSchemaManifest = serde_json::from_str(&stored_json)
+        .map_err(|error| DbError::context("Store Coven schema manifest is invalid", error))?;
     if stored != expected {
         return Err(DbError::Message(format!(
             "Store Coven schema manifest does not match the current schema: stored {stored:?}, current {expected:?}"
@@ -128,11 +125,9 @@ pub(super) fn load_coven_metadata(conn: &Connection) -> Result<SyncRoutingContra
                 "Store database is missing required sync_routing_hash metadata".to_string(),
             )
         })?;
-    let stored_hash: ObjectHash = stored_hash.parse().map_err(|error| {
-        DbError::Message(format!(
-            "Store sync_routing_hash metadata is invalid: {error}"
-        ))
-    })?;
+    let stored_hash: ObjectHash = stored_hash
+        .parse()
+        .map_err(|error| DbError::context("Store sync_routing_hash metadata is invalid", error))?;
     if stored_hash != contract.hash() {
         return Err(DbError::Message(format!(
             "Store sync-routing contract hashes to {}, but metadata records {stored_hash}",
@@ -282,7 +277,7 @@ impl DatabaseCore {
             .install_cleanup_guards(&conn)
             .map_err(|e| DbError::Message(e.to_string()))?;
         gate::attach_empty_clone(&conn, &gates)
-            .map_err(|error| DbError::Message(format!("install host transaction gate: {error}")))?;
+            .map_err(|error| DbError::context("install host transaction gate", error))?;
         let core = DatabaseCore {
             conn,
             hlc,

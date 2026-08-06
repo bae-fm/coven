@@ -18,9 +18,7 @@ impl DatabaseConnection {
         let join = std::thread::Builder::new()
             .name(thread_name.to_string())
             .spawn(move || worker.run())
-            .map_err(|error| {
-                DbError::Message(format!("spawn database connection thread: {error}"))
-            })?;
+            .map_err(|error| DbError::context("spawn database connection thread", error))?;
         Ok(Self {
             thread: Arc::new(ConnectionThread {
                 jobs,

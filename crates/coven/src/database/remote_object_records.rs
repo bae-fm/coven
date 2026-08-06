@@ -13,7 +13,7 @@ pub(crate) fn candidate_graph_exact_objects(
 ) -> Result<Vec<ExactObjectRef>, DbError> {
     crate::protocol::remote_object::CandidateObjectGraph::from_commit(commit)
         .map(|graph| graph.exact_objects().cloned().collect())
-        .map_err(|error| DbError::Message(format!("closed candidate object graph: {error}")))
+        .map_err(|error| DbError::context("closed candidate object graph", error))
 }
 
 pub(crate) fn validate_remote_object_on(
@@ -60,13 +60,14 @@ pub(crate) fn load_remote_object_on(
             error => DbError::from(error),
         })?;
     let remote: RemoteObjectRecord = serde_json::from_str(&state).map_err(|error| {
-        DbError::Message(format!(
-            "prepared remote object {object_id} has invalid closed state: {error}"
-        ))
+        DbError::context(
+            format!("prepared remote object {object_id} has invalid closed state"),
+            error,
+        )
     })?;
-    remote.validate().map_err(|error| {
-        DbError::Message(format!("prepared remote object {object_id}: {error}"))
-    })?;
+    remote
+        .validate()
+        .map_err(|error| DbError::context(format!("prepared remote object {object_id}"), error))?;
     let actual = remote_object_id(remote.object());
     if actual != object_id {
         return Err(DbError::Message(format!(
@@ -113,14 +114,16 @@ pub(super) fn indexed_retained_replay_owners_on(
             row.map_err(DbError::from)?;
         let commit: StoreBatchCommitRef =
             serde_json::from_str(&encoded_commit).map_err(|error| {
-                DbError::Message(format!(
-                    "retained replay object {object_id} commit ref: {error}"
-                ))
+                DbError::context(
+                    format!("retained replay object {object_id} commit ref"),
+                    error,
+                )
             })?;
         let input_hash = encoded_input_hash.parse().map_err(|error| {
-            DbError::Message(format!(
-                "retained replay object {object_id} input hash: {error}"
-            ))
+            DbError::context(
+                format!("retained replay object {object_id} input hash"),
+                error,
+            )
         })?;
         let StoreCommitCoord {
             stream_id,
@@ -157,9 +160,8 @@ pub(crate) fn index_retained_replay_owner_on(
     } = &commit.coord;
     let device_id = stream_id.to_string();
     let sequence = Database::sequence_to_sqlite(&device_id, *sequence)?;
-    let commit_ref = serde_json::to_string(commit).map_err(|error| {
-        DbError::Message(format!("serialize retained replay commit ref: {error}"))
-    })?;
+    let commit_ref = serde_json::to_string(commit)
+        .map_err(|error| DbError::context("serialize retained replay commit ref", error))?;
     let input_hash = input_hash.to_string();
     conn.execute(
         "INSERT INTO retained_replay_objects
@@ -204,13 +206,14 @@ pub(crate) fn load_protocol_inert_object_on(
         .map_err(DbError::from)?;
     let inert: crate::protocol::remote_object::ProtocolInertObject = serde_json::from_str(&state)
         .map_err(|error| {
-        DbError::Message(format!(
-            "protocol-inert object {object_id} has invalid closed state: {error}"
-        ))
+        DbError::context(
+            format!("protocol-inert object {object_id} has invalid closed state"),
+            error,
+        )
     })?;
     inert
         .validate()
-        .map_err(|error| DbError::Message(format!("protocol-inert object {object_id}: {error}")))?;
+        .map_err(|error| DbError::context(format!("protocol-inert object {object_id}"), error))?;
     if inert.object_id() != object_id {
         return Err(DbError::Message(format!(
             "protocol-inert object key is {object_id}, exact reference hashes to {}",
@@ -236,14 +239,16 @@ pub(super) fn load_reclaimed_store_package_on(
         return Ok(None);
     };
     let authorization_hash = authorization_hash.parse::<ObjectHash>().map_err(|error| {
-        DbError::Message(format!(
-            "reclaimed Store package {object_id} has invalid authorization hash: {error}"
-        ))
+        DbError::context(
+            format!("reclaimed Store package {object_id} has invalid authorization hash"),
+            error,
+        )
     })?;
     let reclaimed: ReclaimedStorePackage = serde_json::from_str(&state).map_err(|error| {
-        DbError::Message(format!(
-            "reclaimed Store package {object_id} has invalid closed state: {error}"
-        ))
+        DbError::context(
+            format!("reclaimed Store package {object_id} has invalid closed state"),
+            error,
+        )
     })?;
     reclaimed.validate().map_err(store_reclaim_journal_error)?;
     if reclaimed.object_id() != object_id
@@ -285,9 +290,8 @@ pub(crate) fn record_reclaimed_store_package_on(
                 "reclaimed Store package {object_id} has conflicting closed authority"
             )));
         }
-        let state = serde_json::to_string(reclaimed).map_err(|error| {
-            DbError::Message(format!("serialize reclaimed Store package: {error}"))
-        })?;
+        let state = serde_json::to_string(reclaimed)
+            .map_err(|error| DbError::context("serialize reclaimed Store package", error))?;
         let updated = conn
             .execute(
                 "UPDATE reclaimed_store_packages SET state = ?2 WHERE object_id = ?1",
@@ -334,9 +338,7 @@ pub(crate) fn record_reclaimed_store_package_on(
                 remote.validate_reclaimable_stored_blob(&target.blob)
             }
         }
-        .map_err(|error| {
-            DbError::Message(format!("close reclaimed package {object_id}: {error}"))
-        })?;
+        .map_err(|error| DbError::context(format!("close reclaimed package {object_id}"), error))?;
         // A stored blob is referenced by a chain: row bindings name its locator row,
         // which names its remote object. All three leave in this transaction or none
         // does. The bindings that remain here are stale by construction — the reclaim
@@ -377,7 +379,7 @@ pub(crate) fn record_reclaimed_store_package_on(
         )));
     }
     let state = serde_json::to_string(reclaimed)
-        .map_err(|error| DbError::Message(format!("serialize reclaimed Store package: {error}")))?;
+        .map_err(|error| DbError::context("serialize reclaimed Store package", error))?;
     let inserted = conn
         .execute(
             "INSERT INTO reclaimed_store_packages (object_id, authorization_hash, state) VALUES (?1, ?2, ?3)",
@@ -403,7 +405,7 @@ pub(crate) fn persist_exact_remote_object_on(
 ) -> Result<(), DbError> {
     remote
         .validate()
-        .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
+        .map_err(|error| DbError::context(format!("prepared {domain}"), error))?;
     let object_id = remote.object_id();
     ensure_remote_object_is_writable_on(conn, object_id, domain)?;
     let existing = conn
@@ -416,9 +418,10 @@ pub(crate) fn persist_exact_remote_object_on(
         .map_err(DbError::from)?;
     if let Some(existing) = existing {
         let existing: RemoteObjectRecord = serde_json::from_str(&existing).map_err(|error| {
-            DbError::Message(format!(
-                "prepared {domain} {object_id} has invalid closed state: {error}"
-            ))
+            DbError::context(
+                format!("prepared {domain} {object_id} has invalid closed state"),
+                error,
+            )
         })?;
         if existing != *remote {
             return Err(DbError::Message(format!(
@@ -428,7 +431,7 @@ pub(crate) fn persist_exact_remote_object_on(
         return Ok(());
     }
     let state = serde_json::to_string(remote)
-        .map_err(|error| DbError::Message(format!("serialize prepared {domain}: {error}")))?;
+        .map_err(|error| DbError::context(format!("serialize prepared {domain}"), error))?;
     conn.execute(
         "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
         (object_id.to_string(), state),
@@ -472,7 +475,7 @@ pub(crate) fn persist_prepared_remote_object_on(
 ) -> Result<(), DbError> {
     remote
         .validate()
-        .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
+        .map_err(|error| DbError::context(format!("prepared {domain}"), error))?;
     let object_id = remote.object_id();
     ensure_remote_object_is_writable_on(conn, object_id, domain)?;
     let exists = conn
@@ -497,14 +500,14 @@ pub(crate) fn update_remote_object_on(
 ) -> Result<(), DbError> {
     remote
         .validate()
-        .map_err(|error| DbError::Message(format!("remote object {object_id}: {error}")))?;
+        .map_err(|error| DbError::context(format!("remote object {object_id}"), error))?;
     if remote.object_id() != object_id {
         return Err(DbError::Message(format!(
             "remote object {object_id} changed its exact identity"
         )));
     }
     let state = serde_json::to_string(remote)
-        .map_err(|error| DbError::Message(format!("serialize remote object: {error}")))?;
+        .map_err(|error| DbError::context("serialize remote object", error))?;
     let updated = conn
         .execute(
             "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
@@ -528,9 +531,10 @@ pub(crate) fn begin_remote_candidate_nonactivation_on(
     let inert = remote
         .begin_candidate_nonactivation(nonactivation)
         .map_err(|error| {
-            DbError::Message(format!(
-                "record candidate nonactivation for {object_id}: {error}"
-            ))
+            DbError::context(
+                format!("record candidate nonactivation for {object_id}"),
+                error,
+            )
         })?;
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
@@ -548,9 +552,10 @@ pub(crate) fn begin_remote_candidate_nonactivation_with_verified_head_on(
             head_nonactivation,
         )
         .map_err(|error| {
-            DbError::Message(format!(
-                "record candidate nonactivation for {object_id}: {error}"
-            ))
+            DbError::context(
+                format!("record candidate nonactivation for {object_id}"),
+                error,
+            )
         })?;
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
@@ -573,9 +578,9 @@ pub(crate) fn finish_remote_candidate_nonactivation_on(
     }
     inert
         .validate()
-        .map_err(|error| DbError::Message(format!("protocol-inert object {object_id}: {error}")))?;
+        .map_err(|error| DbError::context(format!("protocol-inert object {object_id}"), error))?;
     let encoded = serde_json::to_string(&inert)
-        .map_err(|error| DbError::Message(format!("serialize protocol-inert object: {error}")))?;
+        .map_err(|error| DbError::context("serialize protocol-inert object", error))?;
     let removed = conn
         .execute(
             "DELETE FROM remote_objects WHERE object_id = ?1",
@@ -655,10 +660,10 @@ pub(crate) fn replace_prepared_merge_head_remote_on(
         winner_prepared.stored_bytes().to_vec(),
         candidate.clone(),
     )
-    .map_err(|error| DbError::Message(format!("alternate Merge head: {error}")))?;
-    winner_remote.mark_uploaded_verified().map_err(|error| {
-        DbError::Message(format!("mark alternate Merge head uploaded: {error}"))
-    })?;
+    .map_err(|error| DbError::context("alternate Merge head", error))?;
+    winner_remote
+        .mark_uploaded_verified()
+        .map_err(|error| DbError::context("mark alternate Merge head uploaded", error))?;
     persist_exact_remote_object_on(conn, &winner_remote, "alternate Merge head")
 }
 
@@ -734,7 +739,7 @@ pub(crate) fn mark_remote_object_uploaded_on(
     }
     let mut uploaded = expected.clone();
     uploaded.mark_uploaded_verified().map_err(|error| {
-        DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
+        DbError::context(format!("mark remote object {object_id} uploaded"), error)
     })?;
     if current == uploaded {
         return Ok(current);
@@ -745,9 +750,9 @@ pub(crate) fn mark_remote_object_uploaded_on(
         )));
     }
     let expected_json = serde_json::to_string(&expected)
-        .map_err(|error| DbError::Message(format!("serialize expected remote object: {error}")))?;
+        .map_err(|error| DbError::context("serialize expected remote object", error))?;
     let uploaded_json = serde_json::to_string(&uploaded)
-        .map_err(|error| DbError::Message(format!("serialize uploaded remote object: {error}")))?;
+        .map_err(|error| DbError::context("serialize uploaded remote object", error))?;
     let updated = conn
         .execute(
             "UPDATE remote_objects SET state = ?3
@@ -824,9 +829,10 @@ pub(crate) fn mark_reusable_retained_authority_uploaded_on(
     }
     let before = current.clone();
     current.mark_uploaded_verified().map_err(|error| {
-        DbError::Message(format!(
-            "mark reusable retained authority {object_id} uploaded: {error}"
-        ))
+        DbError::context(
+            format!("mark reusable retained authority {object_id} uploaded"),
+            error,
+        )
     })?;
     if current != before {
         update_remote_object_on(conn, object_id, &current)?;
@@ -891,10 +897,10 @@ pub(crate) fn merge_prepared_remote_object(
             }
         }
         merged.validate().map_err(|error| {
-            DbError::Message(format!(
-                "merge shared candidate object {}: {error}",
-                proposed.object_id()
-            ))
+            DbError::context(
+                format!("merge shared candidate object {}", proposed.object_id()),
+                error,
+            )
         })?;
         return Ok(merged);
     }
@@ -932,10 +938,10 @@ pub(crate) fn merge_prepared_remote_object(
         merged
             .add_retained_authority_candidate(owner.clone())
             .map_err(|error| {
-                DbError::Message(format!(
-                    "merge retained candidate object {}: {error}",
-                    proposed.object_id()
-                ))
+                DbError::context(
+                    format!("merge retained candidate object {}", proposed.object_id()),
+                    error,
+                )
             })?;
         return Ok(merged);
     }
@@ -1007,10 +1013,10 @@ pub(crate) fn merge_prepared_remote_object(
     }
     let merged = RemoteObjectRecord::SharedLiveSet(existing);
     merged.validate().map_err(|error| {
-        DbError::Message(format!(
-            "merged stored blob object {}: {error}",
-            merged.object_id()
-        ))
+        DbError::context(
+            format!("merged stored blob object {}", merged.object_id()),
+            error,
+        )
     })?;
     Ok(merged)
 }
@@ -1030,11 +1036,9 @@ pub(crate) fn validate_prepared_package_on(
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    let remote_object_id = remote_object_id.parse().map_err(|error| {
-        DbError::Message(format!(
-            "stored prepared remote object id is invalid: {error}"
-        ))
-    })?;
+    let remote_object_id = remote_object_id
+        .parse()
+        .map_err(|error| DbError::context("stored prepared remote object id is invalid", error))?;
     let actual =
         PreparedAudiencePackage::from_remote(load_remote_object_on(conn, remote_object_id)?)?;
     if actual.package() != expected.package()

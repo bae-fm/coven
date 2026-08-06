@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CreateTableSchemaError {
+pub enum CreateTableSchemaError {
     #[error("read CREATE TABLE schema for {table:?} failed: {source}")]
     Read {
         table: String,

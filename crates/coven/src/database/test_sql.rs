@@ -112,7 +112,7 @@ impl DatabaseTestSql<'_> {
         .into_iter()
         .map(|state| {
             serde_json::from_str(&state)
-                .map_err(|error| DbError::Message(format!("parse remote object: {error}")))
+                .map_err(|error| DbError::context("parse remote object", error))
         })
         .collect()
     }
@@ -124,7 +124,7 @@ impl DatabaseTestSql<'_> {
     ) -> Result<(), DbError> {
         let object_id = crate::protocol::remote_object::remote_object_id(object);
         let state = serde_json::to_string(remote)
-            .map_err(|error| DbError::Message(format!("serialize test remote object: {error}")))?;
+            .map_err(|error| DbError::context("serialize test remote object", error))?;
         let updated = self
             .connection
             .execute(
@@ -427,9 +427,10 @@ impl DatabaseTestSql<'_> {
         sequence: u64,
     ) -> Result<(crate::protocol::store_commit::ObjectHash, Vec<u8>), DbError> {
         let sequence = i64::try_from(sequence).map_err(|error| {
-            DbError::Message(format!(
-                "retained Merge sequence {sequence} is invalid: {error}"
-            ))
+            DbError::context(
+                format!("retained Merge sequence {sequence} is invalid"),
+                error,
+            )
         })?;
         let (input_hash, canonical_input): (String, Vec<u8>) = self
             .connection
@@ -441,9 +442,9 @@ impl DatabaseTestSql<'_> {
             )
             .map_err(DbError::from)?;
         Ok((
-            input_hash.parse().map_err(|error| {
-                DbError::Message(format!("parse retained package input hash: {error}"))
-            })?,
+            input_hash
+                .parse()
+                .map_err(|error| DbError::context("parse retained package input hash", error))?,
             canonical_input,
         ))
     }
@@ -455,7 +456,7 @@ impl DatabaseTestSql<'_> {
     ) -> Result<(), DbError> {
         let stream_id = reference.coord.stream_id.to_string();
         let sequence = i64::try_from(reference.coord.sequence())
-            .map_err(|error| DbError::Message(format!("recovery sequence is invalid: {error}")))?;
+            .map_err(|error| DbError::context("recovery sequence is invalid", error))?;
         self.transaction(|transaction| {
             let (commit_ref, canonical_input): (String, Vec<u8>) = transaction
                 .query_row(
@@ -542,9 +543,9 @@ impl DatabaseTestSql<'_> {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let old_hash = stored_hash.parse().map_err(|error| {
-                DbError::Message(format!("stored retained input hash: {error}"))
-            })?;
+            let old_hash = stored_hash
+                .parse()
+                .map_err(|error| DbError::context("stored retained input hash", error))?;
             let new_hash = crate::protocol::store_commit::ObjectHash::digest(canonical_input);
             let rows = transaction
                 .query(
@@ -565,9 +566,7 @@ impl DatabaseTestSql<'_> {
             for (object_id, state) in rows {
                 let mut remote: crate::protocol::remote_object::RemoteObjectRecord =
                     serde_json::from_str(&state).map_err(|error| {
-                        DbError::Message(format!(
-                            "parse retained replay object {object_id}: {error}"
-                        ))
+                        DbError::context(format!("parse retained replay object {object_id}"), error)
                     })?;
                 let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
                     &mut remote
@@ -682,8 +681,8 @@ impl DatabaseTestSql<'_> {
         stream_id: &str,
         sequence: u64,
     ) -> Result<(Vec<u8>, String, String), DbError> {
-        let sequence = i64::try_from(sequence)
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+        let sequence =
+            i64::try_from(sequence).map_err(|error| DbError::context("invalid sequence", error))?;
         self.connection
             .query_row(
                 "SELECT canonical_input, input_hash, commit_ref
@@ -700,8 +699,8 @@ impl DatabaseTestSql<'_> {
         stream_id: &str,
         sequence: u64,
     ) -> Result<(), DbError> {
-        let sequence = i64::try_from(sequence)
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+        let sequence =
+            i64::try_from(sequence).map_err(|error| DbError::context("invalid sequence", error))?;
         self.connection
             .execute(
                 "UPDATE retained_merge_materializations SET canonical_input = x'7b7d'
@@ -720,7 +719,7 @@ impl DatabaseTestSql<'_> {
         let crate::protocol::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
             owner;
         let sequence = i64::try_from(commit.coord.sequence())
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+            .map_err(|error| DbError::context("invalid sequence", error))?;
         self.connection
             .execute(
                 "INSERT INTO retained_replay_objects
@@ -744,8 +743,8 @@ impl DatabaseTestSql<'_> {
         stream_id: &str,
         sequence: u64,
     ) -> Result<bool, DbError> {
-        let sequence = i64::try_from(sequence)
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+        let sequence =
+            i64::try_from(sequence).map_err(|error| DbError::context("invalid sequence", error))?;
         self.connection
             .query_row(
                 "SELECT EXISTS(
@@ -986,7 +985,7 @@ impl DatabaseTestSql<'_> {
         reference: &crate::protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let sequence = i64::try_from(reference.coord.sequence())
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+            .map_err(|error| DbError::context("invalid sequence", error))?;
         let encoded = serde_json::to_string(reference)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let removed = self
@@ -1010,7 +1009,7 @@ impl DatabaseTestSql<'_> {
         reference: &crate::protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let sequence = i64::try_from(reference.coord.sequence())
-            .map_err(|error| DbError::Message(format!("invalid sequence: {error}")))?;
+            .map_err(|error| DbError::context("invalid sequence", error))?;
         self.set_foreign_keys(false).map_err(DbError::from)?;
         let result = self
             .connection
@@ -1233,7 +1232,7 @@ impl DatabaseTestSql<'_> {
         bytes: &[u8],
     ) -> Result<(), DbError> {
         let size = i64::try_from(bytes.len())
-            .map_err(|error| DbError::Message(format!("test blob size is invalid: {error}")))?;
+            .map_err(|error| DbError::context("test blob size is invalid", error))?;
         self.connection
             .execute(
                 "INSERT INTO photos (id, size, hash, cloud_path, _updated_at)
@@ -1389,9 +1388,7 @@ impl DatabaseTestSql<'_> {
             .into_iter()
             .map(|encoded| {
                 serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::Message(format!(
-                        "parse test Store device state snapshot reference: {error}"
-                    ))
+                    DbError::context("parse test Store device state snapshot reference", error)
                 })
             })
             .collect()
@@ -1454,7 +1451,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)?;
         encoded
             .parse()
-            .map_err(|error| DbError::Message(format!("stored Store root hash: {error}")))
+            .map_err(|error| DbError::context("stored Store root hash", error))
     }
 
     pub(crate) fn required_protocol_state(&self, key: &str) -> Result<String, DbError> {
@@ -1550,7 +1547,7 @@ impl DatabaseTestSql<'_> {
         let sync_routing_hash: ObjectHash = self
             .required_protocol_state(crate::database::SYNC_ROUTING_HASH_STATE_KEY)?
             .parse()
-            .map_err(|error| DbError::Message(format!("test Store sync-routing hash: {error}")))?;
+            .map_err(|error| DbError::context("test Store sync-routing hash", error))?;
         let root_slot = ObjectSlot::logical(
             crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
         )
@@ -1614,7 +1611,7 @@ impl DatabaseTestSql<'_> {
                     hash.to_string(),
                     bytes,
                     serde_json::to_string(object).map_err(|error| {
-                        DbError::Message(format!("serialize test Store root object: {error}"))
+                        DbError::context("serialize test Store root object", error)
                     })?,
                 ],
             )

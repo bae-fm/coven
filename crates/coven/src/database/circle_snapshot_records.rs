@@ -32,16 +32,15 @@ pub(crate) fn load_published_circle_snapshot_on(
             DbError::Message("published Circle snapshot generation is negative".to_string())
         })?;
         let reference: CircleSnapshotRef = serde_json::from_str(&reference)
-            .map_err(|error| DbError::Message(format!("published Circle snapshot ref: {error}")))?;
+            .map_err(|error| DbError::context("published Circle snapshot ref", error))?;
         if reference.generation != generation {
             return Err(DbError::Message(
                 "published Circle snapshot generation differs from its indexed generation"
                     .to_string(),
             ));
         }
-        let successor_slot = serde_json::from_str(&successor_slot).map_err(|error| {
-            DbError::Message(format!("published Circle snapshot successor slot: {error}"))
-        })?;
+        let successor_slot = serde_json::from_str(&successor_slot)
+            .map_err(|error| DbError::context("published Circle snapshot successor slot", error))?;
         let authority = local_store_authority_on(conn)?;
         let author_ref = authority.reference();
         let author = authority.value();
@@ -51,9 +50,9 @@ pub(crate) fn load_published_circle_snapshot_on(
             &reference,
             author,
         )
-        .map_err(|error| DbError::Message(format!("published Circle snapshot: {error}")))?;
+        .map_err(|error| DbError::context("published Circle snapshot", error))?;
         let cut: crate::protocol::store_commit::CommitFrontier = serde_json::from_str(&cut)
-            .map_err(|error| DbError::Message(format!("published Circle snapshot cut: {error}")))?;
+            .map_err(|error| DbError::context("published Circle snapshot cut", error))?;
         if &meta.author_registration != author_ref
             || meta.circle_id != circle_id
             || meta.successor.next_slot != successor_slot
@@ -97,22 +96,22 @@ pub(crate) fn load_outbound_circle_snapshot_on(
     .map(
         |(reference, meta_prepared, image_reference, image_prepared, image_bytes, meta_bytes, blobs)| {
             let reference: CircleSnapshotRef = serde_json::from_str(&reference).map_err(|error| {
-                DbError::Message(format!("outbound Circle snapshot ref: {error}"))
+                DbError::context("outbound Circle snapshot ref", error)
             })?;
             let meta_prepared: PreparedExactObject =
                 serde_json::from_str(&meta_prepared).map_err(|error| {
-                    DbError::Message(format!("outbound prepared Circle snapshot metadata: {error}"))
+                    DbError::context("outbound prepared Circle snapshot metadata", error)
                 })?;
             let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
                 .map_err(|error| {
-                    DbError::Message(format!("outbound Circle snapshot image ref: {error}"))
+                    DbError::context("outbound Circle snapshot image ref", error)
                 })?;
             let image_prepared: PreparedExactObject = serde_json::from_str(&image_prepared)
                 .map_err(|error| {
-                    DbError::Message(format!("outbound prepared Circle snapshot image: {error}"))
+                    DbError::context("outbound prepared Circle snapshot image", error)
                 })?;
             let blobs: Vec<PreparedSnapshotBlob> = serde_json::from_str(&blobs).map_err(|error| {
-                DbError::Message(format!("outbound prepared Circle snapshot blobs: {error}"))
+                DbError::context("outbound prepared Circle snapshot blobs", error)
             })?;
             if meta_prepared.reference() != &reference.object
                 || image_prepared.reference() != &image_reference.object
@@ -132,7 +131,7 @@ pub(crate) fn load_outbound_circle_snapshot_on(
                 &reference,
                 author,
             )
-            .map_err(|error| DbError::Message(format!("outbound Circle snapshot: {error}")))?;
+            .map_err(|error| DbError::context("outbound Circle snapshot", error))?;
             if &meta.author_registration != author_ref
                 || meta.circle_id != circle_id
                 || meta.bootstrap.image != image_reference

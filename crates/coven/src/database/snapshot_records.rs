@@ -25,16 +25,15 @@ pub(crate) fn load_published_store_snapshot_on(
             DbError::Message("published Store snapshot generation is negative".to_string())
         })?;
         let reference: StoreSnapshotRef = serde_json::from_str(&reference)
-            .map_err(|error| DbError::Message(format!("published Store snapshot ref: {error}")))?;
+            .map_err(|error| DbError::context("published Store snapshot ref", error))?;
         if reference.generation != generation {
             return Err(DbError::Message(
                 "published Store snapshot generation differs from its indexed generation"
                     .to_string(),
             ));
         }
-        let successor_slot = serde_json::from_str(&successor_slot).map_err(|error| {
-            DbError::Message(format!("published Store snapshot successor slot: {error}"))
-        })?;
+        let successor_slot = serde_json::from_str(&successor_slot)
+            .map_err(|error| DbError::context("published Store snapshot successor slot", error))?;
         let authority = local_store_authority_on(conn)?;
         let author_ref = authority.reference();
         let author = authority.value();
@@ -44,7 +43,7 @@ pub(crate) fn load_published_store_snapshot_on(
             &reference,
             author,
         )
-        .map_err(|error| DbError::Message(format!("published Store snapshot: {error}")))?;
+        .map_err(|error| DbError::context("published Store snapshot", error))?;
         if &meta.author_registration != author_ref || meta.successor.next_slot != successor_slot {
             return Err(DbError::Message(
                 "published Store snapshot differs from its local stream state".to_string(),
@@ -84,24 +83,22 @@ pub(crate) fn load_outbound_store_snapshot_on(
         |(reference, meta_prepared, image_reference, image_prepared, image_bytes, meta_bytes, blobs)| {
             let reference: StoreSnapshotRef =
                 serde_json::from_str(&reference).map_err(|error| {
-                    DbError::Message(format!("outbound Store snapshot ref: {error}"))
+                    DbError::context("outbound Store snapshot ref", error)
                 })?;
             let meta_prepared: PreparedExactObject =
                 serde_json::from_str(&meta_prepared).map_err(|error| {
-                    DbError::Message(format!(
-                        "outbound prepared Store snapshot metadata: {error}"
-                    ))
+                    DbError::context("outbound prepared Store snapshot metadata", error)
                 })?;
             let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
                 .map_err(|error| {
-                    DbError::Message(format!("outbound Store snapshot image ref: {error}"))
+                    DbError::context("outbound Store snapshot image ref", error)
                 })?;
             let image_prepared: PreparedExactObject = serde_json::from_str(&image_prepared)
                 .map_err(|error| {
-                    DbError::Message(format!("outbound prepared Store snapshot image: {error}"))
+                    DbError::context("outbound prepared Store snapshot image", error)
                 })?;
             let blobs: Vec<PreparedSnapshotBlob> = serde_json::from_str(&blobs).map_err(|error| {
-                DbError::Message(format!("outbound prepared Store snapshot blobs: {error}"))
+                DbError::context("outbound prepared Store snapshot blobs", error)
             })?;
             if meta_prepared.reference() != &reference.object
                 || image_prepared.reference() != &image_reference.object
@@ -122,7 +119,7 @@ pub(crate) fn load_outbound_store_snapshot_on(
                 author,
             )
                     .map_err(|error| {
-                        DbError::Message(format!("outbound Store snapshot: {error}"))
+                        DbError::context("outbound Store snapshot", error)
                     })?;
             if &meta.author_registration != author_ref || meta.image != image_reference {
                 return Err(DbError::Message(

@@ -375,6 +375,43 @@ pub enum DbError {
     Message(String),
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A JSON column's bytes did not read back as the value they encode, or a
+    /// value would not encode. Every synced-protocol column is stored as JSON,
+    /// so this is the shape of every column-level decode failure.
+    #[error("database error: {0}")]
+    Serde(#[from] serde_json::Error),
+    /// Durable bytes failed the Store protocol's own validation — a hash that
+    /// does not match, a signature that does not verify, an object in the wrong
+    /// slot. The database read them back intact; the protocol refused them.
+    #[error("database error: {0}")]
+    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    #[error("database error: {0}")]
+    RemoteObject(#[from] crate::protocol::remote_object::RemoteObjectRecordError),
+    #[error("database error: {0}")]
+    AudiencePackage(#[from] crate::protocol::audience_package::AudiencePackageError),
+    #[error("database error: {0}")]
+    ObjectHash(#[from] crate::object_hash::InvalidObjectHash),
+    #[error("database error: {0}")]
+    BlobLocator(#[from] crate::protocol::blob::locator::BlobLocatorError),
+    #[error("database error: {0}")]
+    CircleId(#[from] crate::protocol::circle::CircleIdError),
+    #[error("database error: {0}")]
+    RowRoutingKey(#[from] crate::protocol::circle::RowRoutingKeyError),
+    #[error("database error: {0}")]
+    Gate(#[from] crate::database::gate::GateError),
+    #[error("database error: {0}")]
+    Storage(#[from] crate::protocol::objects::StorageError),
+    #[error("database error: unsafe blob path: {0}")]
+    BlobPath(#[from] crate::store_dir::PathTokenError),
+    #[error("database error: {0}")]
+    Io(#[from] std::io::Error),
+    /// A stored integer column did not fit the type the schema says it holds.
+    #[error("database error: stored value is out of range: {0}")]
+    IntRange(#[from] std::num::TryFromIntError),
+    #[error("database error: stored value is not an integer: {0}")]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error("database error: stored value is not UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
     /// A [`DbError`] with the operation that produced it named in front of it.
     /// Carries the cause as a [`DbError`] so callers keep matching on it after
     /// it crosses the layer that added the description.
@@ -740,9 +777,7 @@ impl VerifiedSnapshotBootstrapInstall {
         let routing_key = routing_encryption
             .map(|encryption| {
                 crate::protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
-                    .map_err(|error| {
-                        DbError::Message(format!("derive bootstrap row-routing key: {error}"))
-                    })
+                    .map_err(|error| DbError::context("derive bootstrap row-routing key", error))
             })
             .transpose()?;
         Ok(Self {
@@ -813,9 +848,8 @@ impl VerifiedSnapshotBootstrapInstall {
         conn.execute("DELETE FROM snapshot_coverage", [])
             .map_err(DbError::from)?;
         for (stream_id, reference) in self.snapshot.meta.coverage.clone().into_refs() {
-            let encoded = serde_json::to_string(&reference).map_err(|error| {
-                DbError::Message(format!("serialize snapshot exact commit ref: {error}"))
-            })?;
+            let encoded = serde_json::to_string(&reference)
+                .map_err(|error| DbError::context("serialize snapshot exact commit ref", error))?;
             conn.execute(
                 "INSERT INTO snapshot_coverage
                  (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",

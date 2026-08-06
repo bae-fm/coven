@@ -15,9 +15,8 @@ impl PreparedCircleOperationRow {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let operation_id = journal.operation_id.as_str().to_string();
         let circle_id = journal.circle_id.to_string();
-        let payload = serde_json::to_vec(&journal).map_err(|error| {
-            DbError::Message(format!("serialize circle operation journal: {error}"))
-        })?;
+        let payload = serde_json::to_vec(&journal)
+            .map_err(|error| DbError::context("serialize circle operation journal", error))?;
         Ok(Self {
             operation_id,
             circle_id,
@@ -32,9 +31,8 @@ pub(crate) fn parse_circle_operation_row(
     payload: &[u8],
 ) -> Result<crate::protocol::circle_journal::CircleOperationJournal, DbError> {
     let journal: crate::protocol::circle_journal::CircleOperationJournal =
-        serde_json::from_slice(payload).map_err(|error| {
-            DbError::Message(format!("parse circle operation journal: {error}"))
-        })?;
+        serde_json::from_slice(payload)
+            .map_err(|error| DbError::context("parse circle operation journal", error))?;
     journal
         .validate_identity()
         .map_err(|error| DbError::Message(error.to_string()))?;

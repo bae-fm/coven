@@ -14,7 +14,7 @@ pub(crate) fn verify_next_local_store_ack_on(
     let registration = authority.value();
     let root = &registration.store_root;
     let unverified: StoreAck = serde_json::from_slice(bytes)
-        .map_err(|error| DbError::Message(format!("parse Store acknowledgement: {error}")))?;
+        .map_err(|error| DbError::context("parse Store acknowledgement", error))?;
     if &unverified.registration != registration_ref {
         return Err(DbError::Message(
             "Store acknowledgement author differs from local activation".to_string(),
@@ -27,7 +27,7 @@ pub(crate) fn verify_next_local_store_ack_on(
         object: prepared.reference().clone(),
     };
     let ack = StoreAck::parse_at(bytes, root, &reference, registration)
-        .map_err(|error| DbError::Message(format!("verify Store acknowledgement: {error}")))?;
+        .map_err(|error| DbError::context("verify Store acknowledgement", error))?;
     let previous = load_published_store_ack_on(conn)?;
     let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
         Some(previous) => (
@@ -106,9 +106,8 @@ pub(crate) fn load_published_store_ack_on(
     .optional()
     .map_err(DbError::from)?
     .map(|(reference, successor_slot)| {
-        let reference: StoreAckRef = serde_json::from_str(&reference).map_err(|error| {
-            DbError::Message(format!("published Store acknowledgement ref: {error}"))
-        })?;
+        let reference: StoreAckRef = serde_json::from_str(&reference)
+            .map_err(|error| DbError::context("published Store acknowledgement ref", error))?;
         if reference.sequence == 0 {
             return Err(DbError::Message(
                 "published Store acknowledgement uses sequence zero".to_string(),
@@ -117,9 +116,7 @@ pub(crate) fn load_published_store_ack_on(
         Ok(PublishedStoreAck {
             reference,
             successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
-                DbError::Message(format!(
-                    "published Store acknowledgement successor slot: {error}"
-                ))
+                DbError::context("published Store acknowledgement successor slot", error)
             })?,
         })
     })
@@ -134,9 +131,8 @@ pub(crate) fn finish_outbound_store_ack_on(
     let removed = conn
         .execute(
             "DELETE FROM outbound_store_acks WHERE singleton = 1 AND ack_ref = ?1",
-            [serde_json::to_string(reference).map_err(|error| {
-                DbError::Message(format!("serialize Store acknowledgement ref: {error}"))
-            })?],
+            [serde_json::to_string(reference)
+                .map_err(|error| DbError::context("serialize Store acknowledgement ref", error))?],
         )
         .map_err(DbError::from)?;
     if removed != 1 {
@@ -145,9 +141,7 @@ pub(crate) fn finish_outbound_store_ack_on(
         ));
     }
     let successor_slot = serde_json::to_string(successor_slot).map_err(|error| {
-        DbError::Message(format!(
-            "serialize Store acknowledgement successor slot: {error}"
-        ))
+        DbError::context("serialize Store acknowledgement successor slot", error)
     })?;
     conn.execute(
         "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
@@ -156,9 +150,7 @@ pub(crate) fn finish_outbound_store_ack_on(
            ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot",
         (
             serde_json::to_string(reference).map_err(|error| {
-                DbError::Message(format!(
-                    "serialize published Store acknowledgement ref: {error}"
-                ))
+                DbError::context("serialize published Store acknowledgement ref", error)
             })?,
             successor_slot,
         ),
@@ -189,21 +181,17 @@ pub(crate) fn load_outbound_circle_acks_on(
     let mut activations = Vec::with_capacity(rows.len());
     for (reference, bytes, prepared) in rows {
         let reference: crate::protocol::store_commit::CircleAckRef =
-            serde_json::from_str(&reference).map_err(|error| {
-                DbError::Message(format!("outbound Circle acknowledgement ref: {error}"))
-            })?;
-        let prepared: PreparedExactObject = serde_json::from_str(&prepared).map_err(|error| {
-            DbError::Message(format!("outbound prepared Circle acknowledgement: {error}"))
-        })?;
+            serde_json::from_str(&reference)
+                .map_err(|error| DbError::context("outbound Circle acknowledgement ref", error))?;
+        let prepared: PreparedExactObject = serde_json::from_str(&prepared)
+            .map_err(|error| DbError::context("outbound prepared Circle acknowledgement", error))?;
         if prepared.reference() != &reference.object {
             return Err(DbError::Message(
                 "outbound Circle acknowledgement ref differs from its prepared object".to_string(),
             ));
         }
-        let value =
-            CircleAck::parse_at(&bytes, root, &reference, registration).map_err(|error| {
-                DbError::Message(format!("outbound Circle acknowledgement: {error}"))
-            })?;
+        let value = CircleAck::parse_at(&bytes, root, &reference, registration)
+            .map_err(|error| DbError::context("outbound Circle acknowledgement", error))?;
         activations.push(crate::protocol::prepared_commit::CircleAckActivation {
             reference,
             ack: ExactProtocolObject {
@@ -242,18 +230,17 @@ pub(crate) fn set_outbound_store_ack_activation_on(
     missing: &str,
 ) -> Result<(), DbError> {
     let activation = serde_json::to_string(activation).map_err(|error| {
-        DbError::Message(format!(
-            "serialize Merge Store acknowledgement activation: {error}"
-        ))
+        DbError::context("serialize Merge Store acknowledgement activation", error)
     })?;
     let updated = conn
         .execute(
             "UPDATE outbound_store_acks SET activation = ?2 \
              WHERE singleton = 1 AND ack_ref = ?1",
             rusqlite::params![
-                serde_json::to_string(expected).map_err(|error| DbError::Message(format!(
-                    "serialize Store acknowledgement ref: {error}"
-                )))?,
+                serde_json::to_string(expected).map_err(|error| DbError::context(
+                    "serialize Store acknowledgement ref",
+                    error
+                ))?,
                 activation,
             ],
         )
@@ -283,17 +270,13 @@ pub(crate) fn load_outbound_store_ack_on(
     .optional()
     .map_err(DbError::from)?
     .map(|(reference, bytes, prepared, activation)| {
-        let reference: StoreAckRef = serde_json::from_str(&reference).map_err(|error| {
-            DbError::Message(format!("outbound Store acknowledgement ref: {error}"))
-        })?;
-        let prepared: PreparedExactObject = serde_json::from_str(&prepared).map_err(|error| {
-            DbError::Message(format!("outbound prepared Store acknowledgement: {error}"))
-        })?;
+        let reference: StoreAckRef = serde_json::from_str(&reference)
+            .map_err(|error| DbError::context("outbound Store acknowledgement ref", error))?;
+        let prepared: PreparedExactObject = serde_json::from_str(&prepared)
+            .map_err(|error| DbError::context("outbound prepared Store acknowledgement", error))?;
         let activation: OutboundStoreAckActivation =
             serde_json::from_str(&activation).map_err(|error| {
-                DbError::Message(format!(
-                    "outbound Store acknowledgement activation: {error}"
-                ))
+                DbError::context("outbound Store acknowledgement activation", error)
             })?;
         if prepared.reference() != &reference.object {
             return Err(DbError::Message(
@@ -303,9 +286,8 @@ pub(crate) fn load_outbound_store_ack_on(
         let authority = local_store_authority_on(conn)?;
         let author_ref = authority.reference();
         let author = authority.value();
-        let value = StoreAck::parse_at(&bytes, &author.store_root, &reference, author).map_err(
-            |error| DbError::Message(format!("outbound Store acknowledgement: {error}")),
-        )?;
+        let value = StoreAck::parse_at(&bytes, &author.store_root, &reference, author)
+            .map_err(|error| DbError::context("outbound Store acknowledgement", error))?;
         if &value.registration != author_ref {
             return Err(DbError::Message(
                 "outbound Store acknowledgement author differs from local activation".to_string(),
