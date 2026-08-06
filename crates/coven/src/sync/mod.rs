@@ -19,6 +19,8 @@ pub(crate) mod loop_policy;
 mod pull_tests;
 #[cfg(test)]
 mod refresh_tests;
+#[cfg(test)]
+mod scoped_write_routing_tests;
 pub(crate) mod status;
 #[cfg(test)]
 mod store_history_checkpoint_tests;
