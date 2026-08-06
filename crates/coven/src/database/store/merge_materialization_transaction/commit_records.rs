@@ -73,7 +73,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     ..
                 } if matches!(
                     &**object,
-                    crate::sync::store::DurableStoreReclaimObject::Receipt {
+                    crate::database::DurableStoreReclaimObject::Receipt {
                         receipt_ref,
                         ..
                     } if receipt_ref == receipt
@@ -88,7 +88,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     ..
                 } if matches!(
                     &**object,
-                    crate::sync::store::DurableStoreReclaimObject::Receipt {
+                    crate::database::DurableStoreReclaimObject::Receipt {
                         receipt_ref,
                         ..
                     } if receipt_ref == receipt

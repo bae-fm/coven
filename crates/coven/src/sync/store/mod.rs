@@ -22,7 +22,6 @@ pub(super) mod protocol_root;
 mod registration_object;
 use registration_object::prepare_registration_object;
 
-pub(crate) use crate::database::DurableStoreReclaimObject;
 pub use blob::{BlobCacheError, BlobStream};
 pub(crate) use circle_controls::CircleOperationError;
 #[cfg(test)]
