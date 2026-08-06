@@ -36,7 +36,7 @@ impl ConflictFixture {
         let (store, _home, founder, journal) = persist_merge_operation(&db1, label).await;
         let circle_id = journal.circle_id();
         let device1 = db1
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("read local Store device id")
             .expect("local Store device is active");

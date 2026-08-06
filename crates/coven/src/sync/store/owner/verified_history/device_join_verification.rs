@@ -243,7 +243,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn verify_author_exclusion_nonactivation(
         &mut self,
-        locator: &crate::database::AuthorExclusionActivationLocator,
+        locator: &coven_database::AuthorExclusionActivationLocator,
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
         activation_commit: &VerifiedStoreBatchCommit,
@@ -282,7 +282,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn authenticate_blocked_candidate(
         &mut self,
-        candidate: &crate::database::BlockedMergeCandidate,
+        candidate: &coven_database::BlockedMergeCandidate,
     ) -> Result<VerifiedStoreBatchCommit, StoreError> {
         let reference = &candidate.head.value.commit;
         let verified = self
@@ -439,7 +439,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             founder: founder.value,
             founder_bytes: founder.bytes,
             genesis,
-            membership: crate::database::InitialStoreMembershipAuthority {
+            membership: coven_database::InitialStoreMembershipAuthority {
                 head_refs: membership.head_refs().to_vec(),
             },
             commits: ordered,

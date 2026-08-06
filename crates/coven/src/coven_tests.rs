@@ -146,7 +146,7 @@ fn open_gated_roots_at(dir: StoreDir) -> CovenResult<CovenHandle> {
 
 fn precreate_database(dir: &StoreDir, sql: &str) {
     let database =
-        crate::database::DatabaseImageTest::open(&dir.db_path()).expect("precreate store database");
+        coven_database::DatabaseImageTest::open(&dir.db_path()).expect("precreate store database");
     database
         .execute_batch(sql)
         .expect("seed pre-existing database state");
@@ -183,7 +183,7 @@ fn existing_host_tables_without_a_coven_marker_initialize_coven_metadata() {
 fn interrupted_coven_schema_without_a_marker_is_rejected() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new(tmp.path());
-    crate::database::DatabaseImageTest::open(&dir.db_path())
+    coven_database::DatabaseImageTest::open(&dir.db_path())
         .expect("precreate interrupted Coven database")
         .create_interrupted_coven_schema()
         .expect("seed interrupted Coven schema");
@@ -261,7 +261,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
         .write_changeset_for_test(&write_id)
         .await
         .expect("load gated changeset");
-    let rows = crate::database::walk_changeset(&changeset).expect("walk gated changeset");
+    let rows = coven_database::walk_changeset(&changeset).expect("walk gated changeset");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].op, coven_foundation::changeset::ChangeOp::Insert);
     assert_eq!(rows[0].pk(), Some("root-1"));
@@ -761,7 +761,7 @@ async fn pending_write_drains_only_after_changeset_push() {
 async fn builder_open_runs_coven_and_host_migrations() {
     let (_tmp, handle) = open_files_handle();
     let has_coven_table = handle
-        .coven_table_exists_for_test(crate::database::DatabaseTestTable::named("protocol_state"))
+        .coven_table_exists_for_test(coven_database::DatabaseTestTable::named("protocol_state"))
         .await
         .expect("query coven table");
     let has_host_table: i64 = handle

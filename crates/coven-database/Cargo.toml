@@ -1,0 +1,46 @@
+[package]
+name = "coven-database"
+version = "1.0.0-rc.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Coven's owned SQLite connection: schema, routing gates, and store bookkeeping"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
+
+[lib]
+name = "coven_database"
+path = "src/lib.rs"
+
+[dependencies]
+coven-foundation = { workspace = true }
+coven-keys = { workspace = true }
+coven-protocol = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+fallible-streaming-iterator = { workspace = true }
+hex = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# A `cfg(test)` build of this crate reaches the foundation and protocol test
+# hooks, which exist only under those crates' own `test-utils`. `cfg(test)`
+# enables no `[features]` of this crate, so they arrive through these edges.
+coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-keys = { workspace = true, features = ["test-utils"] }
+coven-protocol = { workspace = true, features = ["test-utils"] }
+
+[features]
+# The synthetic store, schema fixtures, and tamper helpers the layers above
+# build their database tests from.
+test-utils = ["coven-protocol/test-utils"]
+
+[lints]
+workspace = true

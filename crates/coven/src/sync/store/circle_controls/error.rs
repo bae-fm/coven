@@ -5,7 +5,7 @@ use coven_protocol::objects::StoreObjectError;
 #[derive(Debug, thiserror::Error)]
 pub enum CircleOperationError {
     #[error("database: {0}")]
-    Database(crate::database::DbError),
+    Database(coven_database::DbError),
     #[error("circle protocol state is absent: {0}")]
     MissingState(&'static str),
     #[error("circle protocol state is invalid: {0}")]
@@ -70,10 +70,10 @@ pub enum CircleOperationError {
     ReplyChannelClosed,
 }
 
-impl From<crate::database::DbError> for CircleOperationError {
-    fn from(error: crate::database::DbError) -> Self {
+impl From<coven_database::DbError> for CircleOperationError {
+    fn from(error: coven_database::DbError) -> Self {
         match error {
-            crate::database::DbError::ExcludedDeviceMustReset {
+            coven_database::DbError::ExcludedDeviceMustReset {
                 circle_id,
                 close_id,
             } => Self::ExcludedDeviceMustReset {

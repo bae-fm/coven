@@ -37,12 +37,12 @@ trait RefreshTestStoreOps {
         master_keys: &dyn MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &PendingRotation,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
     ) -> Result<String, MembershipOpsError>;
 
     async fn revoke_member_durable(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         owner_keypair: &UserKeypair,
         revokee_pubkey: &str,
         timestamp: &str,
@@ -52,18 +52,18 @@ trait RefreshTestStoreOps {
 
     async fn invite_exact_member(
         &self,
-        owner_db: &crate::database::Database,
+        owner_db: &coven_database::Database,
         owner: &UserKeypair,
         member: &UserKeypair,
         role: MemberRole,
         encryption: &EncryptionService,
     ) -> MembershipChain;
 
-    async fn load_exact_chain(&self, db: &crate::database::Database) -> MembershipChain;
+    async fn load_exact_chain(&self, db: &coven_database::Database) -> MembershipChain;
 
     async fn create_unreferenced_wrapped_key(
         &self,
-        owner_db: &crate::database::Database,
+        owner_db: &coven_database::Database,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
         signer: &UserKeypair,
@@ -79,7 +79,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         master_keys: &dyn MasterKeyCustody,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &PendingRotation,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
     ) -> Result<String, MembershipOpsError> {
         self.bind_device(db, user_keypair)
             .await
@@ -96,7 +96,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn revoke_member_durable(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         owner_keypair: &UserKeypair,
         revokee_pubkey: &str,
         timestamp: &str,
@@ -123,7 +123,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn invite_exact_member(
         &self,
-        owner_db: &crate::database::Database,
+        owner_db: &coven_database::Database,
         owner: &UserKeypair,
         member: &UserKeypair,
         role: MemberRole,
@@ -150,7 +150,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .expect("read exact membership after invitation")
     }
 
-    async fn load_exact_chain(&self, db: &crate::database::Database) -> MembershipChain {
+    async fn load_exact_chain(&self, db: &coven_database::Database) -> MembershipChain {
         let device = self
             .open_into(db)
             .await
@@ -163,7 +163,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn create_unreferenced_wrapped_key(
         &self,
-        owner_db: &crate::database::Database,
+        owner_db: &coven_database::Database,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
         signer: &UserKeypair,
@@ -195,7 +195,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 async fn exact_store(
     owner: &UserKeypair,
     encryption: &EncryptionService,
-) -> (std::sync::Arc<TestStore>, crate::database::Database) {
+) -> (std::sync::Arc<TestStore>, coven_database::Database) {
     let owner_db = open_test_db();
     let storage = Box::pin(TestStore::create_encrypted(
         &owner_db,

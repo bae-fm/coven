@@ -1,5 +1,5 @@
-use crate::database::StoreDatabase;
 use crate::sync::store::StoreError;
+use coven_database::StoreDatabase;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::store_commit::{
@@ -24,11 +24,11 @@ impl LocalStoreDevice {
             .latest_local_store_device_registration()
             .await?
             .ok_or(StoreError::MissingState {
-                key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+                key: coven_database::LOCAL_DEVICE_ID_STATE_KEY,
             })?;
         if durable.device_id.to_string() != expected_device_id {
             return Err(StoreError::InvalidState {
-                key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+                key: coven_database::LOCAL_DEVICE_ID_STATE_KEY,
                 reason: "local registration belongs to another device".to_string(),
             });
         }
@@ -45,7 +45,7 @@ impl LocalStoreDevice {
             ));
         }
         let activation = match durable.state {
-            crate::database::LocalDeviceRegistrationState::Activated { authority } => {
+            coven_database::LocalDeviceRegistrationState::Activated { authority } => {
                 let activated = database
                     .activated_store_device_registration_with_authority(
                         root,
@@ -60,8 +60,8 @@ impl LocalStoreDevice {
                 }
                 Some(authority)
             }
-            crate::database::LocalDeviceRegistrationState::Prepared
-            | crate::database::LocalDeviceRegistrationState::Created => None,
+            coven_database::LocalDeviceRegistrationState::Prepared
+            | coven_database::LocalDeviceRegistrationState::Created => None,
         };
         Ok(Self {
             registration: ReferencedStoreDeviceRegistration::verified(
@@ -249,7 +249,7 @@ impl<'storage> AuthorizedStore<'storage> {
             membership,
         } = self;
         let local_device = local_device.ok_or(crate::sync::store::StoreError::MissingState {
-            key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+            key: coven_database::LOCAL_DEVICE_ID_STATE_KEY,
         })?;
         if local_device.activation.is_none() {
             return Err(super::StoreRegistrationError::ActivationRequired);

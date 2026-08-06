@@ -97,7 +97,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let database = self.database.clone();
         let db = &database;
         match database.merge_abandonment_state(&write_id).await? {
-            crate::database::MergeAbandonmentState::None => {
+            coven_database::MergeAbandonmentState::None => {
                 if database.merge_candidate_cleanup_pending(&write_id).await? {
                     self.cleanup_merge_candidate(write_id.clone()).await?;
                     database
@@ -139,7 +139,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 self.cleanup_merge_candidate(write_id).await?;
                 Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
             }
-            crate::database::MergeAbandonmentState::Prepared => {
+            coven_database::MergeAbandonmentState::Prepared => {
                 let candidates = database
                     .prepared_merge_abandonment_candidates(write_id.clone())
                     .await?
@@ -193,20 +193,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     )),
                 }
             }
-            crate::database::MergeAbandonmentState::Accepted
-            | crate::database::MergeAbandonmentState::OtherWon => {
+            coven_database::MergeAbandonmentState::Accepted
+            | coven_database::MergeAbandonmentState::OtherWon => {
                 if database.merge_candidate_cleanup_pending(&write_id).await? {
                     self.cleanup_merge_candidate(write_id.clone()).await?;
                 }
                 if matches!(
                     database.merge_abandonment_state(&write_id).await?,
-                    crate::database::MergeAbandonmentState::OtherWon
+                    coven_database::MergeAbandonmentState::OtherWon
                 ) {
                     database.finish_lost_merge_abandonment(write_id).await?;
                 }
                 Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
             }
-            crate::database::MergeAbandonmentState::AuthorExcluded => {
+            coven_database::MergeAbandonmentState::AuthorExcluded => {
                 if database.merge_candidate_cleanup_pending(&write_id).await? {
                     self.cleanup_merge_candidate(write_id.clone()).await?;
                 }
@@ -215,7 +215,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .await?;
                 Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
             }
-            crate::database::MergeAbandonmentState::CandidateWon => Ok(None),
+            coven_database::MergeAbandonmentState::CandidateWon => Ok(None),
         }
     }
 

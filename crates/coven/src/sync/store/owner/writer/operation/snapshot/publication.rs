@@ -25,14 +25,14 @@ fn snapshot_readback_error(error: coven_protocol::objects::StorageError) -> Snap
 /// local spool cleanup serialized against every other snapshot publication
 /// using the same Store database.
 pub(crate) struct AuthorizedSnapshotPublication<'operation> {
-    database: &'operation crate::database::StoreDatabase,
+    database: &'operation coven_database::StoreDatabase,
     storage: &'operation dyn SyncStorage,
-    _permit: crate::database::SnapshotPublicationPermit,
+    _permit: coven_database::SnapshotPublicationPermit,
 }
 
 impl<'operation> AuthorizedSnapshotPublication<'operation> {
     pub(crate) async fn begin(
-        database: &'operation crate::database::StoreDatabase,
+        database: &'operation coven_database::StoreDatabase,
         storage: &'operation dyn SyncStorage,
     ) -> Self {
         let permit = database.snapshot_publication_permit().await;
@@ -58,7 +58,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
 
     pub(crate) async fn publish_store(
         &self,
-        pending: crate::database::DurableSnapshotPublication,
+        pending: coven_database::DurableSnapshotPublication,
     ) -> Result<SnapshotMeta, SnapshotError> {
         let meta = &pending.meta.value;
         let device_id = meta.author_registration.device_id.to_string();
@@ -134,7 +134,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
 
     pub(crate) async fn resume_circle(
         &self,
-        pending: crate::database::DurableCircleSnapshotPublication,
+        pending: coven_database::DurableCircleSnapshotPublication,
     ) -> Result<CircleSnapshotMeta, SnapshotError> {
         self.drain_spool_cleanup().await?;
         self.publish_circle(pending).await
@@ -142,7 +142,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
 
     pub(crate) async fn publish_circle(
         &self,
-        pending: crate::database::DurableCircleSnapshotPublication,
+        pending: coven_database::DurableCircleSnapshotPublication,
     ) -> Result<CircleSnapshotMeta, SnapshotError> {
         // The exact ciphertext and its plaintext binding were established when
         // the objects were prepared, so publication does not need the Circle key.

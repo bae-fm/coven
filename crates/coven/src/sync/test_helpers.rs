@@ -6,17 +6,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::database::Database;
 use crate::storage::SyncStorage;
+use coven_database::Database;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use coven_protocol::store_commit::ObjectHash;
 
+pub(crate) use crate::storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
-pub(crate) use crate::database::synthetic_store::*;
-pub(crate) use crate::storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
+pub(crate) use coven_database::synthetic_store::*;
 pub(crate) use coven_foundation::store_dir::temp_store_dir;
 
 #[cfg(test)]
@@ -276,7 +276,7 @@ mod test_device {
 
     #[derive(Clone)]
     pub(crate) struct TestDevice {
-        db: crate::database::StoreDatabase,
+        db: coven_database::StoreDatabase,
         store: std::sync::Arc<crate::sync::store::Store>,
         _store_dir_temp: std::sync::Arc<tempfile::TempDir>,
         pub device_id: String,
@@ -292,7 +292,7 @@ mod test_device {
             identity: UserKeypair,
         ) -> Result<Self, String> {
             Self::create_with_database(
-                crate::database::StoreDatabase::new(db),
+                coven_database::StoreDatabase::new(db),
                 storage,
                 founder_timestamp,
                 identity,
@@ -301,7 +301,7 @@ mod test_device {
         }
 
         pub(crate) async fn create_with_database(
-            database: crate::database::StoreDatabase,
+            database: coven_database::StoreDatabase,
             storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
             founder_timestamp: &str,
             identity: UserKeypair,
@@ -327,7 +327,7 @@ mod test_device {
         }
 
         pub(crate) async fn open_with_database(
-            database: crate::database::StoreDatabase,
+            database: coven_database::StoreDatabase,
             storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
             root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
@@ -357,12 +357,12 @@ mod test_device {
             storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
-            Self::load_with_database(crate::database::StoreDatabase::new(db), storage, identity)
+            Self::load_with_database(coven_database::StoreDatabase::new(db), storage, identity)
                 .await
         }
 
         pub(crate) async fn load_with_database(
-            database: crate::database::StoreDatabase,
+            database: coven_database::StoreDatabase,
             storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
@@ -375,10 +375,10 @@ mod test_device {
             )
             .await?;
             let device_id = database
-                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
                 .await?
                 .ok_or(crate::sync::store::StoreError::MissingState {
-                    key: crate::database::LOCAL_DEVICE_ID_STATE_KEY,
+                    key: coven_database::LOCAL_DEVICE_ID_STATE_KEY,
                 })?;
             Ok(Self {
                 db: database,
@@ -480,7 +480,7 @@ mod test_device {
             expected_control: coven_protocol::circle::CircleControlCoord,
         ) -> Result<
             Option<coven_protocol::circle_activation::CircleEpochAccess>,
-            crate::database::DbError,
+            coven_database::DbError,
         > {
             self.store
                 .circle_epoch_access(circle_id, expected_control)
@@ -669,7 +669,7 @@ mod test_device {
 
         pub(crate) async fn retained_merge_replay_inputs_for_test(
             &self,
-        ) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, crate::database::DbError>
+        ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, coven_database::DbError>
         {
             self.store.retained_merge_replay_inputs_for_test().await
         }
@@ -677,7 +677,7 @@ mod test_device {
         pub(crate) async fn resolved_store_device_state_for_test(
             &self,
             reference: &coven_protocol::store_commit::StoreDeviceStateRef,
-        ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, crate::database::DbError>
+        ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, coven_database::DbError>
         {
             self.store
                 .resolved_store_device_state_for_test(reference)
@@ -687,7 +687,7 @@ mod test_device {
         pub(crate) async fn retained_merge_materialization_for_test(
             &self,
             reference: coven_protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<crate::database::OwnedVerifiedMergeMaterialization, crate::database::DbError>
+        ) -> Result<coven_database::OwnedVerifiedMergeMaterialization, coven_database::DbError>
         {
             self.store
                 .retained_merge_materialization_for_test(reference)
@@ -772,7 +772,7 @@ mod test_device {
 
         pub(crate) async fn verify_snapshots_for_acknowledgement_for_test(
             &self,
-            snapshots: &[crate::database::PublishedStoreSnapshot],
+            snapshots: &[coven_database::PublishedStoreSnapshot],
         ) -> Result<(), crate::sync::store::StoreError> {
             self.store
                 .verify_snapshots_for_acknowledgement_for_test(snapshots)
@@ -833,7 +833,7 @@ mod test_device {
             references: Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
         ) -> Result<
             Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
-            crate::database::DbError,
+            coven_database::DbError,
         > {
             self.store
                 .retained_merge_history_frontier_for_test(references)
@@ -846,7 +846,7 @@ mod test_device {
             control: coven_protocol::circle::CircleControlCoord,
         ) -> Result<
             Option<coven_protocol::circle_activation::VerifiedCircleReference>,
-            crate::database::DbError,
+            coven_database::DbError,
         > {
             self.store
                 .verified_circle_activation_for_test(circle_id, control)
@@ -869,7 +869,7 @@ mod test_device {
             &self,
             target: coven_protocol::store_commit::CirclePackageRef,
             activation: coven_protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<bool, crate::database::DbError> {
+        ) -> Result<bool, coven_database::DbError> {
             self.store
                 .circle_package_is_retained_for_replay_for_test(target, activation)
                 .await
@@ -915,7 +915,7 @@ mod test_device {
             &self,
             acknowledgement: coven_protocol::store_commit::StoreAckRef,
             candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
-        ) -> Result<(), crate::database::DbError> {
+        ) -> Result<(), coven_database::DbError> {
             self.store
                 .prepare_acknowledgement_activation_for_test(acknowledgement, candidate)
                 .await
@@ -942,7 +942,7 @@ mod test_device {
             coverage: &coven_protocol::store_commit::StoreHistoryCut,
             attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
             membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
-        ) -> Result<crate::database::DeviceJoinBootstrapPlan, crate::sync::store::StoreError>
+        ) -> Result<coven_database::DeviceJoinBootstrapPlan, crate::sync::store::StoreError>
         {
             self.store
                 .prepare_device_join_bootstrap_for_test(
@@ -1280,12 +1280,12 @@ mod test_device {
             clock: &dyn coven_foundation::clock::Clock,
             routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
             observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
-        ) -> Result<coven_protocol::blob::DrainOutcome, crate::database::DbError> {
+        ) -> Result<coven_protocol::blob::DrainOutcome, coven_database::DbError> {
             self.store
                 .with_test_store_dir(store_dir.clone())
                 .authorize_writer()
                 .await
-                .map_err(|error| crate::database::DbError::Message(error.to_string()))?
+                .map_err(|error| coven_database::DbError::Message(error.to_string()))?
                 .drain_uploads(clock, routing_encryption, observer)
                 .await
         }
@@ -1314,7 +1314,7 @@ mod test_device {
                 )
                 .drain_published_blob_drop_intents(u64::MAX)
                 .await?;
-                crate::database::LocalBlobCleanup::new(&self.db, store_dir)
+                coven_database::LocalBlobCleanup::new(&self.db, store_dir)
                     .drain()
                     .await
                     .map_err(|error| error.to_string())?;
@@ -1393,7 +1393,7 @@ mod test_device {
             reference: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         ) -> Result<
             coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
-            crate::database::DbError,
+            coven_database::DbError,
         > {
             self.db.activated_store_device_registration(reference).await
         }
@@ -1878,7 +1878,7 @@ mod test_device {
                 .run_host_store_write_for_test(None, None, move |transaction| {
                     transaction
                         .execute_batch(&statement)
-                        .map_err(crate::database::DbError::from)
+                        .map_err(coven_database::DbError::from)
                 })
                 .await
                 .expect("capture transfer candidate host write");
@@ -2241,7 +2241,7 @@ mod test_device {
         {
             self.store
                 .publish_snapshot_for_test(
-                    crate::database::CreatedSnapshot {
+                    coven_database::CreatedSnapshot {
                         db_image,
                         blobs: Vec::new(),
                     },
@@ -2362,7 +2362,7 @@ mod test_device {
         #[cfg(test)]
         pub(crate) async fn prepare_acknowledgement_candidate_for_test(
             &self,
-            outbound: &crate::database::OutboundStoreAck,
+            outbound: &coven_database::OutboundStoreAck,
         ) -> coven_protocol::prepared_commit::PreparedStoreOperationCommit {
             let mut writer = self
                 .authorize_writer()
@@ -2509,7 +2509,7 @@ impl TestStore {
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         self.open_store_with_storage(
-            crate::database::StoreDatabase::new(database),
+            coven_database::StoreDatabase::new(database),
             self.storage.clone(),
             store_dir,
             identity,
@@ -2519,7 +2519,7 @@ impl TestStore {
 
     pub(crate) async fn open_store_with_storage(
         &self,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
         store_dir: StoreDir,
         identity: &UserKeypair,
@@ -2532,7 +2532,7 @@ impl TestStore {
 
     pub(crate) async fn open_founder_store_with_storage(
         &self,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
         store_dir: StoreDir,
     ) -> Result<crate::sync::store::Store, String> {
@@ -2617,7 +2617,7 @@ impl TestStore {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let store = crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(database),
+            coven_database::StoreDatabase::new(database),
             storage,
             store_dir.clone(),
             self.signer.clone(),
@@ -2833,7 +2833,7 @@ impl TestStore {
     }
 
     pub(crate) async fn create_with_database(
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2881,7 +2881,7 @@ impl TestStore {
         blob_paths: crate::storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
         Self::create_with_protection_database(
-            crate::database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(db),
             store_id,
             signer,
             home,
@@ -2892,7 +2892,7 @@ impl TestStore {
     }
 
     async fn create_with_protection_database(
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         store_id: &str,
         signer: UserKeypair,
         home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
@@ -3259,9 +3259,9 @@ impl TestStore {
     pub(crate) async fn publish_third_candidate_winner(
         &self,
         peer_db: &Database,
-        candidate: &crate::database::BlockedMergeCandidate,
+        candidate: &coven_database::BlockedMergeCandidate,
     ) {
-        let registration = crate::database::StoreDatabase::new(peer_db)
+        let registration = coven_database::StoreDatabase::new(peer_db)
             .activated_store_device_registration(candidate.commit.value.author_registration.clone())
             .await
             .expect("load third-winner device registration");
@@ -3492,22 +3492,22 @@ impl TestStore {
         db: &Database,
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
-        self.bind_store_device(&crate::database::StoreDatabase::new(db), identity)
+        self.bind_store_device(&coven_database::StoreDatabase::new(db), identity)
             .await
     }
 
     pub(crate) async fn drain_uploads(
         &self,
-        database: &crate::database::StoreDatabase,
+        database: &coven_database::StoreDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         clock: &dyn coven_foundation::clock::Clock,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
-    ) -> Result<coven_protocol::blob::DrainOutcome, crate::database::DbError> {
+    ) -> Result<coven_protocol::blob::DrainOutcome, coven_database::DbError> {
         let store = self
             .bind_store_device(database, &self.signer)
             .await
-            .map_err(crate::database::DbError::Message)?;
+            .map_err(coven_database::DbError::Message)?;
         store
             .drain_uploads(store_dir, clock, routing_encryption, observer)
             .await
@@ -3537,7 +3537,7 @@ impl TestStore {
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, String> {
-        let joining_database = crate::database::StoreDatabase::new(joining_db);
+        let joining_database = coven_database::StoreDatabase::new(joining_db);
         let activated_database = joining_database.clone();
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
@@ -3615,7 +3615,7 @@ impl TestStore {
 
     pub(crate) async fn bind_store_device(
         &self,
-        database: &crate::database::StoreDatabase,
+        database: &coven_database::StoreDatabase,
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
         TestDevice::load_with_database(
@@ -3779,13 +3779,13 @@ impl TestStore {
     }
 
     pub(crate) async fn open_into(&self, db: &Database) -> Result<TestDevice, String> {
-        self.open_into_store_database(&crate::database::StoreDatabase::new(db))
+        self.open_into_store_database(&coven_database::StoreDatabase::new(db))
             .await
     }
 
     pub(crate) async fn open_into_store_database(
         &self,
-        database: &crate::database::StoreDatabase,
+        database: &coven_database::StoreDatabase,
     ) -> Result<TestDevice, String> {
         TestDevice::open_with_database(
             database.clone(),
@@ -3801,13 +3801,13 @@ impl TestStore {
         db: &Database,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
-        self.publish_pending_store_database(&crate::database::StoreDatabase::new(db), store_dir)
+        self.publish_pending_store_database(&coven_database::StoreDatabase::new(db), store_dir)
             .await
     }
 
     pub(crate) async fn publish_pending_store_database(
         &self,
-        database: &crate::database::StoreDatabase,
+        database: &coven_database::StoreDatabase,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
         let device = self.bind_store_device(database, &self.signer).await?;
@@ -3817,7 +3817,7 @@ impl TestStore {
     #[cfg(test)]
     pub(crate) fn install_cross_principal_device<'a>(
         &'a self,
-        local_database: crate::database::StoreDatabase,
+        local_database: coven_database::StoreDatabase,
         identity: &'a UserKeypair,
         peer_account_id: &'a str,
         published_at: &'a str,

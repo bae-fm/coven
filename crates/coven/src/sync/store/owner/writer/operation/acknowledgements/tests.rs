@@ -2,10 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use crate::database::Database;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::TestDevice;
+use coven_database::Database;
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
@@ -53,7 +53,7 @@ struct LosingAckFixture {
     storage: Arc<CloudSyncStorage>,
     db: Database,
     device: TestDevice,
-    outbound: crate::database::OutboundStoreAck,
+    outbound: coven_database::OutboundStoreAck,
     losing: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
 }
 
@@ -321,7 +321,7 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .await
             .expect("read drained acknowledgement outbox")
             .is_none());
-        assert!(crate::database::StoreDatabase::new(&loser_db)
+        assert!(coven_database::StoreDatabase::new(&loser_db)
             .protocol_inert_object(loser.reference.object)
             .await
             .expect("read losing acknowledgement inert state")
@@ -421,7 +421,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .into_iter()
         .find(|remote| remote.object() == &outbound.reference.object)
         .expect("acknowledgement remote object");
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .mark_remote_object_uploaded(acknowledgement_remote)
         .await
         .expect("record acknowledgement upload");
@@ -491,7 +491,7 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
         .expect("prepared acknowledgement exists after restart");
     assert!(matches!(
         resumed.activation,
-        crate::database::OutboundStoreAckActivation::Prepared(ref prepared)
+        coven_database::OutboundStoreAckActivation::Prepared(ref prepared)
             if prepared.reference == expected
     ));
     assert_eq!(
@@ -594,7 +594,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
             .reference,
         outbound.reference
     );
-    let inert = crate::database::StoreDatabase::new(&db)
+    let inert = coven_database::StoreDatabase::new(&db)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -643,10 +643,10 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
             .unwrap()
             .expect("nonactivating acknowledgement remains durable")
             .activation,
-        crate::database::OutboundStoreAckActivation::Nonactivating(ref candidate)
+        coven_database::OutboundStoreAckActivation::Nonactivating(ref candidate)
             if candidate.reference == losing.reference
     ));
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()

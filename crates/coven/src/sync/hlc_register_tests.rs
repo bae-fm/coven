@@ -5,7 +5,7 @@
 //! fail if `_updated_at` is wall-clock-stamped, if the clock regresses across a
 //! restart, or if revocation depended on an author-supplied transport timestamp
 //! rather than current write-capable membership. They drive a real
-//! [`crate::database::Database`] (with an injected, wall-clock-controlled `Hlc`)
+//! [`coven_database::Database`] (with an injected, wall-clock-controlled `Hlc`)
 //! so the register lives where production puts it: inside the owned connection.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use coven_keys::keys::UserKeypair;
 use coven_protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 use coven_protocol::membership::MemberRole;
 /// The synthetic test db opens with a single migration, so its
-/// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
+/// [`coven_database::Database::schema_version`] is 1. Changesets are stored at
 /// that version.
 const SCHEMA_VERSION: u32 = 1;
 
@@ -47,7 +47,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     // without publishing a snapshot that already contains the row.
     let a_stamp = a_hlc.now().to_string();
     let db_a = open_test_db_with_hlc(a_hlc.clone(), |_conn| Ok(()));
-    let store_database_a = crate::database::StoreDatabase::new(&db_a);
+    let store_database_a = coven_database::StoreDatabase::new(&db_a);
     let keypair = UserKeypair::generate();
     let storage = TestStore::create(
         &db_a,
@@ -94,7 +94,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .expect("install B's active exact device fixture");
     let active_device_count = db_a
         .test_sql(|database| {
-            database.table_row_count(crate::database::DatabaseTestTable::named(
+            database.table_row_count(coven_database::DatabaseTestTable::named(
                 "store_device_registration_activations",
             ))
         })
@@ -251,7 +251,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
     let (_tmp, store_dir) = temp_store_dir();
     let (commit_reached, _resume_pull) =
-        target.arm_test_pause(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
+        target.arm_test_pause(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
             device_id: expected_stream.clone(),
             seq: 1,
         });
@@ -261,16 +261,16 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let pull = tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     commit_reached.notified().await;
-    let queued_stamp = crate::database::StoreDatabase::new(&target).stamp();
-    let host_stamp = crate::database::StoreDatabase::new(&target)
+    let queued_stamp = coven_database::StoreDatabase::new(&target).stamp();
+    let host_stamp = coven_database::StoreDatabase::new(&target)
         .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                          VALUES ('local-boundary', 'Local', NULL, ?1, '2026-01-01')",
                 [queued_stamp.as_str()],
             )
-            .map_err(crate::database::DbError::from)?;
-            Ok::<String, crate::database::DbError>(queued_stamp)
+            .map_err(coven_database::DbError::from)?;
+            Ok::<String, coven_database::DbError>(queued_stamp)
         })
         .await
         .expect("queued host write commits")
@@ -289,7 +289,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
             .await
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&target)
+        coven_database::StoreDatabase::new(&target)
             .materialized_frontier()
             .await
             .expect("read materialized frontier")
@@ -379,7 +379,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("install member's active exact device fixture");
     let member_device_id = member_db
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
         .expect("read member device id")
         .expect("member device registration is active");
@@ -392,7 +392,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
     let member_store = crate::sync::store::Store::load(
-        crate::database::StoreDatabase::new(&member_db),
+        coven_database::StoreDatabase::new(&member_db),
         storage.storage(),
         member_store_dir,
         member.clone(),
@@ -448,7 +448,7 @@ async fn register_seeds_from_persisted_high_water() {
     let temp = tempfile::tempdir().expect("create register restart directory");
     let path = temp.path().join("register.sqlite");
     let migrations = test_migrations();
-    let before_restart = crate::database::Database::open(
+    let before_restart = coven_database::Database::open(
         &path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -464,7 +464,7 @@ async fn register_seeds_from_persisted_high_water() {
         .expect("persist high-water before restart");
     drop(before_restart);
 
-    let db = crate::database::Database::open_with_hlc(
+    let db = coven_database::Database::open_with_hlc(
         &path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -477,7 +477,7 @@ async fn register_seeds_from_persisted_high_water() {
     )
     .expect("reopen register database with persisted high-water");
 
-    let stamp = crate::database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > high,
         "first stamp {stamp} must sort after the seeded high-water {high}",
@@ -503,11 +503,11 @@ async fn register_seeds_from_on_disk_rows_above_high_water() {
                 [row_stamp],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         },
     );
 
-    let stamp = crate::database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > row_stamp,
         "first stamp {stamp} must sort after the on-disk row {row_stamp}; \
@@ -537,18 +537,18 @@ async fn restart_does_not_seed_past_grossly_future_synced_row() {
                  VALUES ('honest', 'row', NULL, ?1, '2026-01-01')",
                 [honest_seed.as_str()],
             )
-            .map_err(crate::database::DbError::from)?;
+            .map_err(coven_database::DbError::from)?;
             conn.execute(
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('poison', 'row', NULL, ?1, '2026-01-01')",
                 [poison_seed.as_str()],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         },
     );
 
-    let stamp = crate::database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > honest.as_str(),
         "first stamp {stamp} must sort after honest on-disk row {honest}",
@@ -577,11 +577,11 @@ async fn restart_seeds_past_within_bound_synced_row() {
                 [within_seed.as_str()],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         },
     );
 
-    let stamp = crate::database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db).stamp();
     assert!(
         stamp.as_str() > within.as_str(),
         "first stamp {stamp} must sort after within-bound on-disk row {within}",
@@ -746,7 +746,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // Open normally, then make `protocol_state` reject every INSERT so a
     // `set_protocol_state` inside the cycle fails. Reads remain available.
     let migrations = test_migrations();
-    let db = crate::database::Database::open(
+    let db = coven_database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -801,7 +801,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         ])
         .await;
 
-    let changes = crate::database::walk_changeset(&next).expect("walk next changeset");
+    let changes = coven_database::walk_changeset(&next).expect("walk next changeset");
     assert!(
         changes
             .iter()

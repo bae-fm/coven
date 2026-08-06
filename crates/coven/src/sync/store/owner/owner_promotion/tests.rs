@@ -1,4 +1,4 @@
-use crate::database::StoreDatabase;
+use coven_database::StoreDatabase;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::membership::MembershipGrantId;
@@ -12,12 +12,12 @@ use super::journal::OwnerPromotionJournalState;
 /// device's registration names — the starting point of every promotion case that
 /// works on a single candidate.
 struct PromotionCandidate {
-    owner_db: crate::database::Database,
+    owner_db: coven_database::Database,
     owner: UserKeypair,
     home: std::sync::Arc<crate::InMemoryCloudHome>,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     member: UserKeypair,
-    member_db: crate::database::Database,
+    member_db: coven_database::Database,
     member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     encryption: EncryptionService,
 }

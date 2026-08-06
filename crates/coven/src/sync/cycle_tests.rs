@@ -13,13 +13,13 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::database::Database;
-use crate::database::StoreDatabase;
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::test_helpers::*;
+use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_foundation::clock::{FixedClock, SystemClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
@@ -203,7 +203,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let error = result.expect_err("tombstone publication failure fails the cycle");
     assert!(error.contains("drain queued blob tombstones"), "{error}");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()
@@ -228,11 +228,11 @@ trait CycleTestDatabaseOps {
 impl CycleTestDatabaseOps for Database {
     async fn local_store_stream_id(&self) -> String {
         let local_device = self
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("read local Store device")
             .expect("local Store device exists");
-        let registration = crate::database::StoreDatabase::new(self)
+        let registration = coven_database::StoreDatabase::new(self)
             .activated_store_device_registration_records()
             .await
             .expect("read activated Store registrations")
@@ -343,7 +343,7 @@ impl CycleTestStoreOps for TestStore {
             .expect("authorize snapshot fixture writer");
         writer
             .push_store_snapshot(
-                crate::database::CreatedSnapshot {
+                coven_database::CreatedSnapshot {
                     db_image: marker.to_vec(),
                     blobs: Vec::new(),
                 },
@@ -368,11 +368,11 @@ impl CycleTestStoreOps for TestStore {
             .await
             .expect("bind acknowledgement inspection Store");
         let local_device = db
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("read local Store device")
             .expect("local Store device exists");
-        let registration = crate::database::StoreDatabase::new(db)
+        let registration = coven_database::StoreDatabase::new(db)
             .activated_store_device_registration_records()
             .await
             .expect("read activated Store registrations")
@@ -396,7 +396,7 @@ fn fail_exact_create_on(storage: &TestStore, call: usize) {
 }
 
 fn exercise_pre_attempt_abandonment<'a>(
-    owner_db: &'a crate::database::StoreDatabase,
+    owner_db: &'a coven_database::StoreDatabase,
     storage: &'a TestStore,
     owner: &'a UserKeypair,
     member: &'a UserKeypair,
@@ -477,7 +477,7 @@ enum ExactCreateInterruption {
 }
 
 fn exercise_provider_access_grant_create_interruption<'a>(
-    owner_db: &'a crate::database::StoreDatabase,
+    owner_db: &'a coven_database::StoreDatabase,
     storage: &'a TestStore,
     owner: &'a UserKeypair,
     member: &'a UserKeypair,
@@ -553,7 +553,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
 }
 
 fn exercise_post_attempt_cancellation<'a>(
-    owner_db: &'a crate::database::StoreDatabase,
+    owner_db: &'a coven_database::StoreDatabase,
     storage: &'a TestStore,
     owner: &'a UserKeypair,
     member: &'a UserKeypair,
@@ -851,7 +851,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
         )
         .await
         .expect("invite exact Member identity");
-    let owner_db = crate::database::StoreDatabase::new(&database);
+    let owner_db = coven_database::StoreDatabase::new(&database);
     let owner_db = &owner_db;
     let storage = &storage;
     let home = home.as_ref();
@@ -1390,7 +1390,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     );
     let installed_bindings = db
         .test_sql(|database| {
-            database.table_row_count(crate::database::DatabaseTestTable::named(
+            database.table_row_count(coven_database::DatabaseTestTable::named(
                 "row_blob_locators",
             ))
         })
@@ -1675,7 +1675,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
 
     let reopened = open();
     let store = crate::sync::store::Store::load(
-        crate::database::StoreDatabase::new(&reopened),
+        coven_database::StoreDatabase::new(&reopened),
         storage.storage(),
         store_dir.clone(),
         keypair,
@@ -1756,11 +1756,11 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
     let (bindings, objects) = db
         .test_sql(|database| {
             Ok((
-                database.table_row_count(crate::database::DatabaseTestTable::named(
+                database.table_row_count(coven_database::DatabaseTestTable::named(
                     "row_blob_locators",
                 ))?,
                 database
-                    .table_row_count(crate::database::DatabaseTestTable::named("blob_locators"))?,
+                    .table_row_count(coven_database::DatabaseTestTable::named("blob_locators"))?,
             ))
         })
         .await
@@ -1798,7 +1798,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         coven_protocol::blob::content_hash(b"AUDIO"),
     ))
     .await;
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "audio1", &external_path)
         .await;
     db.execute_test_sql(
@@ -1842,7 +1842,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     assert!(!store_dir
         .outbound_blob_spool_path(stored.locator().locator_hash())
         .exists());
-    let registration = crate::database::StoreDatabase::new(&db)
+    let registration = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration_records()
         .await
         .expect("load exact Store registrations")
@@ -1954,7 +1954,7 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
         .await
         .expect("read founder graph")
         .expect("founder graph exists");
-    let crate::database::DurableFounderMembership { head, .. } = graph.membership;
+    let coven_database::DurableFounderMembership { head, .. } = graph.membership;
     storage
         .storage()
         .delete_protocol_object(&head.object)
@@ -2094,10 +2094,10 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
     let (_store_temp, store_dir) = temp_store_dir();
 
     cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
+            coven_database::StoreDatabase::new(&db),
             store_dir,
         ),
         storage,
@@ -2161,10 +2161,10 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
     let (_store_temp, store_dir) = temp_store_dir();
 
     let prepared = cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
+            coven_database::StoreDatabase::new(&db),
             store_dir,
         ),
         storage,
@@ -2189,7 +2189,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         None,
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .local_store_root_ref()
             .await
             .unwrap(),
@@ -2236,10 +2236,10 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
     let db = open_test_db();
     let (_store_temp, store_dir) = temp_store_dir();
     let prepared = cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
+            coven_database::StoreDatabase::new(&db),
             store_dir,
         ),
         storage,
@@ -2301,10 +2301,10 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
     );
     let (_store_temp, store_dir) = temp_store_dir();
     cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
+            coven_database::StoreDatabase::new(&db),
             store_dir,
         ),
         storage,
@@ -2371,10 +2371,10 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
 
     assert!(
         cycle::PreparedSyncComponents::prepare(
-            crate::database::StoreDatabase::new(&db),
+            coven_database::StoreDatabase::new(&db),
             store_dir.clone(),
             crate::sync::test_owner_graph::local_blob_access(
-                crate::database::StoreDatabase::new(&db),
+                coven_database::StoreDatabase::new(&db),
                 store_dir,
             ),
             victim_storage,
@@ -2396,7 +2396,7 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
         None,
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .local_store_root_ref()
             .await
             .unwrap(),
@@ -2426,10 +2426,10 @@ async fn initialization_rejects_an_identity_other_than_the_storage_identity() {
     let (_store_temp, store_dir) = temp_store_dir();
 
     let result = cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&db),
+            coven_database::StoreDatabase::new(&db),
             store_dir,
         ),
         storage,
@@ -2473,10 +2473,10 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         .unwrap();
         assert!(
             cycle::PreparedSyncComponents::prepare(
-                crate::database::StoreDatabase::new(&db),
+                coven_database::StoreDatabase::new(&db),
                 store_dir.clone(),
                 crate::sync::test_owner_graph::local_blob_access(
-                    crate::database::StoreDatabase::new(&db),
+                    coven_database::StoreDatabase::new(&db),
                     store_dir,
                 ),
                 storage.clone(),
@@ -3010,7 +3010,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         .await
         .expect("read local Store position after the empty cycle")
         .expect("the empty cycle publishes its acknowledgement");
-    let registration = crate::database::StoreDatabase::new(&db_m)
+    let registration = coven_database::StoreDatabase::new(&db_m)
         .local_blob_write_authority()
         .await
         .expect("load local Store registration");
@@ -3066,7 +3066,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         failed.to_string().contains("unexpected blob create call 1"),
         "cycle surfaces the blob upload failure: {failed}"
     );
-    let pending = crate::database::StoreDatabase::new(&db)
+    let pending = coven_database::StoreDatabase::new(&db)
         .pending_writes()
         .await
         .expect("read retryable Store writes");
@@ -3075,7 +3075,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let rejected_blobs = reject_blob_create.rejected_blobs();
     assert_eq!(rejected_blobs.len(), 1);
     let prepared_blob = rejected_blobs[0].clone();
-    let prepared = crate::database::StoreDatabase::new(&db)
+    let prepared = coven_database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read prepared Store write after blob failure")
@@ -3238,7 +3238,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
-    let write_id = crate::database::StoreDatabase::new(&db)
+    let write_id = coven_database::StoreDatabase::new(&db)
         .pending_writes()
         .await
         .expect("read rotation-paused Store write")
@@ -3313,7 +3313,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         0,
         "the queued changeset publishes on the first cycle after adoption",
     );
-    let published = match crate::database::StoreDatabase::new(&db)
+    let published = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("read adopted Store write status")
@@ -3323,7 +3323,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     };
     let stream_id = db.local_store_stream_id().await;
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .exact_materialized_ref(&stream_id, published.coord.sequence())
             .await
             .expect("read adopted exact Store position")
@@ -3385,7 +3385,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         .await
         .expect("store host-provided blob");
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         ld.clone(),
     )
     .local_transitions()
@@ -3478,7 +3478,7 @@ async fn ready_make_remote_provider_transport_is_offline() {
     .await
     .expect("store host-provided blob");
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         ld.clone(),
     )
     .local_transitions()
@@ -3579,7 +3579,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     .await
     .expect("two-blob retry cycle succeeds");
     let stream_id = db.local_store_stream_id().await;
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, 2)
         .await
         .expect("read retried exact materialized Store commit")
@@ -3651,7 +3651,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .await
         .expect("first host blob cycle succeeds");
     let stream_id = db.local_store_stream_id().await;
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, 1)
         .await
         .expect("read first exact materialized Store commit")
@@ -3688,7 +3688,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     run_cycle_in_task(Arc::clone(&reject_blob_create), device, ld.clone())
         .await
         .expect("already-uploaded host blob cycle succeeds");
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, 2)
         .await
         .expect("read re-emitted exact materialized Store commit")
@@ -3737,7 +3737,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "lazyblob", b"lazy")
         .await
         .expect("store cache-lazy host-provided blob");
-    let pending = crate::database::StoreDatabase::new(&db)
+    let pending = coven_database::StoreDatabase::new(&db)
         .pending_writes()
         .await
         .expect("read pending Store write");
@@ -3762,7 +3762,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "publish Store write: storage operation failed: InMemoryCloudHome: forced failure before exact create call 1",
         "cycle surfaces the exact Store package append failure",
     );
-    let prepared = crate::database::StoreDatabase::new(&db)
+    let prepared = coven_database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read outbound Store queue")
@@ -3782,7 +3782,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     run_cycle_in_task(cycle_storage, device, ld.clone())
         .await
         .expect("prepared Store write retry succeeds");
-    let status = crate::database::StoreDatabase::new(&db)
+    let status = coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("read retried Store write status");
@@ -3797,7 +3797,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         status => panic!("retried Store write is not published: {status:?}"),
     };
     let stream_id = db.local_store_stream_id().await;
-    let published = crate::database::StoreDatabase::new(&db)
+    let published = coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, commit.coord.sequence())
         .await
         .expect("read retried exact Store position")
@@ -3854,7 +3854,7 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
          VALUES ('n1', 'Shareable', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    let write_id = crate::database::StoreDatabase::new(&db)
+    let write_id = coven_database::StoreDatabase::new(&db)
         .pending_writes()
         .await
         .expect("read push-timestamp write")
@@ -3868,7 +3868,7 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         .run_cycle(&ld, None)
         .await
         .expect("run acknowledgement timestamp cycle");
-    let published = match crate::database::StoreDatabase::new(&db)
+    let published = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("read push-timestamp write status")
@@ -3877,7 +3877,7 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         status => panic!("push-timestamp write is not published: {status:?}"),
     };
     let stream_id = db.local_store_stream_id().await;
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, published.coord.sequence())
         .await
         .expect("read push-timestamp materialization")
@@ -3967,7 +3967,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .expect("authorize cadence snapshot writer");
         snapshot_writer
             .push_store_snapshot(
-                crate::database::CreatedSnapshot {
+                coven_database::CreatedSnapshot {
                     db_image: b"cadence-snapshot".to_vec(),
                     blobs: Vec::new(),
                 },
@@ -4074,7 +4074,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .expect("authorize timed snapshot writer");
         snapshot_writer
             .push_store_snapshot(
-                crate::database::CreatedSnapshot {
+                coven_database::CreatedSnapshot {
                     db_image: b"time-cadence-snapshot".to_vec(),
                     blobs: Vec::new(),
                 },
@@ -4151,7 +4151,7 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     .await
     .expect_err("the first Store package append fails");
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
             .expect("read outbound Store queue")
@@ -4167,7 +4167,7 @@ async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     )
     .await
     .expect("retry prepared Store write");
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read retried outbound Store queue")
@@ -4210,7 +4210,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     run_cycle_in_task(Arc::clone(&cycle_storage), device.clone(), ld.clone())
         .await
         .expect_err("the first Store package append fails");
-    let first_write_id = crate::database::StoreDatabase::new(&db)
+    let first_write_id = coven_database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()
         .await
         .expect("read prepared Store write")
@@ -4237,7 +4237,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
             .contains("prepare Store write: outbound blob audio/audio1 is absent from storage"),
         "prepared write surfaces the missing blob: {err}",
     );
-    let first_write_status = crate::database::StoreDatabase::new(&db)
+    let first_write_status = coven_database::StoreDatabase::new(&db)
         .write_status(&first_write_id)
         .await
         .expect("read first write status");
@@ -4253,7 +4253,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         ),
         "first write status after blocking its successor: {first_write_status:?}",
     );
-    let pending = crate::database::StoreDatabase::new(&db)
+    let pending = coven_database::StoreDatabase::new(&db)
         .pending_writes()
         .await
         .expect("read pending writes");
@@ -4276,7 +4276,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .await
         .expect("restored missing user blob cycle succeeds");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .write_status(&blocked_write_id)
             .await
             .expect("read blocked write status"),
@@ -4302,7 +4302,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
          VALUES ('prepare-fail', 'Prepare Fail', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    let write_id = crate::database::StoreDatabase::new(&db)
+    let write_id = coven_database::StoreDatabase::new(&db)
         .pending_writes()
         .await
         .expect("read preparation-failure write")
@@ -4332,7 +4332,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         "the pending write remains queued when outgoing preparation fails"
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .write_status(&write_id)
             .await
             .expect("read failed-preparation write status"),
@@ -4341,7 +4341,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
 
     db.test_sql(|conn| {
         conn.execute_batch("DROP TRIGGER fail_outbound_preparation")
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
     })
     .await
     .expect("remove Store preparation fault");
@@ -4352,7 +4352,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     )
     .await
     .expect("retry outgoing preparation");
-    let published = match crate::database::StoreDatabase::new(&db)
+    let published = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("read retried preparation write status")
@@ -4361,7 +4361,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         status => panic!("retried preparation write is not published: {status:?}"),
     };
     let stream_id = db.local_store_stream_id().await;
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id, published.coord.sequence())
         .await
         .expect("read retried preparation materialization")
@@ -4471,11 +4471,11 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .await
         .expect("bind reclamation acknowledgement Store");
     let local_device = db_m
-        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
         .expect("read local Store device")
         .expect("local Store device exists");
-    let registrations = crate::database::StoreDatabase::new(&db_m)
+    let registrations = coven_database::StoreDatabase::new(&db_m)
         .activated_store_device_registration_records()
         .await
         .expect("read reclamation Store registrations");
@@ -4554,7 +4554,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .expect("pull initial behind Member Store state");
 
         let behind_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            crate::database::StoreDatabase::new(&behind_db)
+            coven_database::StoreDatabase::new(&behind_db)
                 .materialized_frontier()
                 .await
                 .expect("read behind device frontier"),
@@ -4591,7 +4591,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
 
         drop(source);
         tokio::spawn(async move {
-            let registration = crate::database::StoreDatabase::new(&owner_db)
+            let registration = coven_database::StoreDatabase::new(&owner_db)
                 .local_blob_write_authority()
                 .await
                 .expect("read owner announcement authority");
@@ -4797,7 +4797,7 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
         .expect("activate exact joined test device");
 
     assert!(
-        crate::database::StoreDatabase::new(&member_db)
+        coven_database::StoreDatabase::new(&member_db)
             .latest_local_store_device_registration()
             .await
             .expect("load joined local registration")
@@ -4938,7 +4938,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     let (_write_dir, store_dir) = temp_store_dir();
     {
         let store = crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(&owner_db),
+            coven_database::StoreDatabase::new(&owner_db),
             storage.storage(),
             store_dir.clone(),
             owner.clone(),
@@ -4960,7 +4960,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
 
     let mut test_points = owner_db.observe_test_points();
     let (position_held, resume_acceptance) =
-        owner_db.arm_test_pause(crate::database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld);
+        owner_db.arm_test_pause(coven_database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld);
     let accept_store = approval.owner.clone();
     let acceptance = tokio::spawn(async move {
         accept_store
@@ -4977,7 +4977,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     let drain_store_dir = store_dir;
     let drain = tokio::spawn(async move {
         let store = crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(&drain_db),
+            coven_database::StoreDatabase::new(&drain_db),
             drain_storage.storage(),
             drain_store_dir,
             owner.clone(),
@@ -4999,7 +4999,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
         while let Some(point) = test_points.recv().await {
             if matches!(
                 point,
-                crate::database::DatabaseTestPoint::StoreWriteCommitUploaded { .. }
+                coven_database::DatabaseTestPoint::StoreWriteCommitUploaded { .. }
             ) {
                 return true;
             }
@@ -5232,7 +5232,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
                 .await;
 
         let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            crate::database::StoreDatabase::new(&excluding_db)
+            coven_database::StoreDatabase::new(&excluding_db)
                 .materialized_frontier()
                 .await
                 .expect("load exclusion frontier"),
@@ -5441,7 +5441,7 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
     let encryption = EncryptionService::from_key([44; 32]);
     invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
     exercise_pre_attempt_abandonment(
-        &crate::database::StoreDatabase::new(&owner_db),
+        &coven_database::StoreDatabase::new(&owner_db),
         &storage,
         &owner,
         &member,
@@ -5466,7 +5466,7 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
     )
     .await;
     exercise_post_attempt_cancellation(
-        &crate::database::StoreDatabase::new(&owner_db),
+        &coven_database::StoreDatabase::new(&owner_db),
         &storage,
         &owner,
         &member,
@@ -5492,7 +5492,7 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
     )
     .await;
     exercise_post_attempt_cancellation(
-        &crate::database::StoreDatabase::new(&owner_db),
+        &coven_database::StoreDatabase::new(&owner_db),
         &storage,
         &owner,
         &member,
@@ -5517,7 +5517,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         &EncryptionService::from_key([52; 32]),
     )
     .await;
-    let owner_database = crate::database::StoreDatabase::new(&owner_db);
+    let owner_database = coven_database::StoreDatabase::new(&owner_db);
     Box::pin(async {
         let owner_device = storage
             .bind_store_device(&owner_database, &owner)
@@ -5560,7 +5560,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         let (_joining_store_dir_temp, joining_store_dir) = temp_store_dir();
         let mut joining_store = pending_join
             .begin_joining_store(
-                crate::database::StoreDatabase::new(&joining_db),
+                coven_database::StoreDatabase::new(&joining_db),
                 &joining_store_dir,
             )
             .await
@@ -5626,7 +5626,7 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
     )
     .await;
     exercise_provider_access_grant_create_interruption(
-        &crate::database::StoreDatabase::new(&owner_db),
+        &coven_database::StoreDatabase::new(&owner_db),
         &storage,
         &owner,
         &member,
@@ -5652,7 +5652,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
     )
     .await;
     exercise_provider_access_grant_create_interruption(
-        &crate::database::StoreDatabase::new(&owner_db),
+        &coven_database::StoreDatabase::new(&owner_db),
         &storage,
         &owner,
         &member,
@@ -5693,7 +5693,7 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
     let member_db = open_test_db();
     storage
         .install_cross_principal_device(
-            crate::database::StoreDatabase::new(&member_db),
+            coven_database::StoreDatabase::new(&member_db),
             &member,
             "member-account",
             T0,
@@ -5702,7 +5702,7 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
         .expect("complete cross-principal device join");
 
     assert!(
-        crate::database::StoreDatabase::new(&member_db)
+        coven_database::StoreDatabase::new(&member_db)
             .latest_local_store_device_registration()
             .await
             .expect("load joined local registration")
@@ -5743,7 +5743,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     let directory = tempfile::tempdir().expect("pending-rotation database directory");
     let path = directory.path().join("store.sqlite3");
     let open = || {
-        crate::database::Database::open(
+        coven_database::Database::open(
             &path,
             test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -5758,7 +5758,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     let signer = UserKeypair::generate();
     let encryption = coven_keys::encryption::EncryptionService::from_key([17; 32]);
     let db = open();
-    let store_database = crate::database::StoreDatabase::new(&db);
+    let store_database = coven_database::StoreDatabase::new(&db);
     let (_blob_temp, store_dir) = temp_store_dir();
     let storage = crate::storage::CloudSyncStorage::new(
         Arc::new(home.clone()),
@@ -5806,10 +5806,10 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     )
     .expect("reconstruct pending-rotation storage");
     let result = crate::sync::cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(&reopened),
+        coven_database::StoreDatabase::new(&reopened),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(&reopened),
+            coven_database::StoreDatabase::new(&reopened),
             store_dir,
         ),
         storage,

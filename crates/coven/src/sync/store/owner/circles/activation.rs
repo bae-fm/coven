@@ -2,9 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
+use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{

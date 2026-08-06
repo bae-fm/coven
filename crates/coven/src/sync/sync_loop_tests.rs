@@ -25,8 +25,8 @@ fn storage_configuration_failure_is_terminal() {
     assert!(matches!(status, SyncLoopStatus::Failed { .. }));
 }
 
-fn database() -> crate::database::StoreDatabase {
-    let database = crate::database::Database::open(
+fn database() -> coven_database::StoreDatabase {
+    let database = coven_database::Database::open(
         std::path::Path::new(":memory:"),
         Vec::new(),
         chrono::Duration::days(30),
@@ -36,7 +36,7 @@ fn database() -> crate::database::StoreDatabase {
         &[],
     )
     .expect("open status test database");
-    crate::database::StoreDatabase::new(&database)
+    coven_database::StoreDatabase::new(&database)
 }
 
 #[tokio::test]

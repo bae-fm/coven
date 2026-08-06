@@ -20,7 +20,7 @@ pub enum InviteError {
     #[error("Cannot revoke the last owner of a store")]
     LastOwner,
     #[error("membership mutation database state: {0}")]
-    Database(#[from] crate::database::DbError),
+    Database(#[from] coven_database::DbError),
     #[error("pending membership mutation does not match this request: {0}")]
     PendingMutation(String),
     #[error("durable membership mutation is invalid: {0}")]

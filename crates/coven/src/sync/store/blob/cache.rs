@@ -95,8 +95,8 @@
 //! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
-use crate::database::DbError;
 use crate::storage::SyncStorage;
+use coven_database::DbError;
 use coven_foundation::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };

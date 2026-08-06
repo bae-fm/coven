@@ -13,9 +13,9 @@ use super::operations::{
 };
 use super::verified_history::MergeHistoryVerifier;
 use super::{AuthorizedWriterOperation, Store, StoreError};
-use crate::database::DbError;
-use crate::database::StoreDatabase;
 use crate::storage::{SyncStorage, VerifiedObjectWrites};
+use coven_database::DbError;
+use coven_database::StoreDatabase;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     device_exclusion_outcome_semantic_prefix, device_exclusion_proposal_semantic_prefix,
@@ -400,7 +400,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         #[cfg(test)]
         database
             .reach_test_point(
-                crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged,
+                coven_database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged,
             )
             .await;
         Ok(durable)
@@ -502,7 +502,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         #[cfg(test)]
         database
             .reach_test_point(
-                crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged,
+                coven_database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged,
             )
             .await;
         Ok(durable)

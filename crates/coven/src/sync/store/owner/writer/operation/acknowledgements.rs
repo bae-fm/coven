@@ -8,7 +8,7 @@ use coven_protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {
     #[error("database: {0}")]
-    Database(#[from] crate::database::DbError),
+    Database(#[from] coven_database::DbError),
     #[error("Store protocol: {0}")]
     Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("published Store acknowledgement count has no representable successor")]
@@ -173,7 +173,7 @@ impl AuthorizedWriterOperation<'_> {
                 }
             }
             let candidate = match outbound.activation.clone() {
-                crate::database::OutboundStoreAckActivation::AwaitingCandidate => {
+                coven_database::OutboundStoreAckActivation::AwaitingCandidate => {
                     let plan = self.prepare_plan().await?;
                     plan.common()
                         .validate_acknowledgement(&outbound.ack.value)?;
@@ -191,8 +191,8 @@ impl AuthorizedWriterOperation<'_> {
                         .await?;
                     continue;
                 }
-                crate::database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
-                crate::database::OutboundStoreAckActivation::Nonactivating(_) => {
+                coven_database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
+                coven_database::OutboundStoreAckActivation::Nonactivating(_) => {
                     self.finish_nonactivating_acknowledgement(outbound.reference)
                         .await?;
                     published = published

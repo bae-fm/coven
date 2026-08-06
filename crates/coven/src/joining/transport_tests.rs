@@ -38,8 +38,8 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 /// shared in-memory home, and a factory for the joining device's client.
 struct TransportFixture {
     owner_store: TestDevice,
-    owner_db: crate::database::Database,
-    owner_database: crate::database::StoreDatabase,
+    owner_db: coven_database::Database,
+    owner_database: coven_database::StoreDatabase,
     /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
     /// commit of the owner's while a join is mid-flight.
     owner_test_store: std::sync::Arc<TestStore>,
@@ -95,7 +95,7 @@ impl TransportFixture {
         coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
         let owner_db = open_test_db();
-        let owner_database = crate::database::StoreDatabase::from_database(owner_db.clone());
+        let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
         let create_store_db = owner_db.clone();
         let create_store_owner = owner.clone();
         let store_id_owned = store_id.to_string();
@@ -731,7 +731,7 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
     // Completing is not enough: the joining device has to hold the row the
     // owner's intervening commit carried, which is what converging over that
     // commit rather than stepping past it means.
-    let joined_db = crate::database::DatabaseImageTest::open(&config.store_dir.db_path())
+    let joined_db = coven_database::DatabaseImageTest::open(&config.store_dir.db_path())
         .expect("open the joined device's database");
     assert_eq!(
         joined_db

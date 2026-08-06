@@ -1,4 +1,4 @@
-use crate::database::StoreDatabase;
+use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
 

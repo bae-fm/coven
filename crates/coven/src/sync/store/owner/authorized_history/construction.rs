@@ -31,7 +31,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<InitializedStore, StoreInitializationError> {
         let database = self.database.clone();
         let mut device_id = database
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
         let identity_is_founder = self
@@ -61,7 +61,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .await
                 .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
             device_id = database
-                .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
                 .await
                 .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
         }

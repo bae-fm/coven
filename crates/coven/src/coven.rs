@@ -5,10 +5,10 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
 use crate::store_sync::ConfigProvider;
 use crate::{Migration, MigrationError};
+use coven_database::{Database, DbError, OpenError};
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::StoreOpenGuard;
@@ -44,12 +44,12 @@ pub enum CovenError {
     )]
     WriteRollbackFailed {
         write: Box<CovenError>,
-        rollback: crate::database::BlobFileFailures,
+        rollback: coven_database::BlobFileFailures,
     },
     #[error("write failed: {operation}; failed to remove unpublished local blobs: {cleanup}")]
     BlobCleanupFailed {
         operation: Box<CovenError>,
-        cleanup: crate::database::BlobFileFailures,
+        cleanup: coven_database::BlobFileFailures,
     },
     #[error("synced_tables must be set before opening a coven store")]
     MissingSyncedTables,

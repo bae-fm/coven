@@ -151,7 +151,7 @@ async fn operation_inspection_surface_reports_the_typed_block() {
         .await
         .expect("prepare a ready operation");
     let ready_id = journal.operation_id.clone();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(journal)
         .await
         .expect("persist the ready operation");
@@ -242,7 +242,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .collect::<Vec<_>>()
         .try_into()
         .expect("founder has one active Store grant");
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(journal)
         .await
         .expect("persist authorized operation");
@@ -250,7 +250,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     // The operation is durably blocked (its exact retained payload preserved),
     // then retried. Retry restores the phase and re-enters the publish pipeline
     // without regenerating anything.
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .block_circle_operation(
             &operation_id,
             coven_protocol::circle::CircleOperationBlock::AuthorityLost {
@@ -267,12 +267,12 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .await
         .expect("retry publishes the still-authorized operation");
 
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read retried operation")
         .is_none());
-    let (activated, activation_commit_ref) = crate::database::StoreDatabase::new(&db)
+    let (activated, activation_commit_ref) = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&founder))
         .await
         .expect("load activated Circle authoring state");
@@ -314,7 +314,7 @@ async fn discard_without_nonactivation_proof_is_refused() {
         "{refusal:?}"
     );
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read operation after refused discard")
@@ -452,7 +452,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         .expect("the verified winner permits discard");
 
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read discarded operation")
@@ -508,7 +508,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
         .await
         .expect_err("the injected delete failure interrupts cleanup");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read interrupted operation")
@@ -526,7 +526,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
         .await
         .expect("resume completes the interrupted discard");
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read resumed operation")
@@ -555,7 +555,7 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
         .await
         .expect("prepare an authorized operation");
     let ready_id = ready.operation_id.clone();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(ready)
         .await
         .expect("persist the ready operation");
@@ -624,7 +624,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         .await
         .expect("prepare the operation queued behind the loser");
     let second_id = second.operation_id.clone();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(second.clone())
         .await
         .expect("persist the operation queued behind the loser");
@@ -639,7 +639,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         .await
         .expect("the resume queue drains past an operation that lost its position");
 
-    let second_after = crate::database::StoreDatabase::new(&db)
+    let second_after = coven_database::StoreDatabase::new(&db)
         .circle_operation(&second_id)
         .await
         .expect("read the operation queued behind the loser")
@@ -654,7 +654,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         "the queue advanced to and classified the next operation: {:?}",
         second_after.state(),
     );
-    let blocked = crate::database::StoreDatabase::new(&db)
+    let blocked = coven_database::StoreDatabase::new(&db)
         .circle_operation(&first.operation_id)
         .await
         .expect("read the operation that lost its position")
@@ -672,7 +672,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
 
     // The block is a fact reported to the initiator, so it has to be legible from
     // the surface the initiator reads.
-    let reported = crate::database::StoreDatabase::new(&db)
+    let reported = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list circle operations");
@@ -692,7 +692,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
 
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .oldest_pending_circle_operation()
             .await
             .expect("read the publish queue head")
@@ -721,7 +721,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
     assert!(
         matches!(
-            crate::database::StoreDatabase::new(&db)
+            coven_database::StoreDatabase::new(&db)
                 .circle_operation(&first.operation_id)
                 .await
                 .expect("read the retried operation")

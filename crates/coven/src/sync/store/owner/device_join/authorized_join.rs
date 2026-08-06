@@ -343,7 +343,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let plan = self.writer.prepare_plan().await?;
         #[cfg(test)]
         self.database
-            .reach_test_point(crate::database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
+            .reach_test_point(coven_database::DatabaseTestPoint::DeviceJoinAttemptPositionHeld)
             .await;
         let cut = plan.predecessor_cut()?;
         if !self

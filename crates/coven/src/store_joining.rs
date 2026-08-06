@@ -1,6 +1,6 @@
-use crate::database::StoreDatabase;
 use crate::store_membership::StoreMembership;
 use crate::store_sync::{StoreSync, SyncError};
+use coven_database::StoreDatabase;
 use coven_protocol::membership::MemberRole;
 
 /// The two parts of device joining that are not a plain sync command: minting

@@ -2,8 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use crate::database::Database;
-use crate::database::{AuthorExclusionLocatorTamper, StoreDatabase};
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
@@ -11,6 +9,8 @@ use crate::sync::test_helpers::{
     open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
 };
 use crate::{StoreDir, WriteId};
+use coven_database::Database;
+use coven_database::{AuthorExclusionLocatorTamper, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::{
     StoreAckExclusionState, StoreCommitCoord, StoreDeviceExclusionRef, StoreDeviceRegistrationRef,
@@ -120,9 +120,8 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         .sequence();
     drop(writer);
     Box::pin(async move {
-        let (candidate_staged, resume_candidate) = reopened.arm_test_pause(
-            crate::database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged,
-        );
+        let (candidate_staged, resume_candidate) = reopened
+            .arm_test_pause(coven_database::DatabaseTestPoint::StoreDeviceExclusionCandidateStaged);
         let cancel_device = reopened_store.clone();
         let cancel_reference = reference.clone();
         let cancellation_task = tokio::spawn(async move {
@@ -294,7 +293,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         .publish_acknowledgement(snapshot_coverage)
         .await
         .expect("acknowledge author exclusion snapshot");
-    let image = crate::database::DatabaseImageTest::from_bytes(&image)
+    let image = coven_database::DatabaseImageTest::from_bytes(&image)
         .expect("open author exclusion snapshot image");
     let stored: (String, String, String, String) = image
         .author_exclusion_activation_evidence()
@@ -461,7 +460,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             .publish_snapshot(image, snapshot_coverage.clone())
             .await
             .expect("publish pre-exclusion snapshot");
-        let published_snapshot = crate::database::StoreDatabase::new(&owner_db)
+        let published_snapshot = coven_database::StoreDatabase::new(&owner_db)
             .latest_local_store_snapshot()
             .await
             .expect("read published pre-exclusion snapshot")
@@ -696,7 +695,7 @@ async fn summary_materialization_failure_rolls_back_terminal_merge_transaction()
         false,
         true,
         Some(TerminalMergeTransactionFailure::Injected(
-            crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
+            coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
         )),
     ))
     .await;
@@ -712,7 +711,7 @@ async fn retraction_deletion_failure_rolls_back_terminal_merge_transaction() {
         false,
         true,
         Some(TerminalMergeTransactionFailure::Injected(
-            crate::database::MergeMaterializationFailurePoint::RetractionDeletion,
+            coven_database::MergeMaterializationFailurePoint::RetractionDeletion,
         )),
     ))
     .await;
@@ -728,7 +727,7 @@ async fn projection_replacement_failure_rolls_back_terminal_merge_transaction() 
         false,
         true,
         Some(TerminalMergeTransactionFailure::Injected(
-            crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
+            coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
         )),
     ))
     .await;
@@ -882,7 +881,7 @@ impl<'a> ExcludedPeer<'a> {
         &self,
         signer: &UserKeypair,
         write_id: WriteId,
-        candidates: &crate::database::PreparedMergeAbandonmentCandidates,
+        candidates: &coven_database::PreparedMergeAbandonmentCandidates,
         candidate_commit_context: &ProtocolObjectContext,
         publication: PreparedAbandonmentHeadPublication,
     ) {
@@ -964,11 +963,11 @@ impl<'a> ExcludedPeer<'a> {
             }
         }
         assert_eq!(
-            crate::database::StoreDatabase::new(self.database)
+            coven_database::StoreDatabase::new(self.database)
                 .discard_blocked_write(&write_id)
                 .await
                 .expect("discard excluded prepared abandonment write"),
-            crate::database::BlockedWriteDiscard::Discarded(vec![write_id]),
+            coven_database::BlockedWriteDiscard::Discarded(vec![write_id]),
         );
     }
 }
@@ -1040,7 +1039,7 @@ async fn run_excluded_author_candidate_cleanup(
 
 #[derive(Clone, Copy)]
 enum TerminalMergeTransactionFailure {
-    Injected(crate::database::MergeMaterializationFailurePoint),
+    Injected(coven_database::MergeMaterializationFailurePoint),
     DeleteDeviceStateDuringRetraction,
 }
 
@@ -1124,7 +1123,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .prepare_pending_store_write(&store_dir)
         .await
         .expect("prepare excluded peer candidate"));
-    let candidate = crate::database::StoreDatabase::new(&peer_db)
+    let candidate = coven_database::StoreDatabase::new(&peer_db)
         .oldest_prepared_store_write()
         .await
         .expect("load excluded peer candidate")
@@ -1165,7 +1164,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .create_protocol_object(&candidate.commit.prepared)
         .await
         .expect("upload excluded peer candidate commit");
-    crate::database::StoreDatabase::new(&peer_db)
+    coven_database::StoreDatabase::new(&peer_db)
         .mark_candidate_commit_uploaded(candidate_ref.clone())
         .await
         .expect("record uploaded excluded peer commit");
@@ -1178,7 +1177,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .expect("exact excluded peer registration");
     let target = target_registration.reference().clone();
     let prepared_abandonment = if prepare_abandonment {
-        crate::database::StoreDatabase::new(&peer_db)
+        coven_database::StoreDatabase::new(&peer_db)
             .set_write_status(
                 &write_id,
                 crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
@@ -1195,7 +1194,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .prepare_merge_candidate_abandonment(write_id.clone())
             .await
             .expect("prepare abandonment before exclusion"));
-        crate::database::StoreDatabase::new(&peer_db)
+        coven_database::StoreDatabase::new(&peer_db)
             .prepared_merge_abandonment_candidates(write_id.clone())
             .await
             .expect("load prepared abandonment candidates")
@@ -1208,7 +1207,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .drain_store_writes()
             .await
             .expect("publish excluded peer candidate before exclusion");
-        let original = match crate::database::StoreDatabase::new(&peer_db)
+        let original = match coven_database::StoreDatabase::new(&peer_db)
             .write_status(&write_id)
             .await
             .expect("load accepted candidate status")
@@ -1232,7 +1231,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         assert_eq!(local_partitions, 1);
         assert!(local_changeset_bytes > 0);
         finalize_peer_exclusion_detached(owner_device.clone(), &target).await;
-        let activation_commit = crate::database::StoreDatabase::new(&owner_db)
+        let activation_commit = coven_database::StoreDatabase::new(&owner_db)
             .author_exclusion_activation_for_candidate(
                 store.root.clone(),
                 candidate_ref.clone(),
@@ -1286,7 +1285,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                     .await
                     .expect("rolled-back retraction retains the original materialization");
                 assert!(matches!(
-                    crate::database::StoreDatabase::new(&peer_db)
+                    coven_database::StoreDatabase::new(&peer_db)
                         .write_status(&write_id)
                         .await
                         .expect("reload rolled-back write status"),
@@ -1305,13 +1304,13 @@ async fn run_excluded_author_candidate_cleanup_case(
                                     [],
                                     |row| row.get::<_, i64>(0),
                                 )
-                                .map_err(crate::database::DbError::from)
+                                .map_err(coven_database::DbError::from)
                         })
                         .await
                         .expect("count rows after transaction rollback"),
                     3,
                 );
-                assert!(!crate::database::StoreDatabase::new(&peer_db)
+                assert!(!coven_database::StoreDatabase::new(&peer_db)
                     .merge_candidate_cleanup_pending(&write_id)
                     .await
                     .expect("rolled-back transaction created no cleanup"));
@@ -1326,7 +1325,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         }
         home.fail_exact_delete_on_call(1);
         assert!(store.pull_into_result(&peer_db, &store_dir).await.is_err());
-        let witness = match crate::database::StoreDatabase::new(&peer_db)
+        let witness = match coven_database::StoreDatabase::new(&peer_db)
             .write_status(&write_id)
             .await
             .expect("load retracted candidate status")
@@ -1343,7 +1342,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                         [],
                         |row| row.get::<_, i64>(0),
                     )
-                    .map_err(crate::database::DbError::from)
+                    .map_err(coven_database::DbError::from)
             })
             .await
             .expect("count retracted host row");
@@ -1357,7 +1356,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                         [],
                         |row| row.get::<_, i64>(0),
                     )
-                    .map_err(crate::database::DbError::from)
+                    .map_err(coven_database::DbError::from)
             })
             .await
             .expect("count retained local-only host row");
@@ -1370,12 +1369,12 @@ async fn run_excluded_author_candidate_cleanup_case(
                         [],
                         |row| row.get::<_, i64>(0),
                     )
-                    .map_err(crate::database::DbError::from)
+                    .map_err(coven_database::DbError::from)
             })
             .await
             .expect("count surviving retained Store-package row");
         assert_eq!(surviving_row_count, 1);
-        assert!(crate::database::StoreDatabase::new(&peer_db)
+        assert!(coven_database::StoreDatabase::new(&peer_db)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .expect("retracted candidate requires cleanup"));
@@ -1384,12 +1383,12 @@ async fn run_excluded_author_candidate_cleanup_case(
         ExcludedPeer::new(&reopened, store.as_ref(), &store_dir)
             .pull_exclusion(ExpectedHeldCandidate::None)
             .await;
-        assert!(!crate::database::StoreDatabase::new(&reopened)
+        assert!(!coven_database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .expect("retracted candidate cleanup completed"));
         assert!(matches!(
-            crate::database::StoreDatabase::new(&reopened)
+            coven_database::StoreDatabase::new(&reopened)
                 .write_status(&write_id)
                 .await
                 .expect("reload retracted candidate status"),
@@ -1423,12 +1422,12 @@ async fn run_excluded_author_candidate_cleanup_case(
     }
     let publication_pause = match head_publication {
         ExcludedCandidateHeadPublication::AfterCommitUpload => Some(
-            crate::database::DatabaseTestPoint::StoreWriteCommitUploaded {
+            coven_database::DatabaseTestPoint::StoreWriteCommitUploaded {
                 write_id: write_id.clone(),
             },
         ),
         ExcludedCandidateHeadPublication::AfterHeadReadBack => {
-            Some(crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
+            Some(coven_database::DatabaseTestPoint::StoreWriteHeadReadBack {
                 write_id: write_id.clone(),
             })
         }
@@ -1522,7 +1521,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         publish_error,
         crate::sync::store::StoreError::AuthorExcluded { .. }
     ));
-    match crate::database::StoreDatabase::new(&peer_db)
+    match coven_database::StoreDatabase::new(&peer_db)
         .write_status(&write_id)
         .await
         .expect("load excluded peer write status")
@@ -1541,11 +1540,11 @@ async fn run_excluded_author_candidate_cleanup_case(
         status => panic!("excluded peer write has unexpected status: {status:?}"),
     }
     assert!(matches!(
-        crate::database::StoreDatabase::new(&peer_db)
+        coven_database::StoreDatabase::new(&peer_db)
             .merge_abandonment_state(&write_id)
             .await
             .expect("load excluded peer abandonment state"),
-        crate::database::MergeAbandonmentState::None
+        coven_database::MergeAbandonmentState::None
     ));
     let indexed_shared_blobs = if index_shared_blobs {
         let snapshot_owner = coven_protocol::remote_object::SharedObjectOwner::Snapshot(
@@ -1590,7 +1589,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     drop(peer_db);
 
     let reopened = open(&path, "excluded-peer-host");
-    let cleanup_pending = crate::database::StoreDatabase::new(&reopened)
+    let cleanup_pending = coven_database::StoreDatabase::new(&reopened)
         .merge_candidate_cleanup_pending(&write_id)
         .await
         .expect("load excluded peer cleanup state");
@@ -1603,7 +1602,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .abandon_merge_candidate(write_id.clone())
             .await
             .is_err());
-        assert!(crate::database::StoreDatabase::new(&reopened)
+        assert!(coven_database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .expect("excluded peer cleanup remains pending"));
@@ -1620,7 +1619,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         ));
     }
     if cleanup_pending && !indexed_shared_blobs.is_empty() {
-        let cleanup_targets = crate::database::StoreDatabase::new(&reopened)
+        let cleanup_targets = coven_database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_targets(write_id.clone())
             .await
             .expect("load excluded candidate cleanup targets");
@@ -1660,7 +1659,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         ) {
             return;
         }
-        let candidate = crate::database::StoreDatabase::new(&post_proof_database)
+        let candidate = coven_database::StoreDatabase::new(&post_proof_database)
             .blocked_merge_candidate(post_proof_write_id)
             .await
             .expect("reload post-proof candidate")
@@ -1732,7 +1731,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .replace_remote_object_for_test(candidate_ref.object.clone(), remote)
             .await
             .expect("sabotage durable activation head");
-        assert!(crate::database::StoreDatabase::new(&reopened)
+        assert!(coven_database::StoreDatabase::new(&reopened)
             .merge_candidate_cleanup_pending(&write_id)
             .await
             .is_err());
@@ -1790,7 +1789,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                     .await,
                 Err(coven_protocol::objects::StorageError::NotFound(_))
             ));
-            assert!(crate::database::StoreDatabase::new(&retried)
+            assert!(coven_database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
                 .await
                 .expect("read absent candidate head state")
@@ -1811,7 +1810,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                     .expect("reload retained exact late head"),
                 candidate.head.value.to_bytes(),
             );
-            let inert = crate::database::StoreDatabase::new(&retried)
+            let inert = coven_database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
                 .await
                 .expect("read exact late candidate head state")
@@ -1879,7 +1878,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             ));
         }
         ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
-            assert!(crate::database::StoreDatabase::new(&retried)
+            assert!(coven_database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
                 .await
                 .expect("read candidate head state after third winner")
@@ -1918,24 +1917,24 @@ async fn run_excluded_author_candidate_cleanup_case(
         ))
     ));
     assert!(matches!(
-        crate::database::StoreDatabase::new(&retried)
+        coven_database::StoreDatabase::new(&retried)
             .merge_abandonment_state(&write_id)
             .await
             .expect("reload excluded peer abandonment state"),
-        crate::database::MergeAbandonmentState::None
+        coven_database::MergeAbandonmentState::None
     ));
-    match crate::database::StoreDatabase::new(&retried)
+    match coven_database::StoreDatabase::new(&retried)
         .write_status(&write_id)
         .await
         .expect("reload excluded peer write status")
     {
         crate::WriteStatus::Blocked(_) => {
             assert_eq!(
-                crate::database::StoreDatabase::new(&retried)
+                coven_database::StoreDatabase::new(&retried)
                     .discard_blocked_write(&write_id)
                     .await
                     .expect("discard excluded peer write"),
-                crate::database::BlockedWriteDiscard::Discarded(vec![write_id.clone()])
+                coven_database::BlockedWriteDiscard::Discarded(vec![write_id.clone()])
             );
         }
         crate::WriteStatus::Resolved(crate::WriteResolution::Retracted { witness }) => {
@@ -1949,7 +1948,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
             | ExcludedCandidateHeadPublication::AfterHeadReadBack
     ) {
-        assert!(crate::database::StoreDatabase::new(&retried)
+        assert!(coven_database::StoreDatabase::new(&retried)
             .protocol_inert_object(candidate_head)
             .await
             .expect("reload exact late candidate head state")

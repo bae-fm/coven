@@ -7,10 +7,10 @@ use super::*;
 pub(crate) async fn delete_candidate_cleanup_targets<E>(
     storage: &dyn SyncStorage,
     database: &StoreDatabase,
-    targets: impl IntoIterator<Item = crate::database::CandidateCleanupObject>,
+    targets: impl IntoIterator<Item = coven_database::CandidateCleanupObject>,
 ) -> Result<(), E>
 where
-    E: From<coven_protocol::objects::StoreObjectError> + From<crate::database::DbError>,
+    E: From<coven_protocol::objects::StoreObjectError> + From<coven_database::DbError>,
 {
     for target in targets {
         storage

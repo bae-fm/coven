@@ -953,11 +953,11 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "coven-database",
  "coven-foundation",
  "coven-keys",
  "coven-protocol",
  "ed25519-dalek",
- "fallible-streaming-iterator",
  "futures-util",
  "hex",
  "keyring-core",
@@ -974,6 +974,27 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "coven-database"
+version = "1.0.0-rc.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "coven-foundation",
+ "coven-keys",
+ "coven-protocol",
+ "fallible-streaming-iterator",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

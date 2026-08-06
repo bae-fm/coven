@@ -3,8 +3,8 @@
 //! ([`crate::blob::delete`]) — so a row's retry schedule does not depend on which
 //! operation it carries.
 
-use crate::database::DbError;
-use crate::database::OutboxEntry;
+use coven_database::DbError;
+use coven_database::OutboxEntry;
 
 /// Minimum delay before a failed outbox entry is retried, keyed on its prior
 /// `attempt_count`. Exponential (`30s · 2^(n-1)`) capped at one hour: the base

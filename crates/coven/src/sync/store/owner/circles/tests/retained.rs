@@ -193,7 +193,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     }
     let commit = journal.commit().expect("parse retained Circle commit");
     let commit_ref = &journal.operation().commit_ref;
-    let author = crate::database::StoreDatabase::new(&db)
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load retained Circle commit author");

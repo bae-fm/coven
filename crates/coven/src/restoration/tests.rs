@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::database::Database;
 use crate::joining::BootstrapError;
 use crate::restoration::restore_from_code;
 use crate::restoration::{
@@ -31,6 +30,7 @@ use crate::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
     test_synced_tables, test_synced_tables_with_blob, TestDevice,
 };
+use coven_database::Database;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::HomeStorage;
 use coven_foundation::id_provider::SequentialIdProvider;
@@ -855,7 +855,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .expect("load owner membership");
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = crate::database::StoreDatabase::new(&db);
+    let store_database = coven_database::StoreDatabase::new(&db);
     let snapshot = store_database
         .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
         .await
@@ -1054,7 +1054,7 @@ impl OwnerRecoveryRestoreFixture {
         )
         .expect("open recovered database");
         let store_device_id = restored
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("load recovered Store device identity")
             .expect("recovered Store device identity exists");
@@ -1111,7 +1111,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let tables = test_synced_tables();
     let snapshot_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snapshot_dir = snapshot_tmp.path().to_path_buf();
-    let store_database = crate::database::StoreDatabase::new(&owner_db);
+    let store_database = coven_database::StoreDatabase::new(&owner_db);
     let snapshot = store_database
         .capture_snapshot_image_for_test(root.clone(), snapshot_dir, None)
         .await
@@ -1200,7 +1200,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await;
         let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
         let snap_dir = snap_tmp.path().to_path_buf();
-        let store_database = crate::database::StoreDatabase::new(&db_owner);
+        let store_database = coven_database::StoreDatabase::new(&db_owner);
         let snapshot = store_database
             .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
             .await
@@ -1327,7 +1327,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         )
         .expect("build joiner cloud storage");
         let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
-            crate::database::StoreDatabase::new(&db_b),
+            coven_database::StoreDatabase::new(&db_b),
             lib_b.clone(),
         )
         .prepare_sync(joiner_storage, joiner_keypair)
@@ -1434,7 +1434,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let membership_floor = MembershipFloor(chain.head_refs().to_vec());
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = crate::database::StoreDatabase::new(&db_owner);
+    let store_database = coven_database::StoreDatabase::new(&db_owner);
     let snapshot = store_database
         .capture_snapshot_image_for_test(storage.root.clone(), snap_dir, None)
         .await
@@ -1554,7 +1554,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("build owner cycle storage");
         let components = Box::pin(
             crate::sync::test_owner_graph::TestOwnerGraph::new(
-                crate::database::StoreDatabase::new(&db_owner),
+                coven_database::StoreDatabase::new(&db_owner),
                 owner_dir.clone(),
             )
             .prepare_sync(cycle_storage, owner_keypair.clone()),
@@ -1750,7 +1750,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("build restored cloud storage");
         let components = Box::pin(
             crate::sync::test_owner_graph::TestOwnerGraph::new(
-                crate::database::StoreDatabase::new(&restored),
+                coven_database::StoreDatabase::new(&restored),
                 lib_b.clone(),
             )
             .prepare_sync(restored_storage, joiner_keypair),

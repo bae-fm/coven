@@ -4,8 +4,8 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn install_device_join_bootstrap_for_test(
         &self,
-        plan: crate::database::DeviceJoinBootstrapPlan,
-    ) -> Result<(), crate::database::DbError> {
+        plan: coven_database::DeviceJoinBootstrapPlan,
+    ) -> Result<(), coven_database::DbError> {
         self.database
             .install_device_join_bootstrap(self.root.clone(), plan)
             .await
@@ -14,14 +14,14 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn installed_store_root_for_test(
         &self,
-    ) -> Result<Option<StoreRootRef>, crate::database::DbError> {
+    ) -> Result<Option<StoreRootRef>, coven_database::DbError> {
         self.database.local_store_root_ref().await
     }
 
     #[cfg(test)]
     pub(crate) async fn generation_zero_replay_baseline_for_test(
         &self,
-    ) -> Result<crate::database::RetainedReplayBaseline, crate::database::DbError> {
+    ) -> Result<coven_database::RetainedReplayBaseline, coven_database::DbError> {
         self.database
             .generation_zero_replay_baseline_for_test()
             .await
@@ -31,7 +31,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn replace_generation_zero_replay_authority_for_test(
         &self,
         authority_bytes: Vec<u8>,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.database
             .replace_generation_zero_replay_authority_for_test(authority_bytes)
             .await
@@ -59,14 +59,14 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn scoped_snapshot_counts_for_test(
         &self,
-    ) -> Result<(i64, i64, i64), crate::database::DbError> {
+    ) -> Result<(i64, i64, i64), coven_database::DbError> {
         self.database.scoped_snapshot_counts_for_test().await
     }
 
     #[cfg(test)]
     pub(crate) async fn migrated_scoped_snapshot_facts_for_test(
         &self,
-    ) -> Result<(i64, i64, String), crate::database::DbError> {
+    ) -> Result<(i64, i64, String), coven_database::DbError> {
         self.database
             .migrated_scoped_snapshot_facts_for_test()
             .await
@@ -77,7 +77,7 @@ impl<'storage> RestoringStore<'storage> {
         &self,
     ) -> Result<
         BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
-        crate::database::DbError,
+        coven_database::DbError,
     > {
         self.database.materialized_frontier().await
     }
@@ -86,7 +86,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn circle_bootstrap_coverage_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, crate::database::DbError>
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, coven_database::DbError>
     {
         self.database.circle_bootstrap_coverage_ref(circle_id).await
     }
@@ -95,7 +95,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn circle_control_activation_count_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<i64, crate::database::DbError> {
+    ) -> Result<i64, coven_database::DbError> {
         self.database
             .circle_control_activation_count_for_test(circle_id)
             .await
@@ -109,7 +109,7 @@ impl<'storage> RestoringStore<'storage> {
             coven_protocol::store_commit::StoreBatchCommitRef,
             coven_protocol::circle_activation::VerifiedCircleImage,
         )>,
-        crate::database::DbError,
+        coven_database::DbError,
     > {
         self.database.circle_bootstrap_replay_inputs().await
     }
@@ -119,7 +119,7 @@ impl<'storage> RestoringStore<'storage> {
         &self,
         source: &StoreDatabase,
         write_id: &crate::WriteId,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         source
             .transfer_prepared_write_to_for_test(&self.database, write_id)
             .await
@@ -129,7 +129,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn blocked_merge_candidate_for_test(
         &self,
         write_id: crate::WriteId,
-    ) -> Result<Option<crate::database::BlockedMergeCandidate>, crate::database::DbError> {
+    ) -> Result<Option<coven_database::BlockedMergeCandidate>, coven_database::DbError> {
         self.database.blocked_merge_candidate(write_id).await
     }
 
@@ -138,8 +138,8 @@ impl<'storage> RestoringStore<'storage> {
         &self,
         exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
         candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
-        tamper: crate::database::AuthorExclusionLocatorTamper,
-    ) -> Result<(), crate::database::DbError> {
+        tamper: coven_database::AuthorExclusionLocatorTamper,
+    ) -> Result<(), coven_database::DbError> {
         self.database
             .tamper_author_exclusion_locator_for_test(exclusion, candidate, tamper)
             .await
@@ -150,7 +150,7 @@ impl<'storage> RestoringStore<'storage> {
         &self,
         candidate: coven_protocol::store_commit::StoreBatchCommitRef,
         author: coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<Option<crate::database::AuthorExclusionActivationLocator>, crate::database::DbError>
+    ) -> Result<Option<coven_database::AuthorExclusionActivationLocator>, coven_database::DbError>
     {
         self.database
             .author_exclusion_activation_for_candidate(self.root.clone(), candidate, author)
@@ -161,7 +161,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn author_exclusion_activation_evidence_for_test(
         &self,
         exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
-    ) -> Result<(String, String), crate::database::DbError> {
+    ) -> Result<(String, String), coven_database::DbError> {
         self.database
             .author_exclusion_activation_evidence_for_test(exclusion)
             .await
@@ -171,7 +171,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn merge_candidate_cleanup_pending_for_test(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<bool, crate::database::DbError> {
+    ) -> Result<bool, coven_database::DbError> {
         self.database
             .merge_candidate_cleanup_pending(write_id)
             .await

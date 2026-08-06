@@ -5,19 +5,19 @@ use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
 
-fn store_database(db: &crate::database::Database) -> crate::database::StoreDatabase {
-    crate::database::StoreDatabase::new(db)
+fn store_database(db: &coven_database::Database) -> coven_database::StoreDatabase {
+    coven_database::StoreDatabase::new(db)
 }
 
 struct HistoryPublisher<'fixture> {
-    database: &'fixture crate::database::Database,
+    database: &'fixture coven_database::Database,
     device: &'fixture crate::sync::test_helpers::TestDevice,
     store_dir: &'fixture coven_foundation::store_dir::StoreDir,
 }
 
 impl<'fixture> HistoryPublisher<'fixture> {
     fn new(
-        database: &'fixture crate::database::Database,
+        database: &'fixture coven_database::Database,
         device: &'fixture crate::sync::test_helpers::TestDevice,
         store_dir: &'fixture coven_foundation::store_dir::StoreDir,
     ) -> Self {
@@ -55,7 +55,7 @@ impl<'fixture> HistoryPublisher<'fixture> {
 }
 
 struct PublishedHistory {
-    db: crate::database::Database,
+    db: coven_database::Database,
     home: std::sync::Arc<crate::InMemoryCloudHome>,
     device: crate::sync::test_helpers::TestDevice,
     membership: MembershipChain,
@@ -105,7 +105,7 @@ impl PublishedHistory {
         fixture
     }
 
-    async fn retained_history(&self) -> Vec<crate::database::OwnedVerifiedMergeMaterialization> {
+    async fn retained_history(&self) -> Vec<coven_database::OwnedVerifiedMergeMaterialization> {
         self.device
             .retained_merge_replay_inputs_for_test()
             .await
@@ -172,7 +172,7 @@ impl PublishedHistory {
 
 async fn assert_signed_head_rejects_summary(
     device: &crate::sync::test_helpers::TestDevice,
-    retained: &crate::database::OwnedVerifiedMergeMaterialization,
+    retained: &coven_database::OwnedVerifiedMergeMaterialization,
     summary: &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 ) {
     let state = device
@@ -259,7 +259,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .resolved_store_device_state_for_test(&retained[0].history_summary().post_state)
                 .await
                 .expect("load canonical retained state");
-            let root = crate::database::StoreDatabase::new(&fixture.db)
+            let root = coven_database::StoreDatabase::new(&fixture.db)
                 .local_store_root_ref()
                 .await
                 .expect("load Store root")
@@ -419,7 +419,7 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
 }
 
 struct MemberRemovalHistory {
-    db: crate::database::Database,
+    db: coven_database::Database,
     store: std::sync::Arc<TestStore>,
     device: crate::sync::test_helpers::TestDevice,
     summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
@@ -593,7 +593,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
         .publish_snapshot(image, coverage)
         .await
         .expect("publish checkpoint snapshot");
-    let published = crate::database::StoreDatabase::new(&fixture.db)
+    let published = coven_database::StoreDatabase::new(&fixture.db)
         .latest_local_store_snapshot()
         .await
         .expect("load published snapshot")
@@ -635,7 +635,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
             .expect("re-signed omitted summary is internally valid"),
         forged,
     );
-    let forged = crate::database::PublishedStoreSnapshot {
+    let forged = coven_database::PublishedStoreSnapshot {
         reference: forged_reference,
         successor_slot: published.successor_slot,
         meta: forged,

@@ -3,7 +3,7 @@ use coven_protocol::store_commit::{StoreBatchCommitRef, StoreDeviceId};
 
 #[derive(Debug)]
 pub enum StorePreparationError {
-    Database(crate::database::DbError),
+    Database(coven_database::DbError),
     Gate(String),
     AssetScan(String),
     AssetUpload(String),
@@ -62,7 +62,7 @@ impl std::error::Error for StorePreparationError {
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database: {0}")]
-    Database(#[from] crate::database::DbError),
+    Database(#[from] coven_database::DbError),
     #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("Store protocol: {0}")]
@@ -105,7 +105,7 @@ pub enum StoreError {
     WriteBlockNotRecorded {
         write_id: crate::WriteId,
         preparation: Box<StoreError>,
-        status: crate::database::DbError,
+        status: coven_database::DbError,
     },
     #[error("Store author {device_id} was excluded before candidate activation")]
     AuthorExcluded { device_id: StoreDeviceId },

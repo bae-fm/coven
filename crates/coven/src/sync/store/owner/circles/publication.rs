@@ -1,10 +1,10 @@
-use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::{
     read_exact_circle_object, verify_control_context_for_verified_commit, CircleOperationError,
     CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive,
     VerifiedCircleReference,
 };
+use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_protocol::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,

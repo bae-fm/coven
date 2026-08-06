@@ -1,10 +1,10 @@
 use super::*;
-use crate::database::AudiencePartition;
-use crate::database::{
+use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
+use coven_database::AudiencePartition;
+use coven_database::{
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, StoreWriteBlobFact,
     StoreWriteBlobFacts,
 };
-use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
@@ -208,7 +208,7 @@ impl AuthorizedWriterOperation<'_> {
         let locator =
             prepare_partition_blob_locator(fact, audience.clone(), &protection, authority)?;
         if let Some(audience_move) = &fact.audience_move {
-            let crate::database::StoreWriteBlobMoveDestination::Remote {
+            let coven_database::StoreWriteBlobMoveDestination::Remote {
                 audience: staged_audience,
                 locator: staged_locator,
                 spool_path,
@@ -436,7 +436,7 @@ fn partition_blob_facts<'a>(
     changeset: &[u8],
     facts: &'a StoreWriteBlobFacts,
 ) -> Result<Vec<&'a StoreWriteBlobFact>, StoreError> {
-    let rows = crate::database::walk_changeset(changeset)
+    let rows = coven_database::walk_changeset(changeset)
         .map_err(|error| {
             StoreError::InvalidOutbound(format!("read audience package blob rows: {error}"))
         })?

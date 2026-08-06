@@ -4,10 +4,10 @@ use super::verified_history::registration::{
     device_state_has_active_registration, device_state_has_pending_proposal,
     registration_attempt_error, RegistrationLoadError,
 };
-use crate::database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
 use crate::storage::run_blocking_object_verification;
 use crate::storage::SyncStorage;
 use crate::sync::store::StoreError;
+use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
 use coven_protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
 use coven_protocol::objects::{
     decode_protocol_object, verify_store_root, StoreObjectError, VerifiedObject,
@@ -44,7 +44,7 @@ mod registrations;
 pub(crate) use membership::StoreMembershipObjectVerifier;
 
 pub(super) enum DeviceStateResolver<'a> {
-    Database(&'a crate::database::StoreDatabase),
+    Database(&'a coven_database::StoreDatabase),
     Loaded {
         genesis: &'a ResolvedStoreDeviceState,
         states: &'a BTreeMap<StoreBatchCommitRef, ResolvedStoreDeviceState>,
@@ -101,13 +101,13 @@ pub(crate) struct StoreCommitVerifier<'a> {
 }
 
 pub(crate) struct VerifiedMergeMembershipClosure {
-    objects: crate::database::VerifiedMergeMembershipObjects,
+    objects: coven_database::VerifiedMergeMembershipObjects,
     remote_objects: Vec<remote_object::RemoteObjectRecord>,
     pub(crate) proof: RetainedMergeMembershipProof,
 }
 
 impl VerifiedMergeMembershipClosure {
-    pub(super) fn objects(&self) -> &crate::database::VerifiedMergeMembershipObjects {
+    pub(super) fn objects(&self) -> &coven_database::VerifiedMergeMembershipObjects {
         &self.objects
     }
 
@@ -176,7 +176,7 @@ impl<'a> StoreCommitVerifier<'a> {
             head_hash: head.head_hash(),
             object: head_object,
         };
-        let objects = crate::database::VerifiedMergeMembershipObjects::verify(
+        let objects = coven_database::VerifiedMergeMembershipObjects::verify(
             commit,
             commit_ref,
             &entry.value,

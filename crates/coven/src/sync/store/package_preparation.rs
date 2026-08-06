@@ -1,6 +1,6 @@
 //! Audience-package and blob preparation for Store commits.
 
-use crate::database::CirclePartitionControl;
+use coven_database::CirclePartitionControl;
 use coven_protocol::circle;
 use coven_protocol::objects::PreparedExactObject;
 

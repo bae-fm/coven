@@ -2,9 +2,9 @@
 //! host-provided Local blob. Driven over a real temp store directory so the
 //! files-on-disk model is exercised directly.
 
-use crate::database::StoreDatabase;
 use crate::sync::store::blob::StoreBlobCache;
 use crate::sync::test_helpers::{open_test_db, temp_store_dir};
+use coven_database::StoreDatabase;
 use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 
 /// Store a host-provided blob, read it back whole, then drop it.

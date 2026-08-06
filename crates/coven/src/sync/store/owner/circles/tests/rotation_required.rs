@@ -250,7 +250,7 @@ impl RotationFixture {
     async fn latest_circle_snapshot(
         &self,
         circle_id: CircleId,
-    ) -> Option<crate::database::PublishedCircleSnapshot> {
+    ) -> Option<coven_database::PublishedCircleSnapshot> {
         StoreDatabase::new(&self.db)
             .latest_local_circle_snapshot(circle_id)
             .await
@@ -260,7 +260,7 @@ impl RotationFixture {
     async fn pending_circle_snapshot(
         &self,
         circle_id: CircleId,
-    ) -> Option<crate::database::DurableCircleSnapshotPublication> {
+    ) -> Option<coven_database::DurableCircleSnapshotPublication> {
         StoreDatabase::new(&self.db)
             .outbound_circle_snapshot_publication(circle_id)
             .await
@@ -333,7 +333,7 @@ impl RotationFixture {
         StoreDatabase::new(&self.db)
             .run_host_store_write_for_test(
                 Some(EncryptionService::from_key([42; 32])),
-                Some(Box::new(staging) as Box<dyn crate::database::AudienceBlobMoveStaging>),
+                Some(Box::new(staging) as Box<dyn coven_database::AudienceBlobMoveStaging>),
                 move |transaction| {
                     transaction
                         .execute(
@@ -500,7 +500,7 @@ impl RotationFixture {
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish the Circle package");
-        let published = match crate::database::StoreDatabase::new(&self.db)
+        let published = match coven_database::StoreDatabase::new(&self.db)
             .write_status(&write_id)
             .await
             .expect("read Circle write status")
@@ -592,14 +592,14 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .await
         .expect("publish Store-audience and unaffected-Circle writes");
     assert!(matches!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&store_write)
             .await
             .expect("read Store write status"),
         crate::WriteStatus::Published(_)
     ));
     assert!(matches!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&unaffected_write)
             .await
             .expect("read unaffected Circle write status"),
@@ -619,7 +619,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .components
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await;
-    match crate::database::StoreDatabase::new(&fixture.db)
+    match coven_database::StoreDatabase::new(&fixture.db)
         .write_status(&blocked_write)
         .await
         .expect("read affected Circle write status")
@@ -775,7 +775,7 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         .await
         .expect("publish Circle content after the close");
     assert!(matches!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&resumed)
             .await
             .expect("read resumed write status"),
@@ -802,7 +802,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await;
     assert!(matches!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&blocked)
             .await
             .expect("read blocked write status"),
@@ -833,7 +833,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     // The blocked write survives the close as a durable write; the rows it holds
     // were never surrendered.
     assert!(matches!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&blocked)
             .await
             .expect("read blocked write status after the close"),
@@ -852,7 +852,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the formerly blocked write under the successor epoch");
-    let published = match crate::database::StoreDatabase::new(&fixture.db)
+    let published = match coven_database::StoreDatabase::new(&fixture.db)
         .write_status(&blocked)
         .await
         .expect("read republished write status")
@@ -986,7 +986,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         )
         .await
         .expect("cut the successor bootstrap from accepted history");
-    let image = crate::database::DatabaseImageTest::from_bytes(&cut.snapshot.db_image)
+    let image = coven_database::DatabaseImageTest::from_bytes(&cut.snapshot.db_image)
         .expect("open the bootstrap image");
     let installed_ids = image
         .query("SELECT id FROM documents ORDER BY id", [], |row| {
@@ -1089,7 +1089,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         .await
         .expect("publish Circle content after an unrelated Store removal");
     assert!(matches!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&write)
             .await
             .expect("read Circle write status"),
@@ -1593,7 +1593,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     {
         let routing = routing.clone();
         let audience = Some(circle_id.to_string());
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .run_host_store_write_for_test(Some(routing), None, move |transaction| {
                 transaction
                     .execute(
@@ -1665,7 +1665,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         "the restored device holds no positions after the close: {:?}",
         pull.held_positions
     );
-    let owner_frontier = crate::database::StoreDatabase::new(&db)
+    let owner_frontier = coven_database::StoreDatabase::new(&db)
         .materialized_frontier()
         .await
         .expect("read owner Store frontier");

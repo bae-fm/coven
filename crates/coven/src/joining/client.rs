@@ -7,8 +7,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::database::supported_version;
-use crate::database::Database;
 use crate::join_code::InviteCode;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -16,6 +14,8 @@ use crate::sync::store::{
     InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
 };
 use crate::Migration;
+use coven_database::supported_version;
+use coven_database::Database;
 use coven_foundation::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use coven_foundation::store_dir::{StoreDir, StoreLayout};
 use coven_keys::encryption::{EncryptionError, EncryptionService, MasterKeyring};
@@ -670,7 +670,7 @@ impl DeviceJoinClient {
             &self.migrations,
         )
         .map_err(|error| BootstrapError::Database(error.to_string()))?;
-        let database = crate::database::StoreDatabase::from_database(db.clone());
+        let database = coven_database::StoreDatabase::from_database(db.clone());
         // Converge over everything the owner published after this device's
         // bootstrap before materializing the commit that activates the join.
         //

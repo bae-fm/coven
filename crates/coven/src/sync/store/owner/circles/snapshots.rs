@@ -10,12 +10,12 @@ use coven_protocol::store_commit::{
 use tracing::warn;
 
 use super::bootstrap_blobs::CircleBootstrapBlobVerification;
-use crate::database::{verify_circle_bootstrap_image, CreatedSnapshot};
 use crate::sync::store::owner::snapshot::{coverage_dominates, SnapshotCut, SnapshotError};
+use coven_database::{verify_circle_bootstrap_image, CreatedSnapshot};
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
-    database: crate::database::StoreDatabase,
+    database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: StoreRootRef,
@@ -23,7 +23,7 @@ pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
 }
 
 pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
-    database: &'operation crate::database::StoreDatabase,
+    database: &'operation coven_database::StoreDatabase,
     storage: &'storage dyn SyncStorage,
     history:
         &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
@@ -40,7 +40,7 @@ impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
 
 impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     pub(crate) fn new(
-        database: &'operation crate::database::StoreDatabase,
+        database: &'operation coven_database::StoreDatabase,
         storage: &'storage dyn SyncStorage,
         history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
@@ -170,8 +170,8 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         store_frontier: &CommitFrontier,
         restorer_identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
-    ) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
-        use crate::database::StagedCircleDecision;
+    ) -> Result<Vec<coven_database::StagedCircleDecision>, SnapshotError> {
+        use coven_database::StagedCircleDecision;
         let root = self.root().clone();
         // The stream-activation index the control-stream authority resolves against is
         // written by the pull, which has not run on a freshly restored device; seed it
@@ -431,7 +431,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
 impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(super) fn new(
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: StoreRootRef,
@@ -451,7 +451,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         &self,
         routing_encryption: &coven_keys::encryption::EncryptionService,
         circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<SnapshotCut, crate::database::DbError> {
+    ) -> Result<SnapshotCut, coven_database::DbError> {
         let (snapshot, coverage) = self
             .database
             .capture_circle_snapshot_cut(
@@ -470,14 +470,14 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         routing_encryption: &coven_keys::encryption::EncryptionService,
         circle_id: coven_protocol::circle::CircleId,
         cutoff: CommitFrontier,
-    ) -> Result<SnapshotCut, crate::database::DbError> {
+    ) -> Result<SnapshotCut, coven_database::DbError> {
         let tables = self.database.synced_tables().to_vec();
         let routing_encryption = routing_encryption.clone();
         let routing_key = coven_protocol::circle::derive_row_routing_key(
             &routing_encryption,
             self.root.store_root_hash,
         )
-        .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+        .map_err(|error| coven_database::DbError::Message(error.to_string()))?;
         let root = self.root.clone();
         let snapshot = self
             .database

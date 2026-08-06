@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::database::Database;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables,
 };
+use coven_database::Database;
 
 fn store_database(database: &Database) -> StoreDatabase {
     StoreDatabase::new(database)
@@ -356,7 +356,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         .load_founder_registration_for_test()
         .await
         .expect("open exact opaque founder registration");
-    let durable = crate::database::StoreDatabase::new(&db)
+    let durable = coven_database::StoreDatabase::new(&db)
         .latest_local_store_device_registration()
         .await
         .expect("read durable founder registration")

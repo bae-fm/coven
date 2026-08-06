@@ -13,7 +13,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn latest_local_store_position(
         &self,
-    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, crate::database::DbError>
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, coven_database::DbError>
     {
         self.database
             .latest_local_store_position(self.announcement_stream_id())
@@ -91,7 +91,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await?;
                 #[cfg(test)]
                 db.reach_test_point(
-                    crate::database::DatabaseTestPoint::StoreWriteCommitUploaded {
+                    coven_database::DatabaseTestPoint::StoreWriteCommitUploaded {
                         write_id: write_id.clone(),
                     },
                 )
@@ -134,7 +134,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             .await?;
                         #[cfg(test)]
                         db.reach_test_point(
-                            crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
+                            coven_database::DatabaseTestPoint::StoreWriteHeadReadBack {
                                 write_id: write_id.clone(),
                             },
                         )
@@ -147,8 +147,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             )
                             .await?
                         {
-                            crate::database::CompletePreparedStoreWriteOutcome::Published => {}
-                            crate::database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
+                            coven_database::CompletePreparedStoreWriteOutcome::Published => {}
+                            coven_database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
                                 device_id,
                             } => return Err(StoreError::AuthorExcluded { device_id }),
                         }
@@ -208,7 +208,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     })
                     .await?;
                 #[cfg(test)]
-                db.reach_test_point(crate::database::DatabaseTestPoint::StoreWriteHeadReadBack {
+                db.reach_test_point(coven_database::DatabaseTestPoint::StoreWriteHeadReadBack {
                     write_id: write_id.clone(),
                 })
                 .await;
@@ -216,8 +216,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .complete_prepared_store_write(root, head.commit.clone(), nonactivations)
                     .await?
                 {
-                    crate::database::CompletePreparedStoreWriteOutcome::Published => {}
-                    crate::database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
+                    coven_database::CompletePreparedStoreWriteOutcome::Published => {}
+                    coven_database::CompletePreparedStoreWriteOutcome::AuthorExcluded {
                         device_id,
                     } => return Err(StoreError::AuthorExcluded { device_id }),
                 }

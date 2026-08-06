@@ -13,7 +13,7 @@ use super::{
 };
 
 pub(super) fn validate_revoke_rotation_adoption(
-    row: crate::database::DurableMembershipMutation,
+    row: coven_database::DurableMembershipMutation,
     adopted_generation: u64,
 ) -> Result<coven_protocol::store_commit::ObjectHash, InviteError> {
     let intent_hash = row.intent_hash;

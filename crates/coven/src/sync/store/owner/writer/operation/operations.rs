@@ -1,7 +1,7 @@
 use super::*;
-#[cfg(test)]
-use crate::database::StoreDatabase;
 use crate::sync::store::StoreError;
+#[cfg(test)]
+use coven_database::StoreDatabase;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::store_commit::{

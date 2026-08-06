@@ -9,15 +9,15 @@ pub(crate) struct MergeConflictResolutionAuthorization {
 pub(crate) enum TerminalNonactivationCandidate {
     StoreWrite {
         write_id: crate::WriteId,
-        verification: crate::database::TerminalCandidateCleanupVerification,
+        verification: coven_database::TerminalCandidateCleanupVerification,
     },
     CircleOperation {
         operation_id: coven_protocol::circle::CircleOperationId,
-        verification: crate::database::TerminalCandidateCleanupVerification,
+        verification: coven_database::TerminalCandidateCleanupVerification,
     },
     MergeRetraction {
         reference: coven_protocol::store_commit::StoreBatchCommitRef,
-        verification: crate::database::TerminalCandidateCleanupVerification,
+        verification: coven_database::TerminalCandidateCleanupVerification,
     },
 }
 
@@ -41,7 +41,7 @@ pub(crate) fn validate_retained_membership_floors(
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn discard_candidate_nonactivation(
         &mut self,
-        candidate: &crate::database::BlockedMergeCandidate,
+        candidate: &coven_database::BlockedMergeCandidate,
         revoked_grant: Option<&coven_protocol::membership::MembershipGrantId>,
     ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
@@ -215,7 +215,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn verify_author_exclusion_nonactivation(
         &mut self,
-        locator: &crate::database::AuthorExclusionActivationLocator,
+        locator: &coven_database::AuthorExclusionActivationLocator,
         candidate: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         candidate_head: &coven_protocol::store_commit::StoreDeviceHead,
         candidate_head_object: &coven_protocol::objects::ExactObjectRef,
@@ -294,7 +294,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn verify_terminal_nonactivation(
         &mut self,
-        verification: &crate::database::TerminalCandidateCleanupVerification,
+        verification: &coven_database::TerminalCandidateCleanupVerification,
     ) -> Result<
         coven_protocol::remote_object::VerifiedCandidateNonactivation,
         crate::sync::store::owner::pull::StorePullError,
@@ -317,7 +317,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             canonical_signed_bytes: verification.candidate.commit.bytes.clone(),
         };
         match &verification.authority {
-            crate::database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
+            coven_database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
                 self.verify_author_exclusion_nonactivation(
                     locator,
                     &candidate,
@@ -326,7 +326,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 )
                 .await
             }
-            crate::database::TerminalCandidateAuthority::MembershipGrantRevocation {
+            coven_database::TerminalCandidateAuthority::MembershipGrantRevocation {
                 grant_id,
                 membership,
                 activation_commit,
@@ -344,7 +344,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     )
                     .await
             }
-            crate::database::TerminalCandidateAuthority::DependencyRetraction(authority) => {
+            coven_database::TerminalCandidateAuthority::DependencyRetraction(authority) => {
                 coven_protocol::remote_object::VerifiedCandidateNonactivation::from_verified_dependency_retraction_authority(
                     authority.clone(),
                     target,

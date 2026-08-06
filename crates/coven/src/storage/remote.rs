@@ -250,7 +250,7 @@ impl CloudSyncStorage {
     /// **A cloud object is never rewritten with different bytes, so no two blobs ever
     /// share a key.** `Hashed` gets that from the key itself; `Plain` gets it from the
     /// blob's declared [`BlobReplacement`](coven_protocol::blob::BlobReplacement), which coven
-    /// enforces where a blob is derived from its row ([`crate::database::BlobDecls`]) —
+    /// enforces where a blob is derived from its row ([`coven_database::BlobDecls`]) —
     /// a replaceable blob's readable path must name it, and a write-once blob's row can
     /// never be repointed. Either way, an object's *presence* at a blob's key is proof of
     /// its *content*, which is what lets the push skip an upload without asking a sealed

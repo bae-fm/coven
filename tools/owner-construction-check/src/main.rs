@@ -84,27 +84,27 @@ const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
 
 const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
-        "crates/coven/src/database/database_open.rs",
+        "crates/coven-database/src/database_open.rs",
         "DatabaseCore",
         "open",
     ),
     (
-        "crates/coven/src/database/database_runtime.rs",
+        "crates/coven-database/src/database_runtime.rs",
         "Database",
         "open",
     ),
     (
-        "crates/coven/src/database/database_runtime.rs",
+        "crates/coven-database/src/database_runtime.rs",
         "Database",
         "open_initialized_store",
     ),
     (
-        "crates/coven/src/database/database_runtime.rs",
+        "crates/coven-database/src/database_runtime.rs",
         "Database",
         "open_with_hlc_and_coven_metadata",
     ),
     (
-        "crates/coven/src/database/database_runtime.rs",
+        "crates/coven-database/src/database_runtime.rs",
         "Database",
         "open_read_only",
     ),
@@ -730,7 +730,7 @@ fn main() {
             }
             if !result.database_boundary.is_empty() {
                 eprintln!(
-                    "database operations retain SQLite state and expose domain methods; move raw SQLite and SQL under crates/coven/src/database"
+                    "database operations retain SQLite state and expose domain methods; move raw SQLite and SQL under crates/coven-database"
                 );
             }
             if !result.service_returns.is_empty() {
@@ -838,13 +838,13 @@ fn check(
     })
 }
 
-// The database module's own files: raw SQLite and SQL are its subject, so the
+// The database crate's own files: raw SQLite and SQL are its subject, so the
 // boundary exempts them.
-const DATABASE_MODULE_ROOT: &str = "crates/coven/src/database.rs";
-const DATABASE_MODULE_DIR: &str = "crates/coven/src/database/";
+const DATABASE_MODULE_ROOT: &str = "crates/coven-database/src/lib.rs";
+const DATABASE_MODULE_DIR: &str = "crates/coven-database/src/";
 // Declares the tables Coven owns, which the boundary reads to tell a Coven
 // table name from a host's.
-const COVEN_SCHEMA_FILE: &str = "crates/coven/src/database/coven_schema.rs";
+const COVEN_SCHEMA_FILE: &str = "crates/coven-database/src/coven_schema.rs";
 
 fn find_database_boundary_violations(files: &[RustFile]) -> Vec<DatabaseBoundaryViolation> {
     let mut violations = BTreeSet::new();
@@ -1014,7 +1014,7 @@ fn collect_forbidden_sqlite_imports(
         syn::UseTree::Path(path) => collect_forbidden_sqlite_imports(
             &path.tree,
             under_rusqlite || path.ident == "rusqlite",
-            under_database || path.ident == "database",
+            under_database || path.ident == "database" || path.ident == "coven_database",
             capabilities,
         ),
         syn::UseTree::Name(name) => {
@@ -2563,6 +2563,19 @@ mod tests {
         );
     }
 
+    /// The host facade re-exports the database crate's `rusqlite` so a host can
+    /// name the connection types its own SQL uses. That path names the database
+    /// crate, not the SQLite crate, so it is not a raw import.
+    #[test]
+    fn the_facades_reexport_of_the_database_crates_rusqlite_is_allowed() {
+        let source = syn::parse_file("pub use coven_database::rusqlite;").expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/lib.rs".to_string(),
+            syntax: source,
+        }];
+        assert!(find_database_boundary_violations(&files).is_empty());
+    }
+
     #[test]
     fn every_raw_sqlite_ownership_path_is_rejected() {
         let source = syn::parse_file(
@@ -2608,7 +2621,7 @@ mod tests {
         )
         .expect("parse fixture");
         let files = vec![RustFile {
-            relative_path: "crates/coven/src/database/transaction.rs".to_string(),
+            relative_path: "crates/coven-database/src/transaction.rs".to_string(),
             syntax: source,
         }];
 
@@ -2681,7 +2694,7 @@ mod tests {
         .expect("parse leak fixture");
         let files = vec![
             RustFile {
-                relative_path: "crates/coven/src/database/coven_schema.rs".to_string(),
+                relative_path: "crates/coven-database/src/coven_schema.rs".to_string(),
                 syntax: schema,
             },
             RustFile {

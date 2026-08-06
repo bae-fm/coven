@@ -1,7 +1,7 @@
 //! Tests for the pull path and blob sync, on the synthetic schema.
 //!
 //! A source device captures changesets into a `TestStore`; a second device
-//! pulls and applies them through a real [`crate::database::Database`], exercising
+//! pulls and applies them through a real [`coven_database::Database`], exercising
 //! the real `pull_changes` + blob plumbing.
 
 use coven_protocol::membership::HeldStorePositionReason;
@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::database::Database;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 use crate::Migration;
+use coven_database::Database;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::blob::{CacheFill, Provenance};
@@ -23,7 +23,7 @@ use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use coven_protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
 use coven_protocol::store_commit::StoreDeviceHead;
 /// The synthetic test db opens with a single migration, so its
-/// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
+/// [`coven_database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
 use crate::storage::SyncStorage;
@@ -78,7 +78,7 @@ trait PullTestDatabaseOps {
     async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId;
     async fn pull_exact_store_into(
         &self,
-        source: &crate::database::Database,
+        source: &coven_database::Database,
         storage: &Arc<CloudSyncStorage>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
@@ -90,7 +90,7 @@ trait PullTestDatabaseOps {
     async fn row_blob_object_key(&self, table: &str, row_id: &str) -> String;
 }
 
-impl PullTestDatabaseOps for crate::database::Database {
+impl PullTestDatabaseOps for coven_database::Database {
     async fn exact_row_blob_ref(
         &self,
         table: &str,
@@ -150,7 +150,7 @@ impl PullTestDatabaseOps for crate::database::Database {
 
     async fn pull_exact_store_into(
         &self,
-        source: &crate::database::Database,
+        source: &coven_database::Database,
         storage: &Arc<CloudSyncStorage>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
@@ -158,13 +158,13 @@ impl PullTestDatabaseOps for crate::database::Database {
         std::collections::BTreeMap<String, u64>,
         crate::sync::store::StorePullResult,
     ) {
-        let root = crate::database::StoreDatabase::new(source)
+        let root = coven_database::StoreDatabase::new(source)
             .local_store_root_ref()
             .await
             .expect("read source Store root")
             .expect("source Store has exact root authority");
         let initialized = crate::sync::store::Store::open(
-            crate::database::StoreDatabase::new(self),
+            coven_database::StoreDatabase::new(self),
             storage.clone(),
             store_dir.clone(),
             &root,
@@ -267,14 +267,14 @@ fn commit_stream_id(reference: &coven_protocol::store_commit::StoreBatchCommitRe
 trait TestStoreStorage: Sync {
     async fn store_for_test_publish(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String>;
 
     async fn sync_for_test(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
@@ -300,7 +300,7 @@ trait TestStoreStorage: Sync {
                 .map_or(0, |position| position.coord.sequence()),
             local_seq
         );
-        crate::database::StoreDatabase::new(db)
+        coven_database::StoreDatabase::new(db)
             .enqueue_store_changeset_for_test(outgoing)
             .await
             .map_err(|error| error.to_string())?;
@@ -329,7 +329,7 @@ trait TestStoreStorage: Sync {
     /// the resulting immutable Store objects as `keypair`.
     async fn publish_test_cycle(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
@@ -348,7 +348,7 @@ trait TestStoreStorage: Sync {
 impl TestStoreStorage for TestStore {
     async fn store_for_test_publish(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -364,18 +364,18 @@ impl TestStoreStorage for TestStore {
 impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
     async fn store_for_test_publish(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
-        if crate::database::StoreDatabase::new(db)
+        if coven_database::StoreDatabase::new(db)
             .local_store_root_ref()
             .await
             .map_err(|error| error.to_string())?
             .is_none()
         {
             crate::sync::store::Store::create(
-                crate::database::StoreDatabase::new(db),
+                coven_database::StoreDatabase::new(db),
                 self.clone(),
                 store_dir.clone(),
                 self.store_id(),
@@ -385,7 +385,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
             .map_err(|error| error.to_string())?;
         }
         crate::sync::store::Store::load(
-            crate::database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(db),
             self.clone(),
             store_dir.clone(),
             keypair.clone(),
@@ -398,7 +398,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
 trait PullTestStoreOps {
     async fn make_root_remote(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     );
@@ -406,11 +406,11 @@ trait PullTestStoreOps {
     async fn read_exact_blob(&self, blob: &coven_protocol::blob::locator::StoredBlobRef)
         -> Vec<u8>;
 
-    async fn author_scoped_write(&self, db: &crate::database::Database, sql: String);
+    async fn author_scoped_write(&self, db: &coven_database::Database, sql: String);
 
     async fn pull_scoped(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure>;
 
     async fn publish_exact_changeset_with_authority(
@@ -426,7 +426,7 @@ trait PullTestStoreOps {
 impl PullTestStoreOps for TestStore {
     async fn make_root_remote(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     ) {
@@ -480,14 +480,14 @@ impl PullTestStoreOps for TestStore {
             .expect("read staged exact blob plaintext")
     }
 
-    async fn author_scoped_write(&self, db: &crate::database::Database, sql: String) {
-        crate::database::StoreDatabase::new(db)
+    async fn author_scoped_write(&self, db: &coven_database::Database, sql: String) {
+        coven_database::StoreDatabase::new(db)
             .run_host_store_write_for_test(
                 Some(EncryptionService::from_key([42; 32])),
                 None,
                 move |tx| {
                     tx.execute_batch(&sql)
-                        .map_err(crate::database::DbError::from)
+                        .map_err(coven_database::DbError::from)
                 },
             )
             .await
@@ -500,7 +500,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn pull_scoped(
         &self,
-        db: &crate::database::Database,
+        db: &coven_database::Database,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let device = self
             .open_into(db)
@@ -568,7 +568,7 @@ fn photo_decl_with_blob_id_column() -> BlobDecl {
         .with_id_column("cloud_path")
 }
 
-fn unique_note_db() -> crate::database::Database {
+fn unique_note_db() -> coven_database::Database {
     open_test_db_schema(
         vec![SyncedTable::new(
             "unique_notes",
@@ -584,12 +584,12 @@ fn unique_note_db() -> crate::database::Database {
                     created_at TEXT NOT NULL
                 ) STRICT;",
             )
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })],
     )
 }
 
-fn uuid_note_db() -> crate::database::Database {
+fn uuid_note_db() -> coven_database::Database {
     open_test_db_schema(
         vec![SyncedTable::new(
             "uuid_notes",
@@ -603,12 +603,12 @@ fn uuid_note_db() -> crate::database::Database {
                     _updated_at TEXT NOT NULL
                 ) STRICT;",
             )
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })],
     )
 }
 
-fn mixed_constraint_db() -> crate::database::Database {
+fn mixed_constraint_db() -> coven_database::Database {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -634,13 +634,13 @@ fn mixed_constraint_db() -> crate::database::Database {
                     FOREIGN KEY (parent_id) REFERENCES constraint_parents (id)
                 ) STRICT;",
             )
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })],
     )
 }
 
-fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::database::Database {
-    crate::database::Database::open(
+fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> coven_database::Database {
+    coven_database::Database::open(
         path,
         test_synced_tables_with_blob(decl),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -653,7 +653,7 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
 }
 
 async fn create_store(
-    db: &crate::database::Database,
+    db: &coven_database::Database,
     signer: UserKeypair,
 ) -> std::sync::Arc<TestStore> {
     TestStore::create(
@@ -2218,11 +2218,11 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         .test_sql(move |conn| {
             conn.execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
                 .map(|_| ())
-                .map_err(crate::database::DbError::from)
+                .map_err(coven_database::DbError::from)
         })
         .await
         .expect("copy the locally-authored retained input");
-    let target = crate::database::Database::open(
+    let target = coven_database::Database::open(
         &target_path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -2239,7 +2239,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
                 transaction.delete_materialized_commit(&conflicting_stream, 1)?;
                 transaction
                     .execute("DELETE FROM notes WHERE id = 'rollback-row'", [])
-                    .map_err(crate::database::DbError::from)?;
+                    .map_err(coven_database::DbError::from)?;
                 Ok(())
             })
         })
@@ -2311,7 +2311,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
     let (_tmp, store_dir) = temp_store_dir();
     storage.pull_into(&target, &store_dir).await;
 
-    crate::database::StoreDatabase::new(&target)
+    coven_database::StoreDatabase::new(&target)
         .run_host_store_write_for_test(None, None, move |tx| {
             let remote_row: bool = tx
                 .query_row(
@@ -2319,7 +2319,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(crate::database::DbError::from)?;
+                .map_err(coven_database::DbError::from)?;
             let materialized = tx.materialized_sequence(&stream_id)?;
             assert!(remote_row, "the host transaction observes the remote row");
             assert_eq!(
@@ -2335,7 +2335,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
                 [],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })
         .await
         .expect("host write after remote apply");
@@ -3023,13 +3023,13 @@ async fn push_stamps_the_dbs_schema_version() {
 
 #[tokio::test]
 async fn sync_reuses_opened_schema_models() {
-    crate::database::reset_gate_from_tables_call_count();
-    crate::database::reset_from_tables_call_count();
+    coven_database::reset_gate_from_tables_call_count();
+    coven_database::reset_from_tables_call_count();
 
     let db = open_test_db();
     let storage = create_store(&db, UserKeypair::generate()).await;
-    assert_eq!(crate::database::gate_from_tables_call_count(), 1);
-    assert_eq!(crate::database::gate_from_tables_call_count(), 1);
+    assert_eq!(coven_database::gate_from_tables_call_count(), 1);
+    assert_eq!(coven_database::gate_from_tables_call_count(), 1);
 
     let outgoing = db
         .capture_test_changeset(&[
@@ -3044,8 +3044,8 @@ async fn sync_reuses_opened_schema_models() {
         .await
         .expect("sync");
 
-    assert_eq!(crate::database::from_tables_call_count(), 1);
-    assert_eq!(crate::database::from_tables_call_count(), 1);
+    assert_eq!(coven_database::from_tables_call_count(), 1);
+    assert_eq!(coven_database::from_tables_call_count(), 1);
 }
 
 #[tokio::test]
@@ -3768,7 +3768,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     );
 }
 
-fn open_scoped_circle_test_db() -> crate::database::Database {
+fn open_scoped_circle_test_db() -> coven_database::Database {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -3823,13 +3823,13 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         "INSERT INTO notes VALUES ('{note_id}', '{circle_id}', 'private', '0000000002000-0000-owner');
          INSERT INTO comments VALUES ('{comment_id}', '{note_id}', 'child', '0000000002001-0000-owner');"
     );
-    crate::database::StoreDatabase::new(&source)
+    coven_database::StoreDatabase::new(&source)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
             move |tx| {
                 tx.execute_batch(&sql)
-                    .map_err(crate::database::DbError::from)
+                    .map_err(coven_database::DbError::from)
             },
         )
         .await
@@ -3876,7 +3876,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         result
             .row_changes
             .iter()
-            .all(|change| !crate::database::is_routing_table(&change.table)),
+            .all(|change| !coven_database::is_routing_table(&change.table)),
         "host-visible row changes must not expose Coven routing tables"
     );
     assert!(
@@ -3983,7 +3983,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     );
 }
 
-fn scoped_fk_circle_db() -> crate::database::Database {
+fn scoped_fk_circle_db() -> coven_database::Database {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -4359,7 +4359,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         err.contains("outbound blob photos/p1ab is absent from storage"),
         "an absent blob must abort Store publication, got {err:?}",
     );
-    let pending = crate::database::StoreDatabase::new(&db1)
+    let pending = coven_database::StoreDatabase::new(&db1)
         .pending_writes()
         .await
         .expect("read blocked write");
@@ -4791,7 +4791,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                     [],
                     |r| r.get::<_, String>(0),
                 )
-                .map_err(crate::database::DbError::from)
+                .map_err(coven_database::DbError::from)
             })
             .await
             .expect("the cover row");
@@ -5454,7 +5454,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // DELETE through the real transition publication path.
     let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(&db1),
+        coven_database::StoreDatabase::new(&db1),
         source_store_dir.clone(),
     )
     .connected_blob_transitions(storage.storage(), None, None)
@@ -5555,7 +5555,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     assert!(!second.local_blob_cleanup_pending);
     let pending_after_restart: i64 = restarted
         .test_sql(|database| {
-            database.table_row_count(crate::database::DatabaseTestTable::named(
+            database.table_row_count(coven_database::DatabaseTestTable::named(
                 "local_cleanup_intents",
             ))
         })
@@ -5589,7 +5589,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     let (_tmp, store_dir) = temp_store_dir();
     store_dir.store_local("cleanup-race", b"old bytes").await;
     let (reached_filesystem, resume_cleanup) = target.arm_test_pause(
-        crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
+        coven_database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
             namespace: "photos".to_string(),
             blob_id: "cleanup-race".to_string(),
         },
@@ -5601,7 +5601,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     reached_filesystem.notified().await;
-    let store_database = crate::database::StoreDatabase::new(&target);
+    let store_database = coven_database::StoreDatabase::new(&target);
     let host_write = store_database
         .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
@@ -5612,7 +5612,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
                 [],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })
         .await;
     let host_update = store_database
@@ -5624,7 +5624,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
                 [],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })
         .await;
     resume_cleanup.notify_one();
@@ -5662,7 +5662,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
 
 #[tokio::test]
 async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
-    use crate::database::DatabaseTestPoint;
+    use coven_database::DatabaseTestPoint;
 
     let decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
         .with_id_column("blob_id");
@@ -5688,10 +5688,10 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     };
     let (first_reached_filesystem, resume_first) = target.arm_test_pause(before_filesystem.clone());
 
-    let first_db = crate::database::StoreDatabase::new(&target);
+    let first_db = coven_database::StoreDatabase::new(&target);
     let first_store_dir = store_dir.clone();
     let first = tokio::spawn(async move {
-        crate::database::LocalBlobCleanup::new(&first_db, &first_store_dir)
+        coven_database::LocalBlobCleanup::new(&first_db, &first_store_dir)
             .drain()
             .await
     });
@@ -5706,7 +5706,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     );
     assert_eq!(points.recv().await, Some(before_filesystem));
 
-    let host_re_reference = crate::database::StoreDatabase::new(&target)
+    let host_re_reference = coven_database::StoreDatabase::new(&target)
         .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
                 "INSERT INTO note_photos \
@@ -5716,7 +5716,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
                 [],
             )
             .map(|_| ())
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })
         .await;
     assert!(
@@ -5724,10 +5724,10 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         "the cleanup intent rejects a host row re-reference"
     );
 
-    let second_db = crate::database::StoreDatabase::new(&target);
+    let second_db = coven_database::StoreDatabase::new(&target);
     let second_store_dir = store_dir.clone();
     let second = tokio::spawn(async move {
-        crate::database::LocalBlobCleanup::new(&second_db, &second_store_dir)
+        coven_database::LocalBlobCleanup::new(&second_db, &second_store_dir)
             .drain()
             .await
     });
@@ -5764,8 +5764,8 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     store_dir
         .store_local("shared-intent", b"recreated bytes")
         .await;
-    assert!(!crate::database::LocalBlobCleanup::new(
-        &crate::database::StoreDatabase::new(&target),
+    assert!(!coven_database::LocalBlobCleanup::new(
+        &coven_database::StoreDatabase::new(&target),
         &store_dir,
     )
     .drain()
@@ -6004,7 +6004,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
 struct PersistedCycleRemoval {
     storage: std::sync::Arc<TestStore>,
-    db: crate::database::Database,
+    db: coven_database::Database,
     founder_pubkey: String,
     second_owner_head: coven_protocol::membership::MembershipHeadRef,
     removed_member_pubkey: String,
@@ -6259,7 +6259,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let result = crate::sync::store::Store::load(
-        crate::database::StoreDatabase::new(&db2),
+        coven_database::StoreDatabase::new(&db2),
         failing,
         store_dir,
         owner,
@@ -6662,7 +6662,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     ));
     let (_pull_temp, pull_store_dir) = temp_store_dir();
     let store = crate::sync::store::Store::open(
-        crate::database::StoreDatabase::new(&db2),
+        coven_database::StoreDatabase::new(&db2),
         lagging,
         pull_store_dir,
         &storage.root,
@@ -7041,7 +7041,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .cleanup_merge_candidate_for_test(write_id.clone())
         .await
         .expect("verify and resume removed-member candidate cleanup");
-    crate::database::StoreDatabase::new(&member_db)
+    coven_database::StoreDatabase::new(&member_db)
         .finish_retracted_merge_candidate_cleanup(write_id.clone())
         .await
         .expect("finalize removed-member candidate cleanup");
@@ -7050,18 +7050,18 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     );
     assert!(storage.provider_object_is_absent(candidate_graph.head_object.slot().logical_key()));
     assert!(matches!(
-        crate::database::StoreDatabase::new(&member_db)
+        coven_database::StoreDatabase::new(&member_db)
             .write_status(&write_id)
             .await
             .expect("read retracted member write"),
         crate::WriteStatus::Resolved(crate::WriteResolution::Retracted { witness })
             if witness.original_position().commit() == &candidate_graph.reference
     ));
-    assert!(!crate::database::StoreDatabase::new(&member_db)
+    assert!(!coven_database::StoreDatabase::new(&member_db)
         .merge_candidate_cleanup_pending(&write_id)
         .await
         .expect("read completed member cleanup"));
-    assert!(crate::database::StoreDatabase::new(&member_db)
+    assert!(coven_database::StoreDatabase::new(&member_db)
         .protocol_inert_object(candidate_graph.head_object)
         .await
         .expect("read terminal member head")
@@ -7137,7 +7137,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     // indistinguishable from tampering, so the load fails loud instead of
     // re-admitting whatever the truncated walk hash-links into.
     let error = crate::sync::store::Store::load(
-        crate::database::StoreDatabase::new(&db2),
+        coven_database::StoreDatabase::new(&db2),
         lagging,
         store_dir,
         owner,

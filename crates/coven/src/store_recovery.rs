@@ -1,6 +1,6 @@
-use crate::database::StoreDatabase;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::{StoreSync, SyncError};
+use coven_database::StoreDatabase;
 
 #[derive(Clone)]
 pub(crate) struct StoreRecovery {

@@ -1,9 +1,9 @@
 use tracing::debug;
 
-use crate::database::{DbError, StoreDatabase};
 use crate::storage::run_blocking_object_verification;
 use crate::sync::store::owner::pull::{LoadedCirclePackage, LocalStoreMembership};
 use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+use coven_database::{DbError, StoreDatabase};
 use coven_protocol::objects::VerifiedObject;
 use coven_protocol::store_commit::{
     CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,

@@ -1,7 +1,7 @@
 //! Causal discovery and atomic materialization for immutable Store commits.
 
 use super::*;
-use crate::database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
+use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use coven_protocol::membership::ApplyOutcome;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 pub(crate) struct AuthorizedPull<'operation, 'storage> {
     history: &'operation mut super::AuthorizedStoreHistory<'storage>,
-    package_schema: std::sync::Arc<crate::database::TableSchema>,
+    package_schema: std::sync::Arc<coven_database::TableSchema>,
     membership: &'operation MembershipChain,
     identity: Option<&'operation UserKeypair>,
     routing_encryption: Option<&'operation coven_keys::encryption::EncryptionService>,
@@ -23,7 +23,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         routing_encryption: Option<&'operation coven_keys::encryption::EncryptionService>,
     ) -> Result<Self, StorePullError> {
         let package_schema = history.pull_package_schema().await.map_err(|error| {
-            StorePullError::Database(crate::database::DbError::context(
+            StorePullError::Database(coven_database::DbError::context(
                 "load pull package schema",
                 error,
             ))
@@ -64,7 +64,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .pull_materialized_frontier()
             .await
             .map_err(|error| {
-                StorePullError::Database(crate::database::DbError::context(
+                StorePullError::Database(coven_database::DbError::context(
                     "load discovery device-state frontier",
                     error,
                 ))
@@ -280,7 +280,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .pull_snapshot_coverage()
             .await
             .map_err(|error| {
-                StorePullError::Database(crate::database::DbError::context(
+                StorePullError::Database(coven_database::DbError::context(
                     "load snapshot coverage frontier",
                     error,
                 ))
@@ -290,7 +290,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .pull_materialized_frontier()
             .await
             .map_err(|error| {
-                StorePullError::Database(crate::database::DbError::context(
+                StorePullError::Database(coven_database::DbError::context(
                     "load materialized frontier",
                     error,
                 ))
@@ -411,7 +411,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .drain_local_blob_cleanup()
                 .await
                 .map_err(|error| {
-                    StorePullError::Database(crate::database::DbError::context(
+                    StorePullError::Database(coven_database::DbError::context(
                         "drain local blob cleanup intents",
                         error,
                     ))
@@ -773,7 +773,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .unwrap_or_default(),
             registrations: candidate.registrations.clone(),
             package_application: (!packages.is_empty()).then_some(
-                crate::database::RetainedPackageApplication::Received { receiver_wall_ms },
+                coven_database::RetainedPackageApplication::Received { receiver_wall_ms },
             ),
             packages,
             device_operations,

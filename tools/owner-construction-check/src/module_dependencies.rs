@@ -67,7 +67,6 @@ pub(crate) enum Region {
 /// Every top-level module must appear here; an unassigned module fails the
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
-    ("database", Region::Database),
     ("join_code", Region::Storage),
     ("restore_code", Region::Storage),
     ("oauth", Region::Storage),
@@ -91,6 +90,14 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("store_security", Region::Host),
     ("store_sync", Region::Host),
 ];
+
+/// A region whose modules have left `coven` for a crate of their own, keyed by
+/// that crate's name. Cargo stops a reference *up* out of the extracted crate,
+/// but nothing stops a module still inside `coven` from naming it — so the
+/// sibling and rank rules keep applying to paths rooted at these names until
+/// every region above them has also been extracted.
+pub(crate) const EXTRACTED_CRATE_REGIONS: &[(&str, Region)] =
+    &[("coven_database", Region::Database)];
 
 /// Database and Storage are siblings: replication composes both, but neither
 /// may reach into the other.
@@ -261,6 +268,30 @@ impl ModuleDependencyVisitor<'_> {
         });
     }
 
+    /// A path rooted at an extracted crate's name, checked against the same
+    /// rank and sibling rules the module form answers to.
+    fn check_extracted_crate_reference(&mut self, crate_name: &str, line: usize) {
+        let Some(to_region) = EXTRACTED_CRATE_REGIONS
+            .iter()
+            .find(|(name, _)| *name == crate_name)
+            .map(|(_, region)| *region)
+        else {
+            return;
+        };
+        let from_region = self.regions[self.from];
+        if allows(from_region, to_region) {
+            return;
+        }
+        self.violations.insert(ModuleDependencyViolation {
+            path: self.path.to_string(),
+            line,
+            from: self.from.to_string(),
+            to: crate_name.to_string(),
+            from_region,
+            to_region,
+        });
+    }
+
     /// Every `crate :: ident :: ident …` run in a macro's tokens, checked as a
     /// reference. Nested delimiters carry paths of their own, so groups are
     /// walked too.
@@ -330,8 +361,14 @@ impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
         let mut paths = Vec::new();
         crate::capability_boundaries::flatten_use_tree(&node.tree, &mut Vec::new(), &mut paths);
         for segments in paths {
-            if segments.first().is_some_and(|segment| segment == "crate") {
-                self.check_reference(&segments[1..], node.span().start().line);
+            match segments.first() {
+                Some(first) if first == "crate" => {
+                    self.check_reference(&segments[1..], node.span().start().line);
+                }
+                Some(first) => {
+                    self.check_extracted_crate_reference(first, node.span().start().line);
+                }
+                None => {}
             }
         }
     }
@@ -342,8 +379,14 @@ impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect();
-        if segments.first().is_some_and(|segment| segment == "crate") {
-            self.check_reference(&segments[1..], node.span().start().line);
+        match segments.first() {
+            Some(first) if first == "crate" => {
+                self.check_reference(&segments[1..], node.span().start().line);
+            }
+            Some(first) if node.segments.len() > 1 => {
+                self.check_extracted_crate_reference(first, node.span().start().line);
+            }
+            _ => {}
         }
         visit::visit_path(self, node);
     }
@@ -369,17 +412,13 @@ mod tests {
     }
 
     fn lib() -> RustFile {
-        file(
-            "crates/coven/src/lib.rs",
-            "pub use database::StoreDatabase;",
-        )
+        file("crates/coven/src/lib.rs", "pub use sync::SyncLoopStatus;")
     }
 
     #[test]
     fn an_upward_reference_is_rejected() {
         let files = vec![
             lib(),
-            file("crates/coven/src/database/store.rs", ""),
             file(
                 "crates/coven/src/join_code.rs",
                 "use crate::sync::VerifiedThing;",
@@ -396,10 +435,9 @@ mod tests {
     fn a_downward_reference_is_allowed() {
         let files = vec![
             lib(),
-            file("crates/coven/src/database/store.rs", ""),
             file(
                 "crates/coven/src/sync/mod.rs",
-                "use crate::database::StoreDatabase;",
+                "use coven_database::StoreDatabase;",
             ),
             file("crates/coven/src/join_code.rs", ""),
         ];
@@ -409,20 +447,35 @@ mod tests {
     }
 
     #[test]
-    fn database_and_storage_are_mutually_closed_siblings() {
+    fn storage_may_not_reach_its_database_sibling() {
         let files = vec![
             lib(),
             file(
-                "crates/coven/src/database/store.rs",
-                "use crate::storage::ExactObjectRef;",
-            ),
-            file(
                 "crates/coven/src/storage/remote.rs",
-                "use crate::database::StoreDatabase;",
+                "use coven_database::StoreDatabase;",
             ),
+            file("crates/coven/src/sync/mod.rs", ""),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
-        assert_eq!(violations.len(), 2);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].from, "storage");
+        assert_eq!(violations[0].to, "coven_database");
+    }
+
+    /// Replication composes both siblings, so naming the extracted database
+    /// crate from there is the allowed direction.
+    #[test]
+    fn replication_may_name_the_database_crate() {
+        let files = vec![
+            lib(),
+            file(
+                "crates/coven/src/sync/mod.rs",
+                "use coven_database::StoreDatabase;",
+            ),
+        ];
+        assert!(find_module_dependency_violations(&files)
+            .expect("check runs")
+            .is_empty());
     }
 
     #[test]
@@ -449,7 +502,7 @@ mod tests {
             lib(),
             file("crates/coven/src/sync/mod.rs", ""),
             file(
-                "crates/coven/src/database/store.rs",
+                "crates/coven/src/join_code.rs",
                 r#"
                 fn is_receipt(object: &Object) -> bool {
                     matches!(object, crate::sync::store::ReclaimObject::Receipt { .. })
@@ -459,7 +512,7 @@ mod tests {
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "database");
+        assert_eq!(violations[0].from, "join_code");
         assert_eq!(violations[0].to, "sync");
     }
 
@@ -502,19 +555,19 @@ mod tests {
             lib(),
             file("crates/coven/src/sync/mod.rs", ""),
             file("crates/coven/src/handle.rs", ""),
-            file("crates/coven/src/database/store.rs", ""),
+            file("crates/coven/src/join_code.rs", ""),
             file(
                 "crates/coven/src/handle_tests/whole_handle.rs",
                 "use crate::sync::VerifiedThing;",
             ),
             file(
-                "crates/coven/src/database_tests.rs",
+                "crates/coven/src/join_code_tests.rs",
                 "use crate::sync::VerifiedThing;",
             ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "database");
+        assert_eq!(violations[0].from, "join_code");
         assert_eq!(violations[0].to, "sync");
     }
 }

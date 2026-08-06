@@ -222,7 +222,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     ));
     assert_eq!(
         fixture.discard_blocked_write().await,
-        crate::database::BlockedWriteDiscard::RemoteResolutionRequired,
+        coven_database::BlockedWriteDiscard::RemoteResolutionRequired,
     );
     assert!(fixture.merge_candidate_cleanup_pending().await);
     let retry_error = fixture
@@ -244,7 +244,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     assert!(!fixture.merge_candidate_cleanup_pending().await);
     assert_eq!(
         fixture.discard_blocked_write().await,
-        crate::database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
+        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
     );
     assert!(!fixture.contains_exact_object(&fixture.package_object));
     assert!(!fixture.contains_exact_object(&fixture.commit_ref.object));
@@ -455,7 +455,7 @@ async fn third_candidate_wins_after_abandonment_preparation() {
     assert!(!fixture.remote_object_exists(&authority_head).await);
     assert_eq!(
         fixture.discard_blocked_write().await,
-        crate::database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
+        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
     );
 }
 
@@ -665,7 +665,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .prepare_pending_store_write(&store_dir)
             .await
             .expect("prepare write"));
-        let write_id = crate::database::StoreDatabase::new(&db)
+        let write_id = coven_database::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
             .expect("load prepared write")
@@ -681,7 +681,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         drop(db);
 
         let reopened = open();
-        let reopened_database = crate::database::StoreDatabase::new(&reopened);
+        let reopened_database = coven_database::StoreDatabase::new(&reopened);
         let result = match crate::sync::test_helpers::TestDevice::load(
             &reopened,
             storage.clone(),
@@ -731,7 +731,7 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         .expect("in-memory home supports immutable copies"),
     );
     let db = open_test_db();
-    let database = crate::database::StoreDatabase::new(&db);
+    let database = coven_database::StoreDatabase::new(&db);
     let device = crate::sync::test_helpers::TestDevice::create(
         &db,
         storage.clone(),
@@ -786,7 +786,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         .expect("in-memory home supports immutable copies"),
     );
     let db = open_test_db();
-    let database = crate::database::StoreDatabase::new(&db);
+    let database = coven_database::StoreDatabase::new(&db);
     let device = crate::sync::test_helpers::TestDevice::create(
         &db,
         storage.clone(),
@@ -823,12 +823,12 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
 
     assert_eq!(
         database.discard_blocked_write(&first).await.unwrap(),
-        crate::database::BlockedWriteDiscard::Discarded(vec![first.clone(), second.clone()])
+        coven_database::BlockedWriteDiscard::Discarded(vec![first.clone(), second.clone()])
     );
     let note_count: i64 = db
         .test_sql(|conn| {
             conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
-                .map_err(crate::database::DbError::from)
+                .map_err(coven_database::DbError::from)
         })
         .await
         .unwrap();

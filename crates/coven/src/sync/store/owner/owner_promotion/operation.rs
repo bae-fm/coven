@@ -27,7 +27,7 @@ use super::OwnerPromotionError;
 
 pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
-    database: crate::database::StoreDatabase,
+    database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     root: coven_protocol::store_commit::StoreRootRef,
     membership: coven_protocol::membership::MembershipChain,
@@ -73,7 +73,7 @@ enum OwnerPromotionResumeOutcome {
 impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
         root: coven_protocol::store_commit::StoreRootRef,
         membership: coven_protocol::membership::MembershipChain,
@@ -89,7 +89,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
 
     async fn delete_candidate_objects(
         &self,
-        targets: Vec<crate::database::CandidateCleanupObject>,
+        targets: Vec<coven_database::CandidateCleanupObject>,
     ) -> Result<(), OwnerPromotionError> {
         crate::sync::store::owner::delete_candidate_cleanup_targets(
             self.storage.as_ref(),

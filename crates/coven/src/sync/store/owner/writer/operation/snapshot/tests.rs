@@ -3,10 +3,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use crate::database::Database;
-use crate::database::StoreDatabase;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_database::Database;
+use coven_database::StoreDatabase;
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
@@ -187,7 +187,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
     let storage = storage(&home, &signer);
     let db = open(Path::new(":memory:"), "snapshot-test-device");
     let device = initialize(&db, &storage, &signer).await;
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .export_activated_device_continuation(&signer)
         .await
         .expect("export continuation before any snapshot")
@@ -207,7 +207,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
         .expect("load continued snapshot journal")
         .expect("continued snapshot journal exists");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .export_activated_device_continuation(&signer)
             .await
             .expect("export continuation after snapshot")
@@ -432,7 +432,7 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("publish staged second snapshot");
     let published_generations = db
         .test_sql(|database| {
-            database.table_row_count(crate::database::DatabaseTestTable::named(
+            database.table_row_count(coven_database::DatabaseTestTable::named(
                 "published_store_snapshot",
             ))
         })

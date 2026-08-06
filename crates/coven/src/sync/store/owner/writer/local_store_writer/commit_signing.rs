@@ -156,7 +156,7 @@ impl LocalStoreWriter {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drain_tombstones(
         &self,
-        database: &crate::database::StoreDatabase,
+        database: &coven_database::StoreDatabase,
         storage: &dyn crate::storage::SyncStorage,
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,

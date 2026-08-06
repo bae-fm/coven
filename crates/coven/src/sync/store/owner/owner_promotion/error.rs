@@ -5,7 +5,7 @@ use coven_protocol::store_commit::{OwnerPromotionId, OwnerPromotionStaleReason};
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OwnerPromotionError {
     #[error("Owner promotion database state: {0}")]
-    Database(#[from] crate::database::DbError),
+    Database(#[from] coven_database::DbError),
     #[error("Owner promotion protocol state: {0}")]
     Protocol(String),
     #[error("Owner promotion storage: {0}")]

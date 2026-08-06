@@ -81,7 +81,7 @@ impl StoreSync {
     #[cfg(test)]
     pub(crate) async fn latest_materialized_commit_coordinate_for_test(
         &self,
-    ) -> Result<(String, u64), crate::database::DbError> {
+    ) -> Result<(String, u64), coven_database::DbError> {
         self.database
             .latest_materialized_commit_coordinate_for_test()
             .await
@@ -97,7 +97,7 @@ impl StoreSync {
         std::sync::Arc<tokio::sync::Notify>,
     ) {
         self.database
-            .arm_test_pause(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
+            .arm_test_pause(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
                 device_id,
                 seq: sequence,
             })

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::database::StoreDatabase;
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::ConfigProvider;
@@ -8,6 +7,7 @@ use crate::sync::store::blob::{
     BlobAccess, CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
 };
 use crate::sync::{BlobCacheError, BlobStream};
+use coven_database::StoreDatabase;
 use coven_foundation::config::Config;
 use coven_protocol::blob::RowBlobRef;
 
@@ -256,13 +256,13 @@ impl StoreBlobs {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<RowBlobRef, crate::database::DbError> {
+    ) -> Result<RowBlobRef, coven_database::DbError> {
         self.database.row_blob_ref(table, row_id).await
     }
 
     pub(crate) async fn queued_uploads(
         &self,
-    ) -> Result<Vec<crate::QueuedUpload>, crate::database::DbError> {
+    ) -> Result<Vec<crate::QueuedUpload>, coven_database::DbError> {
         self.database.queued_uploads().await
     }
 
@@ -270,7 +270,7 @@ impl StoreBlobs {
         &self,
         root_table: &str,
         root_id: &str,
-    ) -> Result<Vec<crate::QueuedUpload>, crate::database::DbError> {
+    ) -> Result<Vec<crate::QueuedUpload>, coven_database::DbError> {
         self.database
             .queued_uploads_for_root(root_table, root_id)
             .await
@@ -280,13 +280,13 @@ impl StoreBlobs {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<Option<crate::ExternalBlob>, crate::database::DbError> {
+    ) -> Result<Option<crate::ExternalBlob>, coven_database::DbError> {
         self.database.external_blob(table, row_id).await
     }
 
     pub(crate) async fn queued_deletes(
         &self,
-    ) -> Result<Vec<crate::QueuedDelete>, crate::database::DbError> {
+    ) -> Result<Vec<crate::QueuedDelete>, coven_database::DbError> {
         self.database.queued_deletes().await
     }
 
@@ -294,7 +294,7 @@ impl StoreBlobs {
         &self,
         root_table: &str,
         root_id: &str,
-    ) -> Result<Option<crate::MakeRemoteProgress>, crate::database::DbError> {
+    ) -> Result<Option<crate::MakeRemoteProgress>, coven_database::DbError> {
         self.database
             .make_remote_progress(root_table, root_id)
             .await
@@ -303,7 +303,7 @@ impl StoreBlobs {
     pub(crate) async fn cache_budget(
         &self,
         namespace: &str,
-    ) -> Result<Option<u64>, crate::database::DbError> {
+    ) -> Result<Option<u64>, coven_database::DbError> {
         self.database.get_cache_budget(namespace).await
     }
 
@@ -311,7 +311,7 @@ impl StoreBlobs {
         &self,
         namespace: &str,
         max_bytes: u64,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.database.set_cache_budget(namespace, max_bytes).await
     }
 }

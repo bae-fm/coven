@@ -1,0 +1,63 @@
+use super::fixtures::*;
+use crate::*;
+
+#[test]
+fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate() {
+    let stream = coven_protocol::causal_grants::AuthorStreamId::from_bytes([7; 32]);
+    let registration = StoreDeviceRegistrationRef {
+        device_id: "07".repeat(32).parse().expect("test device id"),
+        registration_hash: ObjectHash::digest(b"test registration"),
+        object: reclaim_test_object("store-v1/test/registration.json"),
+    };
+    let exclusion = |label: &str| coven_protocol::store_commit::StoreDeviceExclusionRef {
+        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef {
+            proposal_id: coven_protocol::store_commit::StoreDeviceExclusionProposalId::from_hash(
+                ObjectHash::digest(format!("{label} proposal id").as_bytes()),
+            ),
+            target: registration.clone(),
+            proposal_hash: ObjectHash::digest(format!("{label} proposal").as_bytes()),
+            object: reclaim_test_object(&format!("store-v1/test/{label}/proposal.json")),
+        },
+        outcome_hash: ObjectHash::digest(format!("{label} outcome").as_bytes()),
+        object: reclaim_test_object(&format!("store-v1/test/{label}/outcome.json")),
+    };
+    let high = exclusion("high");
+    let low = exclusion("low");
+    let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
+        coord: StoreCommitCoord {
+            stream_id: stream,
+            sequence,
+        },
+        commit_hash: ObjectHash::digest(format!("{label} commit").as_bytes()),
+        object: reclaim_test_object(&format!("store-v1/test/{label}/commit.json")),
+    };
+    let locator = |exclusion, sequence, label: &str| {
+        AuthorExclusionActivationLocator::verified(
+            exclusion,
+            BTreeMap::from([(stream, commit(sequence, label))]),
+            commit(sequence + 1, &format!("{label}-activation")),
+            coven_protocol::store_commit::StoreDeviceHeadRef {
+                head_hash: ObjectHash::digest(format!("{label} head").as_bytes()),
+                object: reclaim_test_object(&format!("store-v1/test/{label}/head.json")),
+            },
+        )
+    };
+    let high_locator = locator(high.clone(), 5, "high");
+    let low_locator = locator(low.clone(), 2, "low");
+    let terminals = vec![high.clone(), low.clone()];
+
+    let selected =
+        crate::select_author_exclusion_activation_locator(&terminals, &stream, 4, |candidate| {
+            if candidate == &high {
+                Ok(high_locator.clone())
+            } else if candidate == &low {
+                Ok(low_locator.clone())
+            } else {
+                Err(DbError::Message("unexpected exclusion".to_string()))
+            }
+        })
+        .expect("select exclusion locator")
+        .expect("one terminal excludes the candidate");
+
+    assert_eq!(selected, low_locator);
+}

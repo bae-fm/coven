@@ -219,7 +219,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn retained_merge_replay_inputs_for_test(
         &self,
-    ) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, crate::database::DbError>
+    ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, coven_database::DbError>
     {
         self.database
             .retained_merge_replay_inputs(self.root.reference().clone())
@@ -230,7 +230,7 @@ impl Store {
     pub(crate) async fn resolved_store_device_state_for_test(
         &self,
         reference: &coven_protocol::store_commit::StoreDeviceStateRef,
-    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, crate::database::DbError>
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, coven_database::DbError>
     {
         self.database.resolved_store_device_state(reference).await
     }
@@ -239,7 +239,7 @@ impl Store {
     pub(crate) async fn retained_merge_materialization_for_test(
         &self,
         reference: coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<crate::database::OwnedVerifiedMergeMaterialization, crate::database::DbError> {
+    ) -> Result<coven_database::OwnedVerifiedMergeMaterialization, coven_database::DbError> {
         self.database
             .retained_merge_materialization(self.root.reference().clone(), reference)
             .await
@@ -410,7 +410,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn verify_snapshots_for_acknowledgement_for_test(
         &self,
-        snapshots: &[crate::database::PublishedStoreSnapshot],
+        snapshots: &[coven_database::PublishedStoreSnapshot],
     ) -> Result<(), StoreError> {
         let mut history = self
             .authorize_history()
@@ -489,7 +489,7 @@ impl Store {
         references: Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<
         Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
-        crate::database::DbError,
+        coven_database::DbError,
     > {
         self.database
             .retained_merge_history_frontier(self.root.reference().clone(), references)
@@ -503,7 +503,7 @@ impl Store {
         control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<
         Option<crate::sync::store::circle_controls::VerifiedCircleReference>,
-        crate::database::DbError,
+        coven_database::DbError,
     > {
         self.database
             .verified_circle_activation(self.root.reference().clone(), circle_id, control)
@@ -591,7 +591,7 @@ impl Store {
         &self,
         target: coven_protocol::store_commit::CirclePackageRef,
         activation: coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<bool, crate::database::DbError> {
+    ) -> Result<bool, coven_database::DbError> {
         self.database
             .circle_package_is_retained_for_replay(
                 self.root.reference().clone(),
@@ -729,7 +729,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn export_activated_device_continuation_for_test(
         &self,
-    ) -> Result<coven_protocol::recovery::ActivatedContinuation, crate::database::DbError> {
+    ) -> Result<coven_protocol::recovery::ActivatedContinuation, coven_database::DbError> {
         self.database
             .export_activated_device_continuation(&self.identity)
             .await
@@ -764,7 +764,7 @@ impl Store {
         &self,
         acknowledgement: coven_protocol::store_commit::StoreAckRef,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.database
             .prepare_acknowledgement_activation(acknowledgement, candidate)
             .await
@@ -787,7 +787,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn publish_snapshot_for_test(
         &self,
-        snapshot: crate::database::CreatedSnapshot,
+        snapshot: coven_database::CreatedSnapshot,
         coverage: coven_protocol::store_commit::CommitFrontier,
         created_at: String,
     ) -> Result<coven_protocol::store_commit::SnapshotMeta, writer::snapshot::SnapshotError> {
@@ -842,7 +842,7 @@ impl Store {
         coverage: &coven_protocol::store_commit::StoreHistoryCut,
         attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
         membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
-    ) -> Result<crate::database::DeviceJoinBootstrapPlan, StoreError> {
+    ) -> Result<coven_database::DeviceJoinBootstrapPlan, StoreError> {
         let mut history = self
             .authorize_history()
             .await

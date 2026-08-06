@@ -20,7 +20,7 @@ impl EstablishedStoreIdentity {
 
     pub(crate) async fn initialize_sync_components(
         &self,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         store_dir: coven_foundation::store_dir::StoreDir,
         local_blob_access: crate::sync::store::blob::LocalStoreBlobAccess,
         storage: Arc<CloudSyncStorage>,
@@ -43,7 +43,7 @@ impl EstablishedStoreIdentity {
 
     pub(crate) async fn load_store(
         &self,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
         store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Result<crate::sync::Store, crate::sync::store::StoreError> {
@@ -52,8 +52,8 @@ impl EstablishedStoreIdentity {
 
     pub(crate) async fn export_activated_device_continuation(
         &self,
-        database: &crate::database::StoreDatabase,
-    ) -> Result<coven_protocol::recovery::ActivatedContinuation, crate::database::DbError> {
+        database: &coven_database::StoreDatabase,
+    ) -> Result<coven_protocol::recovery::ActivatedContinuation, coven_database::DbError> {
         database
             .export_activated_device_continuation(&self.keypair)
             .await

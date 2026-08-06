@@ -78,7 +78,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, super::SnapshotError> {
+    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, super::SnapshotError> {
         self.owner
             .load_store_snapshot_stream(registration_ref, registration)
             .await
@@ -334,9 +334,9 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
 
     pub(crate) async fn verify_snapshot_stability(
         &mut self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
+        snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<
-        crate::database::VerifiedStoreSnapshotStability,
+        coven_database::VerifiedStoreSnapshotStability,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.owner.reclaim_snapshot_stability(snapshot).await
@@ -344,7 +344,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
 
     pub(crate) async fn select_maximal_stable_store_snapshot(
         &mut self,
-        candidates: Vec<crate::database::PublishedStoreSnapshot>,
+        candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<
         Option<super::SelectedStableStoreSnapshot>,
         crate::sync::store::owner::pull::StorePullError,

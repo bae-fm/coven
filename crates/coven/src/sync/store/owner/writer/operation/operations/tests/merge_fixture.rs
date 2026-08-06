@@ -51,7 +51,7 @@ impl PreparedWriteFixture {
             .expect("read prepared write status")
     }
 
-    pub(super) async fn prepared_write(&self) -> crate::database::PreparedStoreWriteCommit {
+    pub(super) async fn prepared_write(&self) -> coven_database::PreparedStoreWriteCommit {
         self.database
             .oldest_prepared_store_write()
             .await
@@ -83,7 +83,7 @@ impl PreparedWriteFixture {
             .expect("set prepared write status");
     }
 
-    pub(super) async fn discard_blocked_write(&self) -> crate::database::BlockedWriteDiscard {
+    pub(super) async fn discard_blocked_write(&self) -> coven_database::BlockedWriteDiscard {
         self.database
             .discard_blocked_write(&self.write_id)
             .await
@@ -92,7 +92,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn retry_blocked_write(
         &self,
-    ) -> Result<Vec<crate::WriteId>, crate::database::DbError> {
+    ) -> Result<Vec<crate::WriteId>, coven_database::DbError> {
         self.database.retry_blocked_write(&self.write_id).await
     }
 
@@ -168,7 +168,7 @@ impl PreparedWriteFixture {
             .test_sql(|connection| {
                 connection
                     .execute_batch("DROP TRIGGER fail_outbound_completion")
-                    .map_err(crate::database::DbError::from)
+                    .map_err(coven_database::DbError::from)
             })
             .await
             .expect("remove completion fault");
@@ -176,7 +176,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn observe_excluded_candidate_head(
         &self,
-        batch: &crate::database::PreparedStoreWriteCommit,
+        batch: &coven_database::PreparedStoreWriteCommit,
     ) -> Result<ExcludedCandidateHeadObservation, StoreError> {
         self.device
             .observe_excluded_candidate_head_for_test(
@@ -189,7 +189,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn candidate_author(
         &self,
-        batch: &crate::database::PreparedStoreWriteCommit,
+        batch: &coven_database::PreparedStoreWriteCommit,
     ) -> coven_protocol::store_commit::StoreDeviceRegistration {
         self.database
             .activated_store_device_registration(batch.commit.value.author_registration.clone())
@@ -251,7 +251,7 @@ impl PreparedWriteFixture {
             .expect("create outbound crash test Store");
             let root = device.store_root().clone();
             let device_id = device.device_id.clone();
-            let database = crate::database::StoreDatabase::new(&db);
+            let database = coven_database::StoreDatabase::new(&db);
             db.execute_test_host_write(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'outbound', NULL, 1, '0000000001000-0000-writer', '2026-01-01')",

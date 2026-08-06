@@ -77,7 +77,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         seq: u64,
     ) {
         self.database
-            .reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
+            .reach_test_point(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
                 device_id,
                 seq,
             })
@@ -255,7 +255,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         coverage: &coven_protocol::store_commit::StoreHistoryCut,
         attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
         membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
-    ) -> Result<crate::database::DeviceJoinBootstrapPlan, StoreError> {
+    ) -> Result<coven_database::DeviceJoinBootstrapPlan, StoreError> {
         self.history_verifier
             .prepare_device_join_bootstrap(coverage, attempt_activation, membership_state)
             .await

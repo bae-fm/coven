@@ -7,14 +7,14 @@ struct VerifiedMergeSnapshotState {
 }
 
 pub(crate) struct SelectedStableStoreSnapshot {
-    pub(crate) snapshot: crate::database::PublishedStoreSnapshot,
-    pub(crate) stability: crate::database::VerifiedStoreSnapshotStability,
+    pub(crate) snapshot: coven_database::PublishedStoreSnapshot,
+    pub(crate) stability: coven_database::VerifiedStoreSnapshotStability,
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn select_maximal_stable_store_snapshot(
         &mut self,
-        candidates: Vec<crate::database::PublishedStoreSnapshot>,
+        candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<Option<SelectedStableStoreSnapshot>, StorePullError> {
         let Some(maximal_candidate) =
             super::snapshot::select_maximal_store_snapshot(candidates.clone())
@@ -105,7 +105,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     async fn verify_snapshot_authority(
         &mut self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
+        snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<(StoreHistoryCut, VerifiedMergeSnapshotState), StorePullError> {
         let frontier = &snapshot.meta.coverage.0;
         let state = self
@@ -223,7 +223,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn verify_snapshots_for_acknowledgement(
         &mut self,
-        snapshots: &[crate::database::PublishedStoreSnapshot],
+        snapshots: &[coven_database::PublishedStoreSnapshot],
     ) -> Result<(), StorePullError> {
         for snapshot in snapshots {
             self.verify_snapshot_authority(snapshot).await?;
@@ -233,7 +233,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn verify_snapshot_stability(
         &mut self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
+        snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
         let (snapshot_cut, state) = self.verify_snapshot_authority(snapshot).await?;
         let snapshot_frontier = &snapshot_cut.0;
@@ -276,7 +276,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             );
         }
         let founder = self.commit_verifier.load_founder_registration().await?;
-        let authority = crate::database::RetainedReplaySnapshotAuthority {
+        let authority = coven_database::RetainedReplaySnapshotAuthority {
             store_root: self.root.reference().clone(),
             founder_registration: StoreDeviceRegistrationRef::from_registration(
                 &founder.value,

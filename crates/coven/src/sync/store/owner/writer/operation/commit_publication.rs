@@ -171,7 +171,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) async fn publish_prepared(
         &mut self,
         candidate: Box<operations::PreparedStoreOperationCommit>,
-        membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+        membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
@@ -203,7 +203,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         head: coven_protocol::store_commit::StoreDeviceHead,
         prepared_head: coven_protocol::objects::PreparedExactObject,
         history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-        membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
+        membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,

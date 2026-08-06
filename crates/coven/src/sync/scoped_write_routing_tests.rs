@@ -4,10 +4,10 @@
 //! The routing itself is the database's, but every one of these needs the Store
 //! authority Store creation signs, so they run the production creation path.
 
-use crate::database::StoreDatabase;
-use crate::database::*;
 use crate::sync::test_helpers::{test_cloud_home, TestStore};
 use crate::{Migration, WriteStatus};
+use coven_database::StoreDatabase;
+use coven_database::*;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
 use coven_protocol::synced_schema::SyncedTable;
@@ -302,8 +302,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         .find(|(audience, _)| audience == "store")
         .expect("Circle-only write emits a Store package")
         .1;
-    let store_rows =
-        crate::database::walk_changeset(store_changeset).expect("walk Store partition");
+    let store_rows = coven_database::walk_changeset(store_changeset).expect("walk Store partition");
     assert!(
         !store_rows.is_empty(),
         "the Store package is not empty — an empty Store commit would activate nothing",
@@ -321,7 +320,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
             .unwrap_or_else(|| panic!("Circle {circle} package is present"))
             .1;
         let circle_rows =
-            crate::database::walk_changeset(circle_changeset).expect("walk Circle partition");
+            coven_database::walk_changeset(circle_changeset).expect("walk Circle partition");
         assert!(
             circle_rows.iter().any(|row| row.table == "accounts"),
             "each Circle package carries its scoped rows",
@@ -412,7 +411,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         .iter()
         .find(|(audience, _)| audience == "store")
         .expect("move has Store mirror partition");
-    let store_rows = crate::database::walk_changeset(&store.1).expect("walk Store move partition");
+    let store_rows = coven_database::walk_changeset(&store.1).expect("walk Store move partition");
     assert_eq!(store_rows.len(), 1);
     assert_eq!(store_rows[0].table, "_coven_audience");
     assert_eq!(
@@ -420,7 +419,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         coven_foundation::changeset::ChangeOp::Update
     );
 
-    let destination_rows = crate::database::walk_changeset(
+    let destination_rows = coven_database::walk_changeset(
         &partitions
             .iter()
             .find(|(audience, _)| audience == &destination.to_string())

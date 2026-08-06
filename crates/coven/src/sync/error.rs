@@ -2,9 +2,9 @@
 //! boundary's error vocabulary, wrapping the storage, key, and initialization
 //! refusals below it.
 
-use crate::database::DbError;
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::CloudHomeError;
+use coven_database::DbError;
 use coven_keys::keys::KeyError;
 
 use super::cycle::InitSyncError;
@@ -66,8 +66,8 @@ impl From<crate::sync::store::MembershipOpsError> for SyncError {
     }
 }
 
-impl From<crate::database::DeviceJoinJournalError> for SyncError {
-    fn from(error: crate::database::DeviceJoinJournalError) -> Self {
+impl From<coven_database::DeviceJoinJournalError> for SyncError {
+    fn from(error: coven_database::DeviceJoinJournalError) -> Self {
         SyncError::DeviceJoin(crate::DeviceJoinError::from(error))
     }
 }

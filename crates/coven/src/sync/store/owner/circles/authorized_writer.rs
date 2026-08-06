@@ -21,7 +21,7 @@ mod writer_test_support;
 
 pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     writer: &'writer mut AuthorizedWriterOperation<'storage>,
-    database: crate::database::StoreDatabase,
+    database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: coven_protocol::store_commit::StoreRootRef,
@@ -33,7 +33,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         writer: &'writer mut AuthorizedWriterOperation<'storage>,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: coven_protocol::store_commit::StoreRootRef,

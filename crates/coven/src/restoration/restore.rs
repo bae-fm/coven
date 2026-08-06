@@ -322,7 +322,7 @@ pub async fn restore_from_cloud(
             &storage,
             history_verifier,
             membership_floor,
-            crate::database::supported_version(migrations),
+            coven_database::supported_version(migrations),
             &store_dir.db_path(),
             keypair,
         )

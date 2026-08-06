@@ -1,5 +1,5 @@
 use super::*;
-use crate::database::StoredBlobReferenceState;
+use coven_database::StoredBlobReferenceState;
 use tracing::{debug, warn};
 
 impl AuthorizedWriterOperation<'_> {
@@ -230,11 +230,11 @@ impl AuthorizedWriterOperation<'_> {
         Ok(deleted)
     }
 
-    pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, crate::database::DbError> {
+    pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
         self.history.drain_local_blob_cleanup().await
     }
 
-    pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), crate::database::DbError> {
+    pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), coven_database::DbError> {
         self.database.persist_hlc_high_water().await
     }
 }

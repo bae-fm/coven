@@ -43,8 +43,8 @@
 
 use std::collections::HashMap;
 
-use crate::database::DbError;
-use crate::database::StoreDatabase;
+use coven_database::DbError;
+use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::{Provenance, RowBlobRef};
 use coven_protocol::synced_schema::SyncedTable;
@@ -399,7 +399,7 @@ impl LocalBlobTransitions {
         root_id: &str,
         gate_column: &str,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
-        records: Vec<crate::database::MaterializedLocalBlob>,
+        records: Vec<coven_database::MaterializedLocalBlob>,
     ) -> Result<(), DbError> {
         self.database
             .commit_make_local(
@@ -600,7 +600,7 @@ impl ConnectedBlobTransitions {
                             detail,
                         })?;
                     materialization.record_created_file(destination);
-                    crate::database::MaterializedLocalBlob {
+                    coven_database::MaterializedLocalBlob {
                         remote: reference.clone(),
                         stored,
                         destination: Some(dest_path),
@@ -660,7 +660,7 @@ impl ConnectedBlobTransitions {
                         path: store_path.display().to_string(),
                         detail,
                     })?;
-                    crate::database::MaterializedLocalBlob {
+                    coven_database::MaterializedLocalBlob {
                         remote: reference.clone(),
                         stored,
                         destination: None,
@@ -730,7 +730,7 @@ struct MakeLocalMaterialization<'operation> {
     root_table: &'operation str,
     root_id: &'operation str,
     gate_column: String,
-    records: Vec<crate::database::MaterializedLocalBlob>,
+    records: Vec<coven_database::MaterializedLocalBlob>,
     created_files: Vec<ExactPlaintextFile>,
 }
 
@@ -755,7 +755,7 @@ impl<'operation> MakeLocalMaterialization<'operation> {
         self.created_files.push(file);
     }
 
-    fn record_blob(&mut self, record: crate::database::MaterializedLocalBlob) {
+    fn record_blob(&mut self, record: coven_database::MaterializedLocalBlob) {
         self.records.push(record);
     }
 

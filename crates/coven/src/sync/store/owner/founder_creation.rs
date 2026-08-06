@@ -24,12 +24,12 @@ pub(super) struct FounderStoreCreation<'operation> {
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     founder_timestamp: &'operation str,
     identity: &'operation UserKeypair,
-    _permit: crate::database::store::StoreCreationPermit,
+    _permit: coven_database::store::StoreCreationPermit,
 }
 
 struct StagedFounderStoreCreation<'operation> {
     creation: FounderStoreCreation<'operation>,
-    graph: Box<crate::database::DurableFounderGraph>,
+    graph: Box<coven_database::DurableFounderGraph>,
     rollback_allowed: bool,
 }
 
@@ -445,7 +445,7 @@ impl<'operation> FounderStoreCreation<'operation> {
 
     async fn prepare_founder_graph(
         &self,
-    ) -> Result<Box<crate::database::DurableFounderGraph>, StoreProtocolRootError> {
+    ) -> Result<Box<coven_database::DurableFounderGraph>, StoreProtocolRootError> {
         let db = &self.database;
         let storage = self.storage.as_ref();
         let founder_timestamp = self.founder_timestamp;
@@ -663,7 +663,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             };
             let founder_bytes = serde_json::to_vec(&founder)
                 .expect("founder membership entry serialization cannot fail");
-            crate::database::DurableFounderMembership {
+            coven_database::DurableFounderMembership {
                 entry: coven_protocol::objects::ExactProtocolObject {
                     value: founder,
                     bytes: founder_bytes,
@@ -680,7 +680,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 head_ref,
             }
         };
-        Ok(Box::new(crate::database::DurableFounderGraph {
+        Ok(Box::new(coven_database::DurableFounderGraph {
             root: coven_protocol::objects::ExactProtocolObject {
                 value: root_value,
                 bytes: root_bytes,
@@ -701,13 +701,13 @@ impl<'operation> FounderStoreCreation<'operation> {
             },
             initial_ack_ref,
             membership,
-            registration_state: crate::database::LocalDeviceRegistrationState::Prepared,
+            registration_state: coven_database::LocalDeviceRegistrationState::Prepared,
         }))
     }
 
     async fn rollback_founder_publication(
         &self,
-        graph: &crate::database::DurableFounderGraph,
+        graph: &coven_database::DurableFounderGraph,
     ) -> Result<(), String> {
         let mut objects = vec![
             graph.membership.head.object.clone(),
@@ -765,9 +765,9 @@ impl<'operation> FounderStoreCreation<'operation> {
             }
         };
         let rollback_allowed = match &graph.registration_state {
-            crate::database::LocalDeviceRegistrationState::Prepared
-            | crate::database::LocalDeviceRegistrationState::Created => true,
-            crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
+            coven_database::LocalDeviceRegistrationState::Prepared
+            | coven_database::LocalDeviceRegistrationState::Created => true,
+            coven_database::LocalDeviceRegistrationState::Activated { .. } => false,
         };
         let mut staged = StagedFounderStoreCreation {
             creation: self,
@@ -786,7 +786,7 @@ impl<'operation> FounderStoreCreation<'operation> {
 
     async fn reload_founder_graph(
         &self,
-    ) -> Result<Box<crate::database::DurableFounderGraph>, StoreInitializationError> {
+    ) -> Result<Box<coven_database::DurableFounderGraph>, StoreInitializationError> {
         self.database
             .local_store_founder_graph()
             .await
@@ -800,7 +800,7 @@ impl<'operation> FounderStoreCreation<'operation> {
 
     async fn publish_history<'creation>(
         &'creation self,
-        graph: &crate::database::DurableFounderGraph,
+        graph: &coven_database::DurableFounderGraph,
     ) -> Result<AuthorizedStoreHistory<'creation>, StoreProtocolRootError> {
         let database = &self.database;
         let storage = &self.storage;
@@ -884,7 +884,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         }
         if !matches!(
             &graph.registration_state,
-            crate::database::LocalDeviceRegistrationState::Activated { .. }
+            coven_database::LocalDeviceRegistrationState::Activated { .. }
         ) {
             database
                 .mark_local_store_device_registration_created(
@@ -929,7 +929,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 root.clone(),
                 registration_ref,
                 graph.initial_ack_ref.clone(),
-                crate::database::FounderMembershipRefs {
+                coven_database::FounderMembershipRefs {
                     entry: membership.entry_ref.clone(),
                     head: membership.head_ref.clone(),
                 },

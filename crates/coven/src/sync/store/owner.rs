@@ -1,5 +1,5 @@
 use super::*;
-use crate::database::BlockedWriteDiscard;
+use coven_database::BlockedWriteDiscard;
 use coven_protocol::store_commit::StoreRootRef;
 use std::sync::Arc;
 
@@ -303,7 +303,7 @@ impl Store {
         .await
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let device_id = database
-            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
         Ok(Self::new(
             database, storage, store_dir, identity, device_id, root,
@@ -721,7 +721,7 @@ impl Store {
         expected_control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<
         Option<crate::sync::store::circle_controls::CircleEpochAccess>,
-        crate::database::DbError,
+        coven_database::DbError,
     > {
         self.database
             .circle_epoch_access(self.root.reference().clone(), circle_id, expected_control)

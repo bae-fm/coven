@@ -48,7 +48,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn authenticate_blocked_candidate(
         &mut self,
-        candidate: &crate::database::BlockedMergeCandidate,
+        candidate: &coven_database::BlockedMergeCandidate,
     ) -> Result<
         coven_protocol::store_commit::VerifiedStoreBatchCommit,
         crate::sync::store::StoreError,
@@ -216,7 +216,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
         registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
+    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
         self.history_verifier
             .load_store_snapshot_stream(registration_ref, registration)
             .await
@@ -224,7 +224,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn verify_snapshots_for_acknowledgement(
         &mut self,
-        snapshots: &[crate::database::PublishedStoreSnapshot],
+        snapshots: &[coven_database::PublishedStoreSnapshot],
     ) -> Result<(), pull::StorePullError> {
         self.history_verifier
             .verify_snapshots_for_acknowledgement(snapshots)
@@ -386,7 +386,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 founder_registration_bytes,
                 founder_genesis,
                 owner_pubkey.to_string(),
-                crate::database::InitialStoreMembershipAuthority {
+                coven_database::InitialStoreMembershipAuthority {
                     head_refs: chain.head_refs().to_vec(),
                 },
             )

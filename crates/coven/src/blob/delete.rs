@@ -41,9 +41,9 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::database::{OutboxEntry, OutboxOperation};
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipherAccess, CloudRotationAccess};
+use coven_database::{OutboxEntry, OutboxOperation};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::blob::locator::StoredBlobRef;
 use coven_protocol::objects::StorageError;
@@ -103,7 +103,7 @@ enum ExistingTombstone {
 /// Store identity, writer identity, and clock used by validation, publication,
 /// and retry recording.
 pub(crate) struct TombstoneDrain<'a> {
-    db: &'a crate::database::StoreDatabase,
+    db: &'a coven_database::StoreDatabase,
     storage: &'a dyn SyncStorage,
     cipher: &'a dyn CloudCipherAccess,
     pending_rotation: &'a dyn CloudRotationAccess,
@@ -284,7 +284,7 @@ impl<'a> TombstoneDrain<'a> {
 
     /// Bind every dependency used by one deletion-drain pass.
     pub(crate) fn new(
-        db: &'a crate::database::StoreDatabase,
+        db: &'a coven_database::StoreDatabase,
         storage: &'a dyn SyncStorage,
         cipher: &'a dyn CloudCipherAccess,
         pending_rotation: &'a dyn CloudRotationAccess,

@@ -21,7 +21,7 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     .await
     .expect("install mismatched Circle operation payload");
 
-    let error = crate::database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect_err("lookup authority must match the payload operation id");
@@ -45,7 +45,7 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
     .await
     .expect("install mismatched Circle operation payload");
 
-    let error = crate::database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect_err("lookup authority must match the payload Circle id");
@@ -63,12 +63,12 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare second Circle operation");
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(second.clone())
         .await
         .expect("persist second Circle operation");
 
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .block_circle_operation(
             &first.operation_id,
             coven_protocol::circle::CircleOperationBlock::AuthorityLost {
@@ -80,12 +80,12 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .await
         .expect("block first Circle operation");
 
-    let first = crate::database::StoreDatabase::new(&db)
+    let first = coven_database::StoreDatabase::new(&db)
         .circle_operation(&first.operation_id)
         .await
         .expect("read first Circle operation")
         .expect("first Circle operation remains durable");
-    let second = crate::database::StoreDatabase::new(&db)
+    let second = coven_database::StoreDatabase::new(&db)
         .circle_operation(&second.operation_id)
         .await
         .expect("read second Circle operation")
@@ -115,7 +115,7 @@ async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
 
     assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&journal.operation_id)
             .await
             .expect("read exact Circle operation")

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::database::{Database, StoreDatabase};
 use crate::sync::test_helpers::TestStore;
+use coven_database::{Database, StoreDatabase};
 
 struct CircleSnapshotFixture {
     directory: tempfile::TempDir,

@@ -162,7 +162,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn load_snapshot_image(
         &self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
+        snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<Vec<u8>, StoreObjectError> {
         let context = ProtocolObjectContext::store_encrypted(
             self.root.reference().store_root_hash,
@@ -257,7 +257,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, super::writer::snapshot::SnapshotError>
+    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, super::writer::snapshot::SnapshotError>
     {
         self.commit_verifier
             .load_store_snapshot_stream(registration_ref, registration)

@@ -133,7 +133,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn blocked_candidate_nonactivation(
         &mut self,
-        candidate: &crate::database::BlockedMergeCandidate,
+        candidate: &coven_database::BlockedMergeCandidate,
     ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let verified = self
@@ -495,7 +495,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn membership_mutation_permit(
         &self,
-    ) -> crate::database::store::MembershipMutationPermit {
+    ) -> coven_database::store::MembershipMutationPermit {
         self.database.membership_mutation_permit().await
     }
 

@@ -11,7 +11,6 @@
 pub(crate) mod blob;
 pub(crate) mod circles;
 pub(crate) mod coven;
-pub(crate) mod database;
 mod handle;
 pub(crate) mod join_code;
 pub(crate) mod joining;
@@ -35,11 +34,16 @@ pub(crate) mod sync;
 #[cfg(test)]
 mod blob_facade_tests;
 
-pub use database::rusqlite;
+pub use coven_database::rusqlite;
 
 pub use blob::{MakeLocalError, MakeRemoteError};
 pub use circles::{CircleError, Circles};
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
+pub use coven_database::{
+    BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
+    QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
+};
+pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_foundation::atomic_file::{write_atomic, WriteError};
 pub use coven_foundation::changeset::{ChangeOp, RowChange};
 #[cfg(any(test, feature = "test-utils"))]
@@ -94,11 +98,6 @@ pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
     ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
-pub use database::{
-    BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
-    QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
-};
-pub use database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use handle::CovenHandle;
 pub use joining::{
     abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,

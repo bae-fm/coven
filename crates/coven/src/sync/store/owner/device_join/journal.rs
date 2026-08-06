@@ -1,15 +1,15 @@
 use coven_protocol::store_commit::DeviceJoinAttemptId;
 
 use super::DeviceJoinError;
-use crate::database::StoreDatabase;
+use coven_database::StoreDatabase;
 use coven_protocol::store_commit::device_join_exchange::{
     DeviceJoinActivation, DeviceJoinCleanupActivation, DeviceJoinReadiness,
 };
 use coven_protocol::store_commit::DeviceJoinAttemptRef;
 use coven_protocol::store_commit::DeviceJoinOutcomeRef;
 
-pub(crate) use crate::database::device_join_journal::validate_initial_progress;
-use crate::database::device_join_journal::validate_successor;
+pub(crate) use coven_database::device_join_journal::validate_initial_progress;
+use coven_database::device_join_journal::validate_successor;
 pub(crate) use coven_protocol::store_commit::device_join_journal::attempt_key;
 pub(crate) use coven_protocol::store_commit::device_join_journal::{
     device_join_action, DeviceJoinRoleProgress, DeviceJoinRoleProgressKind, JoinerJoinProgress,
@@ -111,13 +111,13 @@ impl<Progress: DeviceJoinRoleProgressKind> StoreJoinJournal<Progress> {
 /// compare-and-swap update rejects stale or skipped transitions.
 #[derive(Clone, Debug)]
 pub struct DeviceJoinJournalDatabase {
-    store: crate::database::DeviceJoinJournalStore,
+    store: coven_database::DeviceJoinJournalStore,
 }
 
 impl DeviceJoinJournalDatabase {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, DeviceJoinError> {
         Ok(Self {
-            store: crate::database::DeviceJoinJournalStore::open(path).map_err(database_error)?,
+            store: coven_database::DeviceJoinJournalStore::open(path).map_err(database_error)?,
         })
     }
 
@@ -343,7 +343,7 @@ impl DeviceJoinJournalDatabase {
     }
 }
 
-pub(super) fn database_error(error: crate::database::DbError) -> DeviceJoinError {
+pub(super) fn database_error(error: coven_database::DbError) -> DeviceJoinError {
     DeviceJoinError::Database(error)
 }
 

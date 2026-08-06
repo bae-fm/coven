@@ -54,7 +54,7 @@ pub(super) fn snapshot_supersedes_seed(cut: &CommitFrontier, seed: &CommitFronti
 
 #[derive(Clone)]
 pub(super) struct VerifiedReclaimSnapshot {
-    pub(super) snapshot: crate::database::PublishedStoreSnapshot,
+    pub(super) snapshot: coven_database::PublishedStoreSnapshot,
     pub(super) acknowledgements: Vec<StoreAckRef>,
 }
 

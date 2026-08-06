@@ -608,7 +608,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .journal
             .load()?
             .ok_or(DeviceJoinError::JournalConflict)?;
-        if crate::database::device_join_journal::joiner_abandonment_transition(
+        if coven_database::device_join_journal::joiner_abandonment_transition(
             &current,
             &abandonment,
         )?
@@ -656,7 +656,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let next = crate::database::device_join_journal::joiner_abandonment_transition(
+        let next = coven_database::device_join_journal::joiner_abandonment_transition(
             &current,
             &abandonment,
         )?

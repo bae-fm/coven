@@ -1,9 +1,9 @@
 use super::*;
-use crate::database::VerifiedMergeMembershipObjects;
 use crate::storage as store_objects;
 use crate::sync::store::membership::InviteError;
 use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
+use coven_database::VerifiedMergeMembershipObjects;
 use coven_protocol::membership::{
     self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
 };
@@ -50,7 +50,7 @@ use membership_mutation_journal::{
 };
 
 pub(crate) struct MergeConflictResolutionCommitPlan {
-    authorship: crate::database::store::OwnStreamAuthorship,
+    authorship: coven_database::store::OwnStreamAuthorship,
     writer: Arc<LocalStoreWriter>,
     root: coven_protocol::store_commit::StoreRootRef,
     coord: coven_protocol::store_commit::StoreCommitCoord,
@@ -63,7 +63,7 @@ pub(crate) struct MergeConflictResolutionCommitPlan {
 impl MergeConflictResolutionCommitPlan {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        authorship: crate::database::store::OwnStreamAuthorship,
+        authorship: coven_database::store::OwnStreamAuthorship,
         writer: Arc<LocalStoreWriter>,
         root: coven_protocol::store_commit::StoreRootRef,
         coord: coven_protocol::store_commit::StoreCommitCoord,
@@ -224,7 +224,7 @@ enum AuthorizationRefreshError {
     #[error("refresh state is invalid: {0}")]
     InvalidState(String),
     #[error("rotation gate database state: {0}")]
-    Database(#[source] crate::database::DbError),
+    Database(#[source] coven_database::DbError),
     #[error("merge this device's live and selected keyrings: {0}")]
     InvalidKeyring(#[source] coven_keys::encryption::EncryptionError),
     #[error("adopt committed store-key rotation: {0}")]

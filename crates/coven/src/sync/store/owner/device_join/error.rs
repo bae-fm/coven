@@ -27,7 +27,7 @@ pub enum DeviceJoinError {
     #[error("Store device join state: {0}")]
     Store(String),
     #[error("Store device join database state: {0}")]
-    Database(#[from] crate::database::DbError),
+    Database(#[from] coven_database::DbError),
     #[error("device join requires an activated local Store device")]
     ActiveDeviceRequired,
     #[error("device join requires the active local Owner authority")]
@@ -90,9 +90,9 @@ impl From<coven_protocol::store_commit::device_join_exchange::DeviceJoinExchange
     }
 }
 
-impl From<crate::database::DeviceJoinJournalError> for DeviceJoinError {
-    fn from(error: crate::database::DeviceJoinJournalError) -> Self {
-        use crate::database::DeviceJoinJournalError as E;
+impl From<coven_database::DeviceJoinJournalError> for DeviceJoinError {
+    fn from(error: coven_database::DeviceJoinJournalError) -> Self {
+        use coven_database::DeviceJoinJournalError as E;
         match error {
             E::NonAdjacentJournalTransition => DeviceJoinError::NonAdjacentJournalTransition,
             E::JournalConflict => DeviceJoinError::JournalConflict,

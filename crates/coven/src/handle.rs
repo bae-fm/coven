@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
-use crate::database::{Database, DbError, StoreDatabase};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
@@ -42,6 +41,7 @@ use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
 use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::{BlobCacheError, BlobStream};
+use coven_database::{Database, DbError, StoreDatabase};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
 use coven_foundation::store_dir::StoreOpenGuard;
@@ -188,7 +188,7 @@ impl CovenHandle {
             local_blob_transitions,
         );
         let rows = StoreRows::new(
-            crate::database::StoreRowWrites::new(database.clone(), store_dir.clone()),
+            coven_database::StoreRowWrites::new(database.clone(), store_dir.clone()),
             read_database,
             security.clone(),
             sync.clone(),
@@ -1123,7 +1123,7 @@ impl CovenHandle {
     pub(crate) async fn install_test_active_circle(
         &self,
         label: &str,
-    ) -> Result<crate::CircleId, crate::database::DbError> {
+    ) -> Result<crate::CircleId, coven_database::DbError> {
         self.circles.install_test_active_circle(label).await
     }
 
@@ -1153,7 +1153,7 @@ impl CovenHandle {
     pub(crate) async fn write_changeset_for_test(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<Vec<u8>, crate::database::DbError> {
+    ) -> Result<Vec<u8>, coven_database::DbError> {
         self.rows.write_changeset_for_test(write_id).await
     }
 
@@ -1161,7 +1161,7 @@ impl CovenHandle {
     pub(crate) async fn write_blob_lease_count_for_test(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<i64, crate::database::DbError> {
+    ) -> Result<i64, coven_database::DbError> {
         self.rows.write_blob_lease_count_for_test(write_id).await
     }
 
@@ -1170,7 +1170,7 @@ impl CovenHandle {
         &self,
         namespace: &str,
         blob_id: &str,
-    ) -> Result<i64, crate::database::DbError> {
+    ) -> Result<i64, coven_database::DbError> {
         self.rows
             .cleanup_intent_count_for_test(namespace, blob_id)
             .await
@@ -1179,15 +1179,15 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn coven_table_exists_for_test(
         &self,
-        table: crate::database::DatabaseTestTable,
-    ) -> Result<bool, crate::database::DbError> {
+        table: coven_database::DatabaseTestTable,
+    ) -> Result<bool, coven_database::DbError> {
         self.rows.coven_table_exists_for_test(table).await
     }
 
     #[cfg(test)]
     pub(crate) async fn install_store_write_failure_trigger_for_test(
         &self,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.rows
             .install_store_write_failure_trigger_for_test()
             .await
@@ -1196,7 +1196,7 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn remove_store_write_failure_trigger_for_test(
         &self,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.rows
             .remove_store_write_failure_trigger_for_test()
             .await
@@ -1206,14 +1206,14 @@ impl CovenHandle {
     pub(crate) async fn write_blob_facts_for_test(
         &self,
         write_id: crate::WriteId,
-    ) -> Result<String, crate::database::DbError> {
+    ) -> Result<String, coven_database::DbError> {
         self.rows.write_blob_facts_for_test(write_id).await
     }
 
     #[cfg(test)]
     pub(crate) async fn execute_sql_with_blob_staging_for_test(
         &self,
-        blob_staging: Option<Box<dyn crate::database::AudienceBlobMoveStaging>>,
+        blob_staging: Option<Box<dyn coven_database::AudienceBlobMoveStaging>>,
         sql: String,
     ) -> crate::CovenResult<crate::WriteReceipt<()>> {
         self.rows
@@ -1224,7 +1224,7 @@ impl CovenHandle {
     #[cfg(test)]
     pub(crate) async fn latest_materialized_commit_coordinate_for_test(
         &self,
-    ) -> Result<(String, u64), crate::database::DbError> {
+    ) -> Result<(String, u64), coven_database::DbError> {
         self.sync
             .latest_materialized_commit_coordinate_for_test()
             .await

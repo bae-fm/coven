@@ -1112,8 +1112,8 @@ where
     Box::pin(pass()).await
 }
 
-impl From<crate::database::DeviceJoinJournalError> for DeviceJoinTransportError {
-    fn from(error: crate::database::DeviceJoinJournalError) -> Self {
+impl From<coven_database::DeviceJoinJournalError> for DeviceJoinTransportError {
+    fn from(error: coven_database::DeviceJoinJournalError) -> Self {
         DeviceJoinTransportError::from(super::DeviceJoinError::from(error))
     }
 }

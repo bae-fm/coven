@@ -15,7 +15,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn pull_package_schema(
         &self,
-    ) -> Result<std::sync::Arc<crate::database::TableSchema>, crate::database::DbError> {
+    ) -> Result<std::sync::Arc<coven_database::TableSchema>, coven_database::DbError> {
         Ok(std::sync::Arc::new(
             self.database.table_schema_for_apply().await?,
         ))
@@ -32,15 +32,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         package: coven_protocol::audience_package::AudiencePackage,
         blob_protection: coven_protocol::objects::BlobSpoolProtection,
-        schema: std::sync::Arc<crate::database::TableSchema>,
+        schema: std::sync::Arc<coven_database::TableSchema>,
     ) -> Result<
         Result<PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
         pull::StorePullError,
     > {
         let changeset =
-            match crate::database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
+            match coven_database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
                 Ok(changeset) => changeset,
-                Err(crate::database::ChangesetIdentityError::Row(error)) => {
+                Err(coven_database::ChangesetIdentityError::Row(error)) => {
                     return Ok(Err(pull::HeldStorePositionReason::InvalidRowIdentity {
                         table: error.table().to_string(),
                         reason: error.to_string(),
@@ -52,11 +52,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     )))
                 }
             };
-        let changes = match crate::database::walk_changeset(changeset.bytes()) {
+        let changes = match coven_database::walk_changeset(changeset.bytes()) {
             Ok(changes) => changes,
             Err(error) => return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(error))),
         };
-        let old_changes = match crate::database::walk_old_changeset(changeset.bytes()) {
+        let old_changes = match coven_database::walk_old_changeset(changeset.bytes()) {
             Ok(changes) => changes,
             Err(error) => return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(error))),
         };
@@ -173,7 +173,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn pull_materialized_frontier(
         &self,
-    ) -> Result<std::collections::BTreeMap<String, StoreBatchCommitRef>, crate::database::DbError>
+    ) -> Result<std::collections::BTreeMap<String, StoreBatchCommitRef>, coven_database::DbError>
     {
         self.database.materialized_frontier().await
     }
@@ -181,14 +181,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn pull_device_state_for_cut(
         &self,
         cut: &coven_protocol::store_commit::StoreHistoryCut,
-    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), crate::database::DbError> {
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), coven_database::DbError> {
         self.database.store_device_state_for_history_cut(cut).await
     }
 
     pub(crate) async fn pull_device_state_for_order(
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
-    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), crate::database::DbError> {
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), coven_database::DbError> {
         self.database.store_device_state_for_order(order).await
     }
 
@@ -196,7 +196,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         stream_id: &str,
         sequence: u64,
-    ) -> Result<Option<StoreBatchCommitRef>, crate::database::DbError> {
+    ) -> Result<Option<StoreBatchCommitRef>, coven_database::DbError> {
         self.database
             .exact_materialized_ref(stream_id, sequence)
             .await
@@ -204,13 +204,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn pull_snapshot_coverage(
         &self,
-    ) -> Result<CommitFrontier, crate::database::DbError> {
+    ) -> Result<CommitFrontier, coven_database::DbError> {
         self.database.snapshot_coverage_frontier().await
     }
 
     pub(crate) async fn pull_exclusion_freezes(
         &self,
-    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, crate::database::DbError>
+    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, coven_database::DbError>
     {
         self.database.store_device_exclusion_freezes().await
     }
@@ -218,7 +218,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn record_pull_circle_close_exclusions(
         &self,
         exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.database
             .record_circle_close_exclusions(exclusions)
             .await
@@ -232,7 +232,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         local_store_membership: pull::LocalStoreMembership,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<coven_protocol::membership::ApplyOutcome, crate::database::DbError> {
+    ) -> Result<coven_protocol::membership::ApplyOutcome, coven_database::DbError> {
         self.database
             .apply_received_merge_materialization(
                 materialization,
@@ -246,7 +246,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn prepare_pull_retained_history(
         &mut self,
-    ) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, pull::StorePullError> {
+    ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, pull::StorePullError> {
         let retained_refs = self.database.retained_merge_materialization_refs().await?;
         self.history_verifier.verify_refs(retained_refs).await?;
         let retained_commit_proofs = self.history_verifier.retained_commit_proofs();
@@ -701,13 +701,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                                 > reference.coord.sequence()
                         });
                     if beyond_cutoff {
-                        locator =
-                            Some(crate::database::AuthorExclusionActivationLocator::verified(
-                                exclusion.clone(),
-                                accepted_cut.clone(),
-                                activation_commit_ref.clone(),
-                                activation_head_ref.clone(),
-                            ));
+                        locator = Some(coven_database::AuthorExclusionActivationLocator::verified(
+                            exclusion.clone(),
+                            accepted_cut.clone(),
+                            activation_commit_ref.clone(),
+                            activation_head_ref.clone(),
+                        ));
                         break;
                     }
                 }

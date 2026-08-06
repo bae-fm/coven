@@ -8,8 +8,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self.history_verifier
     }
 
-    pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, crate::database::DbError> {
-        crate::database::LocalBlobCleanup::new(&self.database, self.store_dir)
+    pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
+        coven_database::LocalBlobCleanup::new(&self.database, self.store_dir)
             .drain()
             .await
     }
@@ -136,10 +136,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<
-        Option<coven_protocol::circle_activation::CircleEpochAccess>,
-        crate::database::DbError,
-    > {
+    ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, coven_database::DbError>
+    {
         self.database
             .circle_epoch_access(self.root().clone(), circle_id, control.clone())
             .await
@@ -213,9 +211,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn reclaim_snapshot_stability(
         &mut self,
-        snapshot: &crate::database::PublishedStoreSnapshot,
+        snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<
-        crate::database::VerifiedStoreSnapshotStability,
+        coven_database::VerifiedStoreSnapshotStability,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.history_verifier
@@ -225,7 +223,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn select_reclaim_store_snapshot(
         &mut self,
-        candidates: Vec<crate::database::PublishedStoreSnapshot>,
+        candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::owner::pull::StorePullError>
     {
         self.history_verifier

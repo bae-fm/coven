@@ -1,6 +1,6 @@
 use super::registration::StoreRegistrationError;
-use crate::database::StoreDatabase;
 use crate::storage::{SyncStorage, VerifiedObjectWrites};
+use coven_database::StoreDatabase;
 use coven_protocol::objects::ProtocolObjectDomain;
 use coven_protocol::objects::StorageError;
 use coven_protocol::objects::StoreObjectError;
@@ -97,7 +97,7 @@ impl<'storage> RegistrationOutbox<'storage> {
     }
 }
 
-fn database_error(error: crate::database::DbError) -> StoreRegistrationError {
+fn database_error(error: coven_database::DbError) -> StoreRegistrationError {
     StoreRegistrationError::Database(error.to_string())
 }
 

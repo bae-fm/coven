@@ -2,11 +2,11 @@ use crate::sync::test_helpers::{open_test_db, temp_store_dir, test_cloud_home, T
 use coven_keys::keys::UserKeypair;
 
 trait ExactFounderGraphDatabaseOps {
-    async fn table_count(&self, table: crate::database::DatabaseTestTable) -> i64;
+    async fn table_count(&self, table: coven_database::DatabaseTestTable) -> i64;
 }
 
-impl ExactFounderGraphDatabaseOps for crate::database::Database {
-    async fn table_count(&self, table: crate::database::DatabaseTestTable) -> i64 {
+impl ExactFounderGraphDatabaseOps for coven_database::Database {
+    async fn table_count(&self, table: coven_database::DatabaseTestTable) -> i64 {
         self.test_sql(move |database| database.table_row_count(table))
             .await
             .expect("count lifecycle rows")
@@ -73,12 +73,12 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
 
     assert_eq!(home.exact_create_count(), creates_before);
     let local_registrations = opened_db
-        .table_count(crate::database::DatabaseTestTable::named(
+        .table_count(coven_database::DatabaseTestTable::named(
             "local_store_device_registration",
         ))
         .await;
     let activations = opened_db
-        .table_count(crate::database::DatabaseTestTable::named(
+        .table_count(coven_database::DatabaseTestTable::named(
             "store_device_registration_activations",
         ))
         .await;
@@ -93,7 +93,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(home.exact_create_count(), creates_before);
     assert_eq!(
         opened_db
-            .table_count(crate::database::DatabaseTestTable::named(
+            .table_count(coven_database::DatabaseTestTable::named(
                 "local_store_device_registration",
             ))
             .await,
@@ -101,7 +101,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     );
     assert_eq!(
         opened_db
-            .table_count(crate::database::DatabaseTestTable::named(
+            .table_count(coven_database::DatabaseTestTable::named(
                 "store_device_registration_activations",
             ))
             .await,
@@ -176,7 +176,7 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
     )
     .await
     .expect("create Store");
-    let baseline = crate::database::StoreDatabase::new(&db)
+    let baseline = coven_database::StoreDatabase::new(&db)
         .generation_zero_replay_baseline_for_test()
         .await
         .expect("Store creation installs a retained replay baseline");
@@ -184,10 +184,10 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
     assert_eq!(baseline.schema_version, db.schema_version());
     assert_eq!(baseline.routing_hash, db.sync_routing_hash());
     match &baseline.authority {
-        crate::database::RetainedReplayAuthority::Genesis(authority) => {
+        coven_database::RetainedReplayAuthority::Genesis(authority) => {
             assert_eq!(authority.store_root, store.root)
         }
-        crate::database::RetainedReplayAuthority::StableSnapshot(_) => {
+        coven_database::RetainedReplayAuthority::StableSnapshot(_) => {
             panic!("Store creation installed a snapshot replay baseline")
         }
     }

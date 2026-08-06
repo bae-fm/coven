@@ -11,8 +11,8 @@ use std::time::Duration;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::warn;
 
-use crate::database::DbError;
-use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
+use coven_database::DbError;
+use coven_database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
 use coven_protocol::blob::{
@@ -161,7 +161,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         root_table: &str,
         root_id: &str,
-    ) -> Result<Option<crate::database::MakeRemoteIntentState>, DbError> {
+    ) -> Result<Option<coven_database::MakeRemoteIntentState>, DbError> {
         self.database
             .make_remote_intent_state(root_table, root_id)
             .await
@@ -255,7 +255,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         entry: &OutboxEntry,
         routing_encryption: Option<EncryptionService>,
-    ) -> Result<crate::database::PostUpload, DbError> {
+    ) -> Result<coven_database::PostUpload, DbError> {
         self.database
             .finalize_created_blob_upload(entry, self.database.stamp(), routing_encryption)
             .await
@@ -345,7 +345,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             .blob_upload_intent_state(&root_table, &root_id)
             .await
         {
-            Ok(Some(crate::database::MakeRemoteIntentState::Cancelling)) => {
+            Ok(Some(coven_database::MakeRemoteIntentState::Cancelling)) => {
                 return self.finish_cancelled(&state, &file_id).await;
             }
             Ok(_) => {}
@@ -498,11 +498,11 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             .finalize_blob_upload(&self.entry, self.routing_encryption.cloned())
             .await
         {
-            Ok(crate::database::PostUpload::Waiting) => EntryOutcome::Uploaded {
+            Ok(coven_database::PostUpload::Waiting) => EntryOutcome::Uploaded {
                 made_remote: false,
                 created_this_pass,
             },
-            Ok(crate::database::PostUpload::MadeRemote {
+            Ok(coven_database::PostUpload::MadeRemote {
                 root_table,
                 root_id,
             }) => {
@@ -514,7 +514,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     created_this_pass,
                 }
             }
-            Ok(crate::database::PostUpload::Cancelled) => {
+            Ok(coven_database::PostUpload::Cancelled) => {
                 self.finish_cancelled(
                     &OutboxUploadState::Created {
                         authority: coven_protocol::audience_package::PackageAudience::Store,

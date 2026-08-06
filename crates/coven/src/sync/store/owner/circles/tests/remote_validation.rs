@@ -90,7 +90,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         },
         bootstrap: None,
     });
-    let author = crate::database::StoreDatabase::new(&db)
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
@@ -236,7 +236,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
             .expect("count circle activations"),
         0
     );
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id.to_string(), commit.seq())
         .await
         .expect("read invented access commit position")
@@ -282,7 +282,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .expect("prepare Circle with inactive Store-member access");
     let old_commit = journal.commit().expect("parse prepared Store commit");
     let candidate_family = old_commit.candidate_family();
-    let author = crate::database::StoreDatabase::new(&db)
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
@@ -432,7 +432,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .expect("prepare founder Circle");
     let commit = journal.commit().expect("parse founder Circle commit");
     let commit_ref = journal.operation().commit_ref.clone();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(journal.clone())
         .await
         .expect("persist founder Circle operation");
@@ -443,7 +443,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .resume_circle_operations()
         .await
         .expect("publish founder Circle");
-    let author = crate::database::StoreDatabase::new(&db)
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load founder device registration");
@@ -518,7 +518,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
         .await
         .expect_err("interrupt rename before its first exact upload");
-    let operation_id = crate::database::StoreDatabase::new(&db)
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted Circle rename")
@@ -526,7 +526,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted Circle rename remains pending")
         .operation_id;
-    let journal = crate::database::StoreDatabase::new(&db)
+    let journal = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted Circle rename")
@@ -538,7 +538,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     let roster = &mut draft.roster;
     roster.state_hash = ObjectHash::digest(b"different historical roster state");
     let candidate_family = old_commit.candidate_family();
-    let author = crate::database::StoreDatabase::new(&db)
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");

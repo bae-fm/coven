@@ -6,8 +6,8 @@ use super::{
     read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
-use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
+use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys;
 use coven_protocol::circle::{

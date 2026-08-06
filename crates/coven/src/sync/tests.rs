@@ -1,7 +1,7 @@
 //! Integration tests for the capture / apply / conflict stack.
 //!
 //! Run against the synthetic, domain-free schema (`notes` / `note_tags` /
-//! `note_photos`) through a real [`crate::database::Database`], so the engine is
+//! `note_photos`) through a real [`coven_database::Database`], so the engine is
 //! exercised end-to-end the same way production drives it.
 
 use crate::sync::test_helpers::*;

@@ -9,13 +9,13 @@
 
 use super::cache::BlobCacheError;
 use super::StoreBlobCache;
-use crate::database::{Database, StoreDatabase};
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, photo_decl, read_test_db,
     read_test_db_with_download_limit, remote_root_db, temp_store_dir, test_migrations, TestStore,
 };
+use coven_database::{Database, StoreDatabase};
 use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::BlobDecl;
@@ -333,7 +333,7 @@ async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
             "UPDATE note_photos SET _updated_at = '0000000002000-0000-dev1' WHERE id = 'stale-materialized-row'",
             [],
         )
-        .map_err(crate::database::DbError::from)?;
+        .map_err(coven_database::DbError::from)?;
         Ok(())
     })
     .await
@@ -358,7 +358,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
         .plant_blob_row_for_test("external-corrupt", false, external_bytes)
         .await;
     let external_path = write_external_file(tmp.path(), "external-corrupt", external_bytes);
-    crate::database::StoreDatabase::new(&external_db)
+    coven_database::StoreDatabase::new(&external_db)
         .register_external_blob_for_test("note_photos", "external-corrupt", &external_path)
         .await;
     std::fs::write(&external_path, vec![b'!'; external_bytes.len()])
@@ -440,7 +440,7 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
             rusqlite::params![second_size, second_hash, id_for_update],
         )
         .map(|_| ())
-        .map_err(crate::database::DbError::from)
+        .map_err(coven_database::DbError::from)
     })
     .await
     .expect("replace logical row with a second exact version");
@@ -653,17 +653,17 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
 
 #[tokio::test]
 async fn blob_reads_reuse_schema_models_built_at_open() {
-    crate::database::reset_gate_from_tables_call_count();
-    crate::database::reset_from_tables_call_count();
+    coven_database::reset_gate_from_tables_call_count();
+    coven_database::reset_from_tables_call_count();
 
     let db = read_test_db("audio");
     assert_eq!(
-        crate::database::gate_from_tables_call_count(),
+        coven_database::gate_from_tables_call_count(),
         1,
         "database open builds the gate model once",
     );
     assert_eq!(
-        crate::database::from_tables_call_count(),
+        coven_database::from_tables_call_count(),
         1,
         "database open builds the blob declaration model once",
     );
@@ -677,8 +677,8 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
         .install(&blob.id, &blob.namespace, &bytes)
         .await;
-    let gate_models_before_reads = crate::database::gate_from_tables_call_count();
-    let blob_models_before_reads = crate::database::from_tables_call_count();
+    let gate_models_before_reads = coven_database::gate_from_tables_call_count();
+    let blob_models_before_reads = coven_database::from_tables_call_count();
 
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(StoreDatabase::new(&db), ld.clone())
@@ -705,12 +705,12 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     );
 
     assert_eq!(
-        crate::database::gate_from_tables_call_count(),
+        coven_database::gate_from_tables_call_count(),
         gate_models_before_reads,
         "blob reads reuse the database's gate model",
     );
     assert_eq!(
-        crate::database::from_tables_call_count(),
+        coven_database::from_tables_call_count(),
         blob_models_before_reads,
         "blob reads reuse the database's blob declaration model",
     );
@@ -1037,7 +1037,7 @@ async fn cache_lazy_fetches_on_first_read() {
         coven_protocol::blob::content_hash(&bytes),
     ))
     .await;
-    crate::database::StoreDatabase::new(&db1)
+    coven_database::StoreDatabase::new(&db1)
         .register_external_blob_for_test("note_photos", "aud01234", &external_path)
         .await;
     db1.execute_test_host_write(
@@ -1598,7 +1598,7 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     db.plant_blob_row_for_test(&blob.id, false, &full).await;
     let path = write_external_file(tmp.path(), "song.flac", &full);
 
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let reference = db
@@ -1669,7 +1669,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         .plant_blob_row_for_test("strm-ext1", false, &full)
         .await;
     let external_path = write_external_file(tmp.path(), "strm-ext1.flac", &full);
-    crate::database::StoreDatabase::new(&external_db)
+    coven_database::StoreDatabase::new(&external_db)
         .register_external_blob_for_test("note_photos", "strm-ext1", &external_path)
         .await;
     let external = external_db
@@ -1790,7 +1790,7 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
     let db = read_test_db("audio");
     db.plant_blob_row_for_test("strm-ext2", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext2.flac", &full);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "strm-ext2", &path)
         .await;
     let reference = db
@@ -1852,7 +1852,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
         .plant_blob_row_for_test("strm-ext3", false, &full)
         .await;
     let external_path = write_external_file(tmp.path(), "strm-ext3.flac", &full);
-    crate::database::StoreDatabase::new(&external_db)
+    coven_database::StoreDatabase::new(&external_db)
         .register_external_blob_for_test("note_photos", "strm-ext3", &external_path)
         .await;
     std::fs::write(&external_path, &corrupt).expect("write same-length external corruption");
@@ -1928,7 +1928,7 @@ async fn a_relengthened_external_file_is_refused_at_open() {
     let db = read_test_db("audio");
     db.plant_blob_row_for_test("strm-ext4", false, &full).await;
     let path = write_external_file(tmp.path(), "strm-ext4.flac", &full);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "strm-ext4", &path)
         .await;
     std::fs::write(&path, &full[..full.len() - 1]).expect("truncate the external file");
@@ -1968,7 +1968,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
         .create_exact_opaque_blob(&missing.namespace, &missing.id, &cloud_bytes)
         .await;
     let missing_path = tmp.path().join("external").join("gone.flac");
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &missing.id, &missing_path)
         .await;
     let missing_reference = db
@@ -2000,7 +2000,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     )
     .await;
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &mism.id, &mism_path)
         .await;
     let mism_reference = db
@@ -2035,7 +2035,7 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     db.plant_blob_row_for_test(&blob.id, false, &ext_bytes)
         .await;
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let local_reference = db
@@ -2068,7 +2068,7 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
         database.clear_external_blob(&local_reference_for_transition)?;
         database
             .execute("UPDATE notes SET shared = 1 WHERE id = ?1", [note_id])
-            .map_err(crate::database::DbError::from)?;
+            .map_err(coven_database::DbError::from)?;
         Ok(())
     })
     .await
@@ -2128,7 +2128,7 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 
     // The real bytes: the user's external file.
     let path = write_external_file(tmp.path(), "precedence.flac", &ext_bytes);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let reference = db
@@ -2193,7 +2193,7 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
     let ext_path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &blob.id, &ext_path)
         .await;
 
@@ -2576,7 +2576,7 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let cloud_bytes = ramp(2048);
     db.plant_blob_row_for_test(&blob.id, false, &cloud_bytes)
         .await;
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     db.set_blob_remote_for_test(&blob.id, true).await;
@@ -2635,19 +2635,19 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
                     ('note-remote', 'x', 1, '0000000001000-0000-dev1', '2026-01-01')",
             [],
         )
-        .map_err(crate::database::DbError::from)?;
+        .map_err(coven_database::DbError::from)?;
         conn.execute(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES (?1, 'note-local', 'attach', 17, ?2, '0000000001000-0000-dev1', '2026-01-01')",
             rusqlite::params![id, local_hash],
         )
-        .map_err(crate::database::DbError::from)?;
+        .map_err(coven_database::DbError::from)?;
         conn.execute(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
              VALUES (?1, 'note-remote', 18, ?2, '0000000001000-0000-dev1', '2026-01-01')",
             rusqlite::params![id, remote_hash],
         )
-        .map_err(crate::database::DbError::from)?;
+        .map_err(coven_database::DbError::from)?;
         Ok(())
     })
     .await
@@ -3023,7 +3023,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
              VALUES ('usr0bbbb', 'n1', 500, ?1, '0000000001000-0000-dev1', '2026-01-01')",
             [lazy_hash],
         )
-        .map_err(crate::database::DbError::from)?;
+        .map_err(coven_database::DbError::from)?;
         Ok(())
     })
     .await

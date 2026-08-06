@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use crate::database::{AudienceMove, AudiencePartition};
-use crate::database::{
+use crate::storage::SyncStorage;
+use coven_database::{AudienceMove, AudiencePartition};
+use coven_database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWriteBlobMoveDestination,
 };
-use crate::storage::SyncStorage;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::locator::RemoteAudience;
 use coven_protocol::blob::{Provenance, RowBlobAuthority};
@@ -67,7 +67,7 @@ impl HostWriteBlobStaging {
         partitions: &[AudiencePartition],
         files: &mut StagedAudienceBlobFiles,
     ) -> Result<(), DbError> {
-        let moved_rows = crate::database::audience_moves_by_row(moves)?;
+        let moved_rows = coven_database::audience_moves_by_row(moves)?;
         if moved_rows.is_empty() {
             return Ok(());
         }
@@ -386,18 +386,18 @@ impl StagedAudienceBlobFiles {
         }
     }
 
-    async fn rollback(self) -> Result<(), crate::database::StagedBlobRollbackFailures> {
+    async fn rollback(self) -> Result<(), coven_database::StagedBlobRollbackFailures> {
         let mut failures = Vec::new();
         for file in self.created.into_iter().rev() {
             let path = file.path.clone();
             if let Err(reason) = file.rollback().await {
-                failures.push(crate::database::StagedBlobRollbackFailure { path, reason });
+                failures.push(coven_database::StagedBlobRollbackFailure { path, reason });
             }
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(crate::database::StagedBlobRollbackFailures(failures))
+            Err(coven_database::StagedBlobRollbackFailures(failures))
         }
     }
 }
@@ -530,14 +530,14 @@ fn move_materialization_error(fact: &StoreWriteBlobFact, reason: impl Into<DbErr
     }
 }
 
-impl crate::database::AudienceBlobMoveStaging for HostWriteBlobStaging {
+impl coven_database::AudienceBlobMoveStaging for HostWriteBlobStaging {
     fn stage_audience_move_blobs_on(
         &self,
         transaction: &HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],
-    ) -> Result<crate::database::StagedAudienceBlobRollback, DbError> {
+    ) -> Result<coven_database::StagedAudienceBlobRollback, DbError> {
         let files = HostWriteBlobStaging::stage_audience_move_blobs_on(
             self,
             transaction,

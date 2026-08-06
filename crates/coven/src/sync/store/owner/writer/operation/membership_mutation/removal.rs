@@ -19,7 +19,7 @@ pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     timestamp: &'input str,
     current_encryption: &'input EncryptionService,
     pending_rotation: &'input dyn cloud_storage::CloudRotationAccess,
-    _permit: crate::database::store::MembershipMutationPermit,
+    _permit: coven_database::store::MembershipMutationPermit,
 }
 
 /// Build a removal that revokes provider access, rotates the Store key, and

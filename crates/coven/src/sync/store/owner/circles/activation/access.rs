@@ -304,7 +304,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             &image_prefix,
         )
         .await?;
-        crate::database::verify_circle_bootstrap_image(
+        coven_database::verify_circle_bootstrap_image(
             &image_bytes,
             bootstrap,
             leaf.circle_id,
@@ -511,7 +511,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let local_device_id = match identity {
             Some(_) => {
                 database
-                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                    .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
                     .await?
             }
             None => None,

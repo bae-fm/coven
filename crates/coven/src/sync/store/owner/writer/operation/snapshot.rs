@@ -8,7 +8,7 @@ pub(super) use publication::AuthorizedSnapshotPublication;
 pub(crate) use image::should_create_snapshot;
 pub(crate) use image::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 
-use crate::database::{CreatedSnapshot, SnapshotBlobAudience};
+use coven_database::{CreatedSnapshot, SnapshotBlobAudience};
 
 use tracing::{info, warn};
 
@@ -165,7 +165,7 @@ impl super::AuthorizedWriterOperation<'_> {
         Ok(())
     }
 
-    fn snapshot_position(&self, snapshot: &crate::database::PublishedStoreSnapshot) -> u64 {
+    fn snapshot_position(&self, snapshot: &coven_database::PublishedStoreSnapshot) -> u64 {
         snapshot
             .meta
             .coverage
@@ -180,7 +180,7 @@ impl super::AuthorizedWriterOperation<'_> {
         &self,
         tables: Vec<coven_protocol::synced_schema::SyncedTable>,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<StoreSnapshotCut, crate::database::DbError> {
+    ) -> Result<StoreSnapshotCut, coven_database::DbError> {
         let (snapshot, coverage) = self
             .database
             .capture_store_snapshot_cut(
@@ -397,7 +397,7 @@ impl super::AuthorizedWriterOperation<'_> {
         &self,
         snapshot: CreatedSnapshot,
         owner: coven_protocol::remote_object::SnapshotObjectOwner,
-    ) -> Result<(Vec<u8>, Vec<crate::database::PreparedSnapshotBlob>), SnapshotError> {
+    ) -> Result<(Vec<u8>, Vec<coven_database::PreparedSnapshotBlob>), SnapshotError> {
         let database = &self.database;
         let storage = self.storage.as_ref();
         let authority = self.writer.blob_write_authority();
@@ -406,7 +406,7 @@ impl super::AuthorizedWriterOperation<'_> {
             mut blobs,
         } = snapshot;
         blobs.sort_by_key(|captured| captured.fact.previous.is_none());
-        let mut prepared: Vec<crate::database::PreparedSnapshotBlob> = Vec::new();
+        let mut prepared: Vec<coven_database::PreparedSnapshotBlob> = Vec::new();
         let mut coalesced = std::collections::BTreeMap::<String, usize>::new();
         let preparation = async {
     for captured in blobs {
@@ -518,7 +518,7 @@ impl super::AuthorizedWriterOperation<'_> {
             owner.clone(),
         )
         .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
-        prepared.push(crate::database::PreparedSnapshotBlob {
+        prepared.push(coven_database::PreparedSnapshotBlob {
             bindings: vec![binding],
             authority: package_authority,
             remote,
@@ -541,7 +541,7 @@ impl super::AuthorizedWriterOperation<'_> {
         if prepared.is_empty() {
             return Ok((db_image, prepared));
         }
-        let image = match crate::database::SnapshotDatabaseImage::replace(
+        let image = match coven_database::SnapshotDatabaseImage::replace(
             self.store_dir.as_ref().join("snapshot-closure.db"),
             &db_image,
         )
@@ -575,7 +575,7 @@ impl super::AuthorizedWriterOperation<'_> {
 }
 
 async fn cleanup_snapshot_spools(
-    prepared: &[crate::database::PreparedSnapshotBlob],
+    prepared: &[coven_database::PreparedSnapshotBlob],
 ) -> Result<(), String> {
     let mut paths = std::collections::BTreeSet::new();
     for path in prepared.iter().filter_map(|blob| blob.spool_path.as_ref()) {
@@ -606,8 +606,8 @@ async fn remove_snapshot_spool(
 }
 
 pub(crate) fn select_maximal_store_snapshot(
-    mut candidates: Vec<crate::database::PublishedStoreSnapshot>,
-) -> Option<crate::database::PublishedStoreSnapshot> {
+    mut candidates: Vec<coven_database::PublishedStoreSnapshot>,
+) -> Option<coven_database::PublishedStoreSnapshot> {
     let all = candidates.clone();
     candidates.retain(|snapshot| {
         !all.iter().any(|other| {

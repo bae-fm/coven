@@ -23,7 +23,7 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         &serde_json::to_vec(&own_access.leaf.value).expect("serialize mismatched access leaf"),
     );
     own_access.envelope.resign(&signer);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect("persist substituted journal plaintext");
@@ -71,7 +71,7 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .operation_mut()
         .prepared_objects
         .insert("metadata".to_string(), substituted);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect("persist substituted journal object");
@@ -152,7 +152,7 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .expect("Merge operation carries a Store head")
         .reference()
         .clone();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect("persist substituted signed Circle graph");
@@ -255,7 +255,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             stream_id,
             sequence,
         } = journal.operation().commit_ref.coord;
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .update_circle_operation(journal.clone())
             .await
             .expect("persist Circle journal with substituted stream authority");
@@ -274,7 +274,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
                 .expect("count circle activations"),
             0
         );
-        assert!(crate::database::StoreDatabase::new(&db)
+        assert!(coven_database::StoreDatabase::new(&db)
             .exact_materialized_ref(&stream_id.to_string(), sequence)
             .await
             .expect("read rejected Circle Store position")
@@ -296,7 +296,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     device
         .stage_acknowledgement(
             coven_protocol::store_commit::CommitFrontier::from_refs(
-                crate::database::StoreDatabase::new(&db)
+                coven_database::StoreDatabase::new(&db)
                     .materialized_frontier()
                     .await
                     .expect("read current Store frontier"),
@@ -306,7 +306,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         )
         .await
         .expect("stage a valid non-initial Store acknowledgement");
-    let acknowledgement = crate::database::StoreDatabase::new(&db)
+    let acknowledgement = coven_database::StoreDatabase::new(&db)
         .oldest_outbound_store_ack()
         .await
         .expect("read staged Store acknowledgement")
@@ -348,7 +348,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         stream_id,
         sequence,
     } = journal.operation().commit_ref.coord;
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect("persist Circle journal with unexpected acknowledgement");
@@ -368,7 +368,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
             .expect("count circle activations"),
         0
     );
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id.to_string(), sequence)
         .await
         .expect("read rejected Circle Store position")
@@ -398,7 +398,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
         .await
         .expect_err("interrupt rename before its first exact upload");
-    let operation_id = crate::database::StoreDatabase::new(&db)
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted rename")
@@ -406,13 +406,13 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted rename remains pending")
         .operation_id;
-    let mut journal = crate::database::StoreDatabase::new(&db)
+    let mut journal = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted rename")
         .expect("interrupted rename journal remains durable");
     let commit = journal.commit().expect("parse rename commit");
-    let author = crate::database::StoreDatabase::new(&db)
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load rename author");
@@ -491,7 +491,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .expect("Merge operation carries a Store head")
         .reference()
         .clone();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal)
         .await
         .expect("persist forged successor journal");
@@ -542,7 +542,7 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .operation_mut()
         .prepared_objects
         .insert("store-head".to_string(), substituted);
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect("persist substituted Store head slot");

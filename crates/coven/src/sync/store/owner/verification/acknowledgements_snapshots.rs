@@ -113,7 +113,7 @@ impl<'a> StoreCommitVerifier<'a> {
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
     ) -> Result<
-        Vec<crate::database::PublishedStoreSnapshot>,
+        Vec<coven_database::PublishedStoreSnapshot>,
         crate::sync::store::owner::writer::snapshot::SnapshotError,
     > {
         let mut slot = match &registration.snapshots {
@@ -186,7 +186,7 @@ impl<'a> StoreCommitVerifier<'a> {
             let successor_slot = meta.successor.next_slot.clone();
             slot = successor_slot.clone();
             predecessor = Some(reference.clone());
-            snapshots.push(crate::database::PublishedStoreSnapshot {
+            snapshots.push(coven_database::PublishedStoreSnapshot {
                 reference,
                 successor_slot,
                 meta,

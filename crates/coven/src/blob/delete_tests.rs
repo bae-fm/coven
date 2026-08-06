@@ -12,8 +12,6 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
-use crate::database::Database;
-use crate::database::StoreDatabase;
 use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
@@ -21,6 +19,8 @@ use crate::sync::test_helpers::{
     StorageInterceptor, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
+use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
@@ -358,7 +358,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
 
     // The outbox row is gone.
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .expect("pending")
@@ -400,7 +400,7 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
     assert_eq!(tombstone.stored, stored);
     assert!(tombstone.verify("lib"));
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()
@@ -446,7 +446,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
         "the existing tombstone remains byte-for-byte unchanged",
     );
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()
@@ -461,7 +461,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
 /// contract.
 #[tokio::test]
 async fn upload_carries_scope_delete_carries_no_extra_fields() {
-    use crate::database::{OutboxOperation, OutboxUploadState};
+    use coven_database::{OutboxOperation, OutboxUploadState};
 
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
@@ -501,7 +501,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         .await
         .expect("enqueue exact blob deletion");
 
-    let uploads = crate::database::StoreDatabase::new(&db)
+    let uploads = coven_database::StoreDatabase::new(&db)
         .pending_blob_uploads()
         .await
         .expect("uploads");
@@ -519,7 +519,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         "an upload entry carries its scope in the variant"
     );
 
-    let deletes = crate::database::StoreDatabase::new(&db)
+    let deletes = coven_database::StoreDatabase::new(&db)
         .pending_blob_deletes()
         .await
         .expect("deletes");
@@ -1467,7 +1467,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     )
     .await
     .expect("create exact Store before wiping its membership head");
-    let founder_graph = crate::database::StoreDatabase::new(&founder_db)
+    let founder_graph = coven_database::StoreDatabase::new(&founder_db)
         .local_store_founder_graph()
         .await
         .expect("load exact founder graph")
@@ -1475,7 +1475,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     let stored = storage
         .create_exact_opaque_blob("delete-tests", "wiped", b"contents")
         .await;
-    let crate::database::DurableFounderMembership { head_ref, .. } = founder_graph.membership;
+    let coven_database::DurableFounderMembership { head_ref, .. } = founder_graph.membership;
     storage
         .delete_membership_head_for_test(&head_ref)
         .await
@@ -1624,7 +1624,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         .stage_pending_upload_for_test(sources.path(), "same-id", b"replacement", T0)
         .await;
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_uploads()
             .await
             .unwrap()
@@ -1633,7 +1633,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         "the exact row-version upload remains",
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()
@@ -1662,7 +1662,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         .await
         .expect("enqueue exact blob deletion");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_uploads()
             .await
             .unwrap()
@@ -1671,7 +1671,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         "the exact row-version upload remains",
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()
@@ -1700,7 +1700,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         .await
         .expect("enqueue exact blob deletion");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_uploads()
             .await
             .unwrap()
@@ -1709,7 +1709,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
         "the unrelated exact upload remains",
     );
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()
@@ -1854,7 +1854,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     // The re-enqueued row is removed too (the drain always removes the row once the
     // tombstone is present), so the queue converges.
     assert!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .pending_blob_deletes()
             .await
             .unwrap()

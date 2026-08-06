@@ -31,7 +31,7 @@ pub(crate) struct StoreOperationPlanCommon {
     /// position this plan's order extends was read. A plan is the live claim on
     /// that position: hold it until the commit has published its head, or until
     /// the candidate is durably persisted for a later publisher to activate.
-    pub(super) _authorship: crate::database::OwnStreamAuthorship,
+    pub(super) _authorship: coven_database::OwnStreamAuthorship,
     pub(super) writer: std::sync::Arc<LocalStoreWriter>,
     pub(super) root: StoreRootRef,
     pub(super) coord: StoreCommitCoord,
@@ -59,7 +59,7 @@ impl std::ops::Deref for StoreOperationCommitPlan {
 impl StoreOperationPlanCommon {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        authorship: crate::database::OwnStreamAuthorship,
+        authorship: coven_database::OwnStreamAuthorship,
         writer: std::sync::Arc<LocalStoreWriter>,
         root: StoreRootRef,
         coord: StoreCommitCoord,

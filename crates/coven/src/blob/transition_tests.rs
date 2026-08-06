@@ -21,8 +21,6 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::blob::transition::LocalBlobTransitions;
-use crate::database::Database;
-use crate::database::StoreDatabase;
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
@@ -31,6 +29,8 @@ use crate::sync::test_helpers::{
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use crate::Migration;
+use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
@@ -98,7 +98,7 @@ fn scoped_blob_transition_db() -> Database {
                     _updated_at TEXT NOT NULL
                 ) STRICT;",
             )
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
         })],
     )
 }
@@ -205,7 +205,7 @@ async fn gate_stamp(db: &Database, note_id: &str) -> String {
 }
 
 async fn pending_uploads(db: &Database) -> usize {
-    crate::database::StoreDatabase::new(db)
+    coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
         .unwrap()
@@ -216,34 +216,34 @@ async fn created_upload_blob(
     db: &Database,
     blob_id: &str,
 ) -> coven_protocol::blob::locator::StoredBlobRef {
-    crate::database::StoreDatabase::new(db)
+    coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
         .expect("load exact upload journals")
         .into_iter()
         .find_map(|entry| match entry.operation {
-            crate::database::OutboxOperation::Upload {
+            coven_database::OutboxOperation::Upload {
                 row,
-                state: crate::database::OutboxUploadState::Created { stored, .. },
+                state: coven_database::OutboxUploadState::Created { stored, .. },
                 ..
             } if row.blob().id == blob_id => Some(stored),
-            crate::database::OutboxOperation::Upload { .. }
-            | crate::database::OutboxOperation::Delete { .. } => None,
+            coven_database::OutboxOperation::Upload { .. }
+            | coven_database::OutboxOperation::Delete { .. } => None,
         })
         .expect("blob has a Created exact upload journal")
 }
 
 async fn pending_deletes(db: &Database) -> Vec<String> {
-    crate::database::StoreDatabase::new(db)
+    coven_database::StoreDatabase::new(db)
         .pending_blob_deletes()
         .await
         .unwrap()
         .into_iter()
         .map(|entry| match entry.operation {
-            crate::database::OutboxOperation::Delete { stored } => {
+            coven_database::OutboxOperation::Delete { stored } => {
                 stored.locator().blob_id().to_string()
             }
-            crate::database::OutboxOperation::Upload { .. } => {
+            coven_database::OutboxOperation::Upload { .. } => {
                 panic!("pending delete query returned an upload")
             }
         })
@@ -261,13 +261,13 @@ async fn assert_scoped_flip_journaled_atomically(
         "the audience partition and its parent write commit together",
     );
     let has_routes = db
-        .table_has_rows_for_test(crate::database::DatabaseTestTable::named(
+        .table_has_rows_for_test(coven_database::DatabaseTestTable::named(
             "_coven_row_routes",
         ))
         .await
         .expect("inspect scoped routes");
     let has_mirrors = db
-        .table_has_rows_for_test(crate::database::DatabaseTestTable::named("_coven_audience"))
+        .table_has_rows_for_test(coven_database::DatabaseTestTable::named("_coven_audience"))
         .await
         .expect("inspect scoped mirrors");
     assert!(
@@ -281,7 +281,7 @@ async fn assert_scoped_flip_journaled_atomically(
     let all_changes = changesets
         .iter()
         .map(|changeset| {
-            crate::database::walk_changeset(changeset).expect("walk routed Store partition")
+            coven_database::walk_changeset(changeset).expect("walk routed Store partition")
         })
         .collect::<Vec<_>>();
     let changes = all_changes
@@ -473,20 +473,20 @@ async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
         .row_blob_ref("note_photos", id)
         .await
         .expect("load exact pending upload row");
-    let mut matching = crate::database::StoreDatabase::new(db)
+    let mut matching = coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
         .expect("load pending exact row uploads")
         .into_iter()
         .filter_map(|entry| match entry.operation {
-            crate::database::OutboxOperation::Upload {
+            coven_database::OutboxOperation::Upload {
                 row,
                 source_path,
                 retain_pinned,
                 ..
             } if row == expected => Some((source_path, retain_pinned)),
-            crate::database::OutboxOperation::Upload { .. }
-            | crate::database::OutboxOperation::Delete { .. } => None,
+            coven_database::OutboxOperation::Upload { .. }
+            | coven_database::OutboxOperation::Delete { .. } => None,
         });
     let state = matching.next().expect("exact row has a pending upload");
     assert!(
@@ -572,7 +572,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     // The user moves the file: re-register it at a new path and remove the old one.
     let src2 = user_dir.join("relocated.jpg");
     std::fs::write(&src2, &bytes).unwrap();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photoaaa", &src2)
         .await;
     std::fs::remove_file(&src1).unwrap();
@@ -968,7 +968,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     std::fs::create_dir_all(&user_dir).unwrap();
     let source = user_dir.join("photo-user-scoped.jpg");
     std::fs::write(&source, bytes).unwrap();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photo-user-scoped", &source)
         .await;
     owners
@@ -2290,10 +2290,10 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let cover_source = user_dir.join("cover.bin");
     std::fs::write(&photo_source, bytes).unwrap();
     std::fs::write(&cover_source, bytes).unwrap();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photo-a", &photo_source)
         .await;
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photo-b", &cover_source)
         .await;
 
@@ -2302,22 +2302,22 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await
         .expect("queue both same-locator uploads");
     storage.open_into(&db).await.expect("open exact test Store");
-    let registration = crate::database::StoreDatabase::new(&db)
+    let registration = coven_database::StoreDatabase::new(&db)
         .local_blob_write_authority()
         .await
         .expect("load local blob write authority");
     let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
-    let entries = crate::database::StoreDatabase::new(&db)
+    let entries = coven_database::StoreDatabase::new(&db)
         .pending_blob_uploads()
         .await
         .expect("load same-locator upload journals");
     assert_eq!(entries.len(), 2);
     let mut created = Vec::new();
     for pending in entries {
-        let crate::database::OutboxOperation::Upload {
+        let coven_database::OutboxOperation::Upload {
             row,
             source_path,
-            state: crate::database::OutboxUploadState::Pending,
+            state: coven_database::OutboxUploadState::Pending,
             ..
         } = &pending.operation
         else {
@@ -2371,7 +2371,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .prepare_blob_object(&locator, &authority, slot, &spool)
             .await
             .expect("prepare exact blob");
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .mark_blob_upload_prepared(
                 &pending,
                 coven_protocol::audience_package::PackageAudience::Store,
@@ -2390,14 +2390,14 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             )
             .await
             .expect("create exact blob");
-        let prepared = crate::database::StoreDatabase::new(&db)
+        let prepared = coven_database::StoreDatabase::new(&db)
             .pending_blob_uploads()
             .await
             .expect("reload Prepared handoff")
             .into_iter()
             .find(|entry| entry.id == pending.id)
             .expect("Prepared handoff remains queued");
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .mark_blob_upload_created(&prepared)
             .await
             .expect("record Created exact handoff");
@@ -2601,7 +2601,7 @@ async fn make_local_commit_failure_removes_materialized_files() {
                      SELECT RAISE(ABORT, 'forced make_local commit failure');
                  END;",
             )
-            .map_err(crate::database::DbError::from)
+            .map_err(coven_database::DbError::from)
     })
     .await
     .expect("install make_local commit failure");
@@ -2751,7 +2751,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // failed-attempt backoff first (a restart/retry re-attempts past the window);
     // the drain then completes and flips.
     std::fs::write(&src2, b"second").unwrap();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .reset_outbox_backoff()
         .await
         .unwrap();

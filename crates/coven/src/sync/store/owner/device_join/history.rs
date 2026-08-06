@@ -37,7 +37,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         verify_offer(self.storage, self.history, identity, offer).await
     }
 
-    pub(super) async fn validate_store_owner(&self) -> Result<(), crate::database::DbError> {
+    pub(super) async fn validate_store_owner(&self) -> Result<(), coven_database::DbError> {
         self.database
             .validated_store_owner(self.root().reference())
             .await
@@ -50,7 +50,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 
     pub(super) async fn latest_local_registration(
         &self,
-    ) -> Result<Option<crate::database::DurableDeviceRegistration>, crate::database::DbError> {
+    ) -> Result<Option<coven_database::DurableDeviceRegistration>, coven_database::DbError> {
         self.database.latest_local_store_device_registration().await
     }
 
@@ -243,14 +243,14 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                 object: ack_prepared.reference().clone(),
             };
             Box::pin(database.stage_local_store_device_registration(
-                crate::database::ExactProtocolObject {
+                coven_database::ExactProtocolObject {
                     value: expected_registration.clone(),
                     bytes: expected_registration.to_bytes(),
                     object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 initial_ack_ref,
-                crate::database::ExactProtocolObject {
+                coven_database::ExactProtocolObject {
                     value: initial_ack.clone(),
                     bytes: initial_ack.to_bytes(),
                     object: ack_prepared.reference().clone(),
@@ -269,8 +269,8 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .ok_or(StoreRegistrationError::ActivationRequired)?;
         if !matches!(
             durable.state,
-            crate::database::LocalDeviceRegistrationState::Created
-                | crate::database::LocalDeviceRegistrationState::Activated { .. }
+            coven_database::LocalDeviceRegistrationState::Created
+                | coven_database::LocalDeviceRegistrationState::Activated { .. }
         ) {
             return Err(StoreRegistrationError::ActivationRequired);
         }
@@ -319,7 +319,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     }
 }
 
-fn registration_database_error(error: crate::database::DbError) -> StoreRegistrationError {
+fn registration_database_error(error: coven_database::DbError) -> StoreRegistrationError {
     StoreRegistrationError::Database(error.to_string())
 }
 

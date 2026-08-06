@@ -544,7 +544,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             )
             .await
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        let snapshot = crate::database::PublishedStoreSnapshot {
+        let snapshot = coven_database::PublishedStoreSnapshot {
             reference,
             successor_slot: metadata.successor.next_slot.clone(),
             meta: metadata,

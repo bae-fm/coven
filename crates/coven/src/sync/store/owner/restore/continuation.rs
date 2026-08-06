@@ -110,7 +110,7 @@ impl<'storage> RestoringStore<'storage> {
         cancel: &watch::Receiver<bool>,
     ) -> Result<
         crate::sync::store::owner::writer::snapshot::SnapshotBlobReconcile,
-        crate::database::DbError,
+        coven_database::DbError,
     > {
         let blobs = self
             .database
@@ -119,7 +119,7 @@ impl<'storage> RestoringStore<'storage> {
             .into_iter()
             .map(BlobDownload::from_row)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::database::DbError::Message)?;
+            .map_err(coven_database::DbError::Message)?;
 
         if blobs.is_empty() {
             return Ok(

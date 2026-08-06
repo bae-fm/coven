@@ -55,8 +55,8 @@ pub struct BlobDecl {
 ```
 
 coven resolves the declaration's column *names* against the live schema once per
-cycle, then derives every blob set it needs itself, reading the declared columns
-off a row:
+cycle into [`BlobDecls`](rustdoc:struct:coven_database::BlobDecls), then derives
+every blob set it needs itself, reading the declared columns off a row:
 
 - over an outgoing changeset's rows: what to upload;
 - over an incoming changeset's rows: what to download (and, for a deleted row,

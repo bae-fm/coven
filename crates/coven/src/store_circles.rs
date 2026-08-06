@@ -1,7 +1,7 @@
-use crate::database::StoreDatabase;
 use crate::store_membership::StoreMembership;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::StoreSync;
+use coven_database::StoreDatabase;
 
 #[derive(Clone)]
 pub(crate) struct StoreCircles {
@@ -163,7 +163,7 @@ impl StoreCircles {
     pub(crate) async fn install_test_active_circle(
         &self,
         label: &str,
-    ) -> Result<crate::CircleId, crate::database::DbError> {
+    ) -> Result<crate::CircleId, coven_database::DbError> {
         self.database
             .install_test_active_circle(label.to_string())
             .await

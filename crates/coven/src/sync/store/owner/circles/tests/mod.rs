@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
-use crate::database::StoreDatabase;
-use crate::database::{Database, DbError};
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
 };
+use coven_database::StoreDatabase;
+use coven_database::{Database, DbError};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
@@ -156,10 +156,10 @@ async fn prepare_owner_sync_components(
     store_id: &str,
 ) -> crate::sync::cycle::SyncComponents {
     crate::sync::cycle::PreparedSyncComponents::prepare(
-        crate::database::StoreDatabase::new(db),
+        coven_database::StoreDatabase::new(db),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            crate::database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(db),
             store_dir.clone(),
         ),
         circle_test_cloud_storage(home, store_id, signer),

@@ -5,8 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::database::StoreDatabase;
-use crate::database::{Database, DbError};
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
@@ -15,6 +13,8 @@ use crate::storage::cloud::{
 };
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
+use coven_database::StoreDatabase;
+use coven_database::{Database, DbError};
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
@@ -311,7 +311,7 @@ impl UploadFixture {
         .await
         .expect("initialize exact local blob authority");
         home.reset_observations();
-        let database = crate::database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db);
         Self {
             db,
             database,
@@ -332,8 +332,8 @@ impl UploadFixture {
             .await
     }
 
-    async fn journal(&self, blob_id: &str) -> crate::database::OutboxEntry {
-        crate::database::StoreDatabase::new(&self.db)
+    async fn journal(&self, blob_id: &str) -> coven_database::OutboxEntry {
+        coven_database::StoreDatabase::new(&self.db)
             .pending_blob_uploads()
             .await
             .expect("read upload journals")
@@ -341,14 +341,14 @@ impl UploadFixture {
             .find(|entry| {
                 matches!(
                     &entry.operation,
-                    crate::database::OutboxOperation::Upload { row, .. }
+                    coven_database::OutboxOperation::Upload { row, .. }
                         if row.blob().id == blob_id
                 )
             })
             .expect("upload journal exists")
     }
 
-    async fn journal_attempt(&self, blob_id: &str) -> crate::database::OutboxAttempt {
+    async fn journal_attempt(&self, blob_id: &str) -> coven_database::OutboxAttempt {
         let blob_id = blob_id.to_string();
         self.db
             .test_sql(move |database| database.upload_outbox_attempt(&blob_id))
@@ -376,7 +376,7 @@ impl UploadFixture {
             coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
-            crate::database::StoreDatabase::new(&self.db)
+            coven_database::StoreDatabase::new(&self.db)
                 .register_external_blob_for_test("note_photos", id, &path)
                 .await;
             paths.push(path);
@@ -419,20 +419,20 @@ impl UploadFixture {
     }
 }
 
-fn is_created(entry: &crate::database::OutboxEntry) -> bool {
+fn is_created(entry: &coven_database::OutboxEntry) -> bool {
     matches!(
         entry.operation,
-        crate::database::OutboxOperation::Upload {
-            state: crate::database::OutboxUploadState::Created { .. },
+        coven_database::OutboxOperation::Upload {
+            state: coven_database::OutboxUploadState::Created { .. },
             ..
         }
     )
 }
 
-fn created_slot(entry: &crate::database::OutboxEntry) -> &ObjectSlot {
+fn created_slot(entry: &coven_database::OutboxEntry) -> &ObjectSlot {
     match &entry.operation {
-        crate::database::OutboxOperation::Upload {
-            state: crate::database::OutboxUploadState::Created { stored, .. },
+        coven_database::OutboxOperation::Upload {
+            state: coven_database::OutboxUploadState::Created { stored, .. },
             ..
         } => stored.object().slot(),
         _ => panic!("journal is not Created"),
@@ -440,11 +440,11 @@ fn created_slot(entry: &crate::database::OutboxEntry) -> &ObjectSlot {
 }
 
 fn created_stored(
-    entry: &crate::database::OutboxEntry,
+    entry: &coven_database::OutboxEntry,
 ) -> &coven_protocol::blob::locator::StoredBlobRef {
     match &entry.operation {
-        crate::database::OutboxOperation::Upload {
-            state: crate::database::OutboxUploadState::Created { stored, .. },
+        coven_database::OutboxOperation::Upload {
+            state: coven_database::OutboxUploadState::Created { stored, .. },
             ..
         } => stored,
         _ => panic!("journal is not Created"),
@@ -697,7 +697,7 @@ async fn backoff_skips_item_inside_window() {
         .await;
     fixture.home.fail_creates();
     let entry = fixture.journal("backoff1").await;
-    crate::database::StoreDatabase::new(&fixture.db)
+    coven_database::StoreDatabase::new(&fixture.db)
         .record_outbox_failure(&entry, "prior", T0)
         .await
         .unwrap();
@@ -882,7 +882,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         })
         .await
         .unwrap();
-    assert!(crate::database::StoreDatabase::new(&fixture.db)
+    assert!(coven_database::StoreDatabase::new(&fixture.db)
         .pending_blob_uploads()
         .await
         .unwrap()
@@ -898,7 +898,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await
         .unwrap();
     assert_eq!(
-        crate::database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db)
             .pending_blob_uploads()
             .await
             .unwrap()

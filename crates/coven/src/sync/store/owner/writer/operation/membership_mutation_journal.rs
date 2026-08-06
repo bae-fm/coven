@@ -1,7 +1,7 @@
-use crate::database::DurableMembershipMutation;
-use crate::database::StoreDatabase;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
 use crate::storage::SyncStorage;
+use coven_database::DurableMembershipMutation;
+use coven_database::StoreDatabase;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::membership::{
     self, MemberRole, MembershipChange, MembershipEntry, StoreMembershipConflictResolution,
@@ -579,7 +579,7 @@ impl MutationPersistence {
     async fn finish_nonactivating_revoke_with_targets(
         &self,
         plan: &RevokeMutationPlan,
-        cleanup: Vec<crate::database::CandidateCleanupObject>,
+        cleanup: Vec<coven_database::CandidateCleanupObject>,
     ) -> Result<(), InviteError> {
         let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
         else {
@@ -668,7 +668,7 @@ impl MutationPersistence {
     async fn finish_nonactivating_resolution_with_targets(
         &self,
         plan: &ResolveMutationPlan,
-        cleanup: Vec<crate::database::CandidateCleanupObject>,
+        cleanup: Vec<coven_database::CandidateCleanupObject>,
     ) -> Result<(), InviteError> {
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
         crate::sync::store::owner::delete_candidate_cleanup_targets::<InviteError>(

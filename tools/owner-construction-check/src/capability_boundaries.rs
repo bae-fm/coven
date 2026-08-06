@@ -175,7 +175,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         path_patterns: &[&["Handle", "current"], &["Handle", "try_current"]],
         allowed: &[
             "crates/coven/src/store_sync/blobs.rs",
-            "crates/coven/src/database/database_connection.rs",
+            "crates/coven-database/src/database_connection.rs",
         ],
     },
 ];
@@ -245,7 +245,7 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-keys/src/custody.rs",
     "crates/coven-keys/src/envelope.rs",
     "crates/coven-keys/src/identity_custody.rs",
-    "crates/coven/src/database/",
+    "crates/coven-database/src/",
     "crates/coven/src/storage/",
     "crates/coven/src/blob/transition.rs",
     "crates/coven/src/sync/store/blob.rs",

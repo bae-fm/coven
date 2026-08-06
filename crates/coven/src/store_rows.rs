@@ -1,10 +1,10 @@
-use crate::database::{HostWriteError, HostWriteOperation, StoreRowWrites};
 use crate::{SqlContext, SqlReadContext, WriteBatch, WriteReceipt};
+use coven_database::{HostWriteError, HostWriteOperation, StoreRowWrites};
 
-use crate::database::StoreDatabase;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::StoreSync;
 use crate::{CovenError, CovenResult};
+use coven_database::StoreDatabase;
 
 /// Run a host read on `database`'s retained read connection.
 ///
@@ -100,21 +100,21 @@ impl StoreRows {
             .routing_encryption(self.writes.requires_routing_encryption())
     }
 
-    fn host_write_blob_staging(&self) -> Option<Box<dyn crate::database::AudienceBlobMoveStaging>> {
+    fn host_write_blob_staging(&self) -> Option<Box<dyn coven_database::AudienceBlobMoveStaging>> {
         self.sync
             .host_write_blob_staging()
-            .map(|staging| Box::new(staging) as Box<dyn crate::database::AudienceBlobMoveStaging>)
+            .map(|staging| Box::new(staging) as Box<dyn coven_database::AudienceBlobMoveStaging>)
     }
 
     pub(crate) async fn pending_writes(
         &self,
-    ) -> Result<Vec<crate::PendingWrite>, crate::database::DbError> {
+    ) -> Result<Vec<crate::PendingWrite>, coven_database::DbError> {
         self.writes.pending_writes().await
     }
 
     pub(crate) async fn blocked_writes(
         &self,
-    ) -> Result<Vec<crate::PendingWrite>, crate::database::DbError> {
+    ) -> Result<Vec<crate::PendingWrite>, coven_database::DbError> {
         self.writes.blocked_writes().await
     }
 
@@ -140,7 +140,7 @@ impl StoreRows {
             .discard_blocked_write(write_id)
             .await
             .map_err(crate::CovenError::from)?;
-        if let crate::database::BlockedWriteDiscard::Discarded(discarded) = outcome {
+        if let coven_database::BlockedWriteDiscard::Discarded(discarded) = outcome {
             return Ok(discarded);
         }
         self.sync
@@ -152,14 +152,14 @@ impl StoreRows {
     pub(crate) async fn write_status(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<crate::WriteStatus, crate::database::DbError> {
+    ) -> Result<crate::WriteStatus, coven_database::DbError> {
         self.writes.write_status(write_id).await
     }
 
     pub(crate) async fn subscribe_write_status(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<tokio::sync::watch::Receiver<crate::WriteStatus>, crate::database::DbError> {
+    ) -> Result<tokio::sync::watch::Receiver<crate::WriteStatus>, coven_database::DbError> {
         self.writes.subscribe_write_status(write_id).await
     }
 
@@ -167,7 +167,7 @@ impl StoreRows {
     pub(crate) async fn write_changeset_for_test(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<Vec<u8>, crate::database::DbError> {
+    ) -> Result<Vec<u8>, coven_database::DbError> {
         self.writes.write_changeset_for_test(write_id).await
     }
 
@@ -175,7 +175,7 @@ impl StoreRows {
     pub(crate) async fn write_blob_lease_count_for_test(
         &self,
         write_id: &crate::WriteId,
-    ) -> Result<i64, crate::database::DbError> {
+    ) -> Result<i64, coven_database::DbError> {
         self.writes.write_blob_lease_count_for_test(write_id).await
     }
 
@@ -184,7 +184,7 @@ impl StoreRows {
         &self,
         namespace: &str,
         blob_id: &str,
-    ) -> Result<i64, crate::database::DbError> {
+    ) -> Result<i64, coven_database::DbError> {
         self.writes
             .cleanup_intent_count_for_test(namespace, blob_id)
             .await
@@ -193,15 +193,15 @@ impl StoreRows {
     #[cfg(test)]
     pub(crate) async fn coven_table_exists_for_test(
         &self,
-        table: crate::database::DatabaseTestTable,
-    ) -> Result<bool, crate::database::DbError> {
+        table: coven_database::DatabaseTestTable,
+    ) -> Result<bool, coven_database::DbError> {
         self.writes.coven_table_exists_for_test(table).await
     }
 
     #[cfg(test)]
     pub(crate) async fn install_store_write_failure_trigger_for_test(
         &self,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.writes
             .install_store_write_failure_trigger_for_test()
             .await
@@ -210,7 +210,7 @@ impl StoreRows {
     #[cfg(test)]
     pub(crate) async fn remove_store_write_failure_trigger_for_test(
         &self,
-    ) -> Result<(), crate::database::DbError> {
+    ) -> Result<(), coven_database::DbError> {
         self.writes
             .remove_store_write_failure_trigger_for_test()
             .await
@@ -220,14 +220,14 @@ impl StoreRows {
     pub(crate) async fn write_blob_facts_for_test(
         &self,
         write_id: crate::WriteId,
-    ) -> Result<String, crate::database::DbError> {
+    ) -> Result<String, coven_database::DbError> {
         self.writes.write_blob_facts_for_test(write_id).await
     }
 
     #[cfg(test)]
     pub(crate) async fn execute_sql_with_blob_staging_for_test(
         &self,
-        blob_staging: Option<Box<dyn crate::database::AudienceBlobMoveStaging>>,
+        blob_staging: Option<Box<dyn coven_database::AudienceBlobMoveStaging>>,
         sql: String,
     ) -> CovenResult<WriteReceipt<()>> {
         let operation = HostWriteOperation::new(WriteBatch::new(), move |context| {

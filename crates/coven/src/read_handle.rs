@@ -22,13 +22,13 @@
 use std::sync::Arc;
 
 use crate::coven::CovenResult;
-use crate::database::Database;
-use crate::database::StoreDatabase;
 use crate::store_blobs::StoreBlobs;
 use crate::store_foundation::StoreFoundation;
 use crate::store_security::StoreSecurity;
 use crate::store_sync::ConfigProvider;
 use crate::sync::{BlobCacheError, BlobStream};
+use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::SealError;
@@ -123,7 +123,7 @@ impl CovenReadHandle {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<RowBlobRef, crate::database::DbError> {
+    ) -> Result<RowBlobRef, coven_database::DbError> {
         self.blobs.row_blob_ref(table, row_id).await
     }
 

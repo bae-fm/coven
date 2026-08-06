@@ -7,11 +7,11 @@ use super::verified_history::*;
 use super::*;
 
 mod authorized;
-use crate::database::DbError;
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 pub(super) use authorized::AuthorizedPull;
+use coven_database::DbError;
 use coven_foundation::changeset::RowChange;
 use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
 use coven_protocol::membership::MembershipChain;

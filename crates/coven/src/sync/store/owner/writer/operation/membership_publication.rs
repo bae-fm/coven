@@ -3,7 +3,7 @@ use super::*;
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn outbound_membership_mutation(
         &self,
-    ) -> Result<Option<crate::database::DurableMembershipMutation>, InviteError> {
+    ) -> Result<Option<coven_database::DurableMembershipMutation>, InviteError> {
         self.database
             .outbound_membership_mutation()
             .await

@@ -103,7 +103,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
 
     pub(crate) async fn publish_acknowledgement_objects(
         &self,
-        outbound: &crate::database::OutboundStoreAck,
+        outbound: &coven_database::OutboundStoreAck,
         candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<(), StoreAckError> {
         for circle in &outbound.circle_acknowledgements {

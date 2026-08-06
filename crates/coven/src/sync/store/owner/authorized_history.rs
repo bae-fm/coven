@@ -1,5 +1,5 @@
 use super::*;
-use crate::database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
+use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 

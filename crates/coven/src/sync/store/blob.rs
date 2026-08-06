@@ -8,7 +8,7 @@ use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
 use coven_protocol::store_commit::StoreRootRef;
 
-use crate::database::StoreDatabase;
+use coven_database::StoreDatabase;
 
 mod cache;
 #[cfg(test)]
@@ -129,7 +129,7 @@ async fn verify_exact_file(
 
 fn verify_external_file_facts(
     reference: &RowBlobRef,
-    external: &crate::database::ExternalBlob,
+    external: &coven_database::ExternalBlob,
     size: u64,
     hash: coven_protocol::store_commit::ObjectHash,
 ) -> Result<(), BlobCacheError> {
@@ -151,7 +151,7 @@ async fn open_local_file(path: &std::path::Path) -> Result<BlobStreamSource, Blo
 
 async fn open_external_file(
     reference: &RowBlobRef,
-    external: crate::database::ExternalBlob,
+    external: coven_database::ExternalBlob,
 ) -> Result<BlobStreamSource, BlobCacheError> {
     let file = coven_foundation::local_file::OpenFile::open(&external.path)
         .await
@@ -622,7 +622,7 @@ impl RemoteBlobSourceInner<'_> {
                 .await
                 .map_err(BlobCacheError::Metadata)?
                 .ok_or(BlobCacheError::Metadata(
-                    crate::database::DbError::StoreRootHashMissing,
+                    coven_database::DbError::StoreRootHashMissing,
                 )),
         }
     }

@@ -10,7 +10,7 @@
 
 use tracing::{debug, info, warn};
 
-use crate::database::DbError;
+use coven_database::DbError;
 use coven_foundation::changeset::RowChange;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::BlobTransitionObserver;
@@ -440,7 +440,7 @@ pub enum InitSyncError {
     #[error("cloud cipher and blob path scheme describe different storage modes")]
     IncoherentStorageRepresentation,
     #[error("Store row routing initialization failed: {0}")]
-    RowRouting(crate::database::DbError),
+    RowRouting(coven_database::DbError),
     #[error("Store protocol root failed: {0}")]
     StoreProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
@@ -475,7 +475,7 @@ impl SyncCycleStorage for CloudSyncStorage {}
 /// A sync session whose local and cloud representation has been validated
 /// before Store creation or opening can perform protocol work.
 pub(crate) struct PreparedSyncComponents {
-    database: crate::database::StoreDatabase,
+    database: coven_database::StoreDatabase,
     store_dir: StoreDir,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: std::sync::Arc<CloudSyncStorage>,
@@ -487,7 +487,7 @@ pub(crate) struct PreparedSyncComponents {
 
 impl PreparedSyncComponents {
     pub(crate) async fn prepare(
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         store_dir: StoreDir,
         local_blob_access: super::store::blob::LocalStoreBlobAccess,
         storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
@@ -599,7 +599,7 @@ impl PreparedSyncComponents {
 /// checked. Callers cannot replace any of them before running a cycle.
 pub(crate) struct SyncComponents {
     store: std::sync::Arc<Store>,
-    database: crate::database::StoreDatabase,
+    database: coven_database::StoreDatabase,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
     storage: std::sync::Arc<dyn SyncCycleStorage>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
@@ -617,7 +617,7 @@ impl SyncComponents {
 
     pub(crate) async fn pending_blocked_writes(
         &self,
-    ) -> Result<Vec<crate::PendingWrite>, crate::database::DbError> {
+    ) -> Result<Vec<crate::PendingWrite>, coven_database::DbError> {
         Ok(self
             .database
             .pending_writes()
@@ -1112,7 +1112,7 @@ impl SyncComponents {
     #[cfg(test)]
     pub(crate) fn from_retained_test_device<S>(
         store: std::sync::Arc<Store>,
-        database: crate::database::StoreDatabase,
+        database: coven_database::StoreDatabase,
         local_blob_access: super::store::blob::LocalStoreBlobAccess,
         storage: std::sync::Arc<S>,
         store_id: String,

@@ -280,7 +280,7 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) async fn verify_author_exclusion_nonactivation(
         &mut self,
-        locator: &crate::database::AuthorExclusionActivationLocator,
+        locator: &coven_database::AuthorExclusionActivationLocator,
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
         activation_commit: &VerifiedStoreBatchCommit,

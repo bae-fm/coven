@@ -6,7 +6,6 @@ use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
-use crate::database::StoreDatabase;
 use crate::storage::cloud::setup::StorageSetupError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
@@ -19,6 +18,7 @@ use crate::sync::cycle::SyncComponents;
 use crate::sync::store::blob::LocalStoreBlobAccess;
 use crate::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
 use crate::sync::Store;
+use coven_database::StoreDatabase;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreOpenGuard;

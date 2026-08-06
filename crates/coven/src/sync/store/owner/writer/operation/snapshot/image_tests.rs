@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use crate::database::{verify_circle_bootstrap_image, StoreDatabase};
+use coven_database::{verify_circle_bootstrap_image, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::CommitFrontier;
 
@@ -288,7 +288,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     .expect("create Circle bootstrap unscoped-row Store");
     let circle_id = source
         .test_sql(|connection| {
-            Ok::<_, crate::database::DbError>(
+            Ok::<_, coven_database::DbError>(
                 connection
                     .install_test_active_circle("circle-bootstrap-unscoped")
                     .0,
@@ -506,10 +506,10 @@ impl PublishedScopedSnapshot {
 fn edit_snapshot_image(
     _image_dir: &Path,
     image: Vec<u8>,
-    edit: impl FnOnce(&crate::database::DatabaseImageTest),
+    edit: impl FnOnce(&coven_database::DatabaseImageTest),
 ) -> Vec<u8> {
     let connection =
-        crate::database::DatabaseImageTest::from_bytes(&image).expect("open edited snapshot image");
+        coven_database::DatabaseImageTest::from_bytes(&image).expect("open edited snapshot image");
     edit(&connection);
     connection
         .into_bytes()
@@ -542,15 +542,15 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
         )
         .await
         .expect("create scoped snapshot image");
-    let inspected = crate::database::DatabaseImageTest::from_bytes(&image)
+    let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
         .expect("open inspected scoped snapshot");
     let routes = inspected
-        .coven_table_row_count(crate::database::DatabaseTestTable::named(
+        .coven_table_row_count(coven_database::DatabaseTestTable::named(
             "_coven_row_routes",
         ))
         .expect("count snapshot private routes");
     let mirrors = inspected
-        .coven_table_row_count(crate::database::DatabaseTestTable::named("_coven_audience"))
+        .coven_table_row_count(coven_database::DatabaseTestTable::named("_coven_audience"))
         .expect("count snapshot audience mirrors");
     let materialized: (i64, i64) = inspected
         .query_row(
@@ -590,7 +590,7 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
         )
         .await
         .expect("create Circle snapshot image");
-    let inspected = crate::database::DatabaseImageTest::from_bytes(&image)
+    let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
         .expect("open inspected Circle snapshot");
     let materialized = inspected
         .query_row(
@@ -621,7 +621,7 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
     ] {
         assert_eq!(
             inspected
-                .coven_table_row_count(crate::database::DatabaseTestTable::named(table))
+                .coven_table_row_count(coven_database::DatabaseTestTable::named(table))
                 .expect("count Circle snapshot Coven rows"),
             expected,
             "unexpected {table} row count"
@@ -742,7 +742,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
         Some(&routing_key),
     )
     .expect("verify Circle bootstrap with its required Store parent");
-    let inspected = crate::database::DatabaseImageTest::from_bytes(&image)
+    let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
         .expect("open inspected Circle parent snapshot");
     let rows = inspected
         .query_row(
@@ -766,7 +766,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     );
     assert_eq!(
         inspected
-            .coven_table_row_count(crate::database::DatabaseTestTable::named(
+            .coven_table_row_count(coven_database::DatabaseTestTable::named(
                 "_coven_row_routes",
             ))
             .expect("count Circle parent routes"),
@@ -774,7 +774,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     );
     assert_eq!(
         inspected
-            .coven_table_row_count(crate::database::DatabaseTestTable::named("_coven_audience",))
+            .coven_table_row_count(coven_database::DatabaseTestTable::named("_coven_audience",))
             .expect("count Circle parent audiences"),
         1
     );
@@ -899,7 +899,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
                         ),
                     )
                     .map(|_| ())
-                    .map_err(crate::database::DbError::from)
+                    .map_err(coven_database::DbError::from)
             },
         )
         .await
@@ -1123,7 +1123,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
         .await
         .expect("create scoped snapshot image");
     let scoped =
-        crate::database::DatabaseImageTest::from_bytes(&image).expect("open scoped snapshot image");
+        coven_database::DatabaseImageTest::from_bytes(&image).expect("open scoped snapshot image");
     let actual = scoped
         .store_device_state_snapshot_refs()
         .expect("read scoped device states")
@@ -1216,11 +1216,11 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .expect("load installed snapshot replay baseline");
         assert_eq!(baseline.exact_cut, published_snapshot.coverage);
         match &baseline.authority {
-            crate::database::RetainedReplayAuthority::StableSnapshot(authority) => {
+            coven_database::RetainedReplayAuthority::StableSnapshot(authority) => {
                 assert_eq!(authority.store_root, store.root);
                 assert_eq!(authority.metadata, published_snapshot);
             }
-            crate::database::RetainedReplayAuthority::Genesis(_) => {
+            coven_database::RetainedReplayAuthority::Genesis(_) => {
                 panic!("snapshot bootstrap installed a genesis replay baseline")
             }
         }
@@ -1228,7 +1228,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .validate_image()
             .expect("validate snapshot replay baseline");
         let mut tampered = baseline.authority.clone();
-        let crate::database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
+        let coven_database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
         else {
             panic!("snapshot bootstrap installed a genesis replay baseline")
         };
@@ -1321,13 +1321,13 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
     let live_counts = source
         .test_sql(|database| {
             Ok((
-                database.table_row_count(crate::database::DatabaseTestTable::named(
+                database.table_row_count(coven_database::DatabaseTestTable::named(
                     "materialized_commits",
                 ))?,
-                database.table_row_count(crate::database::DatabaseTestTable::named(
+                database.table_row_count(coven_database::DatabaseTestTable::named(
                     "retained_merge_materializations",
                 ))?,
-                database.table_row_count(crate::database::DatabaseTestTable::named(
+                database.table_row_count(coven_database::DatabaseTestTable::named(
                     "retained_replay_objects",
                 ))?,
             ))
@@ -1346,7 +1346,7 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
         .await
         .expect("create materialization snapshot");
     let snapshot =
-        crate::database::DatabaseImageTest::from_bytes(&image).expect("open inspected snapshot");
+        coven_database::DatabaseImageTest::from_bytes(&image).expect("open inspected snapshot");
     assert_eq!(
         snapshot
             .materialization_graph_counts()
@@ -1433,8 +1433,8 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create blob snapshot");
-        let snapshot = crate::database::DatabaseImageTest::from_bytes(&image)
-            .expect("open inspected snapshot");
+        let snapshot =
+            coven_database::DatabaseImageTest::from_bytes(&image).expect("open inspected snapshot");
         let graph = snapshot
             .snapshot_blob_graph()
             .expect("read closed snapshot blob graph");
@@ -1456,7 +1456,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         ));
         for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
             let count = snapshot
-                .coven_table_row_count(crate::database::DatabaseTestTable::named(table))
+                .coven_table_row_count(coven_database::DatabaseTestTable::named(table))
                 .expect("count snapshot blob ownership table");
             assert_eq!(count, 1, "snapshot carries one {table} row");
         }
@@ -1573,7 +1573,7 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
         .expect("activate existing blob graph object");
     {
         let connection =
-            crate::database::DatabaseImageTest::open(&image_path).expect("open blob graph image");
+            coven_database::DatabaseImageTest::open(&image_path).expect("open blob graph image");
         connection
             .apply_coven_schema()
             .expect("apply blob graph schema");
@@ -1596,7 +1596,7 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
             owner,
         )
         .expect("activate replacement blob graph object");
-    let prepared = crate::database::PreparedSnapshotBlob {
+    let prepared = coven_database::PreparedSnapshotBlob {
         bindings: vec![replacement],
         authority: coven_protocol::audience_package::PackageAudience::Store,
         remote: replacement_remote,

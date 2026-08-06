@@ -139,7 +139,7 @@ fn store_sync(
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
-    database: crate::database::Database,
+    database: coven_database::Database,
     store_dir: &StoreDir,
 ) -> StoreSync {
     let database = StoreDatabase::from_database(database);

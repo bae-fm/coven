@@ -5,7 +5,7 @@ use coven_protocol::objects::StoreObjectError;
 #[cfg(test)]
 use super::RegistrationOutbox;
 #[cfg(test)]
-use crate::database::Database;
+use coven_database::Database;
 #[cfg(test)]
 use coven_keys::keys::UserKeypair;
 #[cfg(test)]
@@ -65,7 +65,7 @@ mod tests {
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
-        let database = crate::database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db);
         let registration = loaded
             .owner_recovery_for_test()
             .await
@@ -97,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
-        let database = crate::database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db);
         let initialized_db = open_test_db();
         let store = TestStore::create(
             &initialized_db,
@@ -123,7 +123,7 @@ mod tests {
     #[tokio::test]
     async fn exact_founder_registration_is_already_activated() {
         let (store, db, signer) = initialized().await;
-        let database = crate::database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db);
         let loaded = store
             .bind_device(&db, &signer)
             .await
@@ -148,7 +148,7 @@ mod tests {
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
-        let database = crate::database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db);
         let registration = loaded
             .owner_recovery_for_test()
             .await
@@ -182,7 +182,7 @@ mod tests {
             .await
             .expect("corrupt activated recovery registration fixture");
 
-        let frontier = crate::database::StoreDatabase::new(&db)
+        let frontier = coven_database::StoreDatabase::new(&db)
             .materialized_frontier()
             .await
             .expect("retained recovery author does not depend on mutable registration rows");
@@ -195,7 +195,7 @@ mod tests {
         let (store, db, _registration, reference) = recovered_author().await;
         db.tamper_retained_recovery_registration_for_test(
             &reference,
-            crate::database::RetainedRegistrationTamper::CanonicalRegistration,
+            coven_database::RetainedRegistrationTamper::CanonicalRegistration,
         )
         .await;
 
@@ -214,7 +214,7 @@ mod tests {
         let (store, db, _registration, reference) = recovered_author().await;
         db.tamper_retained_recovery_registration_for_test(
             &reference,
-            crate::database::RetainedRegistrationTamper::ActivationAuthority,
+            coven_database::RetainedRegistrationTamper::ActivationAuthority,
         )
         .await;
 
@@ -247,7 +247,7 @@ mod tests {
                 .await
                 .expect("load recovery Store");
             let authority = store.founder_recovery_authority().await;
-            let database = crate::database::StoreDatabase::new(&db);
+            let database = coven_database::StoreDatabase::new(&db);
             let mut recovery = loaded
                 .owner_recovery_for_test()
                 .await

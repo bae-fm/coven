@@ -721,7 +721,7 @@ impl SyncLoopHandle {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<coven_protocol::blob::DrainOutcome, crate::database::DbError> {
+    ) -> Result<coven_protocol::blob::DrainOutcome, coven_database::DbError> {
         self.inner
             .components
             .drain_uploads(self.inner.clock.as_ref(), self.inner.observer.as_deref())

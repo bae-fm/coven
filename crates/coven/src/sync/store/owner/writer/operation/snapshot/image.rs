@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::database::{Database, SnapshotDatabaseImage};
 use crate::storage::SyncStorage;
 use crate::Migration;
+use coven_database::{Database, SnapshotDatabaseImage};
 use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::SyncedTable;
 
@@ -22,7 +22,7 @@ pub enum SnapshotError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Image(#[from] crate::database::SnapshotImageError),
+    Image(#[from] coven_database::SnapshotImageError),
     #[error("snapshot control JSON parse failed: {0}")]
     Parse(String),
     #[error("storage error: {0}")]
@@ -40,7 +40,7 @@ pub enum SnapshotError {
     /// The snapshot's synced-schema version is newer than this binary's top
     /// migration, so its DB image carries columns this binary's tables lack. The
     /// generation is refused before its image is downloaded; the same refusal is
-    /// the at-open backstop in [`crate::database::run_migrations_in_transaction`].
+    /// the at-open backstop in [`coven_database::run_migrations_in_transaction`].
     #[error(
         "snapshot schema version {snapshot_version} is newer than this binary supports \
          ({supported}); update the app"
@@ -76,14 +76,14 @@ pub enum SnapshotError {
     },
 }
 
-impl From<crate::database::SnapshotImageOperationError<SnapshotError>> for SnapshotError {
-    fn from(error: crate::database::SnapshotImageOperationError<SnapshotError>) -> Self {
+impl From<coven_database::SnapshotImageOperationError<SnapshotError>> for SnapshotError {
+    fn from(error: coven_database::SnapshotImageOperationError<SnapshotError>) -> Self {
         match error {
-            crate::database::SnapshotImageOperationError::Operation(cause) => cause,
-            crate::database::SnapshotImageOperationError::Cleanup { path, cleanup } => {
+            coven_database::SnapshotImageOperationError::Operation(cause) => cause,
+            coven_database::SnapshotImageOperationError::Cleanup { path, cleanup } => {
                 Self::StagedDatabaseCleanup { path, cleanup }
             }
-            crate::database::SnapshotImageOperationError::CleanupAfterFailure {
+            coven_database::SnapshotImageOperationError::CleanupAfterFailure {
                 path,
                 cleanup,
                 cause,
@@ -96,8 +96,8 @@ impl From<crate::database::SnapshotImageOperationError<SnapshotError>> for Snaps
     }
 }
 
-impl From<crate::database::DbError> for SnapshotError {
-    fn from(error: crate::database::DbError) -> Self {
+impl From<coven_database::DbError> for SnapshotError {
+    fn from(error: coven_database::DbError) -> Self {
         Self::PublicationState(error.to_string())
     }
 }
@@ -127,9 +127,9 @@ pub(crate) struct PreparedSnapshotBootstrap<'storage> {
         coven_protocol::store_commit::StoreDeviceRegistration,
     >,
     restorer_identity: coven_keys::keys::UserKeypair,
-    snapshot: crate::database::PublishedStoreSnapshot,
+    snapshot: coven_database::PublishedStoreSnapshot,
     coverage: coven_protocol::store_commit::CommitFrontier,
-    stability: crate::database::VerifiedStoreSnapshotStability,
+    stability: coven_database::VerifiedStoreSnapshotStability,
     membership: coven_protocol::membership::MembershipChain,
     #[cfg(test)]
     fail_circle_install: bool,
@@ -305,12 +305,12 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             }
             let root_ref = root.reference().clone();
             let store_frontier = coverage.clone();
-            let install = crate::database::VerifiedSnapshotBootstrapInstall::new(
+            let install = coven_database::VerifiedSnapshotBootstrapInstall::new(
                 snapshot,
                 root.object().clone(),
                 founder_registration,
                 stability,
-                crate::database::InitialStoreMembershipAuthority {
+                coven_database::InitialStoreMembershipAuthority {
                     head_refs: membership.head_refs().to_vec(),
                 },
                 routing_encryption,
@@ -347,8 +347,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                             migrations,
                         )
                         .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-                        let store_database =
-                            crate::database::StoreDatabase::from_database(query_db);
+                        let store_database = coven_database::StoreDatabase::from_database(query_db);
                         crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
                             &store_database,
                             storage.as_ref(),
@@ -386,7 +385,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-            let database = crate::database::StoreDatabase::from_database(db);
+            let database = coven_database::StoreDatabase::from_database(db);
             let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
                 database.clone(),
                 storage.as_ref(),

@@ -165,7 +165,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         .expect("count circle activations"),
                     0
                 );
-                assert!(crate::database::StoreDatabase::new(&db)
+                assert!(coven_database::StoreDatabase::new(&db)
                     .get_circles(
                         &keys::public_key_hex(&signer),
                         BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -174,7 +174,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     .expect("read active circles")
                     .is_empty());
                 assert_eq!(
-                    crate::database::StoreDatabase::new(&db)
+                    coven_database::StoreDatabase::new(&db)
                         .get_circle_operations()
                         .await
                         .expect("read pending circle operations"),
@@ -203,7 +203,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     let error =
                         first.expect_err("failure before exact create interrupts activation");
                     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-                    let persisted = crate::database::StoreDatabase::new(&db)
+                    let persisted = coven_database::StoreDatabase::new(&db)
                         .circle_operation(&expected.operation_id)
                         .await
                         .expect("read interrupted operation")
@@ -226,7 +226,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         .await
                         .expect("resume exact circle operation");
                 }
-                assert!(crate::database::StoreDatabase::new(&db)
+                assert!(coven_database::StoreDatabase::new(&db)
                     .circle_operation(&expected.operation_id)
                     .await
                     .expect("read completed operation")
@@ -239,7 +239,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     1
                 );
                 assert_eq!(
-                    crate::database::StoreDatabase::new(&db)
+                    coven_database::StoreDatabase::new(&db)
                         .get_circles(
                             &keys::public_key_hex(&signer),
                             BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -253,7 +253,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         rotation_required: false,
                     }]
                 );
-                assert!(crate::database::StoreDatabase::new(&db)
+                assert!(coven_database::StoreDatabase::new(&db)
                     .get_circle_operations()
                     .await
                     .expect("read completed circle operations")
@@ -343,7 +343,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .await
         .expect_err("failed exact create interrupts rename publication");
     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-    let operation_id = crate::database::StoreDatabase::new(&db)
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted rename")
@@ -351,7 +351,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted rename is listed")
         .operation_id;
-    let expected = crate::database::StoreDatabase::new(&db)
+    let expected = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted rename")
@@ -446,7 +446,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         .await
         .expect_err("failed exact create interrupts delete publication");
     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-    let operation_id = crate::database::StoreDatabase::new(&db)
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted delete")
@@ -454,7 +454,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted delete is listed")
         .operation_id;
-    let expected = crate::database::StoreDatabase::new(&db)
+    let expected = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted delete")
@@ -534,7 +534,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .delete_circle(circle_id)
         .await
         .expect_err("interrupt delete before its first exact upload");
-    let operation_id = crate::database::StoreDatabase::new(&db)
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted delete")
@@ -542,7 +542,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted delete is pending")
         .operation_id;
-    let mut journal = crate::database::StoreDatabase::new(&db)
+    let mut journal = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted delete")
@@ -556,7 +556,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .control
         .value
         .corrupt_signature_for_test();
-    crate::database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal)
         .await
         .expect("persist forged deletion");
@@ -577,7 +577,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
     );
     assert!(
         matches!(
-            crate::database::StoreDatabase::new(&db)
+            coven_database::StoreDatabase::new(&db)
                 .get_circles(
                     &keys::public_key_hex(&signer),
                     BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -633,7 +633,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         coven_protocol::blob::content_hash(blob_bytes),
     );
     let routing = EncryptionService::from_key([42; 32]);
-    let write_id = crate::database::StoreDatabase::new(&db)
+    let write_id = coven_database::StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |transaction| {
             transaction.execute_batch(&insert).map_err(DbError::from)
         })
@@ -658,7 +658,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle row and blob");
-    let historical_commit = match crate::database::StoreDatabase::new(&db)
+    let historical_commit = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("load historical Circle write status")
@@ -699,7 +699,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .add_circle_member(circle_id, concurrent_writer_pubkey, CircleRole::Member)
         .await
         .expect("add concurrent Circle writer");
-    let concurrent_bootstrap_commit = crate::database::StoreDatabase::new(&db)
+    let concurrent_bootstrap_commit = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load concurrent writer Circle bootstrap commit")
@@ -724,7 +724,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         late_bytes.len(),
         coven_protocol::blob::content_hash(late_bytes),
     );
-    let late_write_id = crate::database::StoreDatabase::new(&concurrent_db)
+    let late_write_id = coven_database::StoreDatabase::new(&concurrent_db)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
@@ -781,7 +781,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("publish late concurrent Circle package"),
         1
     );
-    let late_commit = match crate::database::StoreDatabase::new(&concurrent_db)
+    let late_commit = match coven_database::StoreDatabase::new(&concurrent_db)
         .write_status(&late_write_id)
         .await
         .expect("load late concurrent Circle write status")
@@ -794,7 +794,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("load Circle member Store");
     let member_temp = tempfile::tempdir().expect("new member output directory");
-    let target_control = crate::database::StoreDatabase::new(&db)
+    let target_control = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load target Circle bootstrap control")
@@ -811,7 +811,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     )
     .to_string();
     member_db.fail_next_merge_materialization_at(
-        crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
+        coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
     );
     let injected = member_store
         .authorize_writer()
@@ -936,7 +936,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "{error}"
     );
     let blob_owners = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
     );
     blob_owners
@@ -1034,7 +1034,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("count circle activations"),
         3
     );
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list completed Circle operations")
@@ -1160,7 +1160,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .await
         .expect("add remaining Circle member");
-    let prior = crate::database::StoreDatabase::new(&db)
+    let prior = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load pre-close Circle control")
@@ -1169,7 +1169,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let prior_epoch = prior.control.value.epoch_id();
     let prior_fingerprint = prior.control.value.key_fingerprint();
     let routing = EncryptionService::from_key([42; 32]);
-    let write_id = crate::database::StoreDatabase::new(&db)
+    let write_id = coven_database::StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |transaction| {
             transaction
                 .execute(
@@ -1191,7 +1191,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish pre-close Circle package");
-    let package_commit_ref = match crate::database::StoreDatabase::new(&db)
+    let package_commit_ref = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("load pre-close Circle write status")
@@ -1243,7 +1243,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("activate Circle epoch close");
 
-    let operation = crate::database::StoreDatabase::new(&db)
+    let operation = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read Circle removal operation")
@@ -1260,7 +1260,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .expect("count circle activations"),
         4
     );
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .is_err());
@@ -1296,7 +1296,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     .await
     .expect("copy pre-close Circle database");
 
-    let controls = crate::database::StoreDatabase::new(&db)
+    let controls = coven_database::StoreDatabase::new(&db)
         .closing_circle_controls()
         .await
         .expect("load closing Circle controls");
@@ -1319,7 +1319,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         store.root.store_root_hash,
         ProtocolObjectDomain::CircleEpochCloseResponse,
     );
-    let registration = crate::database::StoreDatabase::new(&db)
+    let registration = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(participant.registration.clone())
         .await
         .expect("load response author registration");
@@ -1399,17 +1399,17 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("activate the exact Circle epoch-close outcome");
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read finalized Circle removal operation")
         .is_none());
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .closing_circle_controls()
         .await
         .expect("read closing Circle controls after finalization")
         .is_empty());
-    let (successor, successor_commit_ref) = crate::database::StoreDatabase::new(&db)
+    let (successor, successor_commit_ref) = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load successor Circle authoring state");
@@ -1807,7 +1807,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_bootstrap.image.image_hash,
         "the retained bootstrap image hashes to its recorded image hash"
     );
-    let image = crate::database::DatabaseImageTest::from_bytes(retained_bootstrap.image_bytes())
+    let image = coven_database::DatabaseImageTest::from_bytes(retained_bootstrap.image_bytes())
         .expect("open the successor bootstrap image");
     let converges: bool = image
         .query_row(
@@ -1845,7 +1845,7 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             .resume_circle_operations()
             .await
             .expect_err("second exact create failure interrupts publication");
-        let persisted = crate::database::StoreDatabase::new(&db)
+        let persisted = coven_database::StoreDatabase::new(&db)
             .circle_operation(&expected.operation_id)
             .await
             .expect("read interrupted circle operation")
@@ -1910,12 +1910,12 @@ async fn uploaded_circle_candidate_fails_when_its_ownership_record_is_missing() 
         .expect("remove candidate ownership record");
     journal.operation_mut().uploaded.insert(step.to_string());
 
-    let error = crate::database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect_err("an uploaded candidate must retain its ownership record");
     assert!(error.to_string().contains("remote object"), "{error}");
-    let persisted = crate::database::StoreDatabase::new(&db)
+    let persisted = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect("read operation after rejected update")
@@ -1934,12 +1934,12 @@ async fn journal_update_rejects_an_uploaded_marker_without_a_prepared_object() {
         .uploaded
         .insert(unknown_step.to_string());
 
-    let error = crate::database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect_err("an upload marker must name a prepared object");
     assert!(error.to_string().contains(unknown_step), "{error}");
-    let persisted = crate::database::StoreDatabase::new(&db)
+    let persisted = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect("read operation after rejected upload marker")
@@ -1965,7 +1965,7 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
         CircleAccessDisposition::Active { .. }
     ));
     own_access.leaf.value.body_mut().disposition = CircleAccessDisposition::Inactive;
-    let error = crate::database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db)
         .update_circle_operation(journal.clone())
         .await
         .expect_err("journal update must verify its closed candidate graph");
@@ -1981,7 +1981,7 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
             .expect("count circle activations"),
         0
     );
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect("read rejected operation")
@@ -2091,7 +2091,7 @@ impl ClosingFounderCircle {
         .await
         .expect("member installs the Circle bootstrap");
 
-        let prior = crate::database::StoreDatabase::new(&db)
+        let prior = coven_database::StoreDatabase::new(&db)
             .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
             .await
             .expect("load pre-close Circle control")
@@ -2104,7 +2104,7 @@ impl ClosingFounderCircle {
             .await
             .expect("activate Circle epoch close");
         assert_eq!(
-            crate::database::StoreDatabase::new(&db)
+            coven_database::StoreDatabase::new(&db)
                 .circle_operation(&operation_id)
                 .await
                 .expect("read Circle removal operation")
@@ -2193,7 +2193,7 @@ impl ClosingFounderCircle {
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish owner Circle row");
-        match crate::database::StoreDatabase::new(&self.db)
+        match coven_database::StoreDatabase::new(&self.db)
             .write_status(&write_id)
             .await
             .expect("read owner Circle write status")
@@ -2247,7 +2247,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     // write does not reach the Store.
     let member_row = "00000000-0000-4000-8000-0000000000c1";
     let member_circle_id = fixture.circle_id;
-    let member_write_id = crate::database::StoreDatabase::new(&fixture.member_db)
+    let member_write_id = coven_database::StoreDatabase::new(&fixture.member_db)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
@@ -2276,7 +2276,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     );
     assert!(
         !matches!(
-            crate::database::StoreDatabase::new(&fixture.member_db)
+            coven_database::StoreDatabase::new(&fixture.member_db)
                 .write_status(&member_write_id)
                 .await
                 .expect("read member write status during close"),
@@ -2368,7 +2368,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         1,
         "the member publishes its old-epoch package after the reopen"
     );
-    let published = match crate::database::StoreDatabase::new(&fixture.member_db)
+    let published = match coven_database::StoreDatabase::new(&fixture.member_db)
         .write_status(&member_write_id)
         .await
         .expect("read member write status after reopen")
@@ -3064,7 +3064,7 @@ impl SilentParticipantCircle {
 
         let silent_storage = Arc::new(circle_test_cloud_storage(&_home, name, &silent));
 
-        let prior_epoch = crate::database::StoreDatabase::new(&db)
+        let prior_epoch = coven_database::StoreDatabase::new(&db)
             .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
             .await
             .expect("load pre-close Circle control")
@@ -3175,7 +3175,7 @@ impl SilentParticipantCircle {
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish the accepted old-epoch Circle row");
-        let covered_commit_ref = match crate::database::StoreDatabase::new(&self.db)
+        let covered_commit_ref = match coven_database::StoreDatabase::new(&self.db)
             .write_status(&covered_write)
             .await
             .expect("read the accepted pre-close write status")
@@ -3270,7 +3270,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         .await
         .expect("activate Circle epoch close");
     assert_eq!(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read Circle removal operation")
@@ -3614,7 +3614,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     fixture.silent_publish_pending_write().await;
     assert!(
         matches!(
-            crate::database::StoreDatabase::new(&fixture.silent_db)
+            coven_database::StoreDatabase::new(&fixture.silent_db)
                 .write_status(&after_write)
                 .await
                 .expect("read post-reset Circle write status"),
@@ -3643,7 +3643,7 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
         .await
         .expect("capture Circle document row");
     fixture.silent_publish_pending_write().await;
-    let beyond_commit_ref = match crate::database::StoreDatabase::new(&fixture.silent_db)
+    let beyond_commit_ref = match coven_database::StoreDatabase::new(&fixture.silent_db)
         .write_status(&beyond_write)
         .await
         .expect("read the beyond-cutoff write status")
@@ -3825,7 +3825,7 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
     fixture.silent_publish_pending_write().await;
     assert!(
         matches!(
-            crate::database::StoreDatabase::new(&fixture.silent_db)
+            coven_database::StoreDatabase::new(&fixture.silent_db)
                 .write_status(&after_write)
                 .await
                 .expect("read post-successor Circle write status"),
@@ -4044,7 +4044,7 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
     // Crash at the reset's projection-replacement boundary: the whole pull rolls
     // back, leaving the pre-reset state exactly as it was.
     fixture.silent_db.fail_next_merge_materialization_at(
-        crate::database::MergeMaterializationFailurePoint::ProjectionReplacement,
+        coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
     );
     fixture
         .silent_pull()
@@ -4413,7 +4413,7 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
     // typed `Deleted` reason rather than a generic missing-close error.
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let error = crate::sync::store::Store::load(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         store.storage(),
         store_dir,
         signer.clone(),

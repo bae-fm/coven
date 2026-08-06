@@ -1,7 +1,7 @@
 use super::close_prepared_packages;
-use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use crate::sync::store::operations::{next_store_sequence, successor_store_sequence};
 use crate::sync::store::StoreError;
+use coven_database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
@@ -69,7 +69,7 @@ impl AuthorizedWriterOperation<'_> {
             for fact in &blob_facts.blobs {
                 if matches!(
                     fact.audience_move,
-                    Some(crate::database::StoreWriteBlobMoveDestination::Local)
+                    Some(coven_database::StoreWriteBlobMoveDestination::Local)
                 ) || fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided
                 {
                     continue;
@@ -310,7 +310,7 @@ impl AuthorizedWriterOperation<'_> {
                 },
                 history_summary: successor.summary,
                 local_cleanup,
-                completion: crate::database::StoreBatchCompletion {},
+                completion: coven_database::StoreBatchCompletion {},
             })
         }
         .await;
@@ -337,8 +337,8 @@ impl AuthorizedWriterOperation<'_> {
 
 fn bind_local_cleanup(
     requests: Vec<LocalBlobDropRequest>,
-    blobs: &[crate::database::PreparedAudienceBlob],
-) -> Result<crate::database::StoreBatchLocalCleanup, crate::sync::store::StorePreparationError> {
+    blobs: &[coven_database::PreparedAudienceBlob],
+) -> Result<coven_database::StoreBatchLocalCleanup, crate::sync::store::StorePreparationError> {
     let mut drops = Vec::with_capacity(requests.len());
     for request in requests {
         let matching = blobs
@@ -381,5 +381,5 @@ fn bind_local_cleanup(
             disposition: request.disposition,
         });
     }
-    Ok(crate::database::StoreBatchLocalCleanup { drops })
+    Ok(coven_database::StoreBatchLocalCleanup { drops })
 }

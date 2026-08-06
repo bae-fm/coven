@@ -29,7 +29,7 @@ pub(crate) struct VerifiedStoreRoot {
 
 impl VerifiedStoreRoot {
     pub(super) async fn open(
-        database: &crate::database::StoreDatabase,
+        database: &coven_database::StoreDatabase,
         storage: &dyn SyncStorage,
         expected: &StoreRootRef,
     ) -> Result<Self, StoreProtocolRootError> {

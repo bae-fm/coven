@@ -1,9 +1,9 @@
 use super::*;
-use crate::database::Database;
 use crate::sync::store::owner::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
+use coven_database::Database;
 use coven_keys::keys::MasterKeyCustody;
 use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 
@@ -112,7 +112,7 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
     let (db, store, signer, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
-        crate::database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db)
             .materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
@@ -663,7 +663,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
 
     fixture.home.clear_exact_reads();
     member_database.fail_next_merge_materialization_at(
-        crate::database::MergeMaterializationFailurePoint::SummaryMaterialization,
+        coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
     );
     fixture
         .pull_member(&member_store_dir)
@@ -782,7 +782,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .is_empty());
     let reopened_public_circle_state: i64 = reopened
         .test_sql(|database| {
-            database.table_row_count(crate::database::DatabaseTestTable::named(
+            database.table_row_count(coven_database::DatabaseTestTable::named(
                 "circle_current_state",
             ))
         })
@@ -1199,7 +1199,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             RoutingConflict::DeleteMove | RoutingConflict::MoveLocal => {
                 assert_eq!(
                     progressive_state,
-                    crate::database::ScopedRoutingStateForTest {
+                    coven_database::ScopedRoutingStateForTest {
                         row: None,
                         route: None,
                         mirror: None,
@@ -1316,7 +1316,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
                    '0000000001000-0000-causal-proof', '2026-07-21')",
         ])
         .await;
-    crate::database::StoreDatabase::new(later_db)
+    coven_database::StoreDatabase::new(later_db)
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");

@@ -515,7 +515,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
     let founder = db
         .test_sql(move |database| {
             database.circle_current_state(circle_id)?.ok_or_else(|| {
-                crate::database::DbError::Message("test Circle current state is absent".to_string())
+                coven_database::DbError::Message("test Circle current state is absent".to_string())
             })
         })
         .await

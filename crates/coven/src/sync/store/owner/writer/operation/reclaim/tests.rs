@@ -194,7 +194,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .publish_acknowledgement(first_coverage)
         .await
         .expect("acknowledge stable snapshot");
-    let stable = crate::database::StoreDatabase::new(&db)
+    let stable = coven_database::StoreDatabase::new(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load stable snapshot")
@@ -218,7 +218,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         )
         .await
         .expect("publish unacknowledged snapshot");
-    let registrations = crate::database::StoreDatabase::new(&db)
+    let registrations = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration_records()
         .await
         .expect("load active registrations");
@@ -514,12 +514,12 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .publish_acknowledgement(coverage)
         .await
         .expect("publish covering acknowledgement");
-    let snapshot = crate::database::StoreDatabase::new(&db)
+    let snapshot = coven_database::StoreDatabase::new(&db)
         .latest_local_store_snapshot()
         .await
         .expect("load covering snapshot")
         .expect("covering snapshot exists");
-    let acknowledgement = crate::database::StoreDatabase::new(&db)
+    let acknowledgement = coven_database::StoreDatabase::new(&db)
         .latest_local_store_ack()
         .await
         .expect("load covering acknowledgement")
@@ -550,7 +550,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         }))
         .await
         .expect("prepare reclaim authorization");
-    let candidate = crate::database::StoreDatabase::new(&db)
+    let candidate = coven_database::StoreDatabase::new(&db)
         .store_reclaim_operations()
         .await
         .expect("load reclaim candidate")
@@ -574,7 +574,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .delete_protocol_object(&activation_head.object)
         .await
         .expect("remove reclaim activation head");
-    let authorized = crate::database::StoreDatabase::new(&db)
+    let authorized = coven_database::StoreDatabase::new(&db)
         .store_reclaim_operations()
         .await
         .expect("load activated reclaim")

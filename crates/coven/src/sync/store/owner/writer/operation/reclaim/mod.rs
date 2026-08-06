@@ -1,16 +1,16 @@
 //! Proof-gated deletion of exact Store packages covered by exact authority.
 
-use crate::database::StoreReclaimJournalError;
+use coven_database::StoreReclaimJournalError;
 use std::sync::Arc;
 
-use crate::database::{
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation, StoreDatabase,
-};
 use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use crate::sync::store::owner::history::{
     CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
 };
 use crate::sync::store::AuthorizedWriterOperation;
+use coven_database::{
+    DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation, StoreDatabase,
+};
 use coven_protocol::circle::{CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId};
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
@@ -31,7 +31,7 @@ pub(crate) enum StoreReclaimError {
     #[error(transparent)]
     Object(#[from] StoreObjectError),
     #[error(transparent)]
-    Database(#[from] crate::database::DbError),
+    Database(#[from] coven_database::DbError),
     #[error(transparent)]
     Outbound(#[from] super::StoreError),
     #[error("Store reclaim journal: {0}")]
@@ -672,11 +672,11 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
 mod tests;
 
 pub(crate) async fn create_reclaim_exact_objects(
-    object: &crate::database::DurableStoreReclaimObject,
+    object: &coven_database::DurableStoreReclaimObject,
     storage: &dyn SyncStorage,
 ) -> Result<(), StoreReclaimJournalError> {
     match object {
-        crate::database::DurableStoreReclaimObject::Authorization {
+        coven_database::DurableStoreReclaimObject::Authorization {
             evidence,
             evidence_prepared,
             authorization,
@@ -707,7 +707,7 @@ pub(crate) async fn create_reclaim_exact_objects(
                 .await
                 .map_err(StoreReclaimJournalError::from)
         }
-        crate::database::DurableStoreReclaimObject::Receipt {
+        coven_database::DurableStoreReclaimObject::Receipt {
             receipt,
             receipt_prepared,
             ..

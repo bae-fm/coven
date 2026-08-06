@@ -1,9 +1,9 @@
 use super::*;
-use crate::database::Database;
-use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
+use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{MasterKeyCustody, UserKeypair};
 use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
@@ -41,7 +41,7 @@ impl MergeFixture {
             .bind_device(&db, &owner)
             .await
             .expect("bind exact Store");
-        let database = crate::database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db);
         let (store_dir_temp, store_dir) = temp_store_dir();
         Self {
             store,
@@ -492,7 +492,7 @@ async fn store_membership_reads_reject_tampered_founder_state() {
     .expect("load Store owner");
     fixture
         .db
-        .set_protocol_state(crate::database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
+        .set_protocol_state(coven_database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
         .await
         .expect("tamper with the installed founder state");
 
@@ -583,7 +583,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         .load_membership_head_for_test(&founder_ref)
         .await
         .expect("load founder membership head");
-    let registration = crate::database::StoreDatabase::new(&fixture.db)
+    let registration = coven_database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(founder_head.body.author_registration.clone())
         .await
         .expect("load founder device registration");
@@ -802,7 +802,7 @@ async fn pruned_membership_author_stream_is_replaced_and_persisted() {
     let grant = MembershipGrantId(coven_protocol::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));
-    let database = crate::database::StoreDatabase::new(&db);
+    let database = coven_database::StoreDatabase::new(&db);
     let first = database
         .select_membership_author_stream(&author, &grant, Default::default())
         .await
@@ -867,7 +867,7 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     let mut floor = vec![first, second.clone()];
     floor.sort_by_key(|reference| reference.coord.stream_key());
     let rejected_key =
-        crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
+        coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
     db.test_sql(move |conn| {
         conn.execute_batch(&format!(
             "CREATE TRIGGER reject_second_membership_floor \
@@ -875,12 +875,12 @@ async fn seeding_a_complete_head_floor_is_atomic() {
                  WHEN NEW.key = '{rejected_key}' \
                  BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
         ))
-        .map_err(crate::database::DbError::from)
+        .map_err(coven_database::DbError::from)
     })
     .await
     .unwrap();
 
-    let database = crate::database::StoreDatabase::new(&db);
+    let database = coven_database::StoreDatabase::new(&db);
     assert!(database
         .persist_membership_head_cursors(floor)
         .await
@@ -905,7 +905,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         .expect("founder head")
         .clone();
     let rejected_key =
-        crate::database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
+        coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
     db.test_sql(move |conn| {
         conn.execute_batch(&format!(
             "CREATE TRIGGER reject_anchor_cursor \
@@ -913,13 +913,13 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
              WHEN NEW.key = '{rejected_key}' \
              BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
         ))
-        .map_err(crate::database::DbError::from)
+        .map_err(coven_database::DbError::from)
     })
     .await
     .unwrap();
 
     assert!(crate::sync::store::Store::open(
-        crate::database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db),
         fixture.store.storage(),
         fixture.store_dir.clone(),
         &fixture.store.root,
@@ -931,7 +931,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         None
     );
-    assert!(crate::database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db)
         .membership_head_cursors()
         .await
         .unwrap()

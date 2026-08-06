@@ -10,9 +10,9 @@ use super::{
     prepare_registration_object, AuthorizedStoreHistory, AuthorizedWriterOperation,
     RegistrationOutbox, StoreKeyrings,
 };
-use crate::database::DeviceJoinBootstrapPlan;
 use crate::storage::SyncStorage;
 use crate::sync::store::{Store, StoreDatabase};
+use coven_database::DeviceJoinBootstrapPlan;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};

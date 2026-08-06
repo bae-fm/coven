@@ -4,14 +4,14 @@ use coven_protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFron
 use super::StoreAckError;
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
-    database: &'operation crate::database::StoreDatabase,
+    database: &'operation coven_database::StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
     root: &'operation coven_protocol::store_commit::StoreRootRef,
 }
 
 impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     pub(crate) fn new(
-        database: &'operation crate::database::StoreDatabase,
+        database: &'operation coven_database::StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
         root: &'operation coven_protocol::store_commit::StoreRootRef,
     ) -> Self {

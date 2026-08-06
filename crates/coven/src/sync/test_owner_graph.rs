@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::blob::transition::{ConnectedBlobTransitions, LocalBlobTransitions};
-use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
 use crate::sync::store::blob::{
     CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess, StoreBlobCache,
 };
+use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
 
 #[derive(Clone)]
