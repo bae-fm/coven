@@ -39,6 +39,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .circle_operation_discard_candidate(operation_id)
                 .await?;
             let Some(nonactivation) = self
+                .merge_conflict()
                 .discard_candidate_nonactivation(
                     &discard_candidate.candidate,
                     discard_candidate.revoked_grant.as_ref(),
@@ -115,6 +116,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> crate::sync::store::owner::device_join::history::DeviceJoinHistory<'_, 'storage> {
         crate::sync::store::owner::device_join::history::DeviceJoinHistory::new(
             self.database.clone(),
+            self.storage.as_ref(),
+            &mut self.history_verifier,
+        )
+    }
+
+    pub(crate) fn merge_conflict(
+        &mut self,
+    ) -> crate::sync::store::merge_conflict::MergeConflictHistory<'_, 'storage> {
+        crate::sync::store::merge_conflict::MergeConflictHistory::new(
+            &self.database,
             self.storage.as_ref(),
             &mut self.history_verifier,
         )

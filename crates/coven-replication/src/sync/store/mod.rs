@@ -13,6 +13,7 @@ mod circle_controls;
 mod error;
 mod host_write;
 mod membership;
+mod merge_conflict;
 pub(crate) mod owner;
 use owner::operations;
 mod package_preparation;
@@ -32,6 +33,7 @@ pub use host_write::HostWriteBlobStaging;
 pub use membership::AnchoredChainError;
 pub use membership::InviteError;
 pub(crate) use membership::MembershipOpsError;
+pub use merge_conflict::{ExcludedCandidateHeadObservation, MergeCandidateAbandonment};
 #[cfg(any(test, feature = "test-utils"))]
 pub use owner::device_exclusion::StoreDeviceExclusionOperationInfo;
 pub use owner::device_exclusion::{StoreDeviceExclusionError, StoreDeviceExclusionResult};
@@ -57,7 +59,6 @@ pub use owner::device_join_transport::{
 pub use owner::device_join_transport::{DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport};
 #[cfg(test)]
 pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_test as prepare_merge_abandonment_history_summary;
-pub use owner::history::{ExcludedCandidateHeadObservation, MergeCandidateAbandonment};
 #[cfg(test)]
 pub(crate) use owner::operations::StoreOperationBatch;
 pub use owner::operations::StoreOperationCommitPlan;

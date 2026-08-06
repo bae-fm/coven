@@ -21,7 +21,7 @@ mod registration;
 mod registration_outbox;
 mod restore;
 mod verification;
-mod verified_history;
+pub(crate) mod verified_history;
 pub(super) mod writer;
 
 mod store_test_support;
@@ -413,13 +413,13 @@ impl Store {
         }
 
         match self.abandon_merge_candidate(write_id.clone()).await? {
-            history::abandonment::MergeCandidateAbandonment::NotRequired => {
+            crate::sync::store::merge_conflict::MergeCandidateAbandonment::NotRequired => {
                 return Err(StoreError::InvalidOutbound(
                     "blocked Merge candidate has no abandonment authority".to_string(),
                 ));
             }
-            history::abandonment::MergeCandidateAbandonment::Abandoned => {}
-            history::abandonment::MergeCandidateAbandonment::CandidateActivated => {
+            crate::sync::store::merge_conflict::MergeCandidateAbandonment::Abandoned => {}
+            crate::sync::store::merge_conflict::MergeCandidateAbandonment::CandidateActivated => {
                 return Err(StoreError::InvalidOutbound(
                     "Merge candidate activated before abandonment and cannot be discarded"
                         .to_string(),
@@ -438,7 +438,7 @@ impl Store {
     pub(crate) async fn abandon_merge_candidate(
         &self,
         write_id: coven_protocol::write::WriteId,
-    ) -> Result<history::abandonment::MergeCandidateAbandonment, StoreError> {
+    ) -> Result<crate::sync::store::merge_conflict::MergeCandidateAbandonment, StoreError> {
         if self.device_id.is_none() {
             let mut authority = self
                 .authorize_history()

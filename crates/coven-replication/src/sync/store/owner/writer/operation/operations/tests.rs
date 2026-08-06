@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::sync::store::owner::history::abandonment::{
+use crate::sync::store::merge_conflict::{
     ExcludedCandidateHeadObservation, MergeCandidateAbandonment,
 };
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};

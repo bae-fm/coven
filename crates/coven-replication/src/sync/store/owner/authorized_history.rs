@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::authorized_store::LocalStoreDevice;
-use super::history::{abandonment, OwnerPromotionHistory, RestoreHistory};
+use super::history::{OwnerPromotionHistory, RestoreHistory};
 use super::pull;
 use super::verification::StoreMembershipObjectVerifier;
 use super::verified_history::registration::RegistrationLoadError;
@@ -17,12 +17,10 @@ mod cleanup;
 mod construction;
 mod facades;
 mod loading;
-mod nonactivation;
 mod pull_interface;
 mod retained;
 mod test_support;
 
-pub(super) use nonactivation::MergeConflictResolutionAuthorization;
 pub(super) use reclaim::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot};
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {

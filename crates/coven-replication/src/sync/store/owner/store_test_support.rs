@@ -165,7 +165,8 @@ impl Store {
         candidate: &coven_protocol::store_commit::StoreDeviceHead,
         candidate_commit: &coven_protocol::store_commit::StoreBatchCommit,
         candidate_object: &coven_protocol::objects::ExactObjectRef,
-    ) -> Result<history::abandonment::ExcludedCandidateHeadObservation, StoreError> {
+    ) -> Result<crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation, StoreError>
+    {
         let mut history = self
             .authorize_history()
             .await
@@ -174,6 +175,7 @@ impl Store {
             .authenticate_commit_bytes(&candidate.commit, &candidate_commit.to_bytes())
             .await?;
         history
+            .merge_conflict()
             .observe_excluded_candidate_head(candidate, &verified_commit, candidate_object)
             .await
     }

@@ -73,6 +73,7 @@ mod membership;
 use membership::VerifiedPrefixMembershipActivation;
 pub(super) mod registration;
 use join_validation::*;
+pub(crate) use registration::RegistrationLoadError;
 use registration::*;
 
 pub(crate) struct VerifiedMergeHistoryCommit {

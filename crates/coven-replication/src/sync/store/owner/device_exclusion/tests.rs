@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
+use crate::sync::store::merge_conflict::MergeCandidateAbandonment;
 use crate::sync::test_helpers::{
     open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
 };

@@ -73,10 +73,11 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         candidate_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         candidate_object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<
-        crate::sync::store::owner::history::abandonment::ExcludedCandidateHeadObservation,
+        crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation,
         crate::sync::store::StoreError,
     > {
         self.history
+            .merge_conflict()
             .observe_excluded_candidate_head(candidate, candidate_commit, candidate_object)
             .await
     }

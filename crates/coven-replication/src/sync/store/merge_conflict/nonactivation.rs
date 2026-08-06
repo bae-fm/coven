@@ -1,4 +1,11 @@
-use super::*;
+use super::abandonment;
+use super::MergeConflictHistory;
+use crate::sync::store::owner::pull;
+use crate::sync::store::StoreError;
+use coven_protocol::membership::MembershipChain;
+use coven_protocol::store_commit::{
+    OpenedRetainedMergeHistorySummary, ResolvedStoreDeviceState, StoreDeviceStateRef,
+};
 
 pub(crate) struct MergeConflictResolutionAuthorization {
     pub(crate) membership: MembershipChain,
@@ -38,7 +45,7 @@ pub(crate) fn validate_retained_membership_floors(
     Ok(())
 }
 
-impl<'storage> AuthorizedStoreHistory<'storage> {
+impl MergeConflictHistory<'_, '_> {
     pub(crate) async fn discard_candidate_nonactivation(
         &mut self,
         candidate: &coven_database::BlockedMergeCandidate,
@@ -46,7 +53,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let verified_candidate = self
-            .history_verifier
+            .history
             .authenticate_blocked_candidate(candidate)
             .await?;
         if let abandonment::ExcludedCandidateHeadObservation::MergeWinner(observation) = self
@@ -98,7 +105,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         candidate_head_object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
-        let root = self.history_verifier.verified_root().reference().clone();
+        let root = self.history.verified_root().reference().clone();
         let expected_stream =
             coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
@@ -124,14 +131,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 continue;
             }
             let membership = self
-                .history_verifier
+                .history
                 .load_predecessor_membership(&witness.commit().membership_state)
                 .await
                 .map_err(|error| match error {
-                    crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Object(error) => {
-                        StoreError::Object(error)
-                    }
-                    crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(
+                    crate::sync::store::owner::verified_history::RegistrationLoadError::Object(
+                        error,
+                    ) => StoreError::Object(error),
+                    crate::sync::store::owner::verified_history::RegistrationLoadError::Invalid(
                         error,
                     ) => StoreError::InvalidOutbound(error),
                 })?;
@@ -151,7 +158,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 object: witness.activation_head_object().clone(),
             };
             return self
-                .history_verifier
+                .history
                 .verify_membership_grant_revocation_nonactivation(
                     revoked_grant,
                     &witness.commit().membership_state,
@@ -176,7 +183,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let candidate_ref = candidate.reference().clone();
-        let root = self.history_verifier.verified_root().reference().clone();
+        let root = self.history.verified_root().reference().clone();
         let Some(locator) = self
             .database
             .author_exclusion_activation_for_candidate(
@@ -226,7 +233,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let retained = self
             .database
             .retained_merge_materialization(
-                self.history_verifier.verified_root().reference().clone(),
+                self.history.verified_root().reference().clone(),
                 locator.activation_commit().clone(),
             )
             .await?;
@@ -234,10 +241,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .store_device_state_for_order(&retained.commit().order)
             .await?;
-        let activation_commit = self
-            .history_verifier
-            .load_ref(retained.commit_ref())
-            .await?;
+        let activation_commit = self.history.load_ref(retained.commit_ref()).await?;
         if activation_commit.value() != retained.commit() {
             return Err(
                 crate::sync::store::owner::pull::StorePullError::InvalidState(
@@ -246,7 +250,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 ),
             );
         }
-        self.history_verifier
+        self.history
             .verify_author_exclusion_nonactivation(
                 locator,
                 retained.activation_head(),
@@ -271,7 +275,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             | TerminalNonactivationCandidate::MergeRetraction { verification, .. } => verification,
         };
         let nonactivation = self.verify_terminal_nonactivation(verification).await?;
-        let root = self.history_verifier.verified_root().reference().clone();
+        let root = self.history.verified_root().reference().clone();
         match candidate {
             TerminalNonactivationCandidate::StoreWrite { write_id, .. } => {
                 self.database
@@ -301,7 +305,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     > {
         let reference = &verification.candidate.head.value.commit;
         let candidate = self
-            .history_verifier
+            .history
             .authenticate_bytes(reference, &verification.candidate.commit.bytes)
             .await?;
         if candidate.value() != verification.candidate.commit.value.value() {
@@ -332,7 +336,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 activation_commit,
                 activation_head,
             } => {
-                self.history_verifier
+                self.history
                     .verify_membership_grant_revocation_nonactivation(
                         grant_id,
                         membership,

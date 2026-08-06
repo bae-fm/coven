@@ -556,7 +556,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                             "Merge Circle operation lacks its prepared Store head".to_string(),
                         )
                     })?;
-                if let crate::sync::store::owner::history::abandonment::ExcludedCandidateHeadObservation::MergeWinner(
+                if let crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation::MergeWinner(
                     winner,
                 ) = self
                     .history

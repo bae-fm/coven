@@ -68,7 +68,7 @@ impl MergeConflictResolutionCommitPlan {
         root: coven_protocol::store_commit::StoreRootRef,
         coord: coven_protocol::store_commit::StoreCommitCoord,
         order: coven_protocol::store_commit::StoreCommitOrder,
-        authorization: super::history::MergeConflictResolutionAuthorization,
+        authorization: crate::sync::store::merge_conflict::MergeConflictResolutionAuthorization,
     ) -> Self {
         Self {
             authorship,

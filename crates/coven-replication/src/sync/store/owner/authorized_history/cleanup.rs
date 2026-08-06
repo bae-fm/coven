@@ -1,5 +1,5 @@
-use super::nonactivation::*;
 use super::*;
+use crate::sync::store::merge_conflict;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn cleanup_merge_candidate(
@@ -12,11 +12,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .merge_candidate_terminal_verifications(root, write_id.clone())
             .await?
         {
-            self.apply_terminal_nonactivation(TerminalNonactivationCandidate::StoreWrite {
-                write_id: write_id.clone(),
-                verification,
-            })
-            .await?;
+            self.merge_conflict()
+                .apply_terminal_nonactivation(
+                    merge_conflict::TerminalNonactivationCandidate::StoreWrite {
+                        write_id: write_id.clone(),
+                        verification,
+                    },
+                )
+                .await?;
         }
         let targets = self
             .database
@@ -35,11 +38,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .circle_operation_discard_terminal_verifications(root, operation_id)
             .await?
         {
-            self.apply_terminal_nonactivation(TerminalNonactivationCandidate::CircleOperation {
-                operation_id: operation_id.clone(),
-                verification,
-            })
-            .await?;
+            self.merge_conflict()
+                .apply_terminal_nonactivation(
+                    merge_conflict::TerminalNonactivationCandidate::CircleOperation {
+                        operation_id: operation_id.clone(),
+                        verification,
+                    },
+                )
+                .await?;
         }
         let targets = self
             .database
@@ -57,11 +63,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .database
                 .merge_retraction_cleanup_verification(root, candidate.clone())
                 .await?;
-            self.apply_terminal_nonactivation(TerminalNonactivationCandidate::MergeRetraction {
-                reference: candidate.clone(),
-                verification,
-            })
-            .await?;
+            self.merge_conflict()
+                .apply_terminal_nonactivation(
+                    merge_conflict::TerminalNonactivationCandidate::MergeRetraction {
+                        reference: candidate.clone(),
+                        verification,
+                    },
+                )
+                .await?;
             let targets = self
                 .database
                 .merge_retraction_cleanup_targets(candidate.clone())
@@ -92,7 +101,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn abandon_excluded_merge_candidate(
         &mut self,
         write_id: coven_protocol::write::WriteId,
-    ) -> Result<Option<abandonment::MergeCandidateAbandonment>, StoreError> {
+    ) -> Result<Option<merge_conflict::MergeCandidateAbandonment>, StoreError> {
         let root = self.history_verifier.verified_root().reference().clone();
         let database = self.database.clone();
         let db = &database;
@@ -103,13 +112,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     database
                         .finish_retracted_merge_candidate_cleanup(write_id)
                         .await?;
-                    return Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned));
+                    return Ok(Some(merge_conflict::MergeCandidateAbandonment::Abandoned));
                 }
                 if matches!(
                     db.write_status(&write_id).await?,
                     coven_protocol::write::WriteStatus::Resolved(_)
                 ) {
-                    return Ok(Some(abandonment::MergeCandidateAbandonment::NotRequired));
+                    return Ok(Some(merge_conflict::MergeCandidateAbandonment::NotRequired));
                 }
                 let Some(candidate) = database.blocked_merge_candidate(write_id.clone()).await?
                 else {
@@ -120,6 +129,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .authenticate_blocked_candidate(&candidate)
                     .await?;
                 let Some(nonactivation) = self
+                    .merge_conflict()
                     .excluded_candidate_nonactivation(
                         &verified,
                         &candidate.head.value,
@@ -137,7 +147,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     )
                     .await?;
                 self.cleanup_merge_candidate(write_id).await?;
-                Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
+                Ok(Some(merge_conflict::MergeCandidateAbandonment::Abandoned))
             }
             coven_database::MergeAbandonmentState::Prepared => {
                 let candidates = database
@@ -153,6 +163,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .authenticate_blocked_candidate(&candidates.candidate)
                     .await?;
                 let candidate = self
+                    .merge_conflict()
                     .excluded_candidate_nonactivation(
                         &verified_candidate,
                         &candidates.candidate.head.value,
@@ -164,6 +175,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .authenticate_blocked_candidate(&candidates.authority)
                     .await?;
                 let authority = self
+                    .merge_conflict()
                     .excluded_candidate_nonactivation(
                         &verified_authority,
                         &candidates.authority.head.value,
@@ -184,7 +196,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                         database
                             .finish_author_excluded_merge_abandonment(write_id)
                             .await?;
-                        Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
+                        Ok(Some(merge_conflict::MergeCandidateAbandonment::Abandoned))
                     }
                     (None, None) => Ok(None),
                     _ => Err(StoreError::InvalidOutbound(
@@ -204,7 +216,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 ) {
                     database.finish_lost_merge_abandonment(write_id).await?;
                 }
-                Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
+                Ok(Some(merge_conflict::MergeCandidateAbandonment::Abandoned))
             }
             coven_database::MergeAbandonmentState::AuthorExcluded => {
                 if database.merge_candidate_cleanup_pending(&write_id).await? {
@@ -213,7 +225,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 database
                     .finish_author_excluded_merge_abandonment(write_id)
                     .await?;
-                Ok(Some(abandonment::MergeCandidateAbandonment::Abandoned))
+                Ok(Some(merge_conflict::MergeCandidateAbandonment::Abandoned))
             }
             coven_database::MergeAbandonmentState::CandidateWon => Ok(None),
         }

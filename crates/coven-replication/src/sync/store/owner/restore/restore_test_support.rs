@@ -181,10 +181,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn abandon_merge_candidate_for_test(
         &mut self,
         write_id: coven_protocol::write::WriteId,
-    ) -> Result<
-        crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment,
-        StoreError,
-    > {
+    ) -> Result<crate::sync::store::merge_conflict::MergeCandidateAbandonment, StoreError> {
         self.history
             .abandon_excluded_merge_candidate(write_id)
             .await

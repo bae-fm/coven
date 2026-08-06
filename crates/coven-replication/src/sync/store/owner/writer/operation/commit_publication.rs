@@ -562,6 +562,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let observation = self
             .history
+            .merge_conflict()
             .observe_occupied_merge_head(
                 &head,
                 &commit,

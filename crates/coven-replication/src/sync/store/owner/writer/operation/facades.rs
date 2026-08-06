@@ -141,6 +141,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .authenticate_blocked_candidate(candidate)
             .await?;
         self.history
+            .merge_conflict()
             .excluded_candidate_nonactivation(
                 &verified,
                 &candidate.head.value,
@@ -221,11 +222,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         expected_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         slot: &coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
-    ) -> Result<
-        crate::sync::store::owner::writer::history::abandonment::VerifiedMergeWinner,
-        StoreError,
-    > {
+    ) -> Result<crate::sync::store::merge_conflict::VerifiedMergeWinner, StoreError> {
         self.history
+            .merge_conflict()
             .observe_occupied_merge_head(expected, expected_commit, slot, semantic_prefix)
             .await
     }
