@@ -32,7 +32,7 @@ member has. The same public key appears in two places coven cross-checks: in
 membership entries, and in the `author_pubkey` field of every changeset
 envelope. The key used for encryption (X25519) is computed from the Ed25519
 key by
-[`ed25519_to_x25519_public_key`](rustdoc:fn:coven::keys::ed25519_to_x25519_public_key),
+[`ed25519_to_x25519_public_key`](rustdoc:fn:coven_keys::keys::ed25519_to_x25519_public_key),
 so anyone holding a member's Ed25519 public key can derive the target to wrap
 the store keyring to (see [The store keyring](#the-store-keyring)).
 
@@ -42,7 +42,7 @@ Anyone who ever held bucket access can write bytes, so a correctly encrypted
 but forged changeset is always possible, and there is no server to refuse it.
 Each device decides who may write from storage alone, with nothing but keys to
 trust. Membership changes are therefore signed records. A
-[`MembershipEntry`](rustdoc:struct:coven::sync::membership::MembershipEntry)
+`MembershipEntry`
 records one change:
 
 ```rust
@@ -63,9 +63,8 @@ pub struct MembershipEntry {
 
 The signature covers a deterministic serialization of every field except the
 signature itself.
-[`sign_membership_entry`](rustdoc:fn:coven::sync::membership::sign_membership_entry)
-fills in `author_pubkey` and `signature`;
-[`verify_membership_entry`](rustdoc:fn:coven::sync::membership::verify_membership_entry)
+Signing fills in `author_pubkey` and `signature`;
+[`verify_membership_entry`](rustdoc:fn:coven_protocol::membership::verify_membership_entry)
 checks them.
 
 The `created_at` value is an HLC string used for display ordering, not to authorize
@@ -89,7 +88,7 @@ Each owner appends entries only under a stream it created and hash-links them
 (`previous_hash`). A dependency frontier names the greatest effective
 coordinate in every observed stream. Dependencies are ordered by full stream
 identity, so one signed byte representation exists. The owner then publishes an
-[`AuthorHead`](rustdoc:struct:coven::sync::membership::AuthorHead): a signed
+`AuthorHead`: a signed
 statement that entries `1..=seq` of that exact stream exist and that the entry at
 `seq` hashes to `tip_hash`. A reader admits an author's prefix only up to that
 author's head, so an entry is uncommitted until its own author's head covers
@@ -138,7 +137,7 @@ other: there is no shared last-writer-wins object one writer can overwrite over
 another's entry, and a failed publish leaves at most that one author's head
 behind its entries, never a wedged chain.
 
-[`MembershipChain`](rustdoc:struct:coven::sync::membership::MembershipChain) is
+[`MembershipChain`](rustdoc:struct:coven_protocol::membership::MembershipChain) is
 rebuilt from storage on each sync, not kept in the database. Validation
 enforces, in order:
 
@@ -156,7 +155,7 @@ downgrade), so an owner can demote a member without removing them.
 
 ## Roles
 
-[`MemberRole`](rustdoc:enum:coven::sync::membership::MemberRole) has three
+[`MemberRole`](rustdoc:enum:coven::MemberRole) has three
 forms:
 
 - **Owner** can write, and can mutate the chain: invite, remove, and change
@@ -186,8 +185,7 @@ Inviting a member writes the keyring wrapped to that member at
 `keys/{owner_pubkey}/{recipient_pubkey}.enc`. The wrapped keyring names the
 exact membership activation — the causal entry coordinate that granted it — and
 a joiner unwraps it only once that activation is visible. The new
-member downloads and unwraps their copy when they join
-([`unwrap_store_keyring`](rustdoc:fn:coven::sync::invite::unwrap_store_keyring)).
+member downloads and unwraps their copy when they join.
 
 If any step of an invite fails partway, the steps already taken are rolled
 back (a previously wrapped keyring is restored, not deleted), so a failed
@@ -196,7 +194,7 @@ invite never leaves a member half-added or an existing member locked out.
 ## Pull verification
 
 Each signed Store commit names the exact
-[`MembershipCoord`](rustdoc:struct:coven::sync::membership::MembershipCoord)
+[`MembershipCoord`](rustdoc:struct:coven_protocol::membership::MembershipCoord)
 that grants its author write access. Pull verifies the commit and device head
 signatures, requires their authors to agree, and checks that coordinate against
 the founder-anchored membership chain.
@@ -307,7 +305,7 @@ coven:
 
 The cloud connection details come back packed with the store id, name, owner
 pubkey, wrapped-key author, exact Store root, and membership floor into an
-[`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
+`InviteCode`. The owner sends
 that back.
 
 The joiner constructs
@@ -346,7 +344,7 @@ chain, a restore code re-establishes an identity that is already in it.
 one `coven:`-prefixed base64url string: the store id, `store_root_hash`, store
 keyring, Ed25519 signing key, cloud provider, and that provider's connection
 details. The
-[`RestoreCode`](rustdoc:struct:coven::sync::restore_code::RestoreCode) is plain
+`RestoreCode` is plain
 JSON under that prefix.
 
 ```text
@@ -357,9 +355,9 @@ Restoring with the signing key keeps the same Ed25519 identity, so the
 recovered device is still the same member in the chain and can keep writing.
 That identity is scoped to the one store the code names — a restore code for
 store A carries no authority in any other store the same device belongs to.
-[`decode_restore_code`](rustdoc:fn:coven::sync::restore_code::decode_restore_code)
+`decode_restore_code`
 parses the string back, and on garbled input returns a
-[`RestoreCodeError`](rustdoc:enum:coven::sync::restore_code::RestoreCodeError)
+[`RestoreCodeError`](rustdoc:enum:coven::RestoreCodeError)
 (missing prefix, truncated base64, malformed JSON, or a version made by a newer
 build) whose `Display` text the host can show verbatim.
 

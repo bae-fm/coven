@@ -35,8 +35,8 @@ neither                                     remote-only: no file, fetched on nex
 
 `{ab}` and `{cd}` are the first two byte-pairs of the dash-stripped id (the same
 content-addressed shard the cloud layout uses, built by
-[`StoreDir::pinned_blob_path`](rustdoc:method:coven::store_dir::StoreDir::pinned_blob_path)
-/ [`cache_blob_path`](rustdoc:method:coven::store_dir::StoreDir::cache_blob_path)).
+[`StoreDir::pinned_blob_path`](rustdoc:method:coven::StoreDir::pinned_blob_path)
+/ [`cache_blob_path`](rustdoc:method:coven::StoreDir::cache_blob_path)).
 
 There is no cache table, because a table would be a second copy of the truth:
 every crash between a file write and its row would leave the two disagreeing,
@@ -45,7 +45,7 @@ The file on disk *is* the presence record, and the folder it sits in *is* the
 retention class. Nothing the two directory listings
 can't answer, so there is no metadata sidecar to keep in step with the disk.
 Every cache write is atomic
-([`local_blob::write_atomic`](rustdoc:fn:coven::local_blob::write_atomic): write a
+([`local_blob::write_atomic`](rustdoc:fn:coven::write_atomic): write a
 temp file, then rename it over the destination), so a crash mid-write cannot
 leave a torn file that a later read would trust as whole. Pinning and unpinning
 are a `rename` within `storage/` (one filesystem, atomic), so a blob is never
@@ -166,7 +166,7 @@ present file would be wasteful and could hide a real fault.
 Whether a Remote blob lands in the cache automatically depends on its **cache
 fill**, declared per blob in the table's
 [declaration](/docs/blobs#declaring-which-rows-carry-blobs) as a
-[`CacheFill`](rustdoc:enum:coven::blob::CacheFill):
+[`CacheFill`](rustdoc:enum:coven::CacheFill):
 
 - `CacheEager`: fetched into the cache on every device's pull. Part of "having the
   store", e.g. an album's cover art, so a grid renders from local bytes without a

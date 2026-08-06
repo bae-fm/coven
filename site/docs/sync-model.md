@@ -108,9 +108,8 @@ commit together or all roll back. `handle.sql` and `handle.write` return a
 `WriteReceipt`; separate successful calls never combine into one Store commit.
 
 The set is not a tuning knob. With no tables declared the session attaches
-nothing and produces empty changesets forever, so
-[`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
-treats an empty set as a hard error and refuses to start.
+nothing and produces empty changesets forever, so sync initialization treats an
+empty set as a hard error and refuses to start.
 
 Initialization also installs signed authorization. A new store publishes its
 self-signed Owner founder and causal membership head, then records the founder
@@ -228,7 +227,7 @@ immutable commits are inert, and provider listing order never chooses a winner.
 For each ready commit, pull:
 
 - parses the signed commit and checks its `schema_version` against the local
-  [`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version);
+  `Database::schema_version`;
 - verifies the commit, its device-stream activation head, package hash, and
   Ed25519 signatures;
 - checks the author against the membership state through the exact causal
@@ -303,12 +302,12 @@ against one store; the version stamp is what lets them coexist instead of
 corrupting each other. Every outgoing Store commit carries the device's schema
 version: the top rung of
 the host's [migration ladder](/docs/schema-evolution), reported by
-[`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version).
+`Database::schema_version`.
 Pull enforces it two ways:
 
 - **Hard floor.** If the local version is below storage's
   `min_schema_version`, pull returns
-  [`PullError::SchemaVersionTooOld`](rustdoc:enum:coven::sync::pull::PullError)
+  `PullError::SchemaVersionTooOld`
   and syncs nothing. Its `Display` is the message shown to the user: update the
   app to keep syncing. This is permanent until the user upgrades. The floor
   object is untrusted input, so it is honored only when signed by a current

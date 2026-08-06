@@ -72,7 +72,7 @@ were application logic, every query and every sync path would have to
 remember it, and the first one that forgot would leak the row. Instead the
 host *gates* the table: privacy becomes a property of the schema, and coven
 enforces it everywhere a row can travel. The host declares the gate per table on
-the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values
+the [`SyncedTable`](rustdoc:struct:coven::SyncedTable) values
 it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
 it on both paths a row can take to another device: the per-cycle changeset
 and the bootstrap snapshot.
@@ -81,7 +81,7 @@ Examples: a `workspace` holds `lists`, a `list` holds `todos`, and a list has
 a boolean `shared` column. A private list, and the todos under it, should stay
 on the device that made it.
 
-[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has these
+[`SyncedTable`](rustdoc:struct:coven::SyncedTable) has these
 gate forms:
 
 ```rust

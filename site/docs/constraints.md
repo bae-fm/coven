@@ -98,7 +98,7 @@ consequences:
   writer, ordered by a [hybrid logical clock](/docs/merge#the-clock) rather than
   wall-clock time. The loser's value is overwritten, not queued for review.
 - **Delete-wins, and only after sync.** A delete beats a concurrent edit
-  ([`arbitrate_row_conflict`](rustdoc:fn:coven::sync::conflict::arbitrate_row_conflict)),
+  (`arbitrate_row_conflict`),
   but a delete only takes effect on a device once that device pulls it. Until
   then, the row is still live there.
 - **No cross-device transactions.** A transaction is atomic on the device that

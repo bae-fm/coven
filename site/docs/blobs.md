@@ -23,8 +23,8 @@ All three must derive the same set from the rows alone, and two of them run
 where the host is not involved at all. So blob-bearing-ness is a per-table
 declaration coven can evaluate anywhere, not a runtime callback. The host
 marks a synced table with
-[`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob),
-passing a [`BlobDecl`](rustdoc:struct:coven::sync::session::BlobDecl) that names the
+[`carries_blob`](rustdoc:method:coven::SyncedTable::carries_blob),
+passing a [`BlobDecl`](rustdoc:struct:coven::BlobDecl) that names the
 columns locating each blob plus its namespace, encryption scope, provenance, and
 cache fill:
 
@@ -55,8 +55,8 @@ pub struct BlobDecl {
 ```
 
 coven resolves the declaration's column *names* against the live schema once per
-cycle into [`BlobDecls`](rustdoc:struct:coven::blob::decl::BlobDecls), then derives
-every blob set it needs itself, reading the declared columns off a row:
+cycle, then derives every blob set it needs itself, reading the declared columns
+off a row:
 
 - over an outgoing changeset's rows: what to upload;
 - over an incoming changeset's rows: what to download (and, for a deleted row,
@@ -65,12 +65,11 @@ every blob set it needs itself, reading the declared columns off a row:
   backfill. A bootstrapped device receives the catalog rows but not the per-row
   blobs (the snapshot is a whole-database image, and the incremental pull that
   follows starts past the changesets that carried them), so coven re-derives them
-  from the live rows via
-  [`refs_in_db`](rustdoc:method:coven::blob::decl::BlobDecls::refs_in_db).
+  from the live rows.
 
 A row maps to the same blob whichever way it moves, so one declaration serves every
 path. coven reads the declared columns off the row to build a
-[`BlobRef`](rustdoc:struct:coven::blob::BlobRef), one blob's resolved reference:
+[`BlobRef`](rustdoc:struct:coven::BlobRef), one blob's resolved reference:
 
 ```rust
 pub struct BlobRef {
@@ -94,7 +93,7 @@ whether the blob is [replaceable or write-once](#a-cloud-object-is-never-rewritt
 
 ### Cache fill
 
-[`CacheFill`](rustdoc:enum:coven::blob::CacheFill) is the blob's **Remote story**:
+[`CacheFill`](rustdoc:enum:coven::CacheFill) is the blob's **Remote story**:
 how a device gets the bytes once the blob is Remote, declared per blob and read the
 same way on every device:
 
@@ -113,7 +112,7 @@ only while it is Remote, never while it is Local.
 
 ### Provenance
 
-[`Provenance`](rustdoc:enum:coven::blob::Provenance) is the blob's **Local story**:
+[`Provenance`](rustdoc:enum:coven::Provenance) is the blob's **Local story**:
 where the bytes live while the blob is Local. Orthogonal to the cache fill; a blob
 declares both:
 
@@ -158,7 +157,7 @@ declares both:
 
 ## Encryption scope
 
-The declaration's [`BlobScope`](rustdoc:enum:coven::blob::BlobScope) selects the
+The declaration's [`BlobScope`](rustdoc:enum:coven::BlobScope) selects the
 key the blob is encrypted under. The host names *what* a blob is scoped to,
 never the raw key bytes:
 
@@ -206,12 +205,12 @@ The outbox is coven's `cloud_outbox` table, created by the handle open path. The
 host does not mutate it by hand; user-provided transitions and sync enqueue rows
 through coven, and host-provided row+blob writes go through `handle.write(...)`.
 Each row is an
-[`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) whose
-[`OutboxOperation`](rustdoc:enum:coven::db::OutboxOperation) is an `Upload`,
+`OutboxEntry` whose
+`OutboxOperation` is an `Upload`,
 `Delete`, or `Cancel`.
 
 Nothing uploads at enqueue time. The next sync cycle's
-[`drain_uploads`](rustdoc:fn:coven::blob::upload::drain_uploads) works through
+`drain_uploads` works through
 the pending entries; for each one it:
 
 1. reads the local file,
@@ -294,7 +293,7 @@ immediate. The host requests blob replacement or row removal through
 [`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write), and coven
 enqueues the cloud delete with the row change.
 
-The next cycle's [`drain_tombstones`](rustdoc:fn:coven::blob::delete::drain_tombstones)
+The next cycle's `drain_tombstones`
 writes a signed **tombstone** (a durable, signed record that the blob was deleted,
 and when) and keeps the blob. The tombstone is signed because the bucket is
 untrusted: the at-rest cipher proves only confidentiality, not authorship, so the
@@ -304,13 +303,13 @@ before acting on it.
 
 The blob is held for the tombstone grace, the convergence window: 7 days by
 default
-([`BLOB_TOMBSTONE_GRACE`](rustdoc:const:coven::blob::delete::BLOB_TOMBSTONE_GRACE)),
+([`BLOB_TOMBSTONE_GRACE`](rustdoc:const:coven_protocol::blob::BLOB_TOMBSTONE_GRACE)),
 host-configurable through
 [`CovenBuilder::blob_tombstone_grace`](rustdoc:method:coven::CovenBuilder::blob_tombstone_grace)
 (a zero-or-negative grace is refused at open). A device offline for less than the grace is never
 stranded: it comes back, pulls the row removal, and the blob is still there in the
 meantime. Once the grace passes,
-[`gc_tombstones`](rustdoc:fn:coven::blob::delete::gc_tombstones) on any device
+`gc_tombstones` on any device
 verifies the tombstone, authorizes the author against the membership chain, deletes
 the blob, then deletes the tombstone. An unreferenced-but-not-yet-deleted blob is
 *correct* state during the window, not garbage a later pass repairs.
@@ -342,7 +341,7 @@ Under an opaque home (the default) a blob is stored at a content-addressed key:
 ```
 
 `ab` and `cd` are the first two byte-pairs of the dash-stripped `id`, built by
-[`StoreDir::hashed_path`](rustdoc:method:coven::store_dir::StoreDir::hashed_path).
+[`StoreDir::hashed_path`](rustdoc:method:coven::StoreDir::hashed_path).
 The two levels of fan-out keep a store with many blobs off a single flat prefix
 the storage layer would have to list in one call. The provider sees this key and
 the encrypted bytes, never the plaintext file or its name.
@@ -465,7 +464,7 @@ And two failures that no retry can repair become unrepresentable:
 coven uploads a blob from whichever local copy its [provenance](#provenance) names.
 A **host-provided** blob is data the host hands coven, which coven keeps in its own
 local store at `storage/local/<namespace>/<id>` (via
-[`local_files::store`](rustdoc:fn:coven::blob::local_files::store)); the inline push
+`local_files::store`); the inline push
 reads it back to upload, then moves the copy into the [cache](/docs/cache) as the
 blob becomes Remote. A **user-provided** blob is the user's own file at a path coven
 references; `make_remote` uploads it straight from that path. Either way coven never
@@ -475,7 +474,7 @@ ready to publish (see [How a blob moves out](#how-a-blob-moves-out)).
 ## Observing transitions and uploads
 
 The host can pass a
-[`BlobTransitionObserver`](rustdoc:trait:coven::blob::BlobTransitionObserver) to
+[`BlobTransitionObserver`](rustdoc:trait:coven::BlobTransitionObserver) to
 watch uploads and the locality transitions. It only *reports*; coven owns flipping
 the gate and deciding when a cycle publishes. The whole observer is optional; most
 methods default to a no-op:

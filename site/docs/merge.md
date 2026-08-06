@@ -28,8 +28,8 @@ lexicographically in causal order: a fixed-width millisecond field, then a
 counter that breaks same-millisecond ties on one device, then the device id that
 breaks ties across devices.
 
-The clock is an [`Hlc`](rustdoc:struct:coven::sync::hlc::Hlc).
-[`Hlc::now`](rustdoc:method:coven::sync::hlc::Hlc::now) mints the next stamp: if
+The clock is an [`Hlc`](rustdoc:struct:coven_protocol::hlc::Hlc).
+[`Hlc::now`](rustdoc:method:coven_protocol::hlc::Hlc::now) mints the next stamp: if
 wall-clock millis moved forward it adopts them and resets the counter, otherwise
 it bumps the counter, so each stamp is strictly greater than the last. The host
 never calls this directly. It calls `sql.stamp()` inside `handle.sql` or
@@ -47,7 +47,7 @@ cycle end and lags any local row stamp minted between cycles.
 
 As each changeset applies, the cycle takes the greatest `_updated_at` among its
 applied rows and calls
-[`advance_past`](rustdoc:method:coven::sync::hlc::Hlc::advance_past), so an
+[`advance_past`](rustdoc:method:coven_protocol::hlc::Hlc::advance_past), so an
 edit made between two applies already sorts after the rows the first apply
 landed. The next local stamp then sorts strictly after everything pulled so
 far: pull, then edit, and the edit wins.
@@ -120,7 +120,7 @@ Either way, concurrent edits to different columns of one row both land.
 </svg>
 
 **Stage two: row arbitration.** For every collision the premerge did not fold
-in, [`arbitrate_row_conflict`](rustdoc:fn:coven::sync::conflict::arbitrate_row_conflict)
+in, `arbitrate_row_conflict`
 compares the two `_updated_at` stamps and the later writer wins. Concurrent
 edits to the *same* column therefore resolve to the later stamp. The
 `_updated_at` column index is read from `PRAGMA table_info` at apply time, so
@@ -137,7 +137,7 @@ Two special cases:
   could stamp a row far in the future and win every conflict forever. The
   receiver bounds an incoming stamp to its own wall clock plus an offline
   allowance
-  ([`MAX_FUTURE_SKEW_MS`](rustdoc:const:coven::sync::hlc::MAX_FUTURE_SKEW_MS),
+  ([`MAX_FUTURE_SKEW_MS`](rustdoc:const:coven_protocol::hlc::MAX_FUTURE_SKEW_MS),
   30 days) and refuses to let a grossly-future stamp win or ratchet its clock.
 
 ### Constraints and foreign keys

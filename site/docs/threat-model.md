@@ -53,7 +53,7 @@ another key fails to open there. A changeset additionally carries its
 `(device_id, seq)` inside the signature, and the puller refuses one whose
 declared position does not match where it was fetched from — before the signature
 or schema is even consulted (see
-[`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes)) — so a member's
+`pull_changes`) — so a member's
 authentic changeset cannot be replayed into another slot.
 
 Availability is *not* defended: anyone who can write the bucket can also delete
@@ -109,7 +109,7 @@ never receives. This holds even when the removing device cannot immediately adop
 the new generation locally: a device that knows a rotation has committed but has
 not folded it into its own cipher refuses to seal anything new for the cloud
 until it adopts it (see
-[`RotationPending`](rustdoc:struct:coven::sync::cloud_storage::RotationPending)),
+[`RotationPending`](rustdoc:struct:coven_protocol::objects::RotationPending)),
 so there is no window in which the store keeps producing content under the
 superseded generation the removed member still holds.
 

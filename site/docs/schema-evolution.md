@@ -34,7 +34,7 @@ not of whichever binary happens to open it. That is what the ladder over
 `PRAGMA user_version` provides.
 
 The host passes an ordered ladder of
-[`Migration`](rustdoc:struct:coven::migration::Migration)s to the builder;
+[`Migration`](rustdoc:struct:coven::Migration)s to the builder;
 Coven applies it over `PRAGMA user_version` at every open, after installing or
 verifying its one current internal schema:
 
@@ -76,13 +76,13 @@ The rules, all enforced before any database access:
   migration.
 - If the on-disk `user_version` exceeds the ladder's top, the binary refuses to
   open with
-  [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::migration::MigrationError)
+  [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError)
   ("update the app") rather than run against a schema it does not know.
 
 `user_version` is a SQLite header field, so it travels inside a snapshot's
 byte-for-byte image: a device that bootstraps inherits the writer's applied
 version directly. And the same number, reported by
-[`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version),
+`Database::schema_version`,
 is the wire `schema_version` every changeset is stamped with. Bumping the
 schema *is* adding a migration; a device cannot stamp a version it has not
 migrated to.
@@ -159,7 +159,7 @@ in one direction; it does nothing about the old client's writes.
 For that case, the release also raises the floor, the `min_schema_version` value
 in storage. Pull checks it before anything else: a client whose ladder top is
 below the stored `min_schema_version` gets
-[`PullError::SchemaVersionTooOld`](rustdoc:enum:coven::sync::pull::PullError) and
+`PullError::SchemaVersionTooOld` and
 syncs nothing, no reads, no writes, until the user updates the app. Its
 `Display` is the message shown to the user. This is a permanent stop, not a
 transient skip. The floor object itself is untrusted input: with a membership
@@ -191,7 +191,7 @@ Version skew at bootstrap is handled on both sides:
   download*. The metadata's recorded version exceeds the joiner's ladder top,
   so bootstrap fails with
   `SnapshotError::SchemaTooNew` and writes nothing. The at-open
-  [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::migration::MigrationError)
+  [`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError)
   check backs this up for a database file that is already on disk (a copied
   file, a downgraded app): a binary never runs against a schema from its
   future.

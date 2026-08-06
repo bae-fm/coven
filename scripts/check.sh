@@ -26,6 +26,13 @@ cargo fmt --all --check
 step "cargo clippy --all-targets --all-features"
 cargo clippy --all-targets --all-features -- -D warnings
 
+step "cargo doc --workspace --no-deps (intra-doc links)"
+RUSTDOCFLAGS="-D rustdoc::broken-intra-doc-links -D rustdoc::private-intra-doc-links" \
+    cargo doc --workspace --no-deps --all-features
+
+step "site rustdoc links resolve to generated pages"
+scripts/check-doc-links.sh
+
 step "scripts/check-lib-only.sh (the feature sets a host actually ships)"
 scripts/check-lib-only.sh
 

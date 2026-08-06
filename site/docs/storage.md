@@ -1,6 +1,6 @@
 # Storage
 
-coven syncs over a [`CloudHome`](rustdoc:trait:coven::storage::cloud::CloudHome):
+coven syncs over a [`CloudHome`](rustdoc:trait:coven::CloudHome):
 a trait that moves opaque encrypted bytes between a device and storage the user
 already controls. coven owns encryption, the key layout, ordering, and retry.
 A `CloudHome` never sees plaintext and never assigns protocol sequence numbers
@@ -8,7 +8,7 @@ or coordinates a global transaction order.
 
 The provider boundary has two parts: `CloudHome` supplies flat-key byte
 operations, while
-[`ExactSlotStorage`](rustdoc:trait:coven::storage::cloud::ExactSlotStorage),
+[`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage),
 which every sync home must also supply, allocates a provider-specific location
 before publication and creates it once. A second create at that location must
 report `AlreadyExists`, never replace the first object. This is collision
@@ -39,16 +39,15 @@ blobs, and membership records all land in one cloud home under keys like
 ## What the host configures
 
 The host selects one provider at a time and fills its settings in
-[`CloudHomeConfig`](rustdoc:struct:coven::config::CloudHomeConfig), held on
-[`Config`](rustdoc:struct:coven::config::Config). coven reads the current config
+[`CloudHomeConfig`](rustdoc:struct:coven::CloudHomeConfig), held on
+[`Config`](rustdoc:struct:coven::Config). coven reads the current config
 fresh on each operation rather than caching its own copy, so a provider swap or
 disconnect takes effect on the next sync cycle without rebuilding the sync layer.
 
 With no provider selected there is no sync layer at all; the store is
-local-only and complete. At connect time
-[`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
-reads the selected provider's settings from config and its credentials from the
-OS keyring; a missing setting or credential fails with a `Storage` error naming
+local-only and complete. At connect time coven builds the cloud home: it reads
+the selected provider's settings from config and its credentials from the OS
+keyring; a missing setting or credential fails with a `Storage` error naming
 the field ("S3 bucket not configured", "Google Drive OAuth token not in
 keyring").
 
@@ -116,10 +115,10 @@ pub trait ExactSlotStorage: Send + Sync {
   single-request upload, and `open_multipart`, a streaming session that accepts
   ordered parts. `multipart_threshold` is the cut between them. The provided
   `write` method is the one coven calls: a central driver that picks the path
-  by size and pumps a sized [`BlobBody`] through it, reporting cumulative bytes
+  by size and pumps a sized `BlobBody` through it, reporting cumulative bytes
   to the `progress` callback for the per-file bar. Small control files (auth
   keys, head pointers, the snapshot) pass
-  [`no_progress`](rustdoc:fn:coven::storage::cloud::no_progress), which
+  `no_progress`, which
   discards the reports.
 - `read` returns the whole value. `read_range` returns a half-open byte range
   (`start` inclusive, `end` exclusive), which is how coven fetches only the
@@ -140,7 +139,7 @@ folder share, a credential, a share URL), so it lives on the trait.
 `set_access(CloudAccessState::Present { ... })` carries the member's public key
 plus the provider account email for backends that share by account, and returns
 a
-[`CloudHomeJoinInfo`](rustdoc:enum:coven::storage::cloud::CloudHomeJoinInfo), one
+[`CloudHomeJoinInfo`](rustdoc:enum:coven::CloudHomeJoinInfo), one
 variant per provider, carrying exactly what another device needs to reach the
 same cloud home:
 
@@ -239,7 +238,7 @@ another device. Setup still checks that the constructed home exposes the exact
 slot adapter; it does not claim that a reachability probe can prove a
 provider's durability.
 
-- **S3** ([`S3CloudHome`](rustdoc:struct:coven::storage::cloud::s3::S3CloudHome))
+- **S3** ([`S3CloudHome`](rustdoc:struct:coven::S3CloudHome))
   works against any S3-compatible endpoint (AWS, Backblaze B2, Wasabi, MinIO).
   Files at or below 8 MiB go up as a single `PutObject`; larger files use a
   multipart upload with 8 MiB parts, reporting progress per completed part and
@@ -249,7 +248,7 @@ provider's durability.
   `libs/abc/changes/dev1/42.enc`.
 
 - **Google Drive**
-  ([`GoogleDriveCloudHome`](rustdoc:struct:coven::storage::cloud::google_drive::GoogleDriveCloudHome))
+  (`GoogleDriveCloudHome`)
   stores files flat in one folder. Drive filenames cannot carry the key's
   slashes, so each key is hex-encoded into a slash-free filename and decoded on
   list; the encoding is exact and reversible, never a lossy substitution. Large
@@ -257,30 +256,29 @@ provider's durability.
   KiB alignment).
 
 - **OneDrive**
-  ([`OneDriveCloudHome`](rustdoc:struct:coven::storage::cloud::onedrive::OneDriveCloudHome))
+  (`OneDriveCloudHome`)
   uses the same hex filename encoding and a Microsoft Graph resumable
   upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
 
 - **Dropbox**
-  ([`DropboxCloudHome`](rustdoc:struct:coven::storage::cloud::dropbox::DropboxCloudHome))
+  (`DropboxCloudHome`)
   uses native Dropbox paths under the store folder (for example
   `/Apps/your-app/my-store/changes/dev1/42.enc`), so no filename encoding is
   needed. Sharing goes through `share_folder` to get a `shared_folder_id`.
 
 - **CloudKit**
-  ([`CloudKitCloudHome`](rustdoc:struct:coven::storage::cloud::cloudkit::CloudKitCloudHome))
+  (`CloudKitCloudHome`)
   stores files in the user's iCloud private database. A `CKAsset` caps at 50 MB,
   so a file larger than 10 MiB is split into 10 MiB part records and read back
   by reassembling those parts; a failed multipart upload deletes the part
   records it wrote. The raw record operations are defined by the
-  [`CloudKitOps`](rustdoc:trait:coven::storage::cloud::cloudkit::CloudKitOps)
-  trait and implemented in Swift through a UniFFI callback interface;
-  [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
+  [`CloudKitOps`](rustdoc:trait:coven::CloudKitOps)
+  trait and implemented in Swift through a UniFFI callback interface; coven
   cannot build this one from Rust alone and returns a `Storage` error directing
   you to construct it through your Swift layer.
 
 - **In-memory**
-  ([`InMemoryCloudHome`](rustdoc:struct:coven::storage::cloud::test_utils::InMemoryCloudHome),
+  ([`InMemoryCloudHome`](rustdoc:struct:coven::InMemoryCloudHome),
   under the `test-utils` feature) is a `HashMap`-backed home that two simulated
   devices share through an `Arc` to round-trip changesets and blobs in unit
   tests. It exposes `keys()`, `get()`, `len()`, and `deletes_seen()` for
@@ -302,7 +300,7 @@ in seconds and fails loud to the cycle's own minutes-long backoff.
 
 When the refresh itself fails because the grant is gone (refresh token revoked,
 expired, or the account password changed), the underlying
-[`OAuthError::Reauthorize`](rustdoc:variant:coven::oauth::OAuthError::Reauthorize)
+[`OAuthError::Reauthorize`](rustdoc:variant:coven::OAuthError::Reauthorize)
 surfaces as a `Storage` message: "Your {provider} access was revoked or expired.
 Reconnect to keep syncing." That is a user-facing message, not a transient
 network error, so a host should wire it to a reconnect affordance rather than
@@ -315,13 +313,13 @@ Encryption stays out of the providers so that all five share one at-rest
 implementation instead of five slightly different ones. `CloudHome` deals
 only in raw bytes. The at-rest protection and the key layout
 live one level up, in
-[`CloudSyncStorage`](rustdoc:struct:coven::sync::cloud_storage::CloudSyncStorage),
+`CloudSyncStorage`,
 which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
 and owns the mapping from Store protocol objects, blob ids, and wrapped member
 keys to the flat keys the trait stores. Both how it seals (the
-[`CloudCipher`](rustdoc:enum:coven::sync::cloud_storage::CloudCipher)) and how it
+[`CloudCipher`](rustdoc:enum:coven::CloudCipher)) and how it
 keys blobs (the
-[`BlobPathScheme`](rustdoc:enum:coven::sync::cloud_storage::BlobPathScheme)) come
+`BlobPathScheme`) come
 from the home's [storage mode](/docs/encryption#opaque-and-browsable-homes), one
 choice set when the home is created:
 

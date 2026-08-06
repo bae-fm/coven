@@ -65,14 +65,14 @@ so their ids are canonical UUIDv4 or UUIDv7 values. A table instead uses
 `RowIdentity::SharedKey` only when equal application keys intentionally merge as
 one row. SQLite represents a primary-key change as deleting the old identity
 and inserting the new validated identity in the same transaction. The
-[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values declare how
+[`SyncedTable`](rustdoc:struct:coven::SyncedTable) values declare how
 each table is gated:
-[`new`](rustdoc:method:coven::sync::session::SyncedTable::new) syncs every row,
-[`remote_root`](rustdoc:method:coven::sync::session::SyncedTable::remote_root)
+[`new`](rustdoc:method:coven::SyncedTable::new) syncs every row,
+[`remote_root`](rustdoc:method:coven::SyncedTable::remote_root)
 syncs every row and makes blobs on those rows and descendants always Remote,
-[`gated_by`](rustdoc:method:coven::sync::session::SyncedTable::gated_by) makes a
+[`gated_by`](rustdoc:method:coven::SyncedTable::gated_by) makes a
 row sync only while its boolean column is true, and
-[`gated_by_descendants`](rustdoc:method:coven::sync::session::SyncedTable::gated_by_descendants)
+[`gated_by_descendants`](rustdoc:method:coven::SyncedTable::gated_by_descendants)
 keeps an ancestor row alive only while a gated descendant survives. Here `lists`
 is a gated root, and `todos` inherit that gate down the foreign key. Tables you
 don't pass are local-only and never leave the device. The gating rules are in
@@ -250,14 +250,14 @@ verifies exact cleanup before reversing local rows.
 If a todo carries a file, that file is a blob. coven moves blobs with the rows
 that reference them, and it learns which rows carry one from a per-table
 *declaration*, not a runtime callback. The host marks the blob-bearing synced table
-with [`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob)
+with [`carries_blob`](rustdoc:method:coven::SyncedTable::carries_blob)
 when it builds the set it passes to `open`, naming the columns that locate each blob
 plus its cloud namespace, a
-[`BlobScope`](rustdoc:enum:coven::blob::BlobScope)
+[`BlobScope`](rustdoc:enum:coven::BlobScope)
 (`Master` for a key every member holds, `Derived` for a fixed per-scope key), a
-[`Provenance`](rustdoc:enum:coven::blob::Provenance) (the Local story:
+[`Provenance`](rustdoc:enum:coven::Provenance) (the Local story:
 `UserProvided` for the user's own file, `HostProvided` for data coven keeps), and a
-[`CacheFill`](rustdoc:enum:coven::blob::CacheFill) (the Remote story: `CacheEager` to
+[`CacheFill`](rustdoc:enum:coven::CacheFill) (the Remote story: `CacheEager` to
 fetch it into the cache on pull, `CacheLazy` to fetch on first read):
 
 ```rust
@@ -289,7 +289,7 @@ layout, and the [Cache](/docs/cache) page covers the device-local read side.
 A store starts with one member, the device that created it. To add a teammate,
 the owner calls
 `handle.invite_member(...)` with the teammate's public key and a
-[`MemberRole`](rustdoc:enum:coven::sync::membership::MemberRole) (`Owner`,
+[`MemberRole`](rustdoc:enum:coven::MemberRole) (`Owner`,
 `Member`, or read-only `Follower`). It returns a code the teammate redeems.
 
 ```rust
@@ -314,7 +314,7 @@ reading it. The owner mints a
 offer plus that namespace and key) for the joining device to scan or type in;
 from there
 [`join_via_transport`](rustdoc:struct:coven::DeviceJoinClient) on the joining
-side and [`drive_device_join`](rustdoc:fn:coven::drive_device_join) on the
+side and `drive_device_join` on the
 owner's carry the join to a saved `Config`. Hosts that would rather deliver the
 artifacts themselves — over a local network, a relay, a QR per step — keep
 using the `DeviceJoinAction` surface directly.

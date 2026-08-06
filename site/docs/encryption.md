@@ -32,11 +32,11 @@ trip internally from whatever the store's custody supplies; a production
 host never constructs a cipher or touches a raw key directly.
 
 **A per-device Ed25519 identity** signs, it does not encrypt. Each device has one
-[`UserKeypair`](rustdoc:struct:coven::keys::UserKeypair), and its 32-byte public
+[`UserKeypair`](rustdoc:struct:coven::UserKeypair), and its 32-byte public
 key is the member's identity across every store that device joins. The device
 signs each changeset and each membership chain entry with `UserKeypair::sign`;
 peers check the 64-byte signature with
-[`verify_signature`](rustdoc:fn:coven::keys::verify_signature) against the
+`verify_signature` against the
 author's public key. This answers "who wrote this", which the store key alone
 cannot: anyone holding the store key could otherwise forge a changeset as
 anyone else.
@@ -45,15 +45,15 @@ anyone else.
 keyring is symmetric material, so it cannot travel in the clear; it is
 encrypted to the joiner. Each member's X25519 key is derived deterministically from their Ed25519
 public key
-([`to_x25519_public_key`](rustdoc:method:coven::keys::UserKeypair::to_x25519_public_key),
-or [`ed25519_to_x25519_public_key`](rustdoc:fn:coven::keys::ed25519_to_x25519_public_key)
+([`to_x25519_public_key`](rustdoc:method:coven::UserKeypair::to_x25519_public_key),
+or [`ed25519_to_x25519_public_key`](rustdoc:fn:coven_keys::keys::ed25519_to_x25519_public_key)
 when only the remote pubkey is known), so an inviter who knows a member's
 identity can wrap to them without any extra handshake. The inviter calls
-[`seal_box_encrypt`](rustdoc:fn:coven::keys::seal_box_encrypt) and stores the
+[`seal_box_encrypt`](rustdoc:fn:coven_keys::keys::seal_box_encrypt) and stores the
 result under its own prefix, at
 `keys/{owner_ed25519_pubkey}/{member_ed25519_pubkey}.enc`; the joiner
 downloads it and calls
-[`seal_box_decrypt`](rustdoc:fn:coven::keys::seal_box_decrypt) with their X25519
+[`seal_box_decrypt`](rustdoc:fn:coven_keys::keys::seal_box_decrypt) with their X25519
 secret key. A sealed box is anonymous: it carries an ephemeral sender key, so the
 stored file reveals nothing about who created the invitation.
 
