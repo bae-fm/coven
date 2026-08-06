@@ -1,6 +1,17 @@
 use super::current_state::*;
 use crate::protocol::circle::{CircleRole, CircleState};
+use crate::protocol::circle_activation_test_fixtures::{
+    test_circle_activation, test_circle_owner_keypair,
+};
 use std::collections::BTreeSet;
+
+fn owner_pubkey() -> String {
+    crate::keys::public_key_hex(&test_circle_owner_keypair())
+}
+
+fn active_state() -> CircleCurrentState {
+    test_circle_activation("derived-state", true).current
+}
 
 fn accessible(state: &CircleCurrentState) -> Box<CircleAccessibleState> {
     match state {
@@ -9,13 +20,10 @@ fn accessible(state: &CircleCurrentState) -> Box<CircleAccessibleState> {
     }
 }
 
-#[tokio::test]
-async fn active_maps_by_rotation_over_the_membership() {
-    let owner_pubkey = crate::keys::public_key_hex(&crate::database::test_circle_owner_keypair());
-    let state = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
-        .install_test_active_circle_state("derived-state".to_string())
-        .await
-        .expect("install and read the active current state");
+#[test]
+fn active_maps_by_rotation_over_the_membership() {
+    let owner_pubkey = owner_pubkey();
+    let state = active_state();
 
     // Owner still a Store member: Active.
     let members = BTreeSet::from([owner_pubkey.clone()]);
@@ -36,13 +44,10 @@ async fn active_maps_by_rotation_over_the_membership() {
     assert_eq!(role, Some(CircleRole::Owner));
 }
 
-#[tokio::test]
-async fn closing_maps_to_closing_regardless_of_rotation() {
-    let owner_pubkey = crate::keys::public_key_hex(&crate::database::test_circle_owner_keypair());
-    let active = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
-        .install_test_active_circle_state("derived-state".to_string())
-        .await
-        .expect("install and read the active current state");
+#[test]
+fn closing_maps_to_closing_regardless_of_rotation() {
+    let owner_pubkey = owner_pubkey();
+    let active = active_state();
     let closing = CircleCurrentState::Closing(accessible(&active));
     // A closing Circle whose roster still names the (removed) member stays
     // Closing rather than reporting RotationRequired.
@@ -56,24 +61,18 @@ async fn closing_maps_to_closing_regardless_of_rotation() {
     );
 }
 
-#[tokio::test]
-async fn inactive_maps_to_inactive_with_no_name_or_role() {
-    let state = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
-        .install_test_inactive_circle_state("derived-state-inactive".to_string())
-        .await
-        .expect("install and read the inactive current state");
+#[test]
+fn inactive_maps_to_inactive_with_no_name_or_role() {
+    let state = test_circle_activation("derived-state-inactive", false).current;
     assert_eq!(state.derived_state(&BTreeSet::new()), CircleState::Inactive);
     let (name, role) = state.display("anyone");
     assert_eq!(name, None);
     assert_eq!(role, None);
 }
 
-#[tokio::test]
-async fn deleted_maps_to_deleted() {
-    let active = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
-        .install_test_active_circle_state("derived-state".to_string())
-        .await
-        .expect("install and read the active current state");
+#[test]
+fn deleted_maps_to_deleted() {
+    let active = active_state();
     let deleted = CircleCurrentState::Deleted(Box::new(accessible(&active).current.clone()));
     assert_eq!(
         deleted.derived_state(&BTreeSet::new()),
@@ -82,12 +81,9 @@ async fn deleted_maps_to_deleted() {
     assert_eq!(deleted.display("anyone"), (None, None));
 }
 
-#[tokio::test]
-async fn control_conflict_maps_to_its_retained_branches() {
-    let active = crate::database::StoreDatabase::new(&crate::sync::test_helpers::open_test_db())
-        .install_test_active_circle_state("derived-state".to_string())
-        .await
-        .expect("install and read the active current state");
+#[test]
+fn control_conflict_maps_to_its_retained_branches() {
+    let active = active_state();
     let current = accessible(&active).current.clone();
     let expected = vec![current.coordinate().clone()];
     let conflict = CircleCurrentState::ControlConflict {

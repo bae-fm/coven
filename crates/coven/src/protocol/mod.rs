@@ -3,6 +3,8 @@ pub(crate) mod blob;
 pub(crate) mod causal_grants;
 pub(crate) mod circle;
 pub(crate) mod circle_activation;
+#[cfg(test)]
+pub(crate) mod circle_activation_test_fixtures;
 pub(crate) mod circle_control;
 pub(crate) mod circle_journal;
 pub(crate) mod circle_roster;

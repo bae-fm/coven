@@ -290,38 +290,6 @@ impl StoreDatabase {
             .await
     }
 
-    pub(crate) async fn install_test_active_circle_state(
-        &self,
-        label: String,
-    ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
-        self.connection
-            .call(move |connection| {
-                let database = crate::database::DatabaseTestSql::new(connection);
-                database.apply_coven_routing_schema()?;
-                let (circle_id, _) = database.install_test_active_circle(&label);
-                database.circle_current_state(circle_id)?.ok_or_else(|| {
-                    DbError::Message("installed active circle has no current state".to_string())
-                })
-            })
-            .await
-    }
-
-    pub(crate) async fn install_test_inactive_circle_state(
-        &self,
-        label: String,
-    ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
-        self.connection
-            .call(move |connection| {
-                let database = crate::database::DatabaseTestSql::new(connection);
-                database.apply_coven_routing_schema()?;
-                let (circle_id, _) = database.install_test_inactive_circle(&label);
-                database.circle_current_state(circle_id)?.ok_or_else(|| {
-                    DbError::Message("installed inactive circle has no current state".to_string())
-                })
-            })
-            .await
-    }
-
     pub(crate) async fn insert_write_status_for_test(
         &self,
         write_id: WriteId,

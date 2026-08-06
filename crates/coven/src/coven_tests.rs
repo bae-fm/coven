@@ -1548,7 +1548,9 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
     fixture
         .handle
         .invite_member(
-            &crate::keys::public_key_hex(&crate::database::test_circle_owner_keypair()),
+            &crate::keys::public_key_hex(
+                &crate::protocol::circle_activation_test_fixtures::test_circle_owner_keypair(),
+            ),
             None,
             crate::MemberRole::Member,
         )

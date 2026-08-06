@@ -520,7 +520,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         })
         .await
         .expect("load founder current state");
-    let owner = crate::database::test_circle_owner_keypair();
+    let owner = crate::protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
     let first = branch(
         founder.clone(),
         &owner,

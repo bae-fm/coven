@@ -146,8 +146,7 @@ pub(crate) use test_sql::DatabaseTestSql;
 pub(crate) use test_support::synthetic_store;
 #[cfg(test)]
 pub(crate) use test_support::{
-    test_circle_owner_keypair, DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper,
-    ScopedRoutingStateForTest,
+    DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper, ScopedRoutingStateForTest,
 };
 #[cfg(test)]
 pub(crate) use test_transaction::DatabaseTestTransaction;
