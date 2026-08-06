@@ -152,7 +152,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build_with",
     ),
     (
-        "crates/coven/src/joining/facade_tests.rs",
+        "crates/coven/src/handle_tests/join_through_the_facade.rs",
         "FacadeFixture",
         "build",
     ),
@@ -1744,6 +1744,7 @@ fn find_retained_service_construction_violations(
 
 pub(crate) fn is_test_source(path: &str) -> bool {
     path.contains("/tests/")
+        || path.contains("_tests/")
         || path.ends_with("/tests.rs")
         || path.ends_with("_tests.rs")
         || path

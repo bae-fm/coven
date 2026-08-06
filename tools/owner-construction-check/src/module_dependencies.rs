@@ -146,16 +146,19 @@ pub(crate) fn find_module_dependency_violations(
     let reexports = root_reexports(files, &known_modules);
     let mut violations = BTreeSet::new();
     for file in files {
+        if is_test_source(&file.relative_path) {
+            continue;
+        }
         let Some(from) = file_module(&file.relative_path) else {
             continue;
         };
         let from = if known_modules.contains(&from) {
             from
-        } else if let Some(sibling) = from
+        } else if let Some(subject) = from
             .strip_suffix("_tests")
-            .filter(|sibling| known_modules.contains(*sibling))
+            .filter(|subject| known_modules.contains(*subject))
         {
-            sibling.to_string()
+            subject.to_string()
         } else {
             continue;
         };
@@ -186,11 +189,18 @@ fn file_module(path: &str) -> Option<String> {
     Some(module.to_string())
 }
 
+/// A `<module>_tests` file or directory holds tests for `<module>` rather than
+/// declaring a module of its own, so it never becomes a region of its own.
+fn is_test_container(module: &str) -> bool {
+    module.ends_with("_tests")
+}
+
 fn top_level_modules(files: &[RustFile]) -> BTreeSet<String> {
     files
         .iter()
         .filter(|file| !is_test_source(&file.relative_path))
         .filter_map(|file| file_module(&file.relative_path))
+        .filter(|module| !is_test_container(module))
         .collect()
 }
 
@@ -337,6 +347,34 @@ impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
             return;
         }
         visit::visit_attribute(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        visit::visit_item_impl(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if is_test_only(&node.attrs) {
+            return;
+        }
+        visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
