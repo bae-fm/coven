@@ -10,6 +10,10 @@ use rusqlite::OptionalExtension;
 /// Tests may exercise or corrupt durable database state, but the connection
 /// itself remains private so test modules cannot pass it into unrelated
 /// helpers or retain it beyond one database-thread operation.
+/// One durable write partition as it is stored: its audience, the Circle
+/// control coordinate it was captured under, and its changeset bytes.
+pub(crate) type StoreWritePartitionRow = (String, Option<String>, Vec<u8>);
+
 pub(crate) struct DatabaseTestSql<'connection> {
     connection: &'connection Connection,
 }
@@ -48,11 +52,10 @@ impl DatabaseTestSql<'_> {
         values
     }
 
-    /// Every durable write partition, Store audience first and Local last, as
-    /// `(audience, control coordinate, changeset)`.
+    /// Every durable write partition, Store audience first and Local last.
     pub(crate) fn store_write_partitions_in_audience_order(
         &self,
-    ) -> Result<Vec<(String, Option<String>, Vec<u8>)>, DbError> {
+    ) -> Result<Vec<StoreWritePartitionRow>, DbError> {
         self.query(
             "SELECT audience, control_coord, changeset
              FROM store_write_partitions
@@ -88,7 +91,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn only_store_write_partition(
         &self,
         write_id: &str,
-    ) -> Result<(String, Option<String>, Vec<u8>), DbError> {
+    ) -> Result<StoreWritePartitionRow, DbError> {
         self.query_row(
             "SELECT audience, control_coord, changeset
              FROM store_write_partitions WHERE write_id = ?1",
