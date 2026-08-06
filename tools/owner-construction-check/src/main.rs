@@ -124,11 +124,6 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "new",
     ),
     (
-        "crates/coven/src/store_blobs.rs",
-        "StoreBlobAccess",
-        "connected_for_test",
-    ),
-    (
         "crates/coven/src/sync/store/owner/device_join/joiner.rs",
         "PendingDeviceJoinObservation",
         "into_joining_store",
