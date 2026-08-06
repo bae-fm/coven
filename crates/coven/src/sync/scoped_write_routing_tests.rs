@@ -85,24 +85,7 @@ async fn capture_scoped_write_then_reopen(
         .await
         .expect("capture Store and Circle partitions");
     let expected = db
-        .test_sql(|database| {
-            database
-                .query(
-                    "SELECT audience, control_coord, changeset
-                 FROM store_write_partitions
-                 ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
-                          audience, control_coord",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                        ))
-                    },
-                )
-                .map_err(DbError::from)
-        })
+        .test_sql(|database| database.store_write_partitions_in_audience_order())
         .await
         .expect("read exact persisted audience partitions");
     assert_eq!(expected.len(), 3);
@@ -168,22 +151,7 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
     let (_temp, reopened, _expected) =
         capture_scoped_write_then_reopen("controlled-local-restart").await;
     reopened
-        .test_sql(|database| {
-            database
-                .execute_batch("PRAGMA ignore_check_constraints = true;")
-                .map_err(DbError::from)?;
-            database
-                .execute(
-                    "UPDATE store_write_partitions
-                 SET control_coord = '{}'
-                 WHERE audience = 'local'",
-                    [],
-                )
-                .map_err(DbError::from)?;
-            database
-                .execute_batch("PRAGMA ignore_check_constraints = false;")
-                .map_err(DbError::from)
-        })
+        .test_sql(|database| database.plant_control_on_the_local_partition())
         .await
         .expect("plant controlled Local partition");
 
@@ -229,23 +197,11 @@ async fn merge_local_only_scoped_write_is_not_pending() {
         .all(|write| write.write_id != receipt.write_id));
     let stored_write_id = receipt.write_id.clone();
     db.test_sql(move |database| {
-        let (affected_rows, store_changeset): (String, Vec<u8>) = database
-            .query_row(
-                "SELECT affected_rows, changeset FROM store_writes WHERE write_id = ?1",
-                [stored_write_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
+        let (affected_rows, store_changeset) =
+            database.store_write_row(stored_write_id.as_str())?;
         assert_eq!(affected_rows, "[]");
         assert!(store_changeset.is_empty());
-        let partition: (String, Option<String>, Vec<u8>) = database
-            .query_row(
-                "SELECT audience, control_coord, changeset
-                 FROM store_write_partitions WHERE write_id = ?1",
-                [stored_write_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(DbError::from)?;
+        let partition = database.only_store_write_partition(stored_write_id.as_str())?;
         assert_eq!(partition.0, "local");
         assert_eq!(partition.1, None);
         assert!(!partition.2.is_empty());
@@ -324,14 +280,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
 
     let partitions = db
         .test_sql(move |database| {
-            database
-                .query(
-                    "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                    [stored_write_id.as_str()],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .map_err(DbError::from)
+            database.store_write_partition_changesets(stored_write_id.as_str())
         })
         .await
         .expect("read Circle-only partitions");
@@ -450,16 +399,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
 
     let partitions = db
         .test_sql(move |database| {
-            database
-                .query(
-                    "SELECT audience, changeset
-                     FROM store_write_partitions
-                     WHERE write_id = ?1
-                     ORDER BY audience",
-                    [stored_move_id.as_str()],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .map_err(DbError::from)
+            database.store_write_partition_changesets(stored_move_id.as_str())
         })
         .await
         .expect("read move partitions");

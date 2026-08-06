@@ -12,3 +12,5 @@ mod remote_ownership;
 mod routing;
 #[path = "tests/schema_initialization.rs"]
 mod schema_initialization;
+#[path = "tests/scoped_audience_capture.rs"]
+mod scoped_audience_capture;

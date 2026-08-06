@@ -48,6 +48,81 @@ impl DatabaseTestSql<'_> {
         values
     }
 
+    /// Every durable write partition, Store audience first and Local last, as
+    /// `(audience, control coordinate, changeset)`.
+    pub(crate) fn store_write_partitions_in_audience_order(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, Vec<u8>)>, DbError> {
+        self.query(
+            "SELECT audience, control_coord, changeset
+             FROM store_write_partitions
+             ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
+                      audience, control_coord",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .map_err(DbError::from)
+    }
+
+    /// One write's partitions as `(audience, changeset)`, ordered by audience.
+    pub(crate) fn store_write_partition_changesets(
+        &self,
+        write_id: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, DbError> {
+        self.query(
+            "SELECT audience, changeset FROM store_write_partitions
+             WHERE write_id = ?1 ORDER BY audience",
+            [write_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .map_err(DbError::from)
+    }
+
+    /// The single partition a local-only write records.
+    pub(crate) fn only_store_write_partition(
+        &self,
+        write_id: &str,
+    ) -> Result<(String, Option<String>, Vec<u8>), DbError> {
+        self.query_row(
+            "SELECT audience, control_coord, changeset
+             FROM store_write_partitions WHERE write_id = ?1",
+            [write_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(DbError::from)
+    }
+
+    /// A write's recorded affected rows and Store changeset.
+    pub(crate) fn store_write_row(&self, write_id: &str) -> Result<(String, Vec<u8>), DbError> {
+        self.query_row(
+            "SELECT affected_rows, changeset FROM store_writes WHERE write_id = ?1",
+            [write_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)
+    }
+
+    /// Give the Local partition a Circle control coordinate, which the schema's
+    /// own check constraint forbids — the durable shape a preparation must
+    /// refuse when it reloads.
+    pub(crate) fn plant_control_on_the_local_partition(&self) -> Result<(), DbError> {
+        self.execute_batch("PRAGMA ignore_check_constraints = true;")
+            .map_err(DbError::from)?;
+        self.execute(
+            "UPDATE store_write_partitions SET control_coord = '{}' WHERE audience = 'local'",
+            [],
+        )
+        .map_err(DbError::from)?;
+        self.execute_batch("PRAGMA ignore_check_constraints = false;")
+            .map_err(DbError::from)
+    }
+
     pub(crate) fn set_foreign_keys(&self, enabled: bool) -> rusqlite::Result<()> {
         self.connection.pragma_update(None, "foreign_keys", enabled)
     }
