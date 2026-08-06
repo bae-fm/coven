@@ -269,6 +269,62 @@ impl ModuleDependencyVisitor<'_> {
             to_region,
         });
     }
+
+    /// Every `crate :: ident :: ident …` run in a macro's tokens, checked as a
+    /// reference. Nested delimiters carry paths of their own, so groups are
+    /// walked too.
+    fn check_token_stream(&mut self, tokens: proc_macro2::TokenStream) {
+        let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+        let mut index = 0;
+        while index < trees.len() {
+            if let proc_macro2::TokenTree::Group(group) = &trees[index] {
+                self.check_token_stream(group.stream());
+                index += 1;
+                continue;
+            }
+            let proc_macro2::TokenTree::Ident(ident) = &trees[index] else {
+                index += 1;
+                continue;
+            };
+            if ident != "crate" {
+                index += 1;
+                continue;
+            }
+            let line = ident.span().start().line;
+            let mut segments = Vec::new();
+            let mut cursor = index + 1;
+            while let Some(ident) = path_separator_then_ident(&trees, cursor) {
+                segments.push(ident.to_string());
+                cursor += 3;
+            }
+            if !segments.is_empty() {
+                self.check_reference(&segments, line);
+            }
+            index = cursor.max(index + 1);
+        }
+    }
+}
+
+/// The identifier at `index` when the tokens there are `:: ident`.
+fn path_separator_then_ident(
+    trees: &[proc_macro2::TokenTree],
+    index: usize,
+) -> Option<&proc_macro2::Ident> {
+    let (proc_macro2::TokenTree::Punct(first), proc_macro2::TokenTree::Punct(second)) =
+        (trees.get(index)?, trees.get(index + 1)?)
+    else {
+        return None;
+    };
+    if first.as_char() != ':' || second.as_char() != ':' {
+        return None;
+    }
+    if first.spacing() != proc_macro2::Spacing::Joint {
+        return None;
+    }
+    match trees.get(index + 2)? {
+        proc_macro2::TokenTree::Ident(ident) => Some(ident),
+        _ => None,
+    }
 }
 
 impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
@@ -327,6 +383,14 @@ impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
             self.check_reference(&segments[1..], node.span().start().line);
         }
         visit::visit_path(self, node);
+    }
+
+    /// A macro invocation's arguments are an unparsed token stream, so the
+    /// visitor never reaches the paths inside `matches!`, `assert!`, or any
+    /// other macro body. Scan the tokens for `crate::`-rooted paths directly.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.check_token_stream(node.tokens.clone());
+        visit::visit_macro(self, node);
     }
 }
 
@@ -413,6 +477,26 @@ mod tests {
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].to, "sync");
+    }
+
+    #[test]
+    fn an_upward_reference_inside_a_macro_body_is_rejected() {
+        let files = vec![
+            lib(),
+            file("crates/coven/src/sync/mod.rs", ""),
+            file(
+                "crates/coven/src/database/store.rs",
+                r#"
+                fn is_receipt(object: &Object) -> bool {
+                    matches!(object, crate::sync::store::ReclaimObject::Receipt { .. })
+                }
+                "#,
+            ),
+        ];
+        let violations = find_module_dependency_violations(&files).expect("check runs");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].from, "database");
         assert_eq!(violations[0].to, "sync");
     }
 
