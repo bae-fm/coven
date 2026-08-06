@@ -330,15 +330,7 @@ pub enum RevokeOutcome {
 }
 
 impl CloudAccessState {
-    pub fn member_pubkey(&self) -> &str {
-        match self {
-            Self::Present { member_pubkey, .. } | Self::Absent { member_pubkey, .. } => {
-                member_pubkey
-            }
-        }
-    }
-
-    pub fn provider_account_email(&self) -> Option<&str> {
+    fn provider_account_email(&self) -> Option<&str> {
         match self {
             Self::Present {
                 provider_account_email,

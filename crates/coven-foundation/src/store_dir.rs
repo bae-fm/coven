@@ -236,20 +236,18 @@ pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
 /// Default name of the parent directory a store lives under — overridden
 /// per host via [`StoreLayout::stores_dirname`].
 const DEFAULT_STORES_DIRNAME: &str = "stores";
-/// Default name of a store's own database file — overridden per host via
-/// [`StoreLayout::db_filename`].
-const DEFAULT_DB_FILENAME: &str = "store.db";
+/// The name of a store's own database file.
+const DB_FILENAME: &str = "store.db";
 
-/// The host's on-disk layout for stores: where they live and what the
-/// database file is called. One rule shared by create, open, join, and
-/// restore, so a host that wants `libraries/<id>/library.db` instead of
-/// coven's default `stores/<id>/store.db` names it once here rather than
-/// each flow hardwiring (or working around) coven's own choice.
+/// The host's on-disk layout for stores: which directory they live under.
+/// One rule shared by create, open, join, and restore, so a host that wants
+/// `libraries/<id>` instead of coven's default `stores/<id>` names it once
+/// here rather than each flow hardwiring (or working around) coven's own
+/// choice.
 #[derive(Clone, Debug)]
 pub struct StoreLayout {
     app_dir: PathBuf,
     stores_dirname: String,
-    db_filename: String,
 }
 
 impl StoreLayout {
@@ -257,17 +255,11 @@ impl StoreLayout {
         Self {
             app_dir: app_dir.into(),
             stores_dirname: DEFAULT_STORES_DIRNAME.to_string(),
-            db_filename: DEFAULT_DB_FILENAME.to_string(),
         }
     }
 
     pub fn stores_dirname(mut self, name: impl Into<String>) -> Self {
         self.stores_dirname = name.into();
-        self
-    }
-
-    pub fn db_filename(mut self, name: impl Into<String>) -> Self {
-        self.db_filename = name.into();
         self
     }
 
@@ -277,13 +269,12 @@ impl StoreLayout {
     }
 
     /// The one `(app_dir, store_id) -> StoreDir` rule, named with this
-    /// layout's directory and database filename. Callers validate an
-    /// untrusted `store_id` ([`validate_path_token`]) BEFORE calling, as
-    /// every join/restore/create flow already does.
+    /// layout's directory. Callers validate an untrusted `store_id`
+    /// ([`validate_path_token`]) BEFORE calling, as every
+    /// join/restore/create flow already does.
     pub fn store_dir(&self, store_id: &str) -> StoreDir {
         StoreDir {
             path: self.stores_root().join(store_id),
-            db_filename: self.db_filename.clone(),
         }
     }
 }
@@ -295,19 +286,15 @@ impl StoreLayout {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoreDir {
     path: PathBuf,
-    db_filename: String,
 }
 
 impl StoreDir {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            db_filename: DEFAULT_DB_FILENAME.to_string(),
-        }
+        Self { path: path.into() }
     }
 
     pub fn db_path(&self) -> PathBuf {
-        self.path.join(&self.db_filename)
+        self.path.join(DB_FILENAME)
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -1048,10 +1035,7 @@ impl AsRef<Path> for StoreDir {
 
 impl From<PathBuf> for StoreDir {
     fn from(path: PathBuf) -> Self {
-        Self {
-            path,
-            db_filename: DEFAULT_DB_FILENAME.to_string(),
-        }
+        Self { path }
     }
 }
 

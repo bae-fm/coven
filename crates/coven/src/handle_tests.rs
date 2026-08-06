@@ -832,12 +832,11 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
         .await;
 }
 
-/// The chunk size a host sets through
-/// [`CovenBuilder::blob_chunking`](crate::CovenBuilder::blob_chunking) is what
-/// the connected sync storage seals under. The receipt is the stored object's
-/// own header: it names the configured size, so the setting decides how little
-/// a later ranged read can fetch. A connect path that builds its connection or its
-/// storage on `BlobChunking::DEFAULT` instead seals at 64 KiB and this fails.
+/// The chunk size a handle is built with is what the connected sync storage
+/// seals under. The receipt is the stored object's own header: it names the
+/// configured size, so the setting decides how little a later ranged read can
+/// fetch. A connect path that builds its connection or its storage on
+/// `BlobChunking::DEFAULT` instead seals at 64 KiB and this fails.
 #[tokio::test]
 async fn connected_seal_honors_the_handles_configured_blob_chunking() {
     let local = tokio::task::LocalSet::new();

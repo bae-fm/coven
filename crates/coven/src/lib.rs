@@ -52,13 +52,13 @@ pub use coven_foundation::config::{
 pub use coven_foundation::id_provider::SequentialIdProvider;
 pub use coven_foundation::id_provider::{IdProvider, IdRef, UuidProvider};
 pub use coven_foundation::store_dir::{StoreDir, StoreLayout};
-pub use coven_keys::custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
+pub use coven_keys::custody::KeyCustody;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_keys::encryption::EncryptionService;
 pub use coven_keys::encryption::{
     EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE,
 };
-pub use coven_keys::identity_custody::{rewrap_passphrase_identity_custody, IdentityCustody};
+pub use coven_keys::identity_custody::IdentityCustody;
 #[cfg(all(
     any(test, feature = "test-utils"),
     any(target_os = "macos", target_os = "ios")

@@ -390,12 +390,6 @@ impl BlobDecl {
         self
     }
 
-    /// Take the content hash from `column` instead of `hash`.
-    pub fn with_hash_column(mut self, column: impl Into<String>) -> Self {
-        self.hash_column = column.into();
-        self
-    }
-
     /// Key the blob at the readable cloud path in `column` (the plain scheme).
     pub fn with_cloud_path_column(mut self, column: impl Into<String>) -> Self {
         self.cloud_path_column = Some(column.into());

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::custody::preset::{self, CustodySecret, InMemoryCustody, PassphraseCustody};
+use crate::custody::preset::{CustodySecret, InMemoryCustody, PassphraseCustody};
 use crate::keys::{DeviceIdentityCustody, KeyError, StoreKeys, UserKeypair, SIGN_SECRETKEYBYTES};
 use coven_foundation::store_dir::StoreDir;
 
@@ -102,22 +102,6 @@ impl DeviceIdentityCustody for PassphraseCustody<UserKeypair> {
     fn forget(&self) -> Result<(), KeyError> {
         PassphraseCustody::forget(self)
     }
-}
-
-/// Re-wrap a store's passphrase-protected signing identity under a new
-/// passphrase — the identity half of a host's "change passphrase", the
-/// sibling of [`crate::custody::rewrap_passphrase_custody`]. The store's
-/// `identity.envelope` is decrypted with `old` and re-sealed under `new`
-/// (fresh salt and nonce). Errors if nothing is established there
-/// ([`KeyError::Persistence`]) or if `old` is wrong ([`KeyError::Crypto`]),
-/// leaving the existing file untouched on either failure. After it returns,
-/// the identity is re-opened under `new`.
-pub fn rewrap_passphrase_identity_custody(
-    store_dir: &StoreDir,
-    old: Passphrase,
-    new: &Passphrase,
-) -> Result<(), KeyError> {
-    preset::rewrap::<UserKeypair>(store_dir, old, new)
 }
 
 #[cfg(test)]
@@ -291,43 +275,6 @@ mod tests {
         r#""nonce_b64":"+pRYN/2QyizRpYZrpG++Y9fU7R7POwp6","#,
         r#""ciphertext_b64":"IrHxxF+oOCv4n80oKVo2VAjPA7m1rbX654FW8u4kt+0FIhqhpotFOke8JL2E8TuKuXperOtbHOtxluSb6LBGtYISbxc3RMnTot98mFXdX8A="}"#
     );
-
-    /// The identity "change passphrase" entry point wires through to the
-    /// vault's re-wrap: after it, the old passphrase no longer unlocks the
-    /// identity file and the new one does. The envelope's own re-wrap
-    /// guarantees are pinned in `envelope.rs`; this only proves the wiring.
-    #[test]
-    fn rewrap_passphrase_identity_custody_moves_the_identity_to_the_new_passphrase() {
-        let (_tmp, dir) = temp_store_dir();
-        let keypair = UserKeypair::generate();
-        PassphraseCustody::<UserKeypair>::new(Passphrase::new("old".to_string()), &dir)
-            .persist(&keypair)
-            .expect("establish");
-
-        rewrap_passphrase_identity_custody(
-            &dir,
-            Passphrase::new("old".to_string()),
-            &Passphrase::new("new".to_string()),
-        )
-        .expect("re-wrap under the new passphrase");
-
-        let with_old =
-            PassphraseCustody::<UserKeypair>::new(Passphrase::new("old".to_string()), &dir);
-        assert!(
-            with_old.unlock().is_err(),
-            "the old passphrase must no longer unlock after a re-wrap",
-        );
-        let with_new =
-            PassphraseCustody::<UserKeypair>::new(Passphrase::new("new".to_string()), &dir);
-        assert_eq!(
-            with_new
-                .unlock()
-                .expect("the new passphrase unlocks")
-                .expect("identity present")
-                .public_key(),
-            keypair.public_key(),
-        );
-    }
 
     #[test]
     fn passphrase_preset_envelope_fixture_v1_unlocks() {

@@ -33,14 +33,14 @@ impl BlobPathScheme {
 /// sets how many round-trips a long read costs. Neither can be derived from the
 /// other, and changing the window never touches a stored blob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlobChunking {
+pub(crate) struct BlobChunking {
     chunk: std::num::NonZeroU32,
     window: std::num::NonZeroU64,
 }
 
 impl BlobChunking {
     /// 64 KiB chunks read one mebibyte of stored bytes at a time.
-    pub const DEFAULT: Self = Self {
+    pub(crate) const DEFAULT: Self = Self {
         chunk: coven_keys::encryption::DEFAULT_BLOB_CHUNK_SIZE,
         window: match std::num::NonZeroU64::new(1 << 20) {
             Some(window) => window,
@@ -48,15 +48,16 @@ impl BlobChunking {
         },
     };
 
-    pub fn new(chunk: std::num::NonZeroU32, window: std::num::NonZeroU64) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(chunk: std::num::NonZeroU32, window: std::num::NonZeroU64) -> Self {
         Self { chunk, window }
     }
 
-    pub fn chunk(self) -> std::num::NonZeroU32 {
+    pub(crate) fn chunk(self) -> std::num::NonZeroU32 {
         self.chunk
     }
 
-    pub fn window(self) -> std::num::NonZeroU64 {
+    pub(crate) fn window(self) -> std::num::NonZeroU64 {
         self.window
     }
 }

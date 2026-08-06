@@ -99,19 +99,3 @@ impl<T: CustodySecret> PassphraseCustody<T> {
         self.vault.forget()
     }
 }
-
-/// Re-wrap a store's passphrase-protected secret under a new passphrase: the
-/// store-side half of a host's "change passphrase". The envelope in
-/// [`T::FILE`](CustodySecret::FILE) is decrypted with `old` and re-sealed under
-/// `new` (fresh salt and nonce). Errors if nothing is established there
-/// ([`KeyError::Persistence`]) or if `old` is wrong ([`KeyError::Crypto`]),
-/// leaving the existing file untouched on either failure.
-pub(crate) fn rewrap<T: CustodySecret>(
-    store_dir: &StoreDir,
-    old: Passphrase,
-    new: &Passphrase,
-) -> Result<(), KeyError> {
-    PassphraseCustody::<T>::new(old, store_dir)
-        .vault
-        .rewrap(new)
-}

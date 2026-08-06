@@ -126,21 +126,6 @@ impl MasterKeyCustody for PassphraseCustody<MasterKeyring> {
     }
 }
 
-/// Re-wrap a store's passphrase-protected master keyring under a new
-/// passphrase — the store-side half of covenpass's "change passphrase". The
-/// `<store_dir>/master.keyring` envelope is decrypted with `old` and re-sealed
-/// under `new` (fresh salt and nonce). Errors if nothing is established there
-/// ([`KeyError::Persistence`]) or if `old` is wrong ([`KeyError::Crypto`]),
-/// leaving the existing file untouched on either failure. After it returns,
-/// the store's custody is re-opened under `new`.
-pub fn rewrap_passphrase_custody(
-    store_dir: &StoreDir,
-    old: Passphrase,
-    new: &Passphrase,
-) -> Result<(), KeyError> {
-    preset::rewrap::<MasterKeyring>(store_dir, old, new)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,43 +309,6 @@ mod tests {
         r#""nonce_b64":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYX","#,
         r#""ciphertext_b64":"+7/Z7TSK5xtqL6fqDzh5ayBkPPtuzf/0FyBy3mrgtiFjfabWOqVb8FonvR7SwvntJd9ERnTDljuE0o3Ofzs8a6XMbf0VJ6HlDp2aB62apAV3Fv1e1eb8su6/TxVOCskR9cvDmPr2P3CnsX3YRaGcEuilgSW8uKosW6gowDDZHqGat1XSPbnG02GO5QYuMxM="}"#
     );
-
-    /// The store-side "change passphrase" entry point wires through to the
-    /// vault's re-wrap: after it, the old passphrase no longer unlocks
-    /// `master.keyring` and the new one does. The envelope's own re-wrap
-    /// guarantees are pinned in `envelope.rs`; this only proves the wiring.
-    #[test]
-    fn rewrap_passphrase_custody_moves_the_master_keyring_to_the_new_passphrase() {
-        let (_tmp, dir) = temp_store_dir();
-        let established =
-            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("old".to_string()), &dir);
-        let keyring = MasterKeyring::generate();
-        established.persist(&keyring).expect("establish");
-
-        rewrap_passphrase_custody(
-            &dir,
-            Passphrase::new("old".to_string()),
-            &Passphrase::new("new".to_string()),
-        )
-        .expect("re-wrap under the new passphrase");
-
-        let with_old =
-            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("old".to_string()), &dir);
-        assert!(
-            with_old.unlock().is_err(),
-            "the old passphrase must no longer unlock after a re-wrap",
-        );
-        let with_new =
-            PassphraseCustody::<MasterKeyring>::new(Passphrase::new("new".to_string()), &dir);
-        assert_eq!(
-            with_new
-                .unlock()
-                .expect("the new passphrase unlocks")
-                .expect("keyring present")
-                .fingerprint(),
-            keyring.fingerprint(),
-        );
-    }
 
     #[test]
     fn passphrase_preset_envelope_fixture_v1_unlocks() {
