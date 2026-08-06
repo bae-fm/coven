@@ -1,5 +1,4 @@
 use super::StoreCommitVerifier;
-use crate::storage::run_blocking_object_verification;
 use coven_protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipGrantId, MembershipHeadRef,
     StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
@@ -10,6 +9,7 @@ use coven_protocol::objects::{
 use coven_protocol::store_commit::{
     membership_entry_semantic_prefix, membership_resolution_semantic_prefix, StoreProtocolError,
 };
+use coven_storage::run_blocking_object_verification;
 
 pub(crate) struct StoreMembershipObjectVerifier<'operation, 'storage> {
     commit_verifier: &'operation StoreCommitVerifier<'storage>,

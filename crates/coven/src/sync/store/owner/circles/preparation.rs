@@ -6,7 +6,6 @@ use super::{
     read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
-use crate::storage::SyncStorage;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys;
@@ -26,6 +25,7 @@ use coven_protocol::store_commit::{
     CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreCommitCoord, StoreCommitOrder,
     StoreOperationMembershipAuthority, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
+use coven_storage::SyncStorage;
 
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     announcement_stream_id: coven_protocol::membership::AuthorStreamId,

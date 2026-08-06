@@ -2,10 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::TestDevice;
 use coven_database::Database;
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(

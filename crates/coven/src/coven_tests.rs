@@ -1,11 +1,5 @@
 use super::*;
 
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    ExactSlotStorage, UploadProgress,
-};
-use crate::storage::CloudCipher;
 use crate::sync::test_helpers::TestStore;
 use crate::{WriteId, WriteReceipt};
 use async_trait::async_trait;
@@ -15,6 +9,12 @@ use coven_keys::keys::test_keyring;
 use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::cloud::{
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    ExactSlotStorage, UploadProgress,
+};
+use coven_storage::CloudCipher;
 use rusqlite::{params, OptionalExtension};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -2713,7 +2713,7 @@ impl ExactSlotStorage for GateCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
-    ) -> Result<(), crate::storage::cloud::CloudFileReadError> {
+    ) -> Result<(), coven_storage::cloud::CloudFileReadError> {
         self.gate().await;
         ExactSlotStorage::read_at_to_file(&self.inner, slot, destination).await
     }

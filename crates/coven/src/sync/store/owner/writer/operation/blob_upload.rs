@@ -216,7 +216,7 @@ impl AuthorizedWriterOperation<'_> {
         blob: &StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         spool_path: &std::path::Path,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
+        progress: &coven_storage::cloud::UploadProgress<'_>,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage
             .create_blob_object_from_file(blob, authority, spool_path, progress)

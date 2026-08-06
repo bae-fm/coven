@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::VerifiedObjectWrites;
+use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
@@ -310,8 +310,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn refresh_authorization_state(
         &self,
-        cipher: &dyn crate::storage::CloudCipherAccess,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        cipher: &dyn coven_storage::CloudCipherAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
         master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Result<(), SyncCycleFailure> {
         let result = async {
@@ -326,8 +326,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .wrapped_key_authority_for(&recipient)
                 .map_err(AuthorizationRefreshError::Membership)?;
             let live_keyring = match cipher.snapshot() {
-                crate::storage::CloudCipher::Encrypted(encryption) => encryption,
-                crate::storage::CloudCipher::Plaintext => {
+                coven_storage::CloudCipher::Encrypted(encryption) => encryption,
+                coven_storage::CloudCipher::Plaintext => {
                     return Err(AuthorizationRefreshError::InvalidState(
                         "plaintext home cannot enter encrypted key refresh".to_string(),
                     ));
@@ -378,10 +378,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                     .adopt_key_rotation(&new_encryption, master_keys)
                                     .map_err(AuthorizationRefreshError::KeyAdoption)?;
                                 let adopted_generation = match cipher.snapshot() {
-                                    crate::storage::CloudCipher::Encrypted(encryption) => {
+                                    coven_storage::CloudCipher::Encrypted(encryption) => {
                                         encryption.current_generation()
                                     }
-                                    crate::storage::CloudCipher::Plaintext => {
+                                    coven_storage::CloudCipher::Plaintext => {
                                         return Err(AuthorizationRefreshError::InvalidState(
                                             "encrypted key refresh produced a plaintext cipher"
                                                 .to_string(),

@@ -6,12 +6,6 @@ use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
-use crate::storage::cloud::setup::StorageSetupError;
-#[cfg(any(test, feature = "test-utils"))]
-use crate::storage::cloud::CloudHome;
-#[cfg(test)]
-use crate::storage::BlobChunking;
-use crate::storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_security::StoreSecurity;
 use crate::sync::cycle::SyncComponents;
@@ -25,6 +19,12 @@ use coven_foundation::store_dir::StoreOpenGuard;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
 use coven_protocol::objects::StorageError;
+use coven_storage::cloud::setup::StorageSetupError;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_storage::cloud::CloudHome;
+#[cfg(test)]
+use coven_storage::BlobChunking;
+use coven_storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 

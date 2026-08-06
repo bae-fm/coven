@@ -1,5 +1,3 @@
-use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
-use crate::storage::SyncStorage;
 use coven_database::DurableMembershipMutation;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::EncryptionService;
@@ -15,6 +13,8 @@ use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 use coven_protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
 use coven_protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
+use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
+use coven_storage::SyncStorage;
 
 use crate::sync::store::membership::InviteError;
 

@@ -44,7 +44,7 @@ impl StoreSync {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
-    ) -> Result<crate::join_code::InviteCode, SyncError> {
+    ) -> Result<coven_storage::join_code::InviteCode, SyncError> {
         let active = self.active().ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);

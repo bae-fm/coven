@@ -1,9 +1,9 @@
 use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
-use crate::storage::BlobPathScheme;
 use coven_protocol::circle::{CircleCloseStatus, CircleId, CircleRole, CircleRosterChain};
 use coven_protocol::store_commit::CircleControlRef;
+use coven_storage::BlobPathScheme;
 
 pub(crate) struct StoreCircleCommands<'store> {
     store: &'store super::Store,

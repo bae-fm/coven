@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
@@ -21,6 +20,7 @@ use coven_protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreRootRef, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
+use coven_storage::SyncStorage;
 
 mod metadata;
 mod roster;

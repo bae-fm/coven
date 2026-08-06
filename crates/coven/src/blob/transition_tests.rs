@@ -21,8 +21,6 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::blob::transition::LocalBlobTransitions;
-use crate::storage::cloud::CloudHome;
-use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,
@@ -38,6 +36,8 @@ use coven_protocol::blob::DeferredLocalBlobDisposition;
 use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
+use coven_storage::cloud::CloudHome;
+use coven_storage::SyncStorage;
 
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -2386,7 +2386,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
                 &stored,
                 &authority,
                 &spool,
-                &crate::storage::cloud::no_progress(),
+                &coven_storage::cloud::no_progress(),
             )
             .await
             .expect("create exact blob");

@@ -1,12 +1,5 @@
 use super::*;
 
-use crate::storage::cloud::cloudkit::{
-    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
-    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
-};
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::CloudHomeError;
-use crate::storage::{BlobPathScheme, CloudCipher};
 use crate::store_sync::{ConfigProvider, SyncError};
 use crate::sync::test_helpers::{open_test_db_with_blob, read_test_db, temp_store_dir, TestStore};
 use coven_foundation::clock::SystemClock;
@@ -14,6 +7,13 @@ use coven_foundation::config::{CloudProvider, Config, HomeStorage};
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{test_keyring, StoreKeys};
 use coven_protocol::blob::{CacheFill, Provenance};
+use coven_storage::cloud::cloudkit::{
+    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
+    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
+};
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::cloud::CloudHomeError;
+use coven_storage::{BlobPathScheme, CloudCipher};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -237,12 +237,12 @@ async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
         StoreKeys::bind("lib-setup-error".to_string()),
         test_key_custody(),
         test_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         Arc::new(SystemClock),
         None,
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
-        crate::storage::BlobChunking::DEFAULT,
+        coven_storage::BlobChunking::DEFAULT,
     );
 
     db.plant_blob_row_for_test("anyblob0", false, b"typed setup error")
@@ -308,12 +308,12 @@ fn test_handle_with_custody_and_storage(
         StoreKeys::bind(store_id.to_string()),
         key_custody,
         test_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         Arc::new(SystemClock),
         None,
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
-        crate::storage::BlobChunking::DEFAULT,
+        coven_storage::BlobChunking::DEFAULT,
     )
 }
 
@@ -415,14 +415,14 @@ impl CloudKitOps for TestCloudKitOps {
         &self,
         scope: &CloudKitScope,
         key: &str,
-    ) -> Result<crate::storage::cloud::CloudVersionedObject, CloudHomeError> {
+    ) -> Result<coven_storage::cloud::CloudVersionedObject, CloudHomeError> {
         let store = self.store.lock().unwrap();
         let (bytes, version) = store
             .get(&(scope.clone(), key.to_string()))
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-        Ok(crate::storage::cloud::CloudVersionedObject {
+        Ok(coven_storage::cloud::CloudVersionedObject {
             bytes: bytes.clone(),
-            version: crate::storage::cloud::CloudObjectVersion::from_provider(version.to_string())?,
+            version: coven_storage::cloud::CloudObjectVersion::from_provider(version.to_string())?,
         })
     }
 
@@ -479,7 +479,7 @@ impl CloudKitOps for TestCloudKitOps {
             store.insert((scope.clone(), create.key.clone()), (create.data, 1));
             created.push(CloudKitRecordVersion {
                 key: create.key,
-                version: crate::storage::cloud::CloudObjectVersion::from_provider("1".to_string())?,
+                version: coven_storage::cloud::CloudObjectVersion::from_provider("1".to_string())?,
             });
         }
         Ok(created)
@@ -604,12 +604,12 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 store_keys,
                 test_key_custody(),
                 identity_custody,
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 None,
                 Some(upload_pause.clone()),
                 StoreOpenGuard::acquire_for_test(&store_dir),
-                crate::storage::BlobChunking::DEFAULT,
+                coven_storage::BlobChunking::DEFAULT,
             );
 
             // Inject the mock home; the host hands over only the home + cipher.
@@ -743,14 +743,14 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
                 store_keys,
                 test_key_custody(),
                 identity_custody,
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 None,
                 // No paused-drain observer: holding a running loop off the queue is
                 // the dance this connect exists to remove.
                 None,
                 StoreOpenGuard::acquire_for_test(&store_dir),
-                crate::storage::BlobChunking::DEFAULT,
+                coven_storage::BlobChunking::DEFAULT,
             );
 
             handle
@@ -848,7 +848,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
             // (64 KiB chunk, 1 MiB window), so a dropped configuration is visible
             // rather than coinciding with the default.
             const CHUNK: u32 = 4096;
-            let chunking = crate::storage::BlobChunking::new(
+            let chunking = coven_storage::BlobChunking::new(
                 std::num::NonZeroU32::new(CHUNK).expect("nonzero chunk"),
                 std::num::NonZeroU64::new(1 << 16).expect("nonzero window"),
             );
@@ -890,7 +890,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
                 store_keys,
                 test_key_custody(),
                 identity_custody,
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 None,
                 Some(upload_pause.clone()),
@@ -1003,12 +1003,12 @@ async fn connected_sync_reuses_connection_storage_for_loop() {
         StoreKeys::bind("lib-cloudkit-home-reuse".to_string()),
         test_key_custody(),
         test_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         Arc::new(SystemClock),
         Some(Arc::new(TestCloudKitOps::new())),
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
-        crate::storage::BlobChunking::DEFAULT,
+        coven_storage::BlobChunking::DEFAULT,
     );
 
     handle
@@ -1075,12 +1075,12 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
                 key_service.clone(),
                 custody.clone(),
                 identity_custody.clone(),
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 Some(ops.clone()),
                 None,
                 StoreOpenGuard::acquire_for_test(&store_dir),
-                crate::storage::BlobChunking::DEFAULT,
+                coven_storage::BlobChunking::DEFAULT,
             );
             writer
                 .connect_sync_with_cloudkit(ops.clone())
@@ -1102,10 +1102,10 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
                 key_service,
                 custody,
                 identity_custody,
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 Some(ops),
-                crate::storage::BlobChunking::DEFAULT,
+                coven_storage::BlobChunking::DEFAULT,
             );
 
             let read = reader
@@ -1212,12 +1212,12 @@ async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back()
                 store_keys,
                 custody,
                 identity_custody,
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 Arc::new(SystemClock),
                 None,
                 None,
                 StoreOpenGuard::acquire_for_test(&store_dir),
-                crate::storage::BlobChunking::DEFAULT,
+                coven_storage::BlobChunking::DEFAULT,
             );
 
             handle
@@ -1341,12 +1341,12 @@ fn test_handle_with_real_identity(
         store_keys,
         test_key_custody(),
         identity_custody,
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         Arc::new(SystemClock),
         None,
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
-        crate::storage::BlobChunking::DEFAULT,
+        coven_storage::BlobChunking::DEFAULT,
     )
 }
 
@@ -1526,10 +1526,10 @@ async fn open_app_data_round_trips_through_the_read_handle() {
         store_keys,
         key_custody,
         test_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         Arc::new(SystemClock),
         None,
-        crate::storage::BlobChunking::DEFAULT,
+        coven_storage::BlobChunking::DEFAULT,
     );
 
     assert_eq!(
@@ -1893,12 +1893,12 @@ async fn reconnect_sync_stops_the_previous_loop() {
                     StoreKeys::bind("lib-reconnect-loop".to_string()),
                     test_key_custody(),
                     test_identity_custody(),
-                    crate::oauth::OAuthClients::empty(),
+                    coven_storage::oauth::OAuthClients::empty(),
                     Arc::new(SystemClock),
                     None,
                     None,
                     StoreOpenGuard::acquire_for_test(&store_dir),
-                    crate::storage::BlobChunking::DEFAULT,
+                    coven_storage::BlobChunking::DEFAULT,
                 );
 
                 let home = Arc::new(InMemoryCloudHome::new());
@@ -1956,12 +1956,12 @@ async fn stopped_installed_loop_blocks_blob_transitions() {
                     StoreKeys::bind("lib-stopped-loop-readiness".to_string()),
                     test_key_custody(),
                     test_identity_custody(),
-                    crate::oauth::OAuthClients::empty(),
+                    coven_storage::oauth::OAuthClients::empty(),
                     Arc::new(SystemClock),
                     None,
                     None,
                     StoreOpenGuard::acquire_for_test(&store_dir),
-                    crate::storage::BlobChunking::DEFAULT,
+                    coven_storage::BlobChunking::DEFAULT,
                 );
 
                 handle
@@ -2030,12 +2030,12 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
                     StoreKeys::bind("lib-test".to_string()),
                     test_key_custody(),
                     test_identity_custody(),
-                    crate::oauth::OAuthClients::empty(),
+                    coven_storage::oauth::OAuthClients::empty(),
                     Arc::new(SystemClock),
                     None,
                     None,
                     StoreOpenGuard::acquire_for_test(&store_dir),
-                    crate::storage::BlobChunking::DEFAULT,
+                    coven_storage::BlobChunking::DEFAULT,
                 );
 
                 let home = Arc::new(InMemoryCloudHome::new());
@@ -2148,12 +2148,12 @@ fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
         StoreKeys::bind(store_id.to_string()),
         test_key_custody(),
         test_identity_custody(),
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         Arc::new(SystemClock),
         None,
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
-        crate::storage::BlobChunking::DEFAULT,
+        coven_storage::BlobChunking::DEFAULT,
     );
     (tmp, handle)
 }

@@ -139,7 +139,7 @@ impl StoreSync {
 
     pub(super) async fn replace_connection(
         &self,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<(), SyncError> {
         let config = self.config();
         let storage = if config.cloud_home.provider.is_some() {
@@ -173,7 +173,7 @@ impl StoreSync {
 
     pub(crate) async fn connect_with_cloudkit(
         &self,
-        cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
+        cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_connection(Some(cloudkit_ops)).await?;
@@ -188,7 +188,7 @@ impl StoreSync {
     pub(super) async fn replace_with_test_home(
         &self,
         home: Arc<dyn CloudHome>,
-        cipher: crate::storage::CloudCipher,
+        cipher: coven_storage::CloudCipher,
         driver: SyncDriver,
     ) -> Result<(), SyncError> {
         let config = self.config();
@@ -225,7 +225,7 @@ impl StoreSync {
     pub(crate) async fn connect_with_test_home(
         &self,
         home: Arc<dyn CloudHome>,
-        cipher: crate::storage::CloudCipher,
+        cipher: coven_storage::CloudCipher,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_with_test_home(home, cipher, SyncDriver::Loop)
@@ -238,7 +238,7 @@ impl StoreSync {
     pub(crate) async fn connect_with_test_home_caller_driven(
         &self,
         home: Arc<dyn CloudHome>,
-        cipher: crate::storage::CloudCipher,
+        cipher: coven_storage::CloudCipher,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_with_test_home(home, cipher, SyncDriver::Caller)

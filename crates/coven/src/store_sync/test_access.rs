@@ -29,7 +29,7 @@ impl StoreSync {
         &self,
         store_id: &str,
         signer: coven_keys::keys::UserKeypair,
-        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
         crate::sync::test_helpers::TestStore::create_with_database(
             self.database.clone(),

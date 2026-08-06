@@ -7,9 +7,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::join_code::InviteCode;
-use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{
     InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
 };
@@ -24,6 +21,9 @@ use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
 use coven_protocol::synced_schema::SyncedTable;
+use coven_storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use coven_storage::join_code::InviteCode;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -184,13 +184,13 @@ impl<'a> BootstrapCleanup<'a> {
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &StoreKeys,
-    oauth_clients: &crate::oauth::OAuthClients,
-    oauth_tokens: Option<crate::oauth::OAuthTokens>,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    oauth_clients: &coven_storage::oauth::OAuthClients,
+    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
 ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
-    use crate::storage::cloud::*;
+    use coven_storage::cloud::*;
 
     #[cfg(not(feature = "oauth-providers"))]
     let _ = (&lib_ks, oauth_clients, &oauth_tokens, &clock);
@@ -330,16 +330,16 @@ pub struct DeviceJoinClient {
     store_keys: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
-    oauth_clients: crate::oauth::OAuthClients,
-    oauth_tokens: Option<crate::oauth::OAuthTokens>,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    oauth_clients: coven_storage::oauth::OAuthClients,
+    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
     #[cfg(test)]
     test_home: Option<Arc<dyn CloudHome>>,
 }
 
 struct DeviceJoinStorage {
-    storage: Arc<dyn crate::storage::SyncStorage>,
+    storage: Arc<dyn coven_storage::SyncStorage>,
     keyring: MasterKeyring,
 }
 
@@ -354,9 +354,9 @@ impl DeviceJoinClient {
         custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
         key_custody: coven_keys::custody::KeyCustody,
         identity_custody: IdentityCustody,
-        oauth_clients: crate::oauth::OAuthClients,
-        oauth_tokens: Option<crate::oauth::OAuthTokens>,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        oauth_clients: coven_storage::oauth::OAuthClients,
+        oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, BootstrapError> {
         let code = crate::joining::decode(invite_code)
@@ -364,7 +364,7 @@ impl DeviceJoinClient {
         let member_pubkey = crate::joining::decode_join_request(join_request_code)
             .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?
             .public_key;
-        crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
+        coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
             &code.join_info,
             custom_s3_exact_slots,
         )
@@ -406,7 +406,7 @@ impl DeviceJoinClient {
     ) -> Result<crate::DeviceProviderAccessRequest, BootstrapError> {
         self.require_offer(&offer)?;
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage: Arc<dyn crate::storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let observation = crate::sync::store::PendingDeviceJoinObservation::open(
@@ -426,7 +426,7 @@ impl DeviceJoinClient {
         &self,
         abandonment: crate::DeviceJoinAbandonment,
     ) -> Result<crate::DeviceJoinAbandonment, BootstrapError> {
-        let storage: Arc<dyn crate::storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
@@ -457,7 +457,7 @@ impl DeviceJoinClient {
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::JoinerJoinTerminal, BootstrapError> {
         let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
-        let storage: Arc<dyn crate::storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let observation = crate::sync::store::PendingDeviceJoinObservation::open(
@@ -484,7 +484,7 @@ impl DeviceJoinClient {
                 return Err(crate::DeviceJoinError::JournalConflict.into());
             }
             _ => {
-                let storage: Arc<dyn crate::storage::SyncStorage> =
+                let storage: Arc<dyn coven_storage::SyncStorage> =
                     Arc::new(self.transport_storage().await?);
                 let mut observation = crate::sync::store::PendingDeviceJoinObservation::open(
                     &pending,
@@ -526,7 +526,7 @@ impl DeviceJoinClient {
         let offer = &approval.request.offer;
         self.require_offer(offer)?;
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage: Arc<dyn crate::storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let observation = crate::sync::store::PendingDeviceJoinObservation::open(

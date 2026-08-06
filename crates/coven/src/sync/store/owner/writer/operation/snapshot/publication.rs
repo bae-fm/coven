@@ -1,8 +1,8 @@
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta, SnapshotMeta,
 };
+use coven_storage::{SyncStorage, VerifiedObjectWrites};
 
 use super::{remove_snapshot_spool, SnapshotError};
 
@@ -82,7 +82,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                         blob,
                         &authority,
                         spool_path,
-                        &crate::storage::cloud::no_progress(),
+                        &coven_storage::cloud::no_progress(),
                     )
                     .await
                     .map_err(SnapshotError::Bucket)?;

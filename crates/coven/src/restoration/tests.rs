@@ -18,14 +18,6 @@ use crate::restoration::{
     decode_restore_code, encode_restore_code, OwnerRecoveryAuthority, RestoreAuthority,
     RestoreCode, RestoreCodeError,
 };
-use crate::storage::cloud::cloudkit::{
-    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
-    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
-};
-use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
-use crate::storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
-use crate::storage::SyncStorage;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
     test_synced_tables, test_synced_tables_with_blob, TestDevice,
@@ -40,6 +32,14 @@ use coven_keys::keys::{StoreKeys, UserKeypair};
 use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::membership::MembershipFloor;
 use coven_protocol::synced_schema::BlobDecl;
+use coven_storage::cloud::cloudkit::{
+    CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
+    CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
+};
+use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
+use coven_storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
+use coven_storage::SyncStorage;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 struct RestoreCloudKitOps {
     records: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
@@ -424,7 +424,7 @@ fn restore_code_with_sid(sid: &str) -> String {
     let root = store_root_ref("restore test store protocol root");
     let owner = coven_keys::keys::UserKeypair::generate();
     let code = RestoreCode {
-        v: crate::restore_code::RESTORE_CODE_VERSION,
+        v: coven_storage::restore_code::RESTORE_CODE_VERSION,
         sid: sid.to_string(),
         ek: Some(serialized_keyring(0xaa)),
         name: "Evil".to_string(),
@@ -460,7 +460,7 @@ async fn restore_result_for(
         Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         None,
         None,
         &coven_foundation::store_dir::StoreLayout::new(app_dir),
@@ -479,7 +479,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
     let root = store_root_ref("restore root");
     let owner = coven_keys::keys::UserKeypair::generate();
     let code = encode_restore_code(&RestoreCode {
-        v: crate::restore_code::RESTORE_CODE_VERSION,
+        v: coven_storage::restore_code::RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
         ek: Some(serialized_keyring(0xaa)),
         name: "Blob Store".to_string(),
@@ -505,7 +505,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         None,
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         None,
         None,
         &coven_foundation::store_dir::StoreLayout::new(app.path()),
@@ -691,7 +691,7 @@ async fn restore_with_cancel(
         Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
-        crate::oauth::OAuthClients::empty(),
+        coven_storage::oauth::OAuthClients::empty(),
         None,
         None,
         &coven_foundation::store_dir::StoreLayout::new(app_dir),
@@ -822,7 +822,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     let store_dir = layout.store_dir(store_id);
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
-        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+        coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
     );
     let owner_keypair = UserKeypair::generate();
     let master_key = coven_keys::encryption::MasterKeyring::from(
@@ -889,7 +889,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         crate::restoration::RestoreSource {
             join_info: CloudHomeJoinInfo::CloudKit,
             custom_s3_exact_slots: None,
-            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: Some(cloudkit_ops.clone()),
         },
@@ -972,7 +972,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         crate::restoration::RestoreSource {
             join_info: CloudHomeJoinInfo::CloudKit,
             custom_s3_exact_slots: None,
-            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: Some(cloudkit_ops),
         },
@@ -1032,7 +1032,7 @@ impl OwnerRecoveryRestoreFixture {
             None,
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
-            crate::oauth::OAuthClients::empty(),
+            coven_storage::oauth::OAuthClients::empty(),
             None,
             Some(cloudkit_ops),
             &layout,
@@ -1084,7 +1084,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let store_id = "owner-recovery-restore";
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
-        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+        coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
     );
     let owner = UserKeypair::generate();
     let owner_storage = Arc::new(
@@ -1127,7 +1127,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         .expect("publish recovery snapshot acknowledgement");
     let authority = owner_device.published_owner_recovery_authority(&owner);
     let code = encode_restore_code(&RestoreCode {
-        v: crate::restore_code::RESTORE_CODE_VERSION,
+        v: coven_storage::restore_code::RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
         ek: None,
         name: "Recovered Store".to_string(),
@@ -1159,7 +1159,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         let store_id = "restore-anti-clobber-test";
         let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
         let cloud =
-            crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone());
+            coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone());
         let cipher = CloudCipher::Plaintext;
         let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
         let tables = test_synced_tables();
@@ -1167,7 +1167,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 
         let owner_storage = Arc::new(
             CloudSyncStorage::new(
-                Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+                Arc::new(cloud.clone()) as Arc<dyn coven_storage::cloud::CloudHome>,
                 cipher.clone(),
                 blob_paths,
                 store_id.to_string(),
@@ -1230,7 +1230,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .expect("export exact activated continuation");
         let expected_latest_snapshot = continuation.latest_snapshot.clone();
         let restore_code = encode_restore_code(&RestoreCode {
-            v: crate::restore_code::RESTORE_CODE_VERSION,
+            v: coven_storage::restore_code::RESTORE_CODE_VERSION,
             sid: store_id.to_string(),
             ek: None,
             name: "Restored Store".to_string(),
@@ -1262,7 +1262,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
                 None,
                 coven_keys::custody::KeyCustody::Keyring,
                 coven_keys::identity_custody::IdentityCustody::Keyring,
-                crate::oauth::OAuthClients::empty(),
+                coven_storage::oauth::OAuthClients::empty(),
                 None,
                 Some(restore_cloudkit),
                 &layout,
@@ -1319,7 +1319,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 
         // B's first real sync cycle, with no local changes of its own.
         let joiner_storage = CloudSyncStorage::new(
-            Arc::new(crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops)),
+            Arc::new(coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops)),
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
@@ -1482,7 +1482,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let store_id = "restore-blob-backfill-test";
         let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
         let cloud = Arc::new(
-            crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+            coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
         );
         let master_key =
             coven_keys::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
@@ -1650,7 +1650,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             crate::restoration::RestoreSource {
                 join_info: CloudHomeJoinInfo::CloudKit,
                 custom_s3_exact_slots: None,
-                oauth_clients: crate::oauth::OAuthClients::empty(),
+                oauth_clients: coven_storage::oauth::OAuthClients::empty(),
                 oauth_tokens: None,
                 cloudkit_ops: Some(cloudkit_ops),
             },

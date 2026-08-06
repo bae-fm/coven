@@ -1,6 +1,6 @@
-use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::CircleOperationError;
 use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext};
+use coven_storage::SyncStorage;
 
 pub(crate) async fn read_exact_circle_object(
     storage: &dyn SyncStorage,

@@ -1,4 +1,3 @@
-use crate::storage::SyncStorage;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
@@ -7,6 +6,7 @@ use coven_protocol::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
     CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
 };
+use coven_storage::SyncStorage;
 use tracing::warn;
 
 use super::bootstrap_blobs::CircleBootstrapBlobVerification;

@@ -1,7 +1,7 @@
-use crate::storage::cloud::CloudHomeError;
 use coven_keys::keys::KeyError;
 use coven_protocol::membership::MembershipError;
 use coven_protocol::objects::StorageError;
+use coven_storage::cloud::CloudHomeError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {

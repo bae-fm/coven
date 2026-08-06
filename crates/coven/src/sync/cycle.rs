@@ -19,10 +19,10 @@ use coven_protocol::blob::DrainOutcome;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
 use super::store::{AuthorizedWriterOperation, Store};
-use crate::storage::{
+use coven_protocol::objects::RotationPending;
+use coven_storage::{
     BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, SyncStorage,
 };
-use coven_protocol::objects::RotationPending;
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
@@ -113,12 +113,12 @@ fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> 
             .downcast_ref::<coven_protocol::objects::StorageError>()
             .is_some_and(coven_protocol::objects::StorageError::is_transport)
             || source
-                .downcast_ref::<crate::storage::cloud::CloudHomeError>()
+                .downcast_ref::<coven_storage::cloud::CloudHomeError>()
                 .is_some_and(|error| {
                     matches!(
                         error,
-                        crate::storage::cloud::CloudHomeError::Transport(_)
-                            | crate::storage::cloud::CloudHomeError::Io(_)
+                        coven_storage::cloud::CloudHomeError::Transport(_)
+                            | coven_storage::cloud::CloudHomeError::Io(_)
                     )
                 })
         {
@@ -545,7 +545,7 @@ impl PreparedSyncComponents {
 
     pub(crate) async fn initialize(self) -> Result<SyncComponents, InitSyncError> {
         let storage: std::sync::Arc<dyn SyncCycleStorage> = self.storage;
-        let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
+        let store_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = storage.clone();
         let initialized = match self.initialization {
             StoreInitialization::CreateStore => {
                 Store::create(
@@ -875,8 +875,8 @@ impl SyncComponents {
 
     fn current_encryption(&self) -> Option<coven_keys::encryption::EncryptionService> {
         match self.storage.snapshot() {
-            crate::storage::CloudCipher::Encrypted(encryption) => Some(encryption),
-            crate::storage::CloudCipher::Plaintext => None,
+            coven_storage::CloudCipher::Encrypted(encryption) => Some(encryption),
+            coven_storage::CloudCipher::Plaintext => None,
         }
     }
 
@@ -903,7 +903,7 @@ impl SyncComponents {
         invitee_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<coven_storage::join_code::InviteCode, super::store::MembershipOpsError> {
         let encryption = self
             .current_encryption()
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
@@ -1144,9 +1144,9 @@ impl SyncComponents {
     #[cfg(test)]
     pub(crate) fn uses_storage_for_test(
         &self,
-        expected: &std::sync::Arc<dyn crate::storage::SyncStorage>,
+        expected: &std::sync::Arc<dyn coven_storage::SyncStorage>,
     ) -> bool {
-        let actual: std::sync::Arc<dyn crate::storage::SyncStorage> = self.storage.clone();
+        let actual: std::sync::Arc<dyn coven_storage::SyncStorage> = self.storage.clone();
         std::sync::Arc::ptr_eq(&actual, expected)
     }
 
@@ -1165,20 +1165,7 @@ impl SyncComponents {
         let encryption = self
             .current_encryption()
             .ok_or_else(|| "session is not encrypted".to_string())?;
-        let (fingerprint, header, chunks) =
-            crate::storage::split_sealed_blob(stored).map_err(|error| error.to_string())?;
-        let plaintext = encryption
-            .blob_opener(
-                header,
-                &coven_keys::encryption::NoncePolicy::DerivedFromContext {
-                    context: aad_context.to_vec(),
-                },
-                aad_context,
-            )
-            .map_err(|error| error.to_string())?
-            .open_chunks(0..header.chunk_count(), chunks)
-            .map_err(|error| error.to_string())?;
-        Ok((fingerprint, plaintext))
+        coven_storage::open_sealed_blob(stored, &encryption, aad_context)
     }
 
     #[cfg(test)]

@@ -1,5 +1,4 @@
 use super::registration::StoreRegistrationError;
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use coven_database::StoreDatabase;
 use coven_protocol::objects::ProtocolObjectDomain;
 use coven_protocol::objects::StorageError;
@@ -7,6 +6,7 @@ use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{
     ack_slot_prefix, registration_semantic_prefix, StoreDeviceRegistration,
 };
+use coven_storage::{SyncStorage, VerifiedObjectWrites};
 
 pub(super) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,

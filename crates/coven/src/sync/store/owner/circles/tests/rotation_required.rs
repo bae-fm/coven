@@ -2378,7 +2378,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         .enqueue_blob_delete_for_test(&stored, "2026-07-23T00:11:00Z")
         .await
         .expect("enqueue the blob deletion");
-    let cipher = std::sync::RwLock::new(crate::storage::CloudCipher::Encrypted(
+    let cipher = std::sync::RwLock::new(coven_storage::CloudCipher::Encrypted(
         EncryptionService::from_key([42; 32]),
     ));
     let loaded_store = fixture
@@ -2394,7 +2394,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         writer
             .drain_tombstones(
                 &cipher,
-                &crate::storage::PendingRotation::default(),
+                &coven_storage::PendingRotation::default(),
                 &coven_foundation::clock::FixedClock(deleted_at),
             )
             .await
@@ -2405,7 +2405,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     let tombstone_key = format!(
         "blob_tombstones/{}{}",
         coven_protocol::remote_object::remote_object_id(stored.object()),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])).suffix(),
+        coven_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])).suffix(),
     );
     assert!(
         fixture.home.read(&tombstone_key).await.is_ok(),

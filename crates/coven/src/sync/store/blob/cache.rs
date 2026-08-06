@@ -95,12 +95,12 @@
 //! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
-use crate::storage::SyncStorage;
 use coven_database::DbError;
 use coven_foundation::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };
 use coven_protocol::objects::StorageError;
+use coven_storage::SyncStorage;
 
 /// Closed cloud access for one exact Remote blob. Store code resolves the
 /// authority; the cache only reads bytes with the supplied protection.
@@ -134,7 +134,7 @@ impl<'a> RemoteBlobAccess<'a> {
     pub(super) async fn open_range_reader(
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<crate::storage::BlobRangeReader, BlobCacheError> {
+    ) -> Result<coven_storage::BlobRangeReader, BlobCacheError> {
         self.storage
             .open_blob_range_reader(stored, self.protection.clone())
             .await
@@ -377,7 +377,7 @@ pub(super) enum BlobStreamSource {
     Local(coven_foundation::local_file::OpenFile),
     /// A Remote blob with no cache copy: ranges are served from the cloud object
     /// a chunk at a time.
-    Remote(crate::storage::BlobRangeReader),
+    Remote(coven_storage::BlobRangeReader),
 }
 
 impl BlobStream {

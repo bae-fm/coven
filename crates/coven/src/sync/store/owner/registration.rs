@@ -35,9 +35,9 @@ pub enum StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SyncStorage;
     use crate::sync::test_helpers::{open_test_db, TestStore};
     use coven_protocol::store_commit::StoreBatchCommitRef;
+    use coven_storage::SyncStorage;
 
     async fn initialized() -> (std::sync::Arc<TestStore>, Database, UserKeypair) {
         let signer = UserKeypair::generate();

@@ -70,10 +70,10 @@ impl CovenReadHandle {
         key_service: StoreKeys,
         key_custody: Arc<dyn MasterKeyCustody>,
         identity_custody: Arc<dyn DeviceIdentityCustody>,
-        oauth_clients: crate::oauth::OAuthClients,
+        oauth_clients: coven_storage::oauth::OAuthClients,
         clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: crate::storage::BlobChunking,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
+        blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
         let StoreFoundation {
             database,

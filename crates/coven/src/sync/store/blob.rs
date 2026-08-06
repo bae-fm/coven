@@ -2,11 +2,11 @@
 
 use futures_util::stream::TryStreamExt;
 
-use crate::storage::SyncStorage;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
 use coven_protocol::store_commit::StoreRootRef;
+use coven_storage::SyncStorage;
 
 use coven_database::StoreDatabase;
 

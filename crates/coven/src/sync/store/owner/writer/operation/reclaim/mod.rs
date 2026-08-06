@@ -3,7 +3,6 @@
 use coven_database::StoreReclaimJournalError;
 use std::sync::Arc;
 
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use crate::sync::store::owner::history::{
     CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
 };
@@ -19,6 +18,7 @@ use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
     StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
 };
+use coven_storage::{SyncStorage, VerifiedObjectWrites};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StoreReclaimResult {

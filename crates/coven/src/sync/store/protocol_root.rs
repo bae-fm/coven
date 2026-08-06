@@ -1,11 +1,11 @@
 //! Durable creation and exact opening of the Store protocol root.
 
-use crate::storage::SyncStorage;
 use coven_protocol::objects::ProtocolObjectDomain;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{
     ObjectHash, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
 };
+use coven_storage::SyncStorage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreProtocolRootError {

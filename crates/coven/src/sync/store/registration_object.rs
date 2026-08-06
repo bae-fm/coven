@@ -1,6 +1,6 @@
-use crate::storage::SyncStorage;
 use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain, StoreObjectError};
 use coven_protocol::store_commit::StoreDeviceRegistration;
+use coven_storage::SyncStorage;
 
 use super::StoreRegistrationError;
 

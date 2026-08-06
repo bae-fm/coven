@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use crate::storage::SyncStorage;
 use coven_database::{AudienceMove, AudiencePartition};
 use coven_database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
@@ -10,6 +9,7 @@ use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::locator::RemoteAudience;
 use coven_protocol::blob::{Provenance, RowBlobAuthority};
 use coven_protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
+use coven_storage::SyncStorage;
 
 #[doc(hidden)]
 pub(crate) struct HostWriteBlobStaging {

@@ -1,10 +1,6 @@
 use std::sync::{Arc, RwLock};
 
 use super::*;
-use crate::storage::cloud::setup::StorageSetupError;
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::store_membership::StoreMembership;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::{CloudProvider, HomeStorage};
@@ -14,6 +10,10 @@ use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{
     test_keyring, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys,
 };
+use coven_storage::cloud::setup::StorageSetupError;
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 struct NoImmutableCopyHome;
 
@@ -27,7 +27,7 @@ impl CloudHome for NoImmutableCopyHome {
         &'a self,
         _key: &str,
         _total_len: u64,
-    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
+    ) -> Result<coven_storage::cloud::BoxPartSink<'a>, CloudHomeError> {
         panic!("incapable home must be rejected before I/O")
     }
 
@@ -62,8 +62,8 @@ impl CloudHome for NoImmutableCopyHome {
 
     async fn set_access(
         &self,
-        _desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
+        _desired: coven_storage::cloud::CloudAccessState,
+    ) -> Result<coven_storage::cloud::CloudAccessOutcome, CloudHomeError> {
         panic!("incapable home must be rejected before I/O")
     }
 }
@@ -124,9 +124,9 @@ fn store_cloud_storage(
 ) -> StoreCloudStorage {
     StoreCloudStorage::new(
         security.clone(),
-        crate::storage::cloud::CloudHomeFactory::new(
+        coven_storage::cloud::CloudHomeFactory::new(
             keys.clone(),
-            crate::oauth::OAuthClients::empty(),
+            coven_storage::oauth::OAuthClients::empty(),
         ),
         clock,
         None,

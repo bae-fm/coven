@@ -670,8 +670,10 @@ impl Store {
         encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
-    {
+    ) -> Result<
+        coven_storage::join_code::InviteCode,
+        crate::sync::store::membership::MembershipOpsError,
+    > {
         let mut authorization = self.authorize_writer().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
                 error.to_string(),
@@ -695,8 +697,8 @@ impl Store {
         public_key_hex: &str,
         encryption: &coven_keys::encryption::EncryptionService,
         master_keys: &dyn coven_keys::keys::MasterKeyCustody,
-        cipher: &dyn crate::storage::CloudCipherAccess,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        cipher: &dyn coven_storage::CloudCipherAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
         let mut authorization = self.authorize_writer().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(

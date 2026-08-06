@@ -1,8 +1,8 @@
 use super::journal::{database_error, provider_error};
 use super::*;
-use crate::storage::VerifiedObjectWrites;
 use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
+use coven_storage::VerifiedObjectWrites;
 
 mod provider_administrator;
 

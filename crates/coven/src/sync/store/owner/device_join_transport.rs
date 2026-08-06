@@ -22,7 +22,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::SyncStorage;
 use crate::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
     DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinOffer,
@@ -35,6 +34,7 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash, STORE_PROTOCOL_VERSION};
+use coven_storage::SyncStorage;
 
 /// The prefix every transport slot's logical key starts with.
 const TRANSPORT_ROOT: &str = "store-v1/device-join-transport";

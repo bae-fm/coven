@@ -16,37 +16,28 @@ coven-database = { workspace = true }
 coven-foundation = { workspace = true }
 coven-keys = { workspace = true }
 coven-protocol = { workspace = true }
+coven-storage = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_urlencoded = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
-base64 = { workspace = true }
 sha2 = { workspace = true }
-rand = { workspace = true }
-uuid = { workspace = true }
-url = { workspace = true }
-bytes = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 rusqlite = { workspace = true }
-axum = { workspace = true }
-open = { workspace = true, optional = true }
-reqwest = { workspace = true }
-aws-config = { workspace = true }
-aws-sdk-s3 = { workspace = true }
-aws-sdk-sts = { workspace = true }
-aws-credential-types = { workspace = true }
-aws-smithy-http-client = { workspace = true }
 
 [dev-dependencies]
+# The public cloud-home API an integration test drives takes `Bytes` payloads.
+bytes = { workspace = true }
 keyring-core = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+# The authorize URL an OAuth integration test parses.
+url = { workspace = true }
 # Signing keys appear only in this crate's test fixtures now; key material
 # itself belongs to coven-keys.
 ed25519-dalek = { workspace = true }
@@ -57,6 +48,7 @@ coven-database = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-keys = { workspace = true, features = ["test-utils"] }
 coven-protocol = { workspace = true, features = ["test-utils"] }
+coven-storage = { workspace = true, features = ["test-utils"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
 # The Apple keyring integration test asserts against the real store's own
@@ -71,8 +63,9 @@ test-utils = [
     "coven-foundation/test-utils",
     "coven-keys/test-utils",
     "coven-protocol/test-utils",
+    "coven-storage/test-utils",
 ]
-oauth-providers = ["dep:open", "coven-keys/oauth-providers"]
+oauth-providers = ["coven-keys/oauth-providers", "coven-storage/oauth-providers"]
 
 [lints]
 workspace = true

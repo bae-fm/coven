@@ -12,7 +12,6 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
-use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
     plaintext_cipher, pubkey_hex, InterceptedStorage, ProviderObjectExistsInterception,
@@ -29,6 +28,7 @@ use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::BlobDecl;
+use coven_storage::{CloudCipher, PendingRotation, SyncStorage};
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -191,8 +191,8 @@ struct CancelTombstoneOnExists {
 /// clock it reads deletion times from vary between tests.
 async fn drain_at(
     store_database: &StoreDatabase,
-    storage: &dyn crate::storage::SyncStorage,
-    cipher: &dyn crate::storage::CloudCipherAccess,
+    storage: &dyn coven_storage::SyncStorage,
+    cipher: &dyn coven_storage::CloudCipherAccess,
     keypair: &UserKeypair,
     clock: &dyn coven_foundation::clock::Clock,
 ) -> Result<usize, String> {

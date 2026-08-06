@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::VerifiedObjectWrites;
+use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
@@ -438,7 +438,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                 &blob,
                                 &authority,
                                 path,
-                                &crate::storage::cloud::no_progress(),
+                                &coven_storage::cloud::no_progress(),
                             )
                             .await
                             .map_err(|source| StoreError::BlobStorage {

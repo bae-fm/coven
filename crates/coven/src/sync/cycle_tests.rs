@@ -13,9 +13,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
-use crate::storage::SyncStorage;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::test_helpers::*;
 use coven_database::Database;
@@ -27,6 +24,9 @@ use coven_keys::keys::UserKeypair;
 use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::store_commit::SnapshotMeta;
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
+use coven_storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
+use coven_storage::SyncStorage;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 const T0: &str = "2024-01-01T00:00:00Z";
 
@@ -868,7 +868,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .bind_store_device(owner_db, owner)
             .await
             .expect("bind owner Store");
-        let owner_binding = crate::storage::SyncStorage::provider_binding(&*storage.storage())
+        let owner_binding = coven_storage::SyncStorage::provider_binding(&*storage.storage())
             .await
             .expect("resolve owner provider binding");
         let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
@@ -885,13 +885,13 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
                     },
                 },
             }));
-        let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
-            crate::storage::CloudSyncStorage::new(
+        let peer_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = std::sync::Arc::new(
+            coven_storage::CloudSyncStorage::new(
                 peer_home.clone(),
-                crate::storage::CloudCipher::Encrypted(
+                coven_storage::CloudCipher::Encrypted(
                     coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 ),
-                crate::storage::BlobPathScheme::Hashed,
+                coven_storage::BlobPathScheme::Hashed,
                 "cross-principal-revocation-store",
                 member.clone(),
             )
@@ -5760,10 +5760,10 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     let db = open();
     let store_database = coven_database::StoreDatabase::new(&db);
     let (_blob_temp, store_dir) = temp_store_dir();
-    let storage = crate::storage::CloudSyncStorage::new(
+    let storage = coven_storage::CloudSyncStorage::new(
         Arc::new(home.clone()),
-        crate::storage::CloudCipher::Encrypted(encryption.clone()),
-        crate::storage::BlobPathScheme::Hashed,
+        coven_storage::CloudCipher::Encrypted(encryption.clone()),
+        coven_storage::BlobPathScheme::Hashed,
         "pending-rotation-reopen",
         signer.clone(),
     )
@@ -5797,10 +5797,10 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     drop(db);
 
     let reopened = open();
-    let storage = crate::storage::CloudSyncStorage::new(
+    let storage = coven_storage::CloudSyncStorage::new(
         Arc::new(home),
-        crate::storage::CloudCipher::Encrypted(encryption),
-        crate::storage::BlobPathScheme::Hashed,
+        coven_storage::CloudCipher::Encrypted(encryption),
+        coven_storage::BlobPathScheme::Hashed,
         "pending-rotation-reopen",
         signer.clone(),
     )

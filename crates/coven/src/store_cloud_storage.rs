@@ -1,20 +1,20 @@
 use std::sync::Arc;
 
-use crate::storage::cloud::setup::StorageSetupError;
-#[cfg(any(test, feature = "test-utils"))]
-use crate::storage::cloud::CloudHome;
-use crate::storage::cloud::CloudHomeFactory;
-use crate::storage::{BlobChunking, CloudCipher, CloudSyncStorage};
 use crate::store_security::StoreSecurity;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
+use coven_storage::cloud::setup::StorageSetupError;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_storage::cloud::CloudHome;
+use coven_storage::cloud::CloudHomeFactory;
+use coven_storage::{BlobChunking, CloudCipher, CloudSyncStorage};
 
 #[derive(Clone)]
 pub(crate) struct StoreCloudStorage {
     security: StoreSecurity,
     cloud_homes: CloudHomeFactory,
     clock: ClockRef,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     blob_chunking: BlobChunking,
 }
 
@@ -23,7 +23,7 @@ impl StoreCloudStorage {
         security: StoreSecurity,
         cloud_homes: CloudHomeFactory,
         clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         blob_chunking: BlobChunking,
     ) -> Self {
         Self {
@@ -39,7 +39,7 @@ impl StoreCloudStorage {
         &self,
         config: &Config,
         cipher: Option<CloudCipher>,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<CloudSyncStorage, StorageSetupError> {
         self.admit(config, cloudkit_ops)?.open(cipher).await
     }
@@ -47,9 +47,9 @@ impl StoreCloudStorage {
     pub(crate) fn admit<'storage, 'config>(
         &'storage self,
         config: &'config Config,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<AdmittedStoreCloudConfig<'storage, 'config>, StorageSetupError> {
-        crate::storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
+        coven_storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
         Ok(AdmittedStoreCloudConfig {
             storage: self,
             config,
@@ -63,7 +63,7 @@ impl StoreCloudStorage {
         config: &'config Config,
         home: Arc<dyn CloudHome>,
     ) -> Result<AdmittedStoreCloudHome<'storage, 'config>, StorageSetupError> {
-        crate::storage::cloud::setup::require_exact_slot_capabilities_home(
+        coven_storage::cloud::setup::require_exact_slot_capabilities_home(
             home.clone(),
             config.cloud_home.provider.clone(),
         )?;
@@ -78,7 +78,7 @@ impl StoreCloudStorage {
         &self,
         config: &Config,
         cipher: Option<CloudCipher>,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Result<CloudSyncStorage, StorageSetupError> {
         let home = self
             .cloud_homes
@@ -107,7 +107,7 @@ impl StoreCloudStorage {
 pub(crate) struct AdmittedStoreCloudConfig<'storage, 'config> {
     storage: &'storage StoreCloudStorage,
     config: &'config Config,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
 }
 
 impl AdmittedStoreCloudConfig<'_, '_> {

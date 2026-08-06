@@ -12,13 +12,9 @@ pub(crate) mod blob;
 pub(crate) mod circles;
 pub(crate) mod coven;
 mod handle;
-pub(crate) mod join_code;
 pub(crate) mod joining;
-pub(crate) mod oauth;
 mod read_handle;
 pub(crate) mod restoration;
-pub(crate) mod restore_code;
-pub(crate) mod storage;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
 pub(crate) mod store_cloud_storage;
@@ -98,6 +94,25 @@ pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
     ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
+#[cfg(feature = "oauth-providers")]
+pub use coven_storage::fetch_account_email;
+#[cfg(feature = "oauth-providers")]
+pub use coven_storage::oauth::OAuthError;
+#[cfg(feature = "oauth-providers")]
+pub use coven_storage::oauth::{AuthorizeRequest, OAuthClientCreds, OAuthClientCredsError};
+pub use coven_storage::oauth::{OAuthClients, OAuthTokens};
+#[cfg(feature = "test-utils")]
+pub use coven_storage::CloudCipher;
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_storage::InMemoryCloudHome;
+pub use coven_storage::{
+    write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudKitAcceptedShareRecord,
+    CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
+    CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
+    CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
+    ExactSlotStorage, PartSink, S3CloudHome, UploadProgress,
+};
 pub use handle::CovenHandle;
 pub use joining::{
     abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
@@ -107,29 +122,10 @@ pub use joining::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
     DeviceJoinTransportOutcome,
 };
-#[cfg(any(test, feature = "oauth-providers"))]
-pub use oauth::OAuthError;
-#[cfg(feature = "oauth-providers")]
-pub use oauth::{AuthorizeRequest, OAuthClientCreds, OAuthClientCredsError};
-pub use oauth::{OAuthClients, OAuthTokens};
 pub use read_handle::CovenReadHandle;
 pub use restoration::{
     decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
     OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError, RestoreCodeInfo, RestoreSource,
-};
-#[cfg(feature = "oauth-providers")]
-pub use storage::fetch_account_email;
-#[cfg(feature = "test-utils")]
-pub use storage::CloudCipher;
-#[cfg(any(test, feature = "test-utils"))]
-pub use storage::InMemoryCloudHome;
-pub use storage::{
-    write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudKitAcceptedShareRecord,
-    CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
-    CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
-    CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    ExactSlotStorage, PartSink, S3CloudHome, UploadProgress,
 };
 pub use sync::{
     BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,

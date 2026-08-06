@@ -4,8 +4,6 @@ use super::verified_history::registration::{
     device_state_has_active_registration, device_state_has_pending_proposal,
     registration_attempt_error, RegistrationLoadError,
 };
-use crate::storage::run_blocking_object_verification;
-use crate::storage::SyncStorage;
 use crate::sync::store::StoreError;
 use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
 use coven_protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
@@ -32,6 +30,8 @@ use coven_protocol::store_commit::{
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreDeviceHeadRef,
     StoreSnapshotRef,
 };
+use coven_storage::run_blocking_object_verification;
+use coven_storage::SyncStorage;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod membership;

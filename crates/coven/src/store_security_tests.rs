@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::restore_code::decode_restore_code;
-use crate::storage::cloud::CloudHomeJoinInfo;
 use coven_foundation::config::{CloudProvider, HomeStorage};
 use coven_foundation::store_dir::StoreDir;
+use coven_storage::cloud::CloudHomeJoinInfo;
+use coven_storage::restore_code::decode_restore_code;
 
 fn membership_floor(author_pubkey: String) -> Vec<coven_protocol::membership::MembershipHeadRef> {
     let coord = coven_protocol::membership::MembershipCoord {

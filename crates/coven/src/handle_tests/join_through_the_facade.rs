@@ -75,7 +75,7 @@ impl FacadeFixture {
         handle
             .connect_sync_with_test_home(
                 home.clone(),
-                crate::storage::CloudCipher::Encrypted(encryption),
+                coven_storage::CloudCipher::Encrypted(encryption),
             )
             .await
             .expect("connect the owner's store to its home");

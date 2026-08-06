@@ -6,18 +6,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::storage::SyncStorage;
 use coven_database::Database;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use coven_protocol::store_commit::ObjectHash;
+use coven_storage::SyncStorage;
 
-pub(crate) use crate::storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
 pub(crate) use coven_database::synthetic_store::*;
 pub(crate) use coven_foundation::store_dir::temp_store_dir;
+pub(crate) use coven_storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
 
 #[cfg(test)]
 pub(crate) fn test_cache_locator_hash(label: &str) -> ObjectHash {
@@ -131,8 +131,8 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
 }
 
 pub(crate) struct TestStore {
-    home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
-    storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+    home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+    storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
     pub root: coven_protocol::store_commit::StoreRootRef,
     signer: UserKeypair,
     founder: TestDevice,
@@ -280,14 +280,14 @@ mod test_device {
         store: std::sync::Arc<crate::sync::store::Store>,
         _store_dir_temp: std::sync::Arc<tempfile::TempDir>,
         pub device_id: String,
-        storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+        storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
         identity: UserKeypair,
     }
 
     impl TestDevice {
         pub(crate) async fn create(
             db: &Database,
-            storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
@@ -302,7 +302,7 @@ mod test_device {
 
         pub(crate) async fn create_with_database(
             database: coven_database::StoreDatabase,
-            storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
@@ -328,7 +328,7 @@ mod test_device {
 
         pub(crate) async fn open_with_database(
             database: coven_database::StoreDatabase,
-            storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, String> {
@@ -354,7 +354,7 @@ mod test_device {
 
         pub(crate) async fn load(
             db: &Database,
-            storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
             Self::load_with_database(coven_database::StoreDatabase::new(db), storage, identity)
@@ -363,7 +363,7 @@ mod test_device {
 
         pub(crate) async fn load_with_database(
             database: coven_database::StoreDatabase,
-            storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
             let (store_dir_temp, store_dir) = temp_store_dir();
@@ -659,7 +659,7 @@ mod test_device {
 
         pub(crate) async fn complete_revoke_rotation_adoption_for_test(
             &self,
-            pending_rotation: &dyn crate::storage::CloudRotationAccess,
+            pending_rotation: &dyn coven_storage::CloudRotationAccess,
             adopted_generation: u64,
         ) -> Result<(), crate::sync::store::InviteError> {
             self.store
@@ -992,8 +992,8 @@ mod test_device {
             public_key_hex: &str,
             encryption: &coven_keys::encryption::EncryptionService,
             master_keys: &dyn coven_keys::keys::MasterKeyCustody,
-            cipher: &dyn crate::storage::CloudCipherAccess,
-            pending_rotation: &dyn crate::storage::CloudRotationAccess,
+            cipher: &dyn coven_storage::CloudCipherAccess,
+            pending_rotation: &dyn coven_storage::CloudRotationAccess,
         ) -> Result<String, crate::sync::store::MembershipOpsError> {
             self.store
                 .remove_member(
@@ -1261,7 +1261,8 @@ mod test_device {
             encryption: &coven_keys::encryption::EncryptionService,
             store_id: &str,
             store_name: &str,
-        ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
+        ) -> Result<coven_storage::join_code::InviteCode, crate::sync::store::MembershipOpsError>
+        {
             self.store
                 .invite_member(
                     member_pubkey,
@@ -1583,7 +1584,7 @@ mod test_device {
                     &stored,
                     &authority,
                     &spool,
-                    &crate::storage::cloud::no_progress(),
+                    &coven_storage::cloud::no_progress(),
                 )
                 .await
                 .expect("create exact blob object");
@@ -1643,7 +1644,7 @@ mod test_device {
                     &stored,
                     &authority,
                     &spool,
-                    &crate::storage::cloud::no_progress(),
+                    &coven_storage::cloud::no_progress(),
                 )
                 .await
                 .expect("create browsable blob object");
@@ -1699,7 +1700,7 @@ mod test_device {
                 self.storage.clone(),
                 interceptor,
             ));
-            let store_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = storage.clone();
+            let store_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = storage.clone();
             let store = std::sync::Arc::new(self.store.with_test_storage(store_storage));
             self.run_cycle_with_storage(store, storage, clock, master_keys, store_dir, observer)
                 .await
@@ -2520,7 +2521,7 @@ impl TestStore {
     pub(crate) async fn open_store_with_storage(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn crate::storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::SyncStorage>,
         store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -2533,7 +2534,7 @@ impl TestStore {
     pub(crate) async fn open_founder_store_with_storage(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn crate::storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::SyncStorage>,
         store_dir: StoreDir,
     ) -> Result<crate::sync::store::Store, String> {
         self.open_store_with_storage(database, storage, store_dir, &self.signer)
@@ -2612,7 +2613,7 @@ impl TestStore {
     pub(crate) async fn pull_with_storage_for_test(
         &self,
         database: &Database,
-        storage: Arc<dyn crate::storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::SyncStorage>,
         store_dir: &StoreDir,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
@@ -2780,11 +2781,11 @@ impl TestStore {
     fn storage_for_device(
         &self,
         identity: UserKeypair,
-    ) -> Result<std::sync::Arc<crate::storage::CloudSyncStorage>, String> {
+    ) -> Result<std::sync::Arc<coven_storage::CloudSyncStorage>, String> {
         if identity.public_key() == self.signer.public_key() {
             return Ok(self.storage.clone());
         }
-        crate::storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncStorage::new(
             self.home.clone(),
             self.storage.cipher_snapshot(),
             self.storage.blob_path_scheme(),
@@ -2799,17 +2800,17 @@ impl TestStore {
         db: &Database,
         store_id: &str,
         signer: UserKeypair,
-        home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Arc<Self>, String> {
         Box::pin(Self::create_with_protection(
             db,
             store_id,
             signer,
             home,
-            crate::storage::CloudCipher::Encrypted(
+            coven_storage::CloudCipher::Encrypted(
                 coven_keys::encryption::EncryptionService::from_key([42; 32]),
             ),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
         ))
         .await
     }
@@ -2818,7 +2819,7 @@ impl TestStore {
         db: &Database,
         store_id: &str,
         signer: UserKeypair,
-        home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
         encryption: coven_keys::encryption::EncryptionService,
     ) -> Result<Arc<Self>, String> {
         Self::create_with_protection(
@@ -2826,8 +2827,8 @@ impl TestStore {
             store_id,
             signer,
             home,
-            crate::storage::CloudCipher::Encrypted(encryption),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::CloudCipher::Encrypted(encryption),
+            coven_storage::BlobPathScheme::Hashed,
         )
         .await
     }
@@ -2836,17 +2837,17 @@ impl TestStore {
         database: coven_database::StoreDatabase,
         store_id: &str,
         signer: UserKeypair,
-        home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Arc<Self>, String> {
         Box::pin(Self::create_with_protection_database(
             database,
             store_id,
             signer,
             home,
-            crate::storage::CloudCipher::Encrypted(
+            coven_storage::CloudCipher::Encrypted(
                 coven_keys::encryption::EncryptionService::from_key([42; 32]),
             ),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
         ))
         .await
     }
@@ -2859,15 +2860,15 @@ impl TestStore {
         db: &Database,
         store_id: &str,
         signer: UserKeypair,
-        home: Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Arc<Self>, String> {
         Box::pin(Self::create_with_protection(
             db,
             store_id,
             signer,
             home,
-            crate::storage::CloudCipher::Plaintext,
-            crate::storage::BlobPathScheme::Plain,
+            coven_storage::CloudCipher::Plaintext,
+            coven_storage::BlobPathScheme::Plain,
         ))
         .await
     }
@@ -2876,9 +2877,9 @@ impl TestStore {
         db: &Database,
         store_id: &str,
         signer: UserKeypair,
-        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
-        cipher: crate::storage::CloudCipher,
-        blob_paths: crate::storage::BlobPathScheme,
+        home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+        cipher: coven_storage::CloudCipher,
+        blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
         Self::create_with_protection_database(
             coven_database::StoreDatabase::new(db),
@@ -2895,12 +2896,12 @@ impl TestStore {
         database: coven_database::StoreDatabase,
         store_id: &str,
         signer: UserKeypair,
-        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
-        cipher: crate::storage::CloudCipher,
-        blob_paths: crate::storage::BlobPathScheme,
+        home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+        cipher: coven_storage::CloudCipher,
+        blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
         let storage = std::sync::Arc::new(
-            crate::storage::CloudSyncStorage::new(
+            coven_storage::CloudSyncStorage::new(
                 home.clone(),
                 cipher,
                 blob_paths,
@@ -2931,7 +2932,7 @@ impl TestStore {
     }
 
     /// The storage handle tests hand to code that takes a [`SyncStorage`].
-    pub(crate) fn storage(&self) -> std::sync::Arc<crate::storage::CloudSyncStorage> {
+    pub(crate) fn storage(&self) -> std::sync::Arc<coven_storage::CloudSyncStorage> {
         self.storage.clone()
     }
 
@@ -3003,10 +3004,10 @@ impl TestStore {
     pub(crate) async fn contains_blob_tombstone(
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<bool, crate::storage::cloud::CloudHomeError> {
+    ) -> Result<bool, coven_storage::cloud::CloudHomeError> {
         let key =
             crate::blob::delete::tombstone_key_for_test(stored, &self.storage.cipher_snapshot());
-        crate::storage::cloud::CloudHome::exists(self.home.as_ref(), &key).await
+        coven_storage::cloud::CloudHome::exists(self.home.as_ref(), &key).await
     }
 
     pub(crate) async fn contains_circle_snapshot_image(
@@ -3636,7 +3637,7 @@ impl TestStore {
         role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
+    ) -> Result<coven_storage::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
         let device = self.bind_device(db, identity).await.map_err(|error| {
             crate::sync::store::MembershipOpsError::Chain(
                 crate::sync::store::AnchoredChainError::LoadFailed(error),
@@ -3824,7 +3825,7 @@ impl TestStore {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
         Box::pin(async move {
             let observer = self.founder.clone();
-            let provider_binding = crate::storage::SyncStorage::provider_binding(&*self.storage)
+            let provider_binding = coven_storage::SyncStorage::provider_binding(&*self.storage)
                 .await
                 .map_err(|error| error.to_string())?;
             let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
@@ -3847,13 +3848,13 @@ impl TestStore {
                     .clone()
                     .with_provider_binding(peer_binding),
             );
-            let peer_storage: std::sync::Arc<dyn crate::storage::SyncStorage> = std::sync::Arc::new(
-                crate::storage::CloudSyncStorage::new(
+            let peer_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = std::sync::Arc::new(
+                coven_storage::CloudSyncStorage::new(
                     peer_home.clone(),
-                    crate::storage::CloudCipher::Encrypted(
+                    coven_storage::CloudCipher::Encrypted(
                         coven_keys::encryption::EncryptionService::from_key([42; 32]),
                     ),
-                    crate::storage::BlobPathScheme::Hashed,
+                    coven_storage::BlobPathScheme::Hashed,
                     "cross-principal-test-store",
                     identity.clone(),
                 )
@@ -4165,14 +4166,14 @@ impl TestStore {
 /// A plaintext cloud cipher — the default for tests that are not exercising
 /// sealing.
 #[cfg(test)]
-pub(crate) fn plaintext_cipher() -> std::sync::RwLock<crate::storage::CloudCipher> {
-    std::sync::RwLock::new(crate::storage::CloudCipher::Plaintext)
+pub(crate) fn plaintext_cipher() -> std::sync::RwLock<coven_storage::CloudCipher> {
+    std::sync::RwLock::new(coven_storage::CloudCipher::Plaintext)
 }
 
 /// The cloud key a tombstone for `stored` is written under.
 #[cfg(test)]
 pub(crate) fn exact_tombstone_key(stored: &coven_protocol::blob::locator::StoredBlobRef) -> String {
-    crate::blob::delete::tombstone_key_for_test(stored, &crate::storage::CloudCipher::Plaintext)
+    crate::blob::delete::tombstone_key_for_test(stored, &coven_storage::CloudCipher::Plaintext)
 }
 
 /// Which protocol read an interceptor hook is running ahead of.
@@ -4344,13 +4345,13 @@ where
 }
 
 #[cfg(test)]
-impl<S, I> crate::storage::CloudCipherAccess for InterceptedStorage<S, I>
+impl<S, I> coven_storage::CloudCipherAccess for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: crate::storage::CloudCipherAccess,
+    S::Target: coven_storage::CloudCipherAccess,
     I: StorageInterceptor,
 {
-    fn snapshot(&self) -> crate::storage::CloudCipher {
+    fn snapshot(&self) -> coven_storage::CloudCipher {
         self.inner.snapshot()
     }
 
@@ -4364,10 +4365,10 @@ where
 }
 
 #[cfg(test)]
-impl<S, I> crate::storage::CloudRotationAccess for InterceptedStorage<S, I>
+impl<S, I> coven_storage::CloudRotationAccess for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: crate::storage::CloudRotationAccess,
+    S::Target: coven_storage::CloudRotationAccess,
     I: StorageInterceptor,
 {
     fn mark_candidate(
@@ -4414,7 +4415,7 @@ where
 
     fn check(
         &self,
-        cipher: &crate::storage::CloudCipher,
+        cipher: &coven_storage::CloudCipher,
     ) -> Result<(), coven_protocol::objects::RotationPending> {
         self.inner.check(cipher)
     }
@@ -4445,13 +4446,13 @@ where
 
 #[cfg(test)]
 #[async_trait::async_trait]
-impl<S, I> crate::storage::SyncStorage for InterceptedStorage<S, I>
+impl<S, I> coven_storage::SyncStorage for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: crate::storage::SyncStorage,
+    S::Target: coven_storage::SyncStorage,
     I: StorageInterceptor,
 {
-    fn blob_path_scheme(&self) -> crate::storage::BlobPathScheme {
+    fn blob_path_scheme(&self) -> coven_storage::BlobPathScheme {
         self.inner.blob_path_scheme()
     }
 
@@ -4461,8 +4462,8 @@ where
 
     async fn set_member_access(
         &self,
-        state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, coven_protocol::objects::StorageError>
+        state: coven_storage::cloud::CloudAccessState,
+    ) -> Result<coven_storage::cloud::CloudAccessOutcome, coven_protocol::objects::StorageError>
     {
         self.inner.set_member_access(state).await
     }
@@ -4514,7 +4515,7 @@ where
         self.inner.delete_provider_object(key).await
     }
 
-    fn provider_probes(&self) -> &crate::storage::provider_probe::ProviderProbeStorage {
+    fn provider_probes(&self) -> &coven_storage::provider_probe::ProviderProbeStorage {
         self.inner.provider_probes()
     }
 
@@ -4679,7 +4680,7 @@ where
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
+        progress: &coven_storage::cloud::UploadProgress<'_>,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_blob_create(blob).await?;
         self.inner
@@ -4711,7 +4712,7 @@ where
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: coven_protocol::objects::BlobSpoolProtection,
-    ) -> Result<crate::storage::BlobRangeReader, coven_protocol::objects::StorageError> {
+    ) -> Result<coven_storage::BlobRangeReader, coven_protocol::objects::StorageError> {
         self.inner.open_blob_range_reader(blob, protection).await
     }
 

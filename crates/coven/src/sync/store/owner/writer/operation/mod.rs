@@ -1,5 +1,4 @@
 use super::*;
-use crate::storage as store_objects;
 use crate::sync::store::membership::InviteError;
 use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
@@ -18,6 +17,7 @@ use coven_protocol::store_commit::{
     StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
 };
 use coven_protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKeyRef};
+use coven_storage as store_objects;
 use std::sync::Arc;
 
 mod abandonment;

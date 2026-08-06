@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::storage::SyncStorage;
 use crate::Migration;
 use coven_database::{Database, SnapshotDatabaseImage};
 use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::SyncedTable;
+use coven_storage::SyncStorage;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;

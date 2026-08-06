@@ -10,9 +10,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::CloudHome;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 use crate::Migration;
 use coven_database::Database;
@@ -22,14 +19,17 @@ use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use coven_protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
 use coven_protocol::store_commit::StoreDeviceHead;
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::cloud::CloudHome;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 /// The synthetic test db opens with a single migration, so its
 /// [`coven_database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
-use crate::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 use coven_protocol::objects::ProtocolObjectDomain;
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
+use coven_storage::SyncStorage;
 
 fn exact_cache_path(
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -1003,7 +1003,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 }
             },
         };
-        let (entry_object, entry_ref) = crate::storage::prepare_membership_entry(
+        let (entry_object, entry_ref) = coven_storage::prepare_membership_entry(
             &*storage.storage(),
             storage.root.store_root_hash,
             &entry,
@@ -7170,7 +7170,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     let chain = ExactMembershipChain::load(&storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     let grant = add_member.coord();
-    let (prepared, _) = crate::storage::prepare_membership_entry(
+    let (prepared, _) = coven_storage::prepare_membership_entry(
         &*storage.storage(),
         storage.root.store_root_hash,
         &add_member,

@@ -275,7 +275,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     handle
         .connect_sync_with_test_home(
             home.clone(),
-            crate::storage::CloudCipher::Encrypted(encryption),
+            coven_storage::CloudCipher::Encrypted(encryption),
         )
         .await
         .expect("connect the store to its home");
@@ -371,7 +371,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     reopened
         .connect_sync_with_test_home_caller_driven(
             home,
-            crate::storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
+            coven_storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
         )
         .await
         .expect("reconnect the relaunched store");

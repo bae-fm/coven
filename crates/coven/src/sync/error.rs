@@ -2,10 +2,10 @@
 //! boundary's error vocabulary, wrapping the storage, key, and initialization
 //! refusals below it.
 
-use crate::storage::cloud::setup::{SetupError, StorageSetupError};
-use crate::storage::cloud::CloudHomeError;
 use coven_database::DbError;
 use coven_keys::keys::KeyError;
+use coven_storage::cloud::setup::{SetupError, StorageSetupError};
+use coven_storage::cloud::CloudHomeError;
 
 use super::cycle::InitSyncError;
 use super::sync_loop::SyncLoopError;

@@ -135,7 +135,7 @@ impl Coven {
             clock: Arc::new(SystemClock),
             key_custody: KeyCustody::Keyring,
             identity_custody: IdentityCustody::Keyring,
-            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             cloudkit_ops: None,
             observer: None,
         }
@@ -152,8 +152,8 @@ pub struct CovenBuilder {
     clock: ClockRef,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
-    oauth_clients: crate::oauth::OAuthClients,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    oauth_clients: coven_storage::oauth::OAuthClients,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
@@ -239,14 +239,14 @@ impl CovenBuilder {
     }
 
     /// The OAuth applications this app uses for consumer cloud providers.
-    pub fn oauth_clients(mut self, clients: crate::oauth::OAuthClients) -> Self {
+    pub fn oauth_clients(mut self, clients: coven_storage::oauth::OAuthClients) -> Self {
         self.oauth_clients = clients;
         self
     }
 
     pub fn apply_cloudkit_ops(
         mut self,
-        ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Self {
         self.cloudkit_ops = ops;
         self
@@ -322,7 +322,7 @@ impl CovenBuilder {
             self.cloudkit_ops,
             self.observer,
             open_guard,
-            crate::storage::BlobChunking::DEFAULT,
+            coven_storage::BlobChunking::DEFAULT,
         ))
     }
 
@@ -379,7 +379,7 @@ impl CovenBuilder {
             self.oauth_clients,
             self.clock,
             self.cloudkit_ops,
-            crate::storage::BlobChunking::DEFAULT,
+            coven_storage::BlobChunking::DEFAULT,
         ))
     }
 }

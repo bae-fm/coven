@@ -42,14 +42,14 @@ impl StoreFoundation {
         key_service: StoreKeys,
         key_custody: Arc<dyn MasterKeyCustody>,
         identity_custody: Arc<dyn DeviceIdentityCustody>,
-        oauth_clients: crate::oauth::OAuthClients,
+        oauth_clients: coven_storage::oauth::OAuthClients,
         clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        blob_chunking: crate::storage::BlobChunking,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
+        blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
         let database = StoreDatabase::from_database(db);
         let cloud_homes =
-            crate::storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
+            coven_storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
         let security = StoreSecurity::new(key_service, key_custody, identity_custody);
         let cloud_storage = StoreCloudStorage::new(
             security.clone(),

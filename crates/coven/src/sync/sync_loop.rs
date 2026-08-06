@@ -24,7 +24,7 @@ use coven_protocol::blob::BlobTransitionObserver;
 
 use super::cycle::SyncComponents;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
-use crate::storage::BlobPathScheme;
+use coven_storage::BlobPathScheme;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -692,7 +692,7 @@ impl SyncLoopHandle {
         invitee_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<coven_storage::join_code::InviteCode, super::store::MembershipOpsError> {
         self.inner
             .components
             .invite_member(public_key_hex, invitee_email, role, store_name)
@@ -907,7 +907,7 @@ impl SyncLoopHandle {
     #[cfg(test)]
     pub(crate) fn uses_storage_for_test(
         &self,
-        expected: &Arc<dyn crate::storage::SyncStorage>,
+        expected: &Arc<dyn coven_storage::SyncStorage>,
     ) -> bool {
         self.inner.components.uses_storage_for_test(expected)
     }

@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
-use crate::storage::cloud::CloudHome;
-use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
 };
@@ -27,6 +25,8 @@ use coven_protocol::store_commit::{
     CircleAccessLeafObjectRef, CircleAccessObjectRef, GrantStreamAnchor, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StreamActivation,
 };
+use coven_storage::cloud::CloudHome;
+use coven_storage::SyncStorage;
 
 async fn create_test_store_in_its_own_task(
     db: &Database,
@@ -135,11 +135,11 @@ fn circle_test_cloud_storage(
     home: &Arc<crate::InMemoryCloudHome>,
     store_id: &str,
     identity: &UserKeypair,
-) -> crate::storage::CloudSyncStorage {
-    crate::storage::CloudSyncStorage::new(
+) -> coven_storage::CloudSyncStorage {
+    coven_storage::CloudSyncStorage::new(
         home.clone(),
-        crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-        crate::storage::BlobPathScheme::Hashed,
+        coven_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        coven_storage::BlobPathScheme::Hashed,
         store_id,
         identity.clone(),
     )

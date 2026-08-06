@@ -1,6 +1,4 @@
 use super::*;
-use crate::storage::SyncStorage;
-use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use coven_database::Database;
 use coven_database::StoreDatabase;
@@ -13,6 +11,8 @@ use coven_protocol::membership::{
 };
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
+use coven_storage::SyncStorage;
+use coven_storage::{CloudCipher, CloudCipherAccess};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
@@ -72,7 +72,7 @@ impl MergeFixture {
         &self,
         member: &UserKeypair,
         role: MemberRole,
-    ) -> crate::join_code::InviteCode {
+    ) -> coven_storage::join_code::InviteCode {
         self.store
             .invite_member(
                 &self.db,
@@ -340,7 +340,7 @@ async fn entry_beyond_membership_head_is_not_committed() {
             "unheaded member".to_string(),
         )
         .expect("sign entry after exact head");
-    let (prepared, _) = crate::storage::prepare_membership_entry(
+    let (prepared, _) = coven_storage::prepare_membership_entry(
         &*fixture.store.storage(),
         fixture.store.root.store_root_hash,
         &entry,
@@ -371,10 +371,10 @@ async fn complete_chain_still_validates() {
 async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomically() {
     let fixture = MergeFixture::new("store-membership-conflict-boundary").await;
     let storage = Arc::new(
-        crate::storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncStorage::new(
             fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
             &fixture.store_id,
             fixture.owner.clone(),
         )
@@ -432,10 +432,10 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
 async fn store_membership_reads_require_the_installed_owner_anchor() {
     let fixture = MergeFixture::new("store-membership-owner-anchor").await;
     let storage = Arc::new(
-        crate::storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncStorage::new(
             fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
             &fixture.store_id,
             fixture.owner.clone(),
         )
@@ -473,10 +473,10 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
 async fn store_membership_reads_reject_tampered_founder_state() {
     let fixture = MergeFixture::new("store-membership-founder-state").await;
     let storage = Arc::new(
-        crate::storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncStorage::new(
             fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
             &fixture.store_id,
             fixture.owner.clone(),
         )

@@ -46,6 +46,7 @@ const NON_OWNER_TYPES: &[&str] = &[
     "AdmittedStoreCloudHome",
     "BlobSpoolProtection",
     "CircleAckPublicationInput",
+    "CloudCipher",
     "Config",
     "ConnectionThread",
     "DatabaseState",

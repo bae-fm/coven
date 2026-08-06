@@ -1404,12 +1404,12 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         )
         .await
         .expect("stage source blob");
-        let writer = crate::storage::CloudSyncStorage::new(
+        let writer = coven_storage::CloudSyncStorage::new(
             home,
-            crate::storage::CloudCipher::Encrypted(
+            coven_storage::CloudCipher::Encrypted(
                 coven_keys::encryption::EncryptionService::from_key([42; 32]),
             ),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
             "snapshot-blob-ownership-graph",
             signer.clone(),
         )

@@ -10,13 +10,13 @@ use crate::sync::store::membership::InviteError;
 
 /// Store-key operations bound to one exact Store root and its storage.
 pub(crate) struct StoreKeyrings<'storage> {
-    storage: &'storage dyn crate::storage::SyncStorage,
+    storage: &'storage dyn coven_storage::SyncStorage,
     root: coven_protocol::store_commit::StoreRootRef,
 }
 
 impl<'storage> StoreKeyrings<'storage> {
     pub(crate) fn new(
-        storage: &'storage dyn crate::storage::SyncStorage,
+        storage: &'storage dyn coven_storage::SyncStorage,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Self {
         Self { storage, root }
@@ -158,7 +158,7 @@ fn wrapped_key_references(
 /// Read and validate one wrapped Store key through the exact reference the
 /// membership names.
 pub(crate) async fn load_wrapped_store_key(
-    storage: &dyn crate::storage::SyncStorage,
+    storage: &dyn coven_storage::SyncStorage,
     store_root_hash: coven_protocol::store_commit::ObjectHash,
     reference: &WrappedStoreKeyRef,
 ) -> Result<WrappedStoreKey, coven_protocol::objects::StorageError> {
@@ -179,10 +179,10 @@ pub(crate) async fn load_wrapped_store_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SyncStorage as _;
     use crate::sync::test_helpers::{open_test_db, test_cloud_home, TestStore};
     use coven_keys::keys::UserKeypair;
     use coven_protocol::wrapped_store_key::WrappedStoreKey;
+    use coven_storage::SyncStorage as _;
 
     #[tokio::test]
     async fn distinct_wraps_at_one_generation_remain_distinct_exact_objects() {

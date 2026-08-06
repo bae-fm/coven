@@ -113,7 +113,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let storage = self.storage.as_ref();
         let founder_timestamp = self.founder_timestamp;
         let signer = self.identity;
-        let binding = crate::storage::SyncStorage::provider_binding(storage)
+        let binding = coven_storage::SyncStorage::provider_binding(storage)
             .await
             .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let probes =
@@ -613,7 +613,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 provider_admin,
             );
             let (entry_prepared, entry_ref) =
-                crate::storage::prepare_membership_entry(storage, root_hash, &founder).await?;
+                coven_storage::prepare_membership_entry(storage, root_hash, &founder).await?;
             let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 root_hash,
                 coven_protocol::objects::ProtocolObjectDomain::StoreMembershipHead,

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::storage::cloud::CloudHome;
-use crate::storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
 use coven_foundation::config::{Config, HomeStorage};
 use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
     MasterKeyError, RoutingEncryptionError, StoreKeys, UserKeypair,
 };
+use coven_storage::cloud::CloudHome;
+use coven_storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 pub(crate) struct EstablishedStoreIdentity {
     keypair: UserKeypair,
@@ -44,7 +44,7 @@ impl EstablishedStoreIdentity {
     pub(crate) async fn load_store(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn crate::storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::SyncStorage>,
         store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Result<crate::sync::Store, crate::sync::store::StoreError> {
         crate::sync::Store::load(database, storage, store_dir, self.keypair.clone()).await
@@ -181,7 +181,7 @@ impl StoreSecurity {
         home: Arc<dyn CloudHome>,
         cipher: Option<CloudCipher>,
         blob_chunking: BlobChunking,
-    ) -> Result<CloudSyncStorage, crate::storage::cloud::setup::StorageSetupError> {
+    ) -> Result<CloudSyncStorage, coven_storage::cloud::setup::StorageSetupError> {
         let cipher = match cipher {
             Some(cipher) => cipher,
             None => self.cloud_cipher(config)?,
@@ -200,14 +200,14 @@ impl StoreSecurity {
     fn cloud_cipher(
         &self,
         config: &Config,
-    ) -> Result<CloudCipher, crate::storage::cloud::setup::StorageSetupError> {
+    ) -> Result<CloudCipher, coven_storage::cloud::setup::StorageSetupError> {
         if config.cloud_home.storage.is_browsable() {
             return Ok(CloudCipher::Plaintext);
         }
         let keyring = self
             .master_keys
             .unlock()?
-            .ok_or(crate::storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
+            .ok_or(coven_storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
         Ok(CloudCipher::Encrypted(keyring.into()))
     }
 
@@ -218,12 +218,12 @@ impl StoreSecurity {
         founder_pubkey: String,
         membership_floor: coven_protocol::membership::MembershipFloor,
         authority: coven_protocol::recovery::RestoreAuthority,
-    ) -> Result<String, crate::storage::cloud::setup::SetupError> {
+    ) -> Result<String, coven_storage::cloud::setup::SetupError> {
         use crate::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
-        use crate::storage::cloud::CloudHomeJoinInfo;
+        use coven_storage::cloud::CloudHomeJoinInfo;
 
         let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
-            crate::storage::cloud::setup::SetupError(
+            coven_storage::cloud::setup::SetupError(
                 "No cloud provider configured. Set up sync first.".to_string(),
             )
         })?;
@@ -232,12 +232,12 @@ impl StoreSecurity {
                 self.master_keys
                     .unlock()
                     .map_err(|error| {
-                        crate::storage::cloud::setup::SetupError(format!(
+                        coven_storage::cloud::setup::SetupError(format!(
                             "Failed to read master key: {error}"
                         ))
                     })?
                     .ok_or_else(|| {
-                        crate::storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError(
                             "No encryption key found".to_string(),
                         )
                     })?
@@ -253,12 +253,12 @@ impl StoreSecurity {
                     .keys
                     .get_cloud_home_credentials()
                     .map_err(|error| {
-                        crate::storage::cloud::setup::SetupError(format!(
+                        coven_storage::cloud::setup::SetupError(format!(
                             "Failed to read cloud credentials: {error}"
                         ))
                     })?
                     .ok_or_else(|| {
-                        crate::storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError(
                             "No S3 credentials found in keyring".to_string(),
                         )
                     })?;
@@ -268,19 +268,19 @@ impl StoreSecurity {
                         secret_key,
                     } => (access_key, secret_key),
                     _ => {
-                        return Err(crate::storage::cloud::setup::SetupError(
+                        return Err(coven_storage::cloud::setup::SetupError(
                             "Expected S3 credentials but found different type".to_string(),
                         ))
                     }
                 };
                 CloudHomeJoinInfo::S3 {
                     bucket: config.cloud_home.s3_bucket.clone().ok_or_else(|| {
-                        crate::storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError(
                             "S3 bucket not configured".to_string(),
                         )
                     })?,
                     region: config.cloud_home.s3_region.clone().ok_or_else(|| {
-                        crate::storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError(
                             "S3 region not configured".to_string(),
                         )
                     })?,
@@ -294,7 +294,7 @@ impl StoreSecurity {
                 if config.cloud_home.cloudkit_owner_name.is_some()
                     || config.cloud_home.cloudkit_zone_name.is_some()
                 {
-                    return Err(crate::storage::cloud::setup::SetupError(
+                    return Err(coven_storage::cloud::setup::SetupError(
                         "This store was joined through a CloudKit share; only the store's owner can create a restore code.".to_string(),
                     ));
                 }
@@ -307,7 +307,7 @@ impl StoreSecurity {
                         .google_drive_folder_id
                         .clone()
                         .ok_or_else(|| {
-                            crate::storage::cloud::setup::SetupError(
+                            coven_storage::cloud::setup::SetupError(
                                 "Google Drive folder ID not configured".to_string(),
                             )
                         })?,
@@ -317,7 +317,7 @@ impl StoreSecurity {
                 CloudHomeJoinInfo::Dropbox {
                     folder_path: config.cloud_home.dropbox_folder_path.clone().ok_or_else(
                         || {
-                            crate::storage::cloud::setup::SetupError(
+                            coven_storage::cloud::setup::SetupError(
                                 "Dropbox folder path not configured".to_string(),
                             )
                         },
@@ -326,7 +326,7 @@ impl StoreSecurity {
             }
             coven_foundation::config::CloudProvider::OneDrive => CloudHomeJoinInfo::OneDrive {
                 drive_id: config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
-                    crate::storage::cloud::setup::SetupError(
+                    coven_storage::cloud::setup::SetupError(
                         "OneDrive drive ID not configured".to_string(),
                     )
                 })?,
@@ -335,7 +335,7 @@ impl StoreSecurity {
                     .onedrive_folder_id
                     .clone()
                     .ok_or_else(|| {
-                        crate::storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError(
                             "OneDrive folder ID not configured".to_string(),
                         )
                     })?,

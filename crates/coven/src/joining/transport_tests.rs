@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
 use crate::joining::encode;
-use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::store::{
     DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
@@ -20,6 +19,7 @@ use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::ObjectSlot;
+use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -45,7 +45,7 @@ struct TransportFixture {
     owner_test_store: std::sync::Arc<TestStore>,
     /// The owner store's storage handle, retained so borrowing transports can
     /// point into it.
-    owner_storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
+    owner_storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
     owner_store_dir: coven_foundation::store_dir::StoreDir,
     home: Arc<crate::InMemoryCloudHome>,
     member_pubkey: String,
@@ -166,7 +166,7 @@ impl TransportFixture {
         let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
         let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
-        let provider_binding = crate::storage::SyncStorage::provider_binding(&*store.storage())
+        let provider_binding = coven_storage::SyncStorage::provider_binding(&*store.storage())
             .await
             .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
@@ -245,7 +245,7 @@ impl TransportFixture {
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
-            crate::oauth::OAuthClients::empty(),
+            coven_storage::oauth::OAuthClients::empty(),
             None,
             None,
             Arc::new(SystemClock),

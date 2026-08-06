@@ -1,9 +1,9 @@
 use super::*;
-use crate::storage::SyncStorage;
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::store_commit::{StoreCommitCoord, StoreProtocolError};
+use coven_storage::SyncStorage;
 use std::collections::BTreeMap;
 
 fn proof_object(path: &str) -> ExactObjectRef {

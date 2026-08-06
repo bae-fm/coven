@@ -5,13 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{
-    BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage,
-    RevokeOutcome, UploadProgress,
-};
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 use coven_database::StoreDatabase;
 use coven_database::{Database, DbError};
@@ -23,6 +16,13 @@ use coven_protocol::blob::DrainOutcome;
 use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::cloud::{
+    BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage,
+    RevokeOutcome, UploadProgress,
+};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";
@@ -219,7 +219,7 @@ impl ExactSlotStorage for InstrumentedHome {
                 &self.inner,
                 slot,
                 ExactBlobBody::from_bytes(bytes),
-                &crate::storage::cloud::no_progress(),
+                &coven_storage::cloud::no_progress(),
             )
             .await
         };

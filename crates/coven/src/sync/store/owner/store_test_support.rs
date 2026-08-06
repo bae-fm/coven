@@ -196,7 +196,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn complete_revoke_rotation_adoption_for_test(
         &self,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
         adopted_generation: u64,
     ) -> Result<(), membership::InviteError> {
         self.authorize_writer()

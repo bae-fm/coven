@@ -13,8 +13,6 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::storage::SyncStorage;
-use crate::storage::{CloudCipher, CloudCipherAccess, PendingRotation};
 use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
@@ -24,6 +22,8 @@ use coven_keys::keys::MasterKeyCustody;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::{MemberRole, MembershipChain};
 use coven_protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
+use coven_storage::SyncStorage;
+use coven_storage::{CloudCipher, CloudCipherAccess, PendingRotation};
 
 const LIB_ID: &str = "lib-refresh-test";
 
@@ -35,7 +35,7 @@ trait RefreshTestStoreOps {
         public_key_hex: &str,
         current_encryption: &EncryptionService,
         master_keys: &dyn MasterKeyCustody,
-        cipher: &dyn crate::storage::CloudCipherAccess,
+        cipher: &dyn coven_storage::CloudCipherAccess,
         pending_rotation: &PendingRotation,
         db: &coven_database::Database,
     ) -> Result<String, MembershipOpsError>;
@@ -77,7 +77,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         public_key_hex: &str,
         current_encryption: &EncryptionService,
         master_keys: &dyn MasterKeyCustody,
-        cipher: &dyn crate::storage::CloudCipherAccess,
+        cipher: &dyn coven_storage::CloudCipherAccess,
         pending_rotation: &PendingRotation,
         db: &coven_database::Database,
     ) -> Result<String, MembershipOpsError> {

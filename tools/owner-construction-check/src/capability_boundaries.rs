@@ -29,8 +29,8 @@ pub(crate) struct GatedCapability {
 }
 
 const NETWORK_HOMES: &[&str] = &[
-    "crates/coven/src/storage/cloud/",
-    "crates/coven/src/oauth.rs",
+    "crates/coven-storage/src/cloud/",
+    "crates/coven-storage/src/oauth.rs",
 ];
 
 /// Only cloud-provider implementations and the OAuth flow speak HTTP. Every
@@ -60,13 +60,13 @@ pub(crate) const NETWORK_BOUNDARY: &[GatedCapability] = &[
             "aws_smithy_types",
         ],
         path_patterns: &[],
-        allowed: &["crates/coven/src/storage/cloud/"],
+        allowed: &["crates/coven-storage/src/cloud/"],
     },
     GatedCapability {
         kind: "browser opener (open)",
         crates: &["open"],
         path_patterns: &[],
-        allowed: &["crates/coven/src/oauth.rs"],
+        allowed: &["crates/coven-storage/src/oauth.rs"],
     },
 ];
 
@@ -165,8 +165,8 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         ],
         allowed: &[
             "crates/coven/src/sync/sync_loop.rs",
-            "crates/coven/src/storage/cloud/s3/runtime.rs",
-            "crates/coven/src/storage/cloud/resumable.rs",
+            "crates/coven-storage/src/cloud/s3/runtime.rs",
+            "crates/coven-storage/src/cloud/resumable.rs",
         ],
     },
     GatedCapability {
@@ -198,8 +198,8 @@ pub(crate) const AMBIENT_BOUNDARY: &[GatedCapability] = &[
             "crates/coven-keys/src/keys/",
             "crates/coven-keys/src/encryption.rs",
             "crates/coven-keys/src/envelope.rs",
-            "crates/coven/src/oauth.rs",
-            "crates/coven/src/storage/cloud/oauth_session.rs",
+            "crates/coven-storage/src/oauth.rs",
+            "crates/coven-storage/src/cloud/oauth_session.rs",
         ],
     },
     // Only generation is gated: parsing and validating a UUID value is a
@@ -246,7 +246,7 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-keys/src/envelope.rs",
     "crates/coven-keys/src/identity_custody.rs",
     "crates/coven-database/src/",
-    "crates/coven/src/storage/",
+    "crates/coven-storage/src/",
     "crates/coven/src/blob/transition.rs",
     "crates/coven/src/sync/store/blob.rs",
     "crates/coven/src/sync/store/owner/host_write.rs",
@@ -478,12 +478,12 @@ mod tests {
     fn network_crates_are_allowed_in_provider_and_oauth_homes() {
         let files = vec![
             file(
-                "crates/coven/src/storage/cloud/google_drive.rs",
+                "crates/coven-storage/src/cloud/google_drive.rs",
                 "use reqwest::Client;",
             ),
-            file("crates/coven/src/oauth.rs", "use axum::Router;"),
+            file("crates/coven-storage/src/oauth.rs", "use axum::Router;"),
             file(
-                "crates/coven/src/storage/cloud/s3.rs",
+                "crates/coven-storage/src/cloud/s3.rs",
                 "use aws_sdk_s3::Client;",
             ),
         ];
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn platform_keyring_is_rejected_outside_key_service() {
         let files = vec![file(
-            "crates/coven/src/storage/cloud/oauth_session.rs",
+            "crates/coven-storage/src/cloud/oauth_session.rs",
             "use keyring_core::Entry;",
         )];
         let violations = find_capability_boundary_violations(&files, KEYRING_BOUNDARY);
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn declared_runtime_owners_construct_runtimes() {
         let files = vec![file(
-            "crates/coven/src/storage/cloud/s3/runtime.rs",
+            "crates/coven-storage/src/cloud/s3/runtime.rs",
             r#"
             fn build() {
                 let _ = tokio::runtime::Builder::new_multi_thread().build();

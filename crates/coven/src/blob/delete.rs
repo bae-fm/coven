@@ -41,12 +41,12 @@
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::storage::SyncStorage;
-use crate::storage::{CloudCipherAccess, CloudRotationAccess};
 use coven_database::{OutboxEntry, OutboxOperation};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::blob::locator::StoredBlobRef;
 use coven_protocol::objects::StorageError;
+use coven_storage::SyncStorage;
+use coven_storage::{CloudCipherAccess, CloudRotationAccess};
 
 /// The cloud key-prefix under which tombstones live. The suffix after this prefix
 /// is the hash of the exact immutable provider object reference.
@@ -65,7 +65,7 @@ pub(crate) fn tombstone_key(stored: &StoredBlobRef, suffix: &str) -> String {
 #[cfg(test)]
 pub(crate) fn tombstone_key_for_test(
     stored: &StoredBlobRef,
-    cipher: &crate::storage::CloudCipher,
+    cipher: &coven_storage::CloudCipher,
 ) -> String {
     tombstone_key(stored, cipher.suffix())
 }
@@ -213,7 +213,7 @@ impl<'a> TombstoneDrain<'a> {
             Err(StorageError::NotFound(_)) => return Ok(ExistingTombstone::Absent),
             Err(e) => return Err(format!("tombstone read failed: {e}")),
         };
-        let aad_context = crate::storage::cloud_aad_context(self.store_id, key);
+        let aad_context = coven_storage::cloud_aad_context(self.store_id, key);
         let decoded = match self.cipher.snapshot().open(stored, &aad_context) {
             Ok(decoded) => decoded,
             Err(e) => return Ok(ExistingTombstone::Invalid(format!("open failed: {e}"))),
@@ -250,7 +250,7 @@ impl<'a> TombstoneDrain<'a> {
         );
         let bytes = serde_json::to_vec(&tombstone)
             .map_err(|e| format!("tombstone serialization failed: {e}"))?;
-        let aad_context = crate::storage::cloud_aad_context(self.store_id, key);
+        let aad_context = coven_storage::cloud_aad_context(self.store_id, key);
         let cipher = self.cipher.snapshot();
         self.pending_rotation
             .check(&cipher)

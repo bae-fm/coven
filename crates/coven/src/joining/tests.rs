@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::joining::encode;
-use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::test_helpers::*;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -95,7 +95,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
-            crate::oauth::OAuthClients::empty(),
+            coven_storage::oauth::OAuthClients::empty(),
             None,
             None,
             Arc::new(SystemClock),

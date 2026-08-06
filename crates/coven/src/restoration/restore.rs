@@ -10,9 +10,6 @@ use tokio::sync::watch;
 use tracing::info;
 
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
-use crate::oauth::OAuthTokens;
-use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 use crate::Migration;
 use coven_foundation::config::{Config, HomeStorage};
@@ -22,6 +19,9 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::{StoreKeys, UserKeypair};
 use coven_protocol::synced_schema::SyncedTable;
+use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
+use coven_storage::oauth::OAuthTokens;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they
@@ -30,9 +30,9 @@ use coven_protocol::synced_schema::SyncedTable;
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
     pub custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
-    pub oauth_clients: crate::oauth::OAuthClients,
+    pub oauth_clients: coven_storage::oauth::OAuthClients,
     pub oauth_tokens: Option<OAuthTokens>,
-    pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    pub cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
 }
 
 impl RestoreSource {
@@ -41,7 +41,7 @@ impl RestoreSource {
         store_keys: &StoreKeys,
         clock: coven_foundation::clock::ClockRef,
     ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
-        use crate::storage::cloud::*;
+        use coven_storage::cloud::*;
 
         let Self {
             join_info,
@@ -206,7 +206,7 @@ pub async fn restore_from_cloud(
     // caller, independent of the decode-time check on untrusted input.
     coven_foundation::store_dir::validate_path_token(store_id)
         .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
-    crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
+    coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &source.join_info,
         source.custom_s3_exact_slots,
     )
@@ -270,7 +270,7 @@ pub async fn restore_from_cloud(
         let cloud_home = source.open_cloud_home(&store_keys, clock.clone()).await?;
         let join_info = &source.join_info;
 
-        let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(CloudSyncStorage::new(
+        let storage: Arc<dyn coven_storage::SyncStorage> = Arc::new(CloudSyncStorage::new(
             cloud_home,
             cipher.clone(),
             blob_paths,
@@ -444,18 +444,18 @@ pub async fn restore_from_code(
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
-    oauth_clients: crate::oauth::OAuthClients,
-    oauth_tokens: Option<crate::oauth::OAuthTokens>,
-    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    oauth_clients: coven_storage::oauth::OAuthClients,
+    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     layout: &StoreLayout,
     clock: coven_foundation::clock::ClockRef,
     ids: coven_foundation::id_provider::IdRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    let parsed = crate::restore_code::decode_restore_code(code)
+    let parsed = coven_storage::restore_code::decode_restore_code(code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
-    crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
+    coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &parsed.provider,
         custom_s3_exact_slots,
     )
@@ -569,7 +569,7 @@ mod tests {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
             custom_s3_exact_slots: None,
-            oauth_clients: crate::oauth::OAuthClients::for_tests(),
+            oauth_clients: coven_storage::oauth::OAuthClients::for_tests(),
             oauth_tokens: Some(tokens.clone()),
             cloudkit_ops: None,
         };
@@ -610,7 +610,7 @@ mod open_cloud_home_tests {
                 key_prefix: Some("prefix/".to_string()),
             },
             custom_s3_exact_slots: None,
-            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: None,
         };
@@ -642,7 +642,7 @@ mod open_cloud_home_tests {
                 zone_name: "zone".to_string(),
             },
             custom_s3_exact_slots: None,
-            oauth_clients: crate::oauth::OAuthClients::empty(),
+            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: None,
         };

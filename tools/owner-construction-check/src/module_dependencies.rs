@@ -19,11 +19,17 @@
 //! Within-region references are unrestricted — this gate asserts the direction
 //! between regions, not the structure inside one.
 //!
-//! A region that has become a crate of its own leaves this table: Cargo's own
-//! dependency graph is then the gate, and it is the stronger one, because it
-//! forbids the upward reference at resolution rather than by inspection. So the
-//! table shrinks as the workspace splits, and holds exactly the regions still
-//! sharing the `coven` crate.
+//! A region that has become a crate of its own leaves this table: for an
+//! *upward* reference Cargo's own dependency graph is then the gate, and it is
+//! the stronger one, because it forbids the reference at resolution rather than
+//! by inspection. So the table shrinks as the workspace splits, and holds
+//! exactly the regions still sharing the `coven` crate.
+//!
+//! Cargo does not settle the *sibling* direction, though: an edge between two
+//! extracted crates is not a cycle, so nothing stops one from simply declaring
+//! the other as a dependency. Extracted crates therefore stay under this gate —
+//! their sources are read for references to the other extracted crates, checked
+//! against the same rank and sibling rules the module form answers to.
 //!
 //! Tests are held to the same direction as the code they exercise. A test that
 //! reaches up a region is an integration test in the wrong module, or a fixture
@@ -67,10 +73,6 @@ pub(crate) enum Region {
 /// Every top-level module must appear here; an unassigned module fails the
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
-    ("join_code", Region::Storage),
-    ("restore_code", Region::Storage),
-    ("oauth", Region::Storage),
-    ("storage", Region::Storage),
     ("blob", Region::Replication),
     ("sync", Region::Replication),
     ("joining", Region::Domain),
@@ -93,11 +95,14 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
 
 /// A region whose modules have left `coven` for a crate of their own, keyed by
 /// that crate's name. Cargo stops a reference *up* out of the extracted crate,
-/// but nothing stops a module still inside `coven` from naming it — so the
-/// sibling and rank rules keep applying to paths rooted at these names until
-/// every region above them has also been extracted.
-pub(crate) const EXTRACTED_CRATE_REGIONS: &[(&str, Region)] =
-    &[("coven_database", Region::Database)];
+/// but it does not stop a module still inside `coven` from naming it, nor one
+/// extracted crate from declaring another as a dependency — so the sibling and
+/// rank rules keep applying to paths rooted at these names, both in `coven` and
+/// in the extracted crates' own sources.
+pub(crate) const EXTRACTED_CRATE_REGIONS: &[(&str, Region)] = &[
+    ("coven_database", Region::Database),
+    ("coven_storage", Region::Storage),
+];
 
 /// Database and Storage are siblings: replication composes both, but neither
 /// may reach into the other.
@@ -139,22 +144,29 @@ pub(crate) fn find_module_dependency_violations(
     let reexports = root_reexports(files, &known_modules);
     let mut violations = BTreeSet::new();
     for file in files {
-        let Some(from) = file_module(&file.relative_path) else {
-            continue;
-        };
-        let from = if known_modules.contains(&from) {
-            from
-        } else if let Some(subject) = from
-            .strip_suffix("_tests")
-            .filter(|subject| known_modules.contains(*subject))
-        {
-            subject.to_string()
-        } else {
-            continue;
+        let (from, from_region, resolves_crate_paths) = match file_origin(&file.relative_path) {
+            Some(Origin::Module(module)) => {
+                let module = if known_modules.contains(&module) {
+                    module
+                } else if let Some(subject) = module
+                    .strip_suffix("_tests")
+                    .filter(|subject| known_modules.contains(*subject))
+                {
+                    subject.to_string()
+                } else {
+                    continue;
+                };
+                let region = regions[module.as_str()];
+                (module, region, true)
+            }
+            Some(Origin::ExtractedCrate(name, region)) => (name.to_string(), region, false),
+            None => continue,
         };
         let mut visitor = ModuleDependencyVisitor {
             path: &file.relative_path,
             from: &from,
+            from_region,
+            resolves_crate_paths,
             regions: &regions,
             known_modules: &known_modules,
             reexports: &reexports,
@@ -165,18 +177,41 @@ pub(crate) fn find_module_dependency_violations(
     Ok(violations.into_iter().collect())
 }
 
-/// The referencing file's top-level module: the first path component under
-/// `crates/coven/src/`, or the file stem for root-level files. `lib.rs` is the
-/// crate root and is exempt — it is the composition surface that names every
-/// module.
-fn file_module(path: &str) -> Option<String> {
-    let relative = path.strip_prefix("crates/coven/src/")?;
-    let top = relative.split('/').next()?;
-    let module = top.strip_suffix(".rs").unwrap_or(top);
-    if module == "lib" {
-        return None;
+/// What gives a scanned file its region.
+enum Origin {
+    /// A top-level module of the `coven` crate.
+    Module(String),
+    /// A file inside a crate that has been extracted out of `coven`, which the
+    /// whole crate's region covers.
+    ExtractedCrate(&'static str, Region),
+}
+
+/// The referencing file's region source: its top-level module when the file is
+/// still inside `coven` — the first path component under `crates/coven/src/`,
+/// or the file stem for root-level files — otherwise the extracted crate it
+/// belongs to. `coven`'s `lib.rs` is exempt: it is the composition surface that
+/// names every module.
+fn file_origin(path: &str) -> Option<Origin> {
+    if let Some(relative) = path.strip_prefix("crates/coven/src/") {
+        let top = relative.split('/').next()?;
+        let module = top.strip_suffix(".rs").unwrap_or(top);
+        if module == "lib" {
+            return None;
+        }
+        return Some(Origin::Module(module.to_string()));
     }
-    Some(module.to_string())
+    EXTRACTED_CRATE_REGIONS
+        .iter()
+        .find(|(name, _)| path.starts_with(&format!("crates/{}/src/", name.replace('_', "-"))))
+        .map(|(name, region)| Origin::ExtractedCrate(name, *region))
+}
+
+/// The top-level module of a file still inside `coven`.
+fn file_module(path: &str) -> Option<String> {
+    match file_origin(path)? {
+        Origin::Module(module) => Some(module),
+        Origin::ExtractedCrate(..) => None,
+    }
 }
 
 /// A `<module>_tests` file or directory holds tests for `<module>` rather than
@@ -231,6 +266,12 @@ fn root_reexports(
 struct ModuleDependencyVisitor<'a> {
     path: &'a str,
     from: &'a str,
+    from_region: Region,
+    /// Whether a `crate::`-rooted path names one of `coven`'s modules. Inside an
+    /// extracted crate it names that crate's own modules — its internal
+    /// structure, which this gate does not rank — so only the crate-name form is
+    /// checked there.
+    resolves_crate_paths: bool,
     regions: &'a BTreeMap<&'static str, Region>,
     known_modules: &'a BTreeSet<String>,
     reexports: &'a BTreeMap<String, String>,
@@ -240,6 +281,9 @@ struct ModuleDependencyVisitor<'a> {
 impl ModuleDependencyVisitor<'_> {
     /// `segments` is a `crate::`-rooted path with the `crate` segment removed.
     fn check_reference(&mut self, segments: &[String], line: usize) {
+        if !self.resolves_crate_paths {
+            return;
+        }
         let Some(first) = segments.first() else {
             return;
         };
@@ -253,7 +297,7 @@ impl ModuleDependencyVisitor<'_> {
         if to == self.from {
             return;
         }
-        let from_region = self.regions[self.from];
+        let from_region = self.from_region;
         let to_region = self.regions[to.as_str()];
         if allows(from_region, to_region) {
             return;
@@ -278,7 +322,10 @@ impl ModuleDependencyVisitor<'_> {
         else {
             return;
         };
-        let from_region = self.regions[self.from];
+        if crate_name == self.from {
+            return;
+        }
+        let from_region = self.from_region;
         if allows(from_region, to_region) {
             return;
         }
@@ -420,15 +467,15 @@ mod tests {
         let files = vec![
             lib(),
             file(
-                "crates/coven/src/join_code.rs",
-                "use crate::sync::VerifiedThing;",
+                "crates/coven/src/sync/mod.rs",
+                "use crate::restoration::RestoreSource;",
             ),
-            file("crates/coven/src/sync/mod.rs", ""),
+            file("crates/coven/src/restoration/mod.rs", ""),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "join_code");
-        assert_eq!(violations[0].to, "sync");
+        assert_eq!(violations[0].from, "sync");
+        assert_eq!(violations[0].to, "restoration");
     }
 
     #[test]
@@ -439,38 +486,62 @@ mod tests {
                 "crates/coven/src/sync/mod.rs",
                 "use coven_database::StoreDatabase;",
             ),
-            file("crates/coven/src/join_code.rs", ""),
         ];
         assert!(find_module_dependency_violations(&files)
             .expect("check runs")
             .is_empty());
     }
 
+    /// Cargo would resolve an edge between the two extracted sibling crates —
+    /// it is not a cycle — so this gate is what forbids it, in both directions.
     #[test]
-    fn storage_may_not_reach_its_database_sibling() {
+    fn the_extracted_siblings_may_not_reach_each_other() {
         let files = vec![
             lib(),
             file(
-                "crates/coven/src/storage/remote.rs",
+                "crates/coven-storage/src/remote.rs",
                 "use coven_database::StoreDatabase;",
             ),
-            file("crates/coven/src/sync/mod.rs", ""),
+            file(
+                "crates/coven-database/src/store.rs",
+                "use coven_storage::CloudHome;",
+            ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "storage");
-        assert_eq!(violations[0].to, "coven_database");
+        assert_eq!(violations.len(), 2);
+        assert_eq!(violations[0].from, "coven_database");
+        assert_eq!(violations[0].to, "coven_storage");
+        assert_eq!(violations[1].from, "coven_storage");
+        assert_eq!(violations[1].to, "coven_database");
     }
 
-    /// Replication composes both siblings, so naming the extracted database
-    /// crate from there is the allowed direction.
+    /// Replication composes both siblings, so naming either extracted crate
+    /// from there is the allowed direction.
     #[test]
-    fn replication_may_name_the_database_crate() {
+    fn replication_may_name_the_extracted_crates() {
         let files = vec![
             lib(),
             file(
                 "crates/coven/src/sync/mod.rs",
-                "use coven_database::StoreDatabase;",
+                "use coven_database::StoreDatabase;\nuse coven_storage::CloudHome;",
+            ),
+        ];
+        assert!(find_module_dependency_violations(&files)
+            .expect("check runs")
+            .is_empty());
+    }
+
+    /// `crate::` inside an extracted crate names that crate's own modules. They
+    /// are its internal structure, not `coven`'s regions, even when a name is
+    /// shared.
+    #[test]
+    fn a_crate_rooted_path_inside_an_extracted_crate_is_its_own() {
+        let files = vec![
+            lib(),
+            file("crates/coven/src/sync/mod.rs", ""),
+            file(
+                "crates/coven-storage/src/remote.rs",
+                "use crate::sync::SomethingOfItsOwn;",
             ),
         ];
         assert!(find_module_dependency_violations(&files)
@@ -481,39 +552,36 @@ mod tests {
     #[test]
     fn a_root_reexport_cannot_bypass_the_gate() {
         let files = vec![
+            file("crates/coven/src/lib.rs", "pub use handle::CovenHandle;"),
+            file("crates/coven/src/handle.rs", ""),
             file(
-                "crates/coven/src/lib.rs",
-                "pub use sync::DeviceJoinJournalDatabase;",
-            ),
-            file("crates/coven/src/sync/mod.rs", ""),
-            file(
-                "crates/coven/src/join_code.rs",
-                "fn open() { let _ = crate::DeviceJoinJournalDatabase::open(\"p\"); }",
+                "crates/coven/src/sync/mod.rs",
+                "fn open() { let _ = crate::CovenHandle::open(\"p\"); }",
             ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].to, "sync");
+        assert_eq!(violations[0].to, "handle");
     }
 
     #[test]
     fn an_upward_reference_inside_a_macro_body_is_rejected() {
         let files = vec![
             lib(),
-            file("crates/coven/src/sync/mod.rs", ""),
+            file("crates/coven/src/restoration/mod.rs", ""),
             file(
-                "crates/coven/src/join_code.rs",
+                "crates/coven/src/sync/mod.rs",
                 r#"
                 fn is_receipt(object: &Object) -> bool {
-                    matches!(object, crate::sync::store::ReclaimObject::Receipt { .. })
+                    matches!(object, crate::restoration::restore::RestoreSource::Code { .. })
                 }
                 "#,
             ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "join_code");
-        assert_eq!(violations[0].to, "sync");
+        assert_eq!(violations[0].from, "sync");
+        assert_eq!(violations[0].to, "restoration");
     }
 
     #[test]
@@ -526,16 +594,16 @@ mod tests {
     fn test_sources_and_cfg_test_items_hold_the_same_direction() {
         let files = vec![
             lib(),
-            file("crates/coven/src/sync/mod.rs", ""),
+            file("crates/coven/src/restoration/mod.rs", ""),
             file(
-                "crates/coven/src/join_code_tests.rs",
-                "use crate::sync::VerifiedThing;",
+                "crates/coven/src/sync_tests.rs",
+                "use crate::restoration::RestoreSource;",
             ),
             file(
-                "crates/coven/src/join_code.rs",
+                "crates/coven/src/sync/mod.rs",
                 r#"
                 #[cfg(test)]
-                mod tests { use crate::sync::VerifiedThing; }
+                mod tests { use crate::restoration::RestoreSource; }
                 "#,
             ),
         ];
@@ -543,7 +611,7 @@ mod tests {
         assert_eq!(violations.len(), 2);
         assert!(violations
             .iter()
-            .all(|violation| violation.from == "join_code" && violation.to == "sync"));
+            .all(|violation| violation.from == "sync" && violation.to == "restoration"));
     }
 
     /// A `<module>_tests` file or directory carries the tests for `<module>`, so
@@ -555,19 +623,19 @@ mod tests {
             lib(),
             file("crates/coven/src/sync/mod.rs", ""),
             file("crates/coven/src/handle.rs", ""),
-            file("crates/coven/src/join_code.rs", ""),
+            file("crates/coven/src/restoration/mod.rs", ""),
             file(
                 "crates/coven/src/handle_tests/whole_handle.rs",
-                "use crate::sync::VerifiedThing;",
+                "use crate::restoration::RestoreSource;",
             ),
             file(
-                "crates/coven/src/join_code_tests.rs",
-                "use crate::sync::VerifiedThing;",
+                "crates/coven/src/sync_tests.rs",
+                "use crate::restoration::RestoreSource;",
             ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "join_code");
-        assert_eq!(violations[0].to, "sync");
+        assert_eq!(violations[0].from, "sync");
+        assert_eq!(violations[0].to, "restoration");
     }
 }

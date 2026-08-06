@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::storage::cloud::setup::StorageSetupError;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::ConfigProvider;
 use crate::sync::store::blob::{
@@ -10,6 +9,7 @@ use crate::sync::{BlobCacheError, BlobStream};
 use coven_database::StoreDatabase;
 use coven_foundation::config::Config;
 use coven_protocol::blob::RowBlobRef;
+use coven_storage::cloud::setup::StorageSetupError;
 
 #[derive(Clone)]
 pub(crate) struct StoreBlobAccess {
@@ -61,7 +61,7 @@ impl StoreBlobAccess {
                 ResolvedBlobAccess::Local(self.local.clone())
             } else {
                 let storage = cloud_storage.open(&config, None, None).await?;
-                let storage: Arc<dyn crate::storage::SyncStorage> = Arc::new(storage);
+                let storage: Arc<dyn coven_storage::SyncStorage> = Arc::new(storage);
                 ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
                     self.local.clone(),
                     CurrentRemoteBlobSource::current(self.database.clone(), storage),
@@ -92,7 +92,7 @@ impl StoreBlobAccess {
             .map(|resolved| resolved.access.clone())
     }
 
-    pub(crate) fn install_connected(&self, storage: Arc<dyn crate::storage::SyncStorage>) {
+    pub(crate) fn install_connected(&self, storage: Arc<dyn coven_storage::SyncStorage>) {
         let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
             self.local.clone(),
             CurrentRemoteBlobSource::current(self.database.clone(), storage),

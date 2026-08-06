@@ -8,14 +8,14 @@ use coven_protocol::store_commit::{
 
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
     database: StoreDatabase,
-    storage: &'storage dyn crate::storage::SyncStorage,
+    storage: &'storage dyn coven_storage::SyncStorage,
     history: &'operation mut super::MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
-        storage: &'storage dyn crate::storage::SyncStorage,
+        storage: &'storage dyn coven_storage::SyncStorage,
         history: &'operation mut super::MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
@@ -328,7 +328,7 @@ fn registration_database_error(error: coven_database::DbError) -> StoreRegistrat
 /// declares, and that exact root — and carries the owner's signature over all
 /// of it. Both the pre-Store observation and the joining Store check it here.
 pub(super) async fn verify_offer(
-    storage: &dyn crate::storage::SyncStorage,
+    storage: &dyn coven_storage::SyncStorage,
     history: &super::MergeHistoryVerifier<'_>,
     identity: &UserKeypair,
     offer: &DeviceJoinOffer,

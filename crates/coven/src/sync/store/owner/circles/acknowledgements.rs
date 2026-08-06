@@ -5,14 +5,14 @@ use super::StoreAckError;
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
     database: &'operation coven_database::StoreDatabase,
-    storage: &'storage dyn crate::storage::SyncStorage,
+    storage: &'storage dyn coven_storage::SyncStorage,
     root: &'operation coven_protocol::store_commit::StoreRootRef,
 }
 
 impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation coven_database::StoreDatabase,
-        storage: &'storage dyn crate::storage::SyncStorage,
+        storage: &'storage dyn coven_storage::SyncStorage,
         root: &'operation coven_protocol::store_commit::StoreRootRef,
     ) -> Self {
         Self {

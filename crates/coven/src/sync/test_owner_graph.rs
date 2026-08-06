@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use crate::blob::transition::{ConnectedBlobTransitions, LocalBlobTransitions};
-use crate::storage::SyncStorage;
 use crate::sync::store::blob::{
     CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess, StoreBlobCache,
 };
 use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
+use coven_storage::SyncStorage;
 
 #[derive(Clone)]
 pub(crate) struct TestOwnerGraph {
@@ -272,7 +272,7 @@ impl TestOwnerGraph {
 
     pub(crate) async fn prepare_sync(
         &self,
-        storage: impl Into<std::sync::Arc<crate::storage::CloudSyncStorage>>,
+        storage: impl Into<std::sync::Arc<coven_storage::CloudSyncStorage>>,
         identity: coven_keys::keys::UserKeypair,
     ) -> Result<crate::sync::cycle::SyncComponents, String> {
         let expected_store_root = self

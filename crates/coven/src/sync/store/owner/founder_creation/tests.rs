@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables,
 };
 use coven_database::Database;
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 fn store_database(database: &Database) -> StoreDatabase {
     StoreDatabase::new(database)

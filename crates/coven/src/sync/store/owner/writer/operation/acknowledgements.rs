@@ -1,9 +1,9 @@
 use super::snapshot;
 use super::*;
-use crate::storage::VerifiedObjectWrites;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
+use coven_storage::VerifiedObjectWrites;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {

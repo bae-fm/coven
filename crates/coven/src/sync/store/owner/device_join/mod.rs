@@ -10,7 +10,6 @@ use super::{
     prepare_registration_object, AuthorizedStoreHistory, AuthorizedWriterOperation,
     RegistrationOutbox, StoreKeyrings,
 };
-use crate::storage::SyncStorage;
 use crate::sync::store::{Store, StoreDatabase};
 use coven_database::DeviceJoinBootstrapPlan;
 use coven_keys::keys::UserKeypair;
@@ -27,6 +26,7 @@ use coven_protocol::store_commit::{
     DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
 };
+use coven_storage::SyncStorage;
 
 mod authorized_join;
 mod cleanup;

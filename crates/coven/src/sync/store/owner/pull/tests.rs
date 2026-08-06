@@ -444,12 +444,12 @@ impl EffectiveAccessFixture {
             .create_circle("0000000001000-0000-owner", "Effective Access")
             .await
             .expect("create effective-access Circle");
-        let owner_storage = crate::storage::CloudSyncStorage::new(
+        let owner_storage = coven_storage::CloudSyncStorage::new(
             home.clone(),
-            crate::storage::CloudCipher::Encrypted(
+            coven_storage::CloudCipher::Encrypted(
                 coven_keys::encryption::EncryptionService::from_key([42; 32]),
             ),
-            crate::storage::BlobPathScheme::Hashed,
+            coven_storage::BlobPathScheme::Hashed,
             label,
             owner.clone(),
         )
@@ -1290,7 +1290,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
             &crate::sync::test_helpers::pubkey_hex(&candidate),
             "0000000003000-0000-causal-proof",
             &encryption,
-            &crate::storage::PendingRotation::none(),
+            &coven_storage::PendingRotation::none(),
         )
         .await
         .expect("publish traversal-earlier Owner removal control");

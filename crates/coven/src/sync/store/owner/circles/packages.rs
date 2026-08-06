@@ -1,6 +1,5 @@
 use tracing::debug;
 
-use crate::storage::run_blocking_object_verification;
 use crate::sync::store::owner::pull::{LoadedCirclePackage, LocalStoreMembership};
 use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
 use coven_database::{DbError, StoreDatabase};
@@ -8,6 +7,7 @@ use coven_protocol::objects::VerifiedObject;
 use coven_protocol::store_commit::{
     CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,
 };
+use coven_storage::run_blocking_object_verification;
 
 pub(crate) enum CirclePackageReadError {
     Database(DbError),
@@ -21,14 +21,14 @@ pub(crate) struct OpenedCirclePackage {
 
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
     database: &'operation StoreDatabase,
-    storage: &'storage dyn crate::storage::SyncStorage,
+    storage: &'storage dyn coven_storage::SyncStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
-        storage: &'storage dyn crate::storage::SyncStorage,
+        storage: &'storage dyn coven_storage::SyncStorage,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {

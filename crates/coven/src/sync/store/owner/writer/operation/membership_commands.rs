@@ -10,8 +10,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
-    ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
-    {
+    ) -> Result<
+        coven_storage::join_code::InviteCode,
+        crate::sync::store::membership::MembershipOpsError,
+    > {
         if role == coven_protocol::membership::MemberRole::Owner {
             return Err(crate::sync::store::membership::MembershipOpsError::Invite(
                 crate::sync::store::membership::InviteError::Membership(
@@ -88,7 +90,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         invitee_pubkey: public_key_hex.to_string(),
                         invitee_email: invitee_email.map(str::to_string),
                         role,
-                        desired_access: crate::storage::cloud::CloudAccessState::Present {
+                        desired_access: coven_storage::cloud::CloudAccessState::Present {
                             member_pubkey: public_key_hex.to_string(),
                             provider_account_email: invitee_email.map(str::to_string),
                         },
@@ -137,7 +139,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let outcome = storage
             .set_member_access(plan.desired_access.clone())
             .await?;
-        let crate::storage::cloud::CloudAccessOutcome::Present(observed_join_info) = outcome else {
+        let coven_storage::cloud::CloudAccessOutcome::Present(observed_join_info) = outcome else {
             return Err(
                 crate::sync::store::membership::InviteError::InvalidDurableMutation(
                     "provider returned absent outcome for present access request".to_string(),
@@ -234,8 +236,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 ),
             ));
         }
-        Ok(crate::join_code::InviteCode {
-            v: crate::join_code::INVITE_CODE_VERSION,
+        Ok(coven_storage::join_code::InviteCode {
+            v: coven_storage::join_code::INVITE_CODE_VERSION,
             store_id: store_id.to_string(),
             store_name: store_name.to_string(),
             join_info,
@@ -254,8 +256,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         public_key_hex: &str,
         current_encryption: &coven_keys::encryption::EncryptionService,
         master_keys: &dyn coven_keys::keys::MasterKeyCustody,
-        cipher: &dyn crate::storage::CloudCipherAccess,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        cipher: &dyn coven_storage::CloudCipherAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
         let timestamp = self.database.stamp();
         let new_key = self
@@ -284,7 +286,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         public_key_hex: &str,
         timestamp: &str,
         current_encryption: &coven_keys::encryption::EncryptionService,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipOpsError,
@@ -309,7 +311,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn complete_revoke_rotation_adoption(
         &self,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
         adopted_generation: u64,
     ) -> Result<(), crate::sync::store::membership::InviteError> {
         let _mutation = self.database.membership_mutation_permit().await;

@@ -129,8 +129,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn set_membership_access(
         &self,
-        state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, InviteError> {
+        state: coven_storage::cloud::CloudAccessState,
+    ) -> Result<coven_storage::cloud::CloudAccessOutcome, InviteError> {
         self.storage
             .set_member_access(state)
             .await

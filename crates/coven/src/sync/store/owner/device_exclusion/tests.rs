@@ -2,8 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
 use crate::sync::test_helpers::{
     open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
@@ -15,6 +13,8 @@ use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::{
     StoreAckExclusionState, StoreCommitCoord, StoreDeviceExclusionRef, StoreDeviceRegistrationRef,
 };
+use coven_storage::cloud::test_utils::InMemoryCloudHome;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(

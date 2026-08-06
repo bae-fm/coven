@@ -1,4 +1,3 @@
-use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::{
     read_exact_circle_object, verify_control_context_for_verified_commit, CircleOperationError,
     CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive,
@@ -16,6 +15,7 @@ use coven_protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
 };
+use coven_storage::SyncStorage;
 use std::collections::BTreeSet;
 
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {

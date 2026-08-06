@@ -26,10 +26,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
-#[cfg(any(test, feature = "test-utils"))]
-use crate::storage::cloud::CloudHome;
-#[cfg(any(test, feature = "test-utils"))]
-use crate::storage::CloudCipher;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
 use crate::store_foundation::StoreFoundation;
@@ -54,14 +50,18 @@ use coven_protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use coven_protocol::membership::MemberInfo;
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_storage::cloud::CloudHome;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_storage::CloudCipher;
 use tokio::sync::watch;
 
 /// A Remote blob read needs sync storage; if building it from config fails
 /// (missing credentials or cloud configuration) the read surfaces that as a
 /// configuration fault, not a disk I/O error. The cache error preserves the
 /// setup failure's message at this API boundary.
-impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
-    fn from(e: crate::storage::cloud::setup::StorageSetupError) -> Self {
+impl From<coven_storage::cloud::setup::StorageSetupError> for BlobCacheError {
+    fn from(e: coven_storage::cloud::setup::StorageSetupError) -> Self {
         BlobCacheError::StorageSetup(e.to_string())
     }
 }
@@ -146,12 +146,12 @@ impl CovenHandle {
         key_service: StoreKeys,
         key_custody: Arc<dyn MasterKeyCustody>,
         identity_custody: Arc<dyn DeviceIdentityCustody>,
-        oauth_clients: crate::oauth::OAuthClients,
+        oauth_clients: coven_storage::oauth::OAuthClients,
         clock: ClockRef,
-        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
-        blob_chunking: crate::storage::BlobChunking,
+        blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
         let StoreFoundation {
             database,
@@ -343,7 +343,7 @@ impl CovenHandle {
 
     pub async fn connect_sync_with_cloudkit(
         &self,
-        cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
+        cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), SyncError> {
         self.sync.connect_with_cloudkit(cloudkit_ops).await
     }
@@ -1114,7 +1114,7 @@ impl CovenHandle {
         &self,
         store_id: &str,
         signer: coven_keys::keys::UserKeypair,
-        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+        home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<std::sync::Arc<crate::sync::test_helpers::TestStore>, String> {
         self.sync.create_test_store(store_id, signer, home).await
     }

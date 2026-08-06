@@ -13,7 +13,6 @@ use super::operations::{
 };
 use super::verified_history::MergeHistoryVerifier;
 use super::{AuthorizedWriterOperation, Store, StoreError};
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use coven_database::DbError;
 use coven_database::StoreDatabase;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -24,6 +23,7 @@ use coven_protocol::store_commit::{
     StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError,
 };
+use coven_storage::{SyncStorage, VerifiedObjectWrites};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StoreDeviceExclusionResult {

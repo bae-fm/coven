@@ -550,10 +550,10 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .expect("activate Store member device");
 
     let (_store_temp, store_dir) = temp_store_dir();
-    let owner_storage = crate::storage::CloudSyncStorage::new(
+    let owner_storage = coven_storage::CloudSyncStorage::new(
         _home.clone(),
-        crate::storage::CloudCipher::Encrypted(routing()),
-        crate::storage::BlobPathScheme::Hashed,
+        coven_storage::CloudCipher::Encrypted(routing()),
+        coven_storage::BlobPathScheme::Hashed,
         "resolve-closing",
         founder.clone(),
     )

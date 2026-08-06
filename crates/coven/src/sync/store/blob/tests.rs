@@ -9,7 +9,6 @@
 
 use super::cache::BlobCacheError;
 use super::StoreBlobCache;
-use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, photo_decl, read_test_db,
@@ -20,6 +19,7 @@ use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_protocol::synced_schema::SyncedTable;
+use coven_storage::SyncStorage;
 
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.

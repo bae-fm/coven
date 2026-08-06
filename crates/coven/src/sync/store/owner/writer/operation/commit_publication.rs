@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::VerifiedObjectWrites;
+use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn reject_excluded_merge_candidate(

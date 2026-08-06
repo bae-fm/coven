@@ -6,7 +6,7 @@ impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn drain_tombstones(
         &self,
         cipher: &dyn CloudCipherAccess,
-        pending_rotation: &dyn crate::storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudRotationAccess,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
@@ -73,7 +73,7 @@ impl AuthorizedWriterOperation<'_> {
                 .read_provider_object(&key)
                 .await
                 .map_err(|error| format!("Failed to read tombstone {key}: {error}"))?;
-            let aad_context = crate::storage::cloud_aad_context(&store_id, &key);
+            let aad_context = coven_storage::cloud_aad_context(&store_id, &key);
             let decoded = match cipher.snapshot().open(stored, &aad_context) {
                 Ok(decoded) => decoded,
                 Err(error) => {
