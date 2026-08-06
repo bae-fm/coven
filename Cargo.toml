@@ -81,6 +81,10 @@ large_enum_variant = "allow"
 # artifacts; the lint only fires because those constructors now live on
 # aliases of the `Signed` envelope type.
 self_named_constructors = "allow"
+# Sibling policy to large_enum_variant: error enums carry their causes inline
+# so hosts can match them without indirection. Revisit boxing per-variant in
+# the error-model tier-2 pass (plans/error-model.md) if a Result becomes hot.
+result_large_err = "allow"
 
 [profile.dev]
 incremental = true
