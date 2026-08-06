@@ -26,8 +26,6 @@ pub use blob::{BlobCacheError, BlobStream};
 pub(crate) use circle_controls::CircleOperationError;
 #[cfg(test)]
 pub(crate) use circle_controls::CircleTransitionHistory;
-#[cfg(test)]
-pub(crate) use circle_controls::{VerifiedCircleAccess, VerifiedCircleActive};
 pub(crate) use error::StoreError;
 pub(crate) use error::StorePreparationError;
 #[cfg(test)]

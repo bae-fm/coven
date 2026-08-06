@@ -836,3 +836,25 @@ impl ExactSlotStorage for InMemoryCloudHome {
 #[cfg(test)]
 #[path = "test_utils_tests.rs"]
 mod tests;
+
+pub(crate) fn test_cloud_home() -> std::sync::Arc<InMemoryCloudHome> {
+    test_cloud_home_with_binding(crate::protocol::objects::ResolvedProviderBinding {
+        store: crate::protocol::objects::StoreProviderBinding::GoogleDrive {
+            corpus: crate::protocol::objects::GoogleDriveCorpus::SharedDrive {
+                drive_id: "test-drive".to_string(),
+                folder_id: "test-folder".to_string(),
+            },
+        },
+        device: crate::protocol::objects::ProviderDeviceBinding {
+            principal: crate::protocol::objects::ProviderPrincipalId::GoogleDrive {
+                permission_id: "test-permission".to_string(),
+            },
+        },
+    })
+}
+
+pub(crate) fn test_cloud_home_with_binding(
+    binding: crate::protocol::objects::ResolvedProviderBinding,
+) -> std::sync::Arc<InMemoryCloudHome> {
+    std::sync::Arc::new(InMemoryCloudHome::new().with_provider_binding(binding))
+}

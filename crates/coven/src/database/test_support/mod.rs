@@ -4,6 +4,7 @@ use super::{Connection, DbError};
 mod circle_fixture;
 mod database;
 mod image;
+pub(crate) mod synthetic_store;
 
 pub(crate) use circle_fixture::test_circle_owner_keypair;
 pub(crate) use image::DatabaseImageTest;

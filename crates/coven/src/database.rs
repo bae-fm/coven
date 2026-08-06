@@ -135,13 +135,15 @@ mod store_reclaim_records;
 #[cfg(test)]
 mod test_sql;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(test)]
 mod test_transaction;
 #[cfg(test)]
 pub(crate) use coven_schema::DatabaseTestTable;
 #[cfg(test)]
 pub(crate) use test_sql::DatabaseTestSql;
+#[cfg(test)]
+pub(crate) use test_support::synthetic_store;
 #[cfg(test)]
 pub(crate) use test_support::{
     test_circle_owner_keypair, DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper,

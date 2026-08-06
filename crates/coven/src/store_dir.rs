@@ -1084,5 +1084,14 @@ impl From<PathBuf> for StoreDir {
 }
 
 #[cfg(test)]
+/// A temp dir plus a [`StoreDir`] rooted at it. The returned `TempDir` must be
+/// held for the directory to outlive the test.
+pub(crate) fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = StoreDir::new(tmp.path());
+    (tmp, dir)
+}
+
+#[cfg(test)]
 #[path = "store_dir_tests.rs"]
 mod tests;

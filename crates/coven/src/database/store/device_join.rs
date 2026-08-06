@@ -435,7 +435,7 @@ mod tests {
         pending
             .insert_or_load("attempt", "joiner", "pending")
             .expect("insert pending join");
-        let database = crate::sync::test_helpers::open_test_db();
+        let database = crate::database::synthetic_store::open_test_db();
         let store = StoreDatabase::new(&database);
         let store_key = "device_join/attempt/joiner";
         store

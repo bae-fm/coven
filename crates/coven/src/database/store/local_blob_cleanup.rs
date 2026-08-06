@@ -246,10 +246,10 @@ impl<'operation> LocalBlobCleanup<'operation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::synthetic_store::open_test_db_with_blob;
     use crate::protocol::blob::{CacheFill, Provenance};
     use crate::protocol::store_commit::ObjectHash;
     use crate::protocol::synced_schema::BlobDecl;
-    use crate::sync::test_helpers::open_test_db_with_blob;
 
     #[tokio::test]
     async fn a_live_same_id_row_with_another_locator_does_not_suppress_exact_cleanup() {

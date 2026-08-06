@@ -1359,7 +1359,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     let encryption = EncryptionService::from_key([17; 32]);
     let db = open();
     let store_database = crate::database::StoreDatabase::new(&db);
-    let (_blob_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (_blob_temp, store_dir) = crate::store_dir::temp_store_dir();
     let storage = CloudSyncStorage::new(
         Arc::new(home.clone()),
         CloudCipher::Encrypted(encryption.clone()),

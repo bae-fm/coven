@@ -50,7 +50,7 @@ fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
 
 #[tokio::test]
 async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
-    let database = crate::sync::test_helpers::open_test_db();
+    let database = crate::database::synthetic_store::open_test_db();
     let activation = StoreBatchCommitRef {
         coord: StoreCommitCoord {
             stream_id: crate::protocol::causal_grants::AuthorStreamId::from_bytes([23; 32]),

@@ -652,10 +652,10 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
         reference,
         circle_id: creation.circle_id,
         control: control.clone(),
-        local_access: Some(crate::sync::store::VerifiedCircleAccess {
+        local_access: Some(crate::protocol::circle_activation::VerifiedCircleAccess {
             envelope: own_access.envelope.clone(),
             leaf: own_access.leaf.clone(),
-            active: Some(crate::sync::store::VerifiedCircleActive {
+            active: Some(crate::protocol::circle_activation::VerifiedCircleActive {
                 roster: creation.roster.clone(),
                 metadata: creation.metadata.clone(),
             }),
