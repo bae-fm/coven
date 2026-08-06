@@ -72,3 +72,23 @@ fn debug_redacts_s3_secret_key() {
         "S3 secret key leaked: {debug}"
     );
 }
+
+/// The join info is what a joining device receives. `s3_exact_slots` and
+/// `strong_reads` describe how THIS device talks to the bucket, so neither
+/// belongs on the shared wire — a joining device decides them for itself.
+#[test]
+fn the_shared_wire_carries_no_local_only_s3_settings() {
+    let join_info = CloudHomeJoinInfo::S3 {
+        bucket: "bucket".to_string(),
+        region: "us-east-1".to_string(),
+        endpoint: Some("https://objects.example".to_string()),
+        access_key: "access".to_string(),
+        secret_key: "secret".to_string(),
+        key_prefix: None,
+    };
+
+    let shared_wire = serde_json::to_string(&join_info).expect("serialize shared join info");
+
+    assert!(!shared_wire.contains("s3_exact_slots"));
+    assert!(!shared_wire.contains("strong_reads"));
+}

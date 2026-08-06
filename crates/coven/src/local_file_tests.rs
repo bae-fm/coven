@@ -3,6 +3,15 @@ use std::sync::Arc;
 
 use super::*;
 
+/// SHA-256 over `bytes`, the digest the exact-read facts report.
+fn digest(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
 async fn temp_entries(dir: &Path) -> Vec<PathBuf> {
     let mut entries = tokio::fs::read_dir(dir).await.expect("read test directory");
     let mut temps = Vec::new();
@@ -68,10 +77,7 @@ async fn exact_read_keeps_bytes_and_identity_on_one_open_inode() {
 
     assert_eq!(bytes, original);
     assert_eq!(size, original.len() as u64);
-    assert_eq!(
-        crate::protocol::store_commit::ObjectHash::from_digest(hash),
-        crate::protocol::store_commit::ObjectHash::digest(original)
-    );
+    assert_eq!(hash, digest(original));
     assert_eq!(read(&path).await.expect("read replacement"), replacement);
 }
 
@@ -155,10 +161,7 @@ async fn exact_copy_keeps_bytes_and_identity_on_one_open_inode() {
 
     assert_eq!(read(&destination).await.expect("read copy"), original);
     assert_eq!(size, original.len() as u64);
-    assert_eq!(
-        crate::protocol::store_commit::ObjectHash::from_digest(hash),
-        crate::protocol::store_commit::ObjectHash::digest(original)
-    );
+    assert_eq!(hash, digest(original));
     assert_eq!(read(&source).await.expect("read replacement"), replacement);
 }
 

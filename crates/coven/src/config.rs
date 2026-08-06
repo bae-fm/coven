@@ -283,18 +283,6 @@ mod tests {
         let loaded = Config::load_from_config_yaml(store_dir).expect("load");
 
         assert_eq!(loaded, config);
-
-        let join_info = crate::storage::cloud::CloudHomeJoinInfo::S3 {
-            bucket: "bucket".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: Some("https://objects.example".to_string()),
-            access_key: "access".to_string(),
-            secret_key: "secret".to_string(),
-            key_prefix: None,
-        };
-        let shared_wire = serde_json::to_string(&join_info).expect("serialize shared join info");
-        assert!(!shared_wire.contains("s3_exact_slots"));
-        assert!(!shared_wire.contains("strong_reads"));
     }
 
     /// A CloudKit share join persists `cloudkit_owner_name` and
