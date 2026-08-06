@@ -243,10 +243,7 @@ impl HostWriteBlobStaging {
                 Err(error) => {
                     return Err(move_materialization_error(
                         fact,
-                        DbError::Message(format!(
-                            "inspect blob source {}: {error}",
-                            path.display()
-                        )),
+                        DbError::context(format!("inspect blob source {}", path.display()), error),
                     ));
                 }
             }
@@ -316,10 +313,10 @@ impl HostWriteBlobStaging {
             Err(error) => {
                 return Err(move_materialization_error(
                     fact,
-                    DbError::Message(format!(
-                        "inspect Local destination {}: {error}",
-                        destination.display()
-                    )),
+                    DbError::context(
+                        format!("inspect Local destination {}", destination.display()),
+                        error,
+                    ),
                 ));
             }
         }

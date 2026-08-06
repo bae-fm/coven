@@ -403,64 +403,64 @@ impl std::fmt::Display for StagedBlobRollbackFailures {
 pub enum DbError {
     #[error("database error: {0}")]
     Message(String),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Sqlite(#[from] rusqlite::Error),
     /// A JSON column's bytes did not read back as the value they encode, or a
     /// value would not encode. Every synced-protocol column is stored as JSON,
     /// so this is the shape of every column-level decode failure.
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Serde(#[from] serde_json::Error),
     /// Durable bytes failed the Store protocol's own validation — a hash that
     /// does not match, a signature that does not verify, an object in the wrong
     /// slot. The database read them back intact; the protocol refused them.
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     RemoteObject(#[from] crate::protocol::remote_object::RemoteObjectRecordError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     AudiencePackage(#[from] crate::protocol::audience_package::AudiencePackageError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     ObjectHash(#[from] crate::object_hash::InvalidObjectHash),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     BlobLocator(#[from] crate::protocol::blob::locator::BlobLocatorError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     CircleId(#[from] crate::protocol::circle::CircleIdError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     RowRoutingKey(#[from] crate::protocol::circle::RowRoutingKeyError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Gate(#[from] crate::database::gate::GateError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Storage(#[from] crate::protocol::objects::StorageError),
-    #[error("database error: unsafe blob path: {0}")]
+    #[error("unsafe blob path: {0}")]
     BlobPath(#[from] crate::store_dir::PathTokenError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Io(#[from] std::io::Error),
     /// A stored integer column did not fit the type the schema says it holds.
-    #[error("database error: stored value is out of range: {0}")]
+    #[error("stored value is out of range: {0}")]
     IntRange(#[from] std::num::TryFromIntError),
-    #[error("database error: stored value is not an integer: {0}")]
+    #[error("stored value is not an integer: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
-    #[error("database error: stored value is not UTF-8: {0}")]
+    #[error("stored value is not UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     BlobDecl(#[from] crate::database::BlobDeclError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     ChangesetIdentity(#[from] crate::database::ChangesetIdentityError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Encryption(#[from] crate::encryption::EncryptionError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     SnapshotImage(#[from] crate::database::store::SnapshotImageError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     FromSql(#[from] rusqlite::types::FromSqlError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     BlobOpeningAuthority(#[from] crate::protocol::blob::BlobOpeningAuthorityError),
-    #[error("database error: {0}")]
+    #[error("{0}")]
     CommitNewFile(#[from] crate::local_file::CommitNewFileError),
     /// A Store operation invoked through [`AudienceBlobMoveStaging`] failed.
     /// The database layer calls back into the sync layer to stage a write's
     /// audience-move blobs, so that layer's failures arrive here. Boxed
     /// because `StoreError` carries a `DbError` of its own.
-    #[error("database error: {0}")]
+    #[error("{0}")]
     Store(Box<crate::sync::store::StoreError>),
     /// Staging a write's audience-move blobs failed AND rolling the staged
     /// files back failed, so those files are left on disk. Carries both
@@ -470,12 +470,14 @@ pub enum DbError {
         operation: Box<DbError>,
         rollback: StagedBlobRollbackFailures,
     },
-    #[error("database error: staged audience blob rollback failed: {0}")]
+    #[error("staged audience blob rollback failed: {0}")]
     StagedBlobRollback(StagedBlobRollbackFailures),
     /// An audience move needs its blob materialized locally and it is not —
     /// the row's bytes are absent, stale, or refuse their declared identity.
     /// Names the row so the caller can act on it.
-    #[error("database error: blob move requires materialization for {table}/{row_id}/{column} at {row_stamp}: {reason}")]
+    #[error(
+        "blob move requires materialization for {table}/{row_id}/{column} at {row_stamp}: {reason}"
+    )]
     BlobMoveRequiresMaterialization {
         table: String,
         row_id: String,
@@ -486,7 +488,7 @@ pub enum DbError {
     /// A queued outbox entry's `last_attempt_at` is not an RFC 3339 timestamp,
     /// so whether the entry is still inside its retry backoff cannot be
     /// decided. Names the entry so the caller can act on that row.
-    #[error("database error: outbox entry {entry_id} has unparseable last_attempt_at {value:?}: {source}")]
+    #[error("outbox entry {entry_id} has unparseable last_attempt_at {value:?}: {source}")]
     UnparseableOutboxAttemptTime {
         entry_id: i64,
         value: String,
