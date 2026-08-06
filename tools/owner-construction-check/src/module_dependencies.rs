@@ -15,9 +15,15 @@
 //! ```
 //!
 //! Every top-level module of the coven crate is assigned to a region, and a
-//! production `crate::` reference from one region to another must point down
-//! the diagram. Within-region references are unrestricted — this gate asserts
-//! the direction between regions, not the structure inside one.
+//! `crate::` reference from one region to another must point down the diagram.
+//! Within-region references are unrestricted — this gate asserts the direction
+//! between regions, not the structure inside one.
+//!
+//! Tests are held to the same direction as the code they exercise. A test that
+//! reaches up a region is an integration test in the wrong module, or a fixture
+//! that belongs to the layer whose types it builds; either way the regions
+//! become crates that cannot depend on each other in that direction, test
+//! profile included.
 //!
 //! References through root re-exports (`use crate::SomeItem`) resolve to the
 //! item's source module via `lib.rs`, so a re-export cannot bypass the gate.
@@ -27,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use crate::{is_test_only, is_test_source, RustFile};
+use crate::{is_test_source, RustFile};
 
 /// Region rank orders the layers bottom-up. A reference from module A to
 /// module B is allowed when B's region rank is strictly lower than A's, or the
@@ -146,9 +152,6 @@ pub(crate) fn find_module_dependency_violations(
     let reexports = root_reexports(files, &known_modules);
     let mut violations = BTreeSet::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
-            continue;
-        }
         let Some(from) = file_module(&file.relative_path) else {
             continue;
         };
@@ -349,34 +352,6 @@ impl<'ast> Visit<'ast> for ModuleDependencyVisitor<'_> {
         visit::visit_attribute(self, node);
     }
 
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_mod(self, node);
-    }
-
-    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_impl(self, node);
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_fn(self, node);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_impl_item_fn(self, node);
-    }
-
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         let mut paths = Vec::new();
         crate::capability_boundaries::flatten_use_tree(&node.tree, &mut Vec::new(), &mut paths);
@@ -521,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sources_and_cfg_test_items_are_exempt() {
+    fn test_sources_and_cfg_test_items_hold_the_same_direction() {
         let files = vec![
             lib(),
             file("crates/coven/src/sync/mod.rs", ""),
@@ -537,8 +512,35 @@ mod tests {
                 "#,
             ),
         ];
-        assert!(find_module_dependency_violations(&files)
-            .expect("check runs")
-            .is_empty());
+        let violations = find_module_dependency_violations(&files).expect("check runs");
+        assert_eq!(violations.len(), 2);
+        assert!(violations
+            .iter()
+            .all(|violation| violation.from == "protocol" && violation.to == "sync"));
+    }
+
+    /// A `<module>_tests` file or directory carries the tests for `<module>`, so
+    /// its references answer to that module's region rather than declaring a
+    /// region of their own.
+    #[test]
+    fn a_modules_test_file_answers_to_that_modules_region() {
+        let files = vec![
+            lib(),
+            file("crates/coven/src/sync/mod.rs", ""),
+            file("crates/coven/src/handle.rs", ""),
+            file("crates/coven/src/database/store.rs", ""),
+            file(
+                "crates/coven/src/handle_tests/whole_handle.rs",
+                "use crate::sync::VerifiedThing;",
+            ),
+            file(
+                "crates/coven/src/database_tests.rs",
+                "use crate::sync::VerifiedThing;",
+            ),
+        ];
+        let violations = find_module_dependency_violations(&files).expect("check runs");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].from, "database");
+        assert_eq!(violations[0].to, "sync");
     }
 }
