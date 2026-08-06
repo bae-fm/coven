@@ -8,7 +8,7 @@ use crate::protocol::store_commit::{
 use crate::storage::SyncStorage;
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum StoreProtocolRootError {
+pub enum StoreProtocolRootError {
     #[error(transparent)]
     Object(#[from] StoreObjectError),
     #[error("Store protocol root database state: {0}")]

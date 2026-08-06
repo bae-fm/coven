@@ -59,25 +59,17 @@ impl StoreSync {
             std::collections::BTreeMap<String, u64>,
             crate::sync::store::StorePullResult,
         ),
-        crate::sync::store::StorePullError,
+        crate::sync::cycle::SyncCycleFailure,
     > {
         let device = store
             .open_into_store_database(&self.database)
             .await
-            .map_err(|error| {
-                crate::sync::store::StorePullError::Membership(
-                    crate::sync::store::StorePullMembershipError::Message(error),
-                )
-            })?;
+            .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
         let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
-        let mut authorization = device
-            .authorize_writer()
-            .await
-            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
-        let result = authorization
-            .pull(Some(&routing_encryption))
-            .await
-            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
+        let mut authorization = device.authorize_writer().await.map_err(|error| {
+            crate::sync::cycle::SyncCycleFailure::operation("authorize Store writer", error)
+        })?;
+        let result = authorization.pull(Some(&routing_encryption)).await?;
         let sequences = result
             .frontier
             .iter()

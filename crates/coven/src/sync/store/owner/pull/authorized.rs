@@ -23,7 +23,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         routing_encryption: Option<&'operation crate::encryption::EncryptionService>,
     ) -> Result<Self, StorePullError> {
         let package_schema = history.pull_package_schema().await.map_err(|error| {
-            StorePullError::Database(format!("load pull package schema: {error}"))
+            StorePullError::Database(crate::database::DbError::context(
+                "load pull package schema",
+                error,
+            ))
         })?;
         Ok(Self {
             history,
@@ -45,15 +48,13 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .map_err(StorePullError::Membership)?;
         let routing_key = if self.history.pull_has_scoped_graph() {
             let encryption = routing_encryption.ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "scoped Store pull requires row-routing encryption".to_string(),
                 )
             })?;
             Some(
                 crate::protocol::circle::derive_row_routing_key(encryption, store_root_hash)
-                    .map_err(|error| {
-                        StorePullError::Database(format!("derive row routing key: {error}"))
-                    })?,
+                    .map_err(|error| StorePullError::context("derive row routing key", error))?,
             )
         } else {
             None
@@ -63,7 +64,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .pull_materialized_frontier()
             .await
             .map_err(|error| {
-                StorePullError::Database(format!("load discovery device-state frontier: {error}"))
+                StorePullError::Database(crate::database::DbError::context(
+                    "load discovery device-state frontier",
+                    error,
+                ))
             })?;
         let local_frontier = local_frontier
             .into_values()
@@ -78,9 +82,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .history
             .load_active_pull_registrations()
             .await
-            .map_err(|error| {
-                StorePullError::Database(format!("load active Merge registrations: {error}"))
-            })?;
+            .map_err(|error| StorePullError::context("load active Merge registrations", error))?;
         for recovered in self
             .history
             .discover_pull_owner_recoveries(membership)
@@ -103,7 +105,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .get(&registration_ref.device_id)
             {
                 Some(record) if record.registration != *registration_ref => {
-                    return Err(StorePullError::Database(format!(
+                    return Err(StorePullError::InvalidState(format!(
                         "discovery device state names another registration for {}",
                         registration_ref.device_id
                     )));
@@ -119,10 +121,13 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .discover_pull_stream(registration_ref, registration.value(), inactive_cut)
                 .await
                 .map_err(|error| {
-                    StorePullError::Database(format!(
-                        "discover Merge stream for {}: {error}",
-                        registration.value().device_id
-                    ))
+                    StorePullError::context(
+                        format!(
+                            "discover Merge stream for {}",
+                            registration.value().device_id
+                        ),
+                        error,
+                    )
                 })?;
             if let Some(head) = discovered.latest_head {
                 visible_heads.push(VerifiedStoreDeviceHead {
@@ -186,7 +191,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     .history
                     .verified_pull_commit(&commit_ref)
                     .ok_or_else(|| {
-                        StorePullError::Database(
+                        StorePullError::InvalidState(
                             "Merge candidate is absent from its operation-verified history"
                                 .to_string(),
                         )
@@ -257,7 +262,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .await
                 .map_err(|error| match error {
                     RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                    RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
                 })?;
             loaded_predecessor_memberships.insert(materialization.commit_ref().clone(), membership);
         }
@@ -275,14 +280,20 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             .pull_snapshot_coverage()
             .await
             .map_err(|error| {
-                StorePullError::Database(format!("load snapshot coverage frontier: {error}"))
+                StorePullError::Database(crate::database::DbError::context(
+                    "load snapshot coverage frontier",
+                    error,
+                ))
             })?;
         let mut frontier = self
             .history
             .pull_materialized_frontier()
             .await
             .map_err(|error| {
-                StorePullError::Database(format!("load materialized frontier: {error}"))
+                StorePullError::Database(crate::database::DbError::context(
+                    "load materialized frontier",
+                    error,
+                ))
             })?;
         let mut row_changes = Vec::new();
         let mut changesets_applied = 0_u64;
@@ -303,13 +314,13 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             });
             for key in keys {
                 let candidate = candidates.get(&key).ok_or_else(|| {
-                    StorePullError::Database(
+                    StorePullError::InvalidState(
                         "Merge candidate disappeared while evaluating readiness".to_string(),
                     )
                 })?;
                 let exclusion_freezes = self.history.pull_exclusion_freezes().await?;
                 let current_frontier = CommitFrontier::from_refs(frontier.clone())
-                    .map_err(|error| StorePullError::Database(error.to_string()))?;
+                    .map_err(StorePullError::Protocol)?;
                 let (_, current_device_state) = self
                     .history
                     .pull_device_state_for_cut(&StoreHistoryCut(current_frontier.0))
@@ -326,10 +337,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     )
                     .await
                     .map_err(|error| {
-                        StorePullError::Database(format!(
-                            "evaluate Store commit readiness for {}/{}: {error}",
-                            key.0, key.1
-                        ))
+                        StorePullError::context(
+                            format!("evaluate Store commit readiness for {}/{}", key.0, key.1),
+                            error,
+                        )
                     })? {
                     Readiness::AlreadyMaterialized => {
                         candidates.remove(&key);
@@ -341,7 +352,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     }
                     Readiness::Ready => {
                         let candidate = candidates.remove(&key).ok_or_else(|| {
-                            StorePullError::Database(
+                            StorePullError::InvalidState(
                                 "ready Merge candidate disappeared before apply".to_string(),
                             )
                         })?;
@@ -363,7 +374,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                                 row_changes.extend(changes);
                                 changesets_applied =
                                     changesets_applied.checked_add(1).ok_or_else(|| {
-                                        StorePullError::Database(
+                                        StorePullError::InvalidState(
                                             "Store apply count exceeded u64".to_string(),
                                         )
                                     })?;
@@ -400,7 +411,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .drain_local_blob_cleanup()
                 .await
                 .map_err(|error| {
-                    StorePullError::Database(format!("drain local blob cleanup intents: {error}"))
+                    StorePullError::Database(crate::database::DbError::context(
+                        "drain local blob cleanup intents",
+                        error,
+                    ))
                 })?;
         Ok(StorePullExecution {
             result: StorePullResult {
@@ -438,7 +452,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 .pull_device_state_for_order(&commit.order)
                 .await?;
             if state_ref != commit.device_state {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "Merge exclusion commit differs from its materialized predecessor device state"
                         .to_string(),
                 ));
@@ -607,10 +621,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             match (&proof.resolution, &proof.resolution_value) {
                 (Some(reference), Some(value)) => successor
                     .apply_resolutions(root.store_root_hash, &[(reference.clone(), value.clone())])
-                    .map_err(|error| StorePullError::Database(error.to_string()))?,
+                    .map_err(|error| {
+                        StorePullError::Membership(StorePullMembershipError::State(error))
+                    })?,
                 (None, None) => {}
                 _ => {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "verified Merge membership proof has incomplete resolution evidence"
                             .to_string(),
                     ))
@@ -619,7 +635,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             successor
                 .add_entry(proof.entry_value.clone())
                 .and_then(|()| successor.activate_head_ref(proof.head.clone()))
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(|error| {
+                    StorePullError::Membership(StorePullMembershipError::State(error))
+                })?;
             successor
         } else {
             predecessor.clone()
@@ -675,7 +693,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         )?;
         let (authorized_predecessor, recovery_author) = predecessor_state
             .preactivate_recovery_author(commit, &candidate.registrations)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let owner_recovery = self
             .history
             .verify_pull_owner_recovery_activation(commit)
@@ -690,7 +708,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     owner_recovery,
                 )
             })
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let retained_acknowledgement = self
             .history
             .retain_pull_acknowledgement(commit_ref, commit, author)
@@ -728,7 +746,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 &state_after,
             )
             .map_err(|error| {
-                StorePullError::Database(format!("open prepared Merge history summary: {error}"))
+                StorePullError::context("open prepared Merge history summary", error)
             })?;
         self.history
             .remember_pull_commit(candidate.verified.clone())?;

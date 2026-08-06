@@ -552,7 +552,7 @@ pub(crate) struct RowRoutingIdError(String);
 pub(crate) struct RowRoutingKey([u8; 32]);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum RowRoutingKeyError {
+pub enum RowRoutingKeyError {
     #[error("Store keyring has no generation-1 key")]
     MissingGenerationOne,
     #[error("Store keyring has more than one generation-1 key")]

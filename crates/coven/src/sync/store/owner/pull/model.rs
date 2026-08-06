@@ -124,7 +124,38 @@ pub enum StorePullError {
     #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("database: {0}")]
-    Database(String),
+    Database(#[from] DbError),
+    #[error("Store protocol: {0}")]
+    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    #[error("Store protocol root: {0}")]
+    ProtocolRoot(#[from] crate::sync::store::protocol_root::StoreProtocolRootError),
+    #[error("remote object record: {0}")]
+    RemoteObject(#[from] crate::protocol::remote_object::RemoteObjectRecordError),
+    #[error("membership chain: {0}")]
+    MembershipChain(#[from] crate::sync::store::membership::AnchoredChainError),
+    #[error("device join exchange: {0}")]
+    DeviceJoinExchange(
+        #[from] crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
+    ),
+    #[error("Store operation: {0}")]
+    Store(#[source] Box<crate::sync::store::StoreError>),
+    #[error("serialization: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("row routing key: {0}")]
+    RowRoutingKey(#[from] crate::protocol::circle::RowRoutingKeyError),
+    /// Pulled Store evidence contradicts itself — a commit outside its own
+    /// verified history, a reference that differs from the state it names, a
+    /// precondition the pull requires. Invariant text with no source error:
+    /// nothing underneath failed, the evidence is inconsistent.
+    #[error("Store pull state is invalid: {0}")]
+    InvalidState(String),
+    /// A [`StorePullError`] with the operation that produced it named in front
+    /// of it, the same shape [`DbError::context`] gives database failures.
+    #[error("{context}: {source}")]
+    Context {
+        context: String,
+        source: Box<StorePullError>,
+    },
     #[error("active Store device {device_id} for member {member:?} has no activated acknowledgement for the selected snapshot")]
     SnapshotNotStable { member: String, device_id: String },
     #[error("Store snapshot author is inactive in its exact covered device state")]
@@ -139,18 +170,25 @@ pub enum StorePullError {
     Storage(#[from] StorageError),
 }
 
+impl StorePullError {
+    /// Name the operation `source` failed in without flattening it.
+    pub(crate) fn context(
+        context: impl Into<String>,
+        source: impl Into<StorePullError>,
+    ) -> StorePullError {
+        StorePullError::Context {
+            context: context.into(),
+            source: Box::new(source.into()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorePullMembershipError {
     #[error("{0}")]
     State(#[source] crate::protocol::membership::MembershipError),
     #[error("{0}")]
     Message(String),
-}
-
-impl From<DbError> for StorePullError {
-    fn from(error: DbError) -> Self {
-        Self::Database(error.into_message())
-    }
 }
 
 #[derive(Clone)]

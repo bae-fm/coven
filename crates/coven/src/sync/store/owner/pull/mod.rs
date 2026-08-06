@@ -70,7 +70,7 @@ impl LoadedMergePredecessorMemberships {
         reference: &StoreBatchCommitRef,
     ) -> Result<&MembershipChain, StorePullError> {
         self.by_commit.get(reference).ok_or_else(|| {
-            StorePullError::Database(format!(
+            StorePullError::InvalidState(format!(
                 "retained Merge commit {reference:?} has no loaded predecessor membership"
             ))
         })

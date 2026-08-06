@@ -700,7 +700,9 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
                 }),
             ) => {}
             (Some(_), Err(StoreError::Database(reason))) => {
-                assert!(reason.contains("Store root authority hash differs"));
+                assert!(reason
+                    .to_string()
+                    .contains("Store root authority hash differs"));
             }
             (_, result) => panic!("unexpected Store root failure: {result:?}"),
         }

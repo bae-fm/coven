@@ -113,19 +113,19 @@ impl<'a> MergeHistoryVerifier<'a> {
             || activating_commit_value.author_registration != reference.registration
             || value.registration != reference.registration
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Store acknowledgement differs from its activating commit".to_string(),
             ));
         }
         activating_commit
             .verify_commit(activating_commit_value)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let chain = self
             .load_acknowledgement_proof_chain(reference, value, registration)
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         Ok(store_commit::RetainedVerifiedActivatedAck {
             chain,
@@ -143,7 +143,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         state: ResolvedStoreDeviceState,
     ) -> Result<VerifiedStoreDeviceOperations, StorePullError> {
         if verified_commit.store_root_hash() != self.root.reference().store_root_hash {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "local device-operation commit belongs to another Store root".to_string(),
             ));
         }
@@ -152,10 +152,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             && commit.device_exclusion_outcomes().is_empty()
         {
             return VerifiedStoreDeviceOperations::without_exclusions(commit)
-                .map_err(|error| StorePullError::Database(error.to_string()));
+                .map_err(StorePullError::Protocol);
         }
         if state_ref != &commit.device_state {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "local exclusion commit differs from its materialized predecessor device state"
                     .to_string(),
             ));
@@ -170,7 +170,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         .await
         .map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
         })
     }
 
@@ -183,7 +183,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
         let (authorized_predecessor, recovery_author) = predecessor_state
             .preactivate_recovery_author(commit, registrations)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let owner_recovery = self
             .commit_verifier
             .verify_owner_recovery_activation(commit)
@@ -198,7 +198,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     owner_recovery,
                 )
             })
-            .map_err(|error| StorePullError::Database(error.to_string()))
+            .map_err(StorePullError::Protocol)
     }
 
     pub(super) async fn from_commit_verifier(
@@ -230,7 +230,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             || founder.semantic_hash != founder_ref.registration_hash
             || !founder_origin_matches
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "verified founder registration belongs to another Store root".to_string(),
             ));
         }
@@ -241,7 +241,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             verified_root.descriptor.founder_grant.clone(),
             &verified_root.descriptor.founder_recovery,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
         Ok(Self {
             root,
             commit_verifier,
@@ -477,7 +477,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commits
             .get(&access.activation)
             .ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "provider-access activation is outside the verified Merge bootstrap history"
                         .to_string(),
                 )
@@ -494,7 +494,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .offer
                 .provider_admin,
         ) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join attempt lacks exact Merge provider-administrator authority"
                     .to_string(),
             ));
@@ -520,7 +520,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                             .get(reference)
                             .map(|commit| commit.state_after.clone())
                             .ok_or_else(|| {
-                                StorePullError::Database(
+                                StorePullError::InvalidState(
                                     "Merge history frontier is absent from its verified graph"
                                         .to_string(),
                                 )
@@ -528,7 +528,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             )
-            .map_err(|error| StorePullError::Database(error.to_string()))?
+            .map_err(StorePullError::Protocol)?
         };
         let verified_membership_activations =
             verified_merge_membership_prefix(&self.history.commits, frontier.values().cloned())?;
@@ -540,10 +540,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                 None,
             )
             .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::MembershipChain)?;
         verified_membership_activations
             .validate_complete_membership(&membership)
-            .map_err(StorePullError::Database)?;
+            .map_err(StorePullError::InvalidState)?;
         verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
         Ok(VerifiedMergeHistoryAuthority {
             device_state,
@@ -563,7 +563,7 @@ fn verified_merge_commit_closure(
             continue;
         }
         let verified = commits.get(&reference).ok_or_else(|| {
-            StorePullError::Database(
+            StorePullError::InvalidState(
                 "verified Merge predecessor closure is absent from its history".to_string(),
             )
         })?;
@@ -585,7 +585,7 @@ fn merge_device_state_from_verified_history(
         .values()
         .any(|reference| !allowed.contains(reference))
     {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Merge device state names a commit outside its causal predecessor history".to_string(),
         ));
     }
@@ -601,7 +601,7 @@ fn merge_device_state_from_verified_history(
                         .get(reference)
                         .map(|verified| verified.state_after.clone())
                         .ok_or_else(|| {
-                            StorePullError::Database(
+                            StorePullError::InvalidState(
                                 "Merge device-state frontier is absent from its verified history"
                                     .to_string(),
                             )
@@ -609,12 +609,12 @@ fn merge_device_state_from_verified_history(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?
+        .map_err(StorePullError::Protocol)?
     };
     let expected = StoreDeviceStateRef::from_resolved(frontier.clone(), &state)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
     if &expected != reference {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Merge device-state reference differs from its verified history".to_string(),
         ));
     }

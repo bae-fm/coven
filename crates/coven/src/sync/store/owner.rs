@@ -48,6 +48,8 @@ pub(crate) use verified_history::{
     MergeHistorySuccessorEvidence, MergeOutboundAuthorization, PreparedMergeHistorySuccessor,
     VerifiedMergeMembershipPrefix,
 };
+#[cfg(test)]
+pub(crate) use writer::StoreWriterAuthorizationError;
 pub(super) use writer::{operations, reclaim, snapshot};
 pub(crate) use writer::{AuthorizedWriterOperation, StoreAckError};
 

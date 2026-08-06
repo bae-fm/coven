@@ -465,6 +465,19 @@ pub(crate) struct TestStore {
     producers: Arc<tokio::sync::Mutex<TestStoreProducers>>,
 }
 
+/// Why a test pull did not produce a result. Keeps the three steps a test pull
+/// runs — opening the store, authorizing the writer, running the cycle — apart,
+/// so a test asserting on one of them cannot pass on another.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TestPullError {
+    #[error("open Store: {0}")]
+    Open(String),
+    #[error("authorize Store writer: {0}")]
+    Authorize(#[from] crate::sync::store::owner::StoreWriterAuthorizationError),
+    #[error("pull: {0}")]
+    Pull(#[from] crate::sync::cycle::SyncCycleFailure),
+}
+
 mod test_device {
     use super::*;
 
@@ -2644,7 +2657,7 @@ mod test_device {
             crate::protocol::store_commit::CommitFrontier::from_refs(
                 self.db.materialized_frontier().await?,
             )
-            .map_err(|error| crate::sync::store::StoreAckError::Database(error.to_string()))
+            .map_err(crate::sync::store::StoreAckError::Protocol)
         }
 
         #[cfg(test)]
@@ -2762,7 +2775,7 @@ mod test_device {
                 std::collections::BTreeMap<String, u64>,
                 crate::sync::store::StorePullResult,
             ),
-            crate::sync::store::StorePullError,
+            TestPullError,
         > {
             let routing_encryption = crate::encryption::EncryptionService::from_key([42; 32]);
             self.pull_store_with_encryption(store_dir, &routing_encryption)
@@ -2778,17 +2791,11 @@ mod test_device {
                 std::collections::BTreeMap<String, u64>,
                 crate::sync::store::StorePullResult,
             ),
-            crate::sync::store::StorePullError,
+            TestPullError,
         > {
             let store = self.store.with_test_store_dir(store_dir.clone());
-            let mut authorization = store
-                .authorize_writer()
-                .await
-                .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
-            let result = authorization
-                .pull(Some(routing_encryption))
-                .await
-                .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?;
+            let mut authorization = store.authorize_writer().await?;
+            let result = authorization.pull(Some(routing_encryption)).await?;
             let sequences = result
                 .frontier
                 .iter()
@@ -3032,13 +3039,11 @@ impl TestStore {
             std::collections::BTreeMap<String, u64>,
             crate::sync::store::StorePullResult,
         ),
-        crate::sync::store::StorePullError,
+        TestPullError,
     > {
-        let device = Box::pin(self.open_into(db)).await.map_err(|error| {
-            crate::sync::store::StorePullError::Membership(
-                crate::sync::store::StorePullMembershipError::Message(error),
-            )
-        })?;
+        let device = Box::pin(self.open_into(db))
+            .await
+            .map_err(TestPullError::Open)?;
         device.pull_store(store_dir).await
     }
 

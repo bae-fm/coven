@@ -236,7 +236,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             }
             published = published
                 .checked_add(1)
-                .ok_or_else(|| StoreError::Database("publish count exceeded u64".into()))?;
+                .ok_or(StoreError::PublishCountExhausted)?;
             next = database.oldest_prepared_store_write().await?;
         }
         Ok(published)
@@ -259,7 +259,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             published = published.checked_add(drained).ok_or_else(|| {
                 SyncCycleFailure::operation(
                     "publish Store write",
-                    StoreError::Database("published Store write count exceeded u64".to_string()),
+                    StoreError::PublishCountExhausted,
                 )
             })?;
         }

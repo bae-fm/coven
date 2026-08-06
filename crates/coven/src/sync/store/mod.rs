@@ -71,9 +71,7 @@ pub(crate) use owner::operations::{StoreOperationBatch, StoreOperationCommitPlan
 pub(crate) use owner::owner_promotion::OwnerPromotionError;
 
 #[cfg(test)]
-pub(crate) use owner::pull::{
-    HeldStoreCoordinate, LoadedCirclePackage, Readiness, StorePullMembershipError,
-};
+pub(crate) use owner::pull::{HeldStoreCoordinate, LoadedCirclePackage, Readiness};
 pub(crate) use owner::pull::{
     HeldStorePosition, PullError, StorePullError, StorePullResult, VerifiedStoreDeviceHead,
 };

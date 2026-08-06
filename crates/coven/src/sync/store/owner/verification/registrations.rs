@@ -123,7 +123,7 @@ impl<'a> StoreCommitVerifier<'a> {
             return Ok(None);
         };
         if recoveries.next().is_some() {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Store commit activates more than one Owner recovery stream".to_string(),
             ));
         }
@@ -135,7 +135,7 @@ impl<'a> StoreCommitVerifier<'a> {
             anchor,
         )
         .map(|activation| Some((grant_id.clone(), activation)))
-        .map_err(|error| StorePullError::Database(error.to_string()))
+        .map_err(StorePullError::Protocol)
     }
 
     pub(crate) async fn discover_owner_recoveries(
@@ -152,7 +152,7 @@ impl<'a> StoreCommitVerifier<'a> {
         }
         let GrantStreamAnchor::OwnerRecovery { first_slot } = &protocol.descriptor.founder_recovery
         else {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Store founder recovery authority has no recovery stream".into(),
             ));
         };
@@ -179,10 +179,8 @@ impl<'a> StoreCommitVerifier<'a> {
                 Err(StorageError::NotFound(_)) => break,
                 Err(error) => return Err(StoreObjectError::Storage(error).into()),
             };
-            let unverified: OwnerRecoveryNode =
-                serde_json::from_slice(&bytes).map_err(|error| {
-                    StorePullError::Database(format!("Owner recovery node: {error}"))
-                })?;
+            let unverified: OwnerRecoveryNode = serde_json::from_slice(&bytes)
+                .map_err(|error| StorePullError::context("Owner recovery node", error))?;
             let reference = OwnerRecoveryNodeRef {
                 owner_pubkey: unverified.owner_pubkey.clone(),
                 owner_grant: unverified.owner_grant.clone(),
@@ -191,7 +189,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 object,
             };
             let node = OwnerRecoveryNode::parse_at(&bytes, self.root.reference(), &reference)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
             if reference.owner_pubkey != protocol.descriptor.founder_pubkey
                 || reference.owner_grant != protocol.descriptor.founder_grant
                 || reference.sequence != sequence
@@ -203,7 +201,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     &node.owner_grant,
                 )
             {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "Owner recovery stream differs from its root-anchored authority".into(),
                 ));
             }
@@ -232,7 +230,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 || initial_ack.store_cut != node.readiness.bootstrap_cut
                 || initial_ack.registration != node.readiness.registration
             {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "Owner recovery readiness differs from its registration graph".into(),
                 ));
             }
@@ -241,12 +239,12 @@ impl<'a> StoreCommitVerifier<'a> {
                     node.readiness.registration.clone(),
                     registration,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?,
+                .map_err(StorePullError::Protocol)?,
             );
             slot = node.next_slot.clone();
             predecessor = Some(reference);
             sequence = sequence.checked_add(1).ok_or_else(|| {
-                StorePullError::Database("Owner recovery sequence overflow".into())
+                StorePullError::InvalidState("Owner recovery sequence overflow".into())
             })?;
         }
         Ok(recovered)
@@ -263,7 +261,7 @@ impl<'a> StoreCommitVerifier<'a> {
             }
             let registration = self.load_registration(&record.registration).await?;
             if registration.value.device_id != *device_id {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "resolved Store device state names another exact registration".to_string(),
                 ));
             }
@@ -273,7 +271,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     record.registration.clone(),
                     registration.value,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?,
+                .map_err(StorePullError::Protocol)?,
             );
         }
         Ok(active)
@@ -292,7 +290,7 @@ impl<'a> StoreCommitVerifier<'a> {
             .map(ReferencedStoreDeviceRegistration::reference)
             .min();
         if canonical != Some(selected) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "conflict-resolution acceptance does not use the canonical active Owner registration"
                     .to_string(),
             ));

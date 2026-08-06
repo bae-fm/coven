@@ -62,9 +62,11 @@ impl std::error::Error for StorePreparationError {
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database: {0}")]
-    Database(String),
+    Database(#[from] crate::database::DbError),
     #[error("{0}")]
     Object(#[from] StoreObjectError),
+    #[error("Store protocol: {0}")]
+    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
     #[error("Store protocol state {key:?} is absent")]
     MissingState { key: &'static str },
     #[error("Store protocol state {key:?} is invalid: {reason}")]
@@ -94,6 +96,17 @@ pub enum StoreError {
     CandidateCleanup(#[from] crate::sync::store::owner::pull::StorePullError),
     #[error("Store sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
+    #[error("published Store write count has no representable successor")]
+    PublishCountExhausted,
+    /// Preparation failed AND recording that write's blocked status failed, so
+    /// the write is not marked blocked. Carries both failures rather than
+    /// reporting one and describing the other.
+    #[error("write {write_id} was not marked blocked ({status}) after it failed to prepare ({preparation})")]
+    WriteBlockNotRecorded {
+        write_id: crate::WriteId,
+        preparation: Box<StoreError>,
+        status: crate::database::DbError,
+    },
     #[error("Store author {device_id} was excluded before candidate activation")]
     AuthorExcluded { device_id: StoreDeviceId },
     #[error("Merge announcement selected {actual:?}, not candidate {expected:?}")]
@@ -121,6 +134,7 @@ impl StoreError {
     pub(crate) fn write_block(&self) -> Option<crate::WriteBlock> {
         match self {
             Self::Database(_)
+            | Self::WriteBlockNotRecorded { .. }
             | Self::BlobStorage { .. }
             // Nothing was persisted and the caller re-runs the operation, so this
             // blocks no writer.
@@ -128,6 +142,7 @@ impl StoreError {
             | Self::CandidateCleanup(_) => None,
             Self::MergeAnnouncementOccupied { .. }
             | Self::SequenceExhausted { .. }
+            | Self::PublishCountExhausted
             | Self::AuthorExcluded { .. } => Some(crate::WriteBlock::InvalidProtocolState {
                 reason: self.to_string(),
             }),
@@ -155,7 +170,7 @@ impl StoreError {
             Self::InvalidState { key, reason } => Some(crate::WriteBlock::InvalidProtocolState {
                 reason: format!("Store protocol state {key:?} is invalid: {reason}"),
             }),
-            Self::InvalidOutbound(_) | Self::Object(_) => {
+            Self::InvalidOutbound(_) | Self::Object(_) | Self::Protocol(_) => {
                 Some(crate::WriteBlock::InvalidPackage {
                     reason: self.to_string(),
                 })
@@ -182,12 +197,6 @@ impl StoreError {
             Self::Preparation(StorePreparationError::AssetUpload(_))
             | Self::Preparation(StorePreparationError::Storage { .. }) => None,
         }
-    }
-}
-
-impl From<crate::database::DbError> for StoreError {
-    fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.into_message())
     }
 }
 

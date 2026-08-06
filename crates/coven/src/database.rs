@@ -373,6 +373,16 @@ pub(crate) fn authorize_host_sql(
 pub enum DbError {
     #[error("database error: {0}")]
     Message(String),
+    #[error("database error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    /// A [`DbError`] with the operation that produced it named in front of it.
+    /// Carries the cause as a [`DbError`] so callers keep matching on it after
+    /// it crosses the layer that added the description.
+    #[error("{context}: {source}")]
+    Context {
+        context: String,
+        source: Box<DbError>,
+    },
     #[error("database error: Store protocol root hash is absent")]
     StoreRootHashMissing,
     /// The local device was excluded from a Circle epoch close and has not yet
@@ -389,18 +399,13 @@ pub enum DbError {
 }
 
 impl DbError {
-    pub(crate) fn into_message(self) -> String {
-        match self {
-            Self::Message(message) => message,
-            Self::StoreRootHashMissing => "Store protocol root hash is absent".to_string(),
-            other @ Self::ExcludedDeviceMustReset { .. } => other.to_string(),
+    /// Name the operation `source` failed in without flattening it: the cause
+    /// stays a [`DbError`] the caller can still match on.
+    pub(crate) fn context(context: impl Into<String>, source: impl Into<DbError>) -> DbError {
+        DbError::Context {
+            context: context.into(),
+            source: Box::new(source.into()),
         }
-    }
-}
-
-impl From<rusqlite::Error> for DbError {
-    fn from(e: rusqlite::Error) -> Self {
-        DbError::Message(e.to_string())
     }
 }
 

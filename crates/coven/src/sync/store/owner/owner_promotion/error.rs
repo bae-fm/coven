@@ -5,7 +5,7 @@ use crate::sync::store::StoreError;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OwnerPromotionError {
     #[error("Owner promotion database state: {0}")]
-    Database(String),
+    Database(#[from] crate::database::DbError),
     #[error("Owner promotion protocol state: {0}")]
     Protocol(String),
     #[error("Owner promotion storage: {0}")]
@@ -16,12 +16,6 @@ pub(crate) enum OwnerPromotionError {
     NotFound(OwnerPromotionId),
     #[error("Owner promotion is stale: {0:?}")]
     Stale(Box<OwnerPromotionStaleReason>),
-}
-
-impl From<crate::database::DbError> for OwnerPromotionError {
-    fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.into_message())
-    }
 }
 
 impl From<StoreError> for OwnerPromotionError {

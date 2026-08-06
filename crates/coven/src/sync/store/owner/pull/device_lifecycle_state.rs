@@ -31,14 +31,14 @@ pub(crate) fn verified_merge_predecessor_state(
                 .into_iter()
                 .map(|dependency| {
                     states.get(dependency).cloned().ok_or_else(|| {
-                        StorePullError::Database(
+                        StorePullError::InvalidState(
                             "Merge history has an unresolved predecessor state".to_string(),
                         )
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?
+        .map_err(StorePullError::Protocol)?
     };
     let mut frontier = dependencies.clone();
     if let Some(predecessor) = predecessor {
@@ -47,16 +47,16 @@ pub(crate) fn verified_merge_predecessor_state(
             .insert(stream_id, predecessor.clone())
             .is_some_and(|existing| existing != *predecessor)
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge predecessor conflicts with its dependency cut".to_string(),
             ));
         }
     }
     let expected_state =
         StoreDeviceStateRef::from_resolved(CommitFrontier(frontier), &predecessor_state)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
     if commit.device_state != expected_state {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Merge commit names another predecessor device state".to_string(),
         ));
     }

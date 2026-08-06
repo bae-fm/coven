@@ -20,7 +20,7 @@ use crate::protocol::store_commit::StoreDeviceHead;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition, StorePullError};
+use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 use crate::Migration;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
@@ -414,7 +414,7 @@ trait PullTestStoreOps {
     async fn pull_scoped(
         &self,
         db: &crate::database::Database,
-    ) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError>;
+    ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure>;
 
     async fn publish_exact_changeset_with_authority(
         &self,
@@ -504,20 +504,20 @@ impl PullTestStoreOps for TestStore {
     async fn pull_scoped(
         &self,
         db: &crate::database::Database,
-    ) -> Result<crate::sync::store::StorePullResult, crate::sync::store::StorePullError> {
-        let device = self.open_into(db).await.map_err(|error| {
-            crate::sync::store::StorePullError::Membership(
-                crate::sync::store::StorePullMembershipError::Message(error),
-            )
-        })?;
+    ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
+        let device = self
+            .open_into(db)
+            .await
+            .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
         let routing_encryption = EncryptionService::from_key([42; 32]);
         device
             .authorize_writer()
             .await
-            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))?
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation("authorize Store writer", error)
+            })?
             .pull(Some(&routing_encryption))
             .await
-            .map_err(|error| crate::sync::store::StorePullError::Database(error.to_string()))
     }
 
     async fn publish_exact_changeset_with_authority(
@@ -1702,7 +1702,7 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
         .await
         .expect_err("materialized-position failure aborts the pull");
     assert!(
-        matches!(error, StorePullError::Database(_)),
+        matches!(error, TestPullError::Pull(_)),
         "unexpected pull error: {error:?}"
     );
     assert!(
@@ -3472,7 +3472,7 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
         .await
         .expect_err("an invalid local register must fail loudly");
 
-    assert!(matches!(error, StorePullError::Database(_)));
+    assert!(matches!(error, TestPullError::Pull(_)));
     assert!(
         target
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-good'")
@@ -7443,7 +7443,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
 
     let result = storage.pull_into_result(&db2, &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(StorePullError::Membership(_))),
+        matches!(result, Err(TestPullError::Open(_))),
         "a head regressing below the accepted watermark must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -7513,7 +7513,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
 
     let result = storage.pull_into_result(&db2, &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(StorePullError::Membership(_))),
+        matches!(result, Err(TestPullError::Open(_))),
         "a malformed chain on a pinned-owner store must be refused, got {:?}",
         result.map(|_| ()),
     );

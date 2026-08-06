@@ -70,7 +70,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .load_registration(&record.registration)
                 .await?;
             if registration.value.device_id != *device_id {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "current Merge device state registration has another device id".to_string(),
                 ));
             }
@@ -80,7 +80,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     record.registration.clone(),
                     registration.value,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?,
+                .map_err(StorePullError::Protocol)?,
             );
         }
         Ok(())
@@ -338,7 +338,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let loaded = self.load_commit_join_evidence(commit, author).await;
         let loaded = loaded.map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
         })?;
         let join_evidence = accepted.verify_commit_join_evidence(commit, loaded)?;
         let registrations = self
@@ -346,7 +346,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await;
         registrations.map_err(|error| match error {
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
         })
     }
 
@@ -530,9 +530,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Some(verified_commit),
             )
             .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(|error| StorePullError::Store(Box::new(error)))?;
         let head_ref = head_ref.ok_or_else(|| {
-            StorePullError::Database(
+            StorePullError::InvalidState(
                 "device join activation has no exact accepted activation head".to_string(),
             )
         })?;

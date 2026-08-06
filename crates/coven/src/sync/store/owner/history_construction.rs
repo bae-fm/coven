@@ -38,9 +38,9 @@ impl HistoryConstructionAuthority {
         let object =
             crate::sync::store::protocol_root::load_pinned_store_protocol_root(storage, root)
                 .await
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::ProtocolRoot)?;
         let verified_root = VerifiedStoreRoot::from_verified_object(root.clone(), object)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         self.bind_verified(storage, verified_root).await
     }
 

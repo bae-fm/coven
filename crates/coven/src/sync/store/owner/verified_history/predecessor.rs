@@ -74,7 +74,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 continue;
             }
             let verified = self.commits.get(&reference).ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "verified Merge predecessor graph is missing an exact commit".to_string(),
                 )
             })?;
@@ -279,7 +279,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
             let verified = self
                 .find(|candidate, _| candidate == &access.activation)?
                 .ok_or_else(|| {
-                    StorePullError::Database(
+                    StorePullError::InvalidState(
                         "provider-access activation is outside the accepted Merge predecessor graph"
                             .to_string(),
                     )
@@ -296,7 +296,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                     .offer
                     .provider_admin,
             ) {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "device join attempt lacks exact Merge provider-administrator authority"
                         .to_string(),
                 ));

@@ -343,7 +343,7 @@ impl DeviceJoinJournalDatabase {
 }
 
 pub(super) fn database_error(error: crate::database::DbError) -> DeviceJoinError {
-    DeviceJoinError::Store(error.into_message())
+    DeviceJoinError::Database(error)
 }
 
 pub(super) fn provider_error(error: impl std::fmt::Display) -> DeviceJoinError {

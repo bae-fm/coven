@@ -318,14 +318,14 @@ impl AuthorizedWriterOperation<'_> {
             Ok(preparation) => preparation,
             Err(error) => {
                 if let Some(block) = error.write_block() {
-                    database
-                    .block_write_if_unresolved(&write_id, block)
-                    .await
-                    .map_err(|status_error| {
-                        StoreError::Database(format!(
-                            "record blocked status for write {write_id} after {error}: {status_error}"
-                        ))
-                    })?;
+                    if let Err(status) = database.block_write_if_unresolved(&write_id, block).await
+                    {
+                        return Err(StoreError::WriteBlockNotRecorded {
+                            write_id: write_id.clone(),
+                            preparation: Box::new(error),
+                            status,
+                        });
+                    }
                 }
                 return Err(error);
             }

@@ -276,7 +276,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             let reference = expected.reference();
             let opened = self.history_verifier.load_registration(reference).await?;
             if &opened.value != expected.value() {
-                return Err(pull::StorePullError::Database(format!(
+                return Err(pull::StorePullError::InvalidState(format!(
                     "activated Store registration {} differs from its exact remote bytes",
                     reference.device_id
                 )));
@@ -285,7 +285,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 opened.value.store_commits,
                 crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { .. }
             ) {
-                return Err(pull::StorePullError::Database(format!(
+                return Err(pull::StorePullError::InvalidState(format!(
                     "activated Store registration {} has no Merge announcement anchor",
                     reference.device_id
                 )));
@@ -599,7 +599,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => pull::StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => pull::StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => pull::StorePullError::InvalidState(error),
             })?;
         match acknowledgement {
             Some((reference, value)) => self
@@ -617,7 +617,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<(), pull::StorePullError> {
         self.history_verifier
             .remember(commit)
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))
+            .map_err(pull::StorePullError::Protocol)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -649,7 +649,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 )
                 .await?;
             if verified.value() != materialization.commit() {
-                return Err(pull::StorePullError::Database(
+                return Err(pull::StorePullError::InvalidState(
                     "retained Merge materialization differs from its authenticated commit"
                         .to_string(),
                 ));
@@ -666,7 +666,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let MembershipStatus::Resolved(current_resolved) =
             activation_predecessor_membership.status()
         else {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "Merge terminal retraction witness membership is conflicted".to_string(),
             ));
         };
@@ -721,7 +721,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 let MembershipStatus::Resolved(predecessor_resolved) =
                     predecessor_membership.status()
                 else {
-                    return Err(pull::StorePullError::Database(
+                    return Err(pull::StorePullError::InvalidState(
                         "retained candidate predecessor membership is conflicted".to_string(),
                     ));
                 };
@@ -729,12 +729,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .active_grants()
                     .filter(|(_, record)| &record.creation_authority == authority);
                 let Some((grant_id, _)) = matching.next() else {
-                    return Err(pull::StorePullError::Database(
+                    return Err(pull::StorePullError::InvalidState(
                         "retained candidate has no exact predecessor grant authority".to_string(),
                     ));
                 };
                 if matching.next().is_some() {
-                    return Err(pull::StorePullError::Database(
+                    return Err(pull::StorePullError::InvalidState(
                         "retained candidate authority identifies multiple predecessor grants"
                             .to_string(),
                     ));
@@ -781,7 +781,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .map(|verified| {
                 let reference = verified
                     .candidate_reference()
-                    .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+                    .map_err(pull::StorePullError::RemoteObject)?;
                 Ok((reference, verified))
             })
             .collect::<Result<BTreeMap<_, _>, pull::StorePullError>>()?;
@@ -814,7 +814,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     candidate.author(),
                     materialization.activation_head_object().clone(),
                 )
-                .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+                .map_err(pull::StorePullError::RemoteObject)?;
                 additions.push((materialization.commit_ref().clone(), verified));
             }
             if additions.is_empty() {
@@ -822,7 +822,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             }
             for (reference, verified) in additions {
                 if verified_by_reference.insert(reference, verified).is_some() {
-                    return Err(pull::StorePullError::Database(
+                    return Err(pull::StorePullError::InvalidState(
                         "transitive Merge retraction constructed duplicate proof".to_string(),
                     ));
                 }
@@ -840,7 +840,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .values()
                     .any(|reference| removed.contains(reference))
         }) {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "surviving retained Merge summary contains a retracted dependency".to_string(),
             ));
         }

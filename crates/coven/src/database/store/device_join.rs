@@ -136,11 +136,9 @@ impl DeviceJoinJournalStore {
             return Err(DeviceJoinJournalError::JournalConflict);
         }
         let pending_attempt = current.attempt_key();
-        let expected_pending = serde_json::to_string(current)
-            .map_err(|error| DeviceJoinJournalError::Journal(error.to_string()))?;
+        let expected_pending = serde_json::to_string(current)?;
         let store_key = activated.store_key();
-        let store_payload = serde_json::to_string(activated)
-            .map_err(|error| DeviceJoinJournalError::Journal(error.to_string()))?;
+        let store_payload = serde_json::to_string(activated)?;
         self.complete_payload_into(
             database,
             pending_attempt,
@@ -149,7 +147,7 @@ impl DeviceJoinJournalStore {
             store_payload,
         )
         .await
-        .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))
+        .map_err(DeviceJoinJournalError::Database)
     }
 
     async fn complete_payload_into(
@@ -256,7 +254,7 @@ impl StoreDatabase {
                     .map_err(|error| crate::database::DbError::Message(error.to_string()))
             })
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))
+            .map_err(DeviceJoinJournalError::Database)
     }
 
     pub(crate) async fn load_device_join(
@@ -268,11 +266,10 @@ impl StoreDatabase {
         let value = self
             .get_protocol_state(&key)
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))?;
+            .map_err(DeviceJoinJournalError::Database)?;
         value
             .map(|value| {
-                serde_json::from_str(&value)
-                    .map_err(|error| DeviceJoinJournalError::Journal(error.to_string()))
+                serde_json::from_str(&value).map_err(DeviceJoinJournalError::Serialization)
             })
             .transpose()
     }
@@ -297,7 +294,7 @@ impl StoreDatabase {
                     .map_err(crate::database::DbError::from)
             })
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))?;
+            .map_err(DeviceJoinJournalError::Database)?;
         if changed == 1 {
             Ok(())
         } else {
@@ -324,7 +321,7 @@ impl StoreDatabase {
                 crate::database::required_protocol_state_on(connection, &key)
             })
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))?;
+            .map_err(DeviceJoinJournalError::Database)?;
         if durable != serde_json::to_string(&record)? {
             return Err(DeviceJoinJournalError::JournalConflict);
         }
@@ -352,7 +349,7 @@ impl StoreDatabase {
                     .map_err(crate::database::DbError::from)
             })
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))?;
+            .map_err(DeviceJoinJournalError::Database)?;
         let mut records = Vec::with_capacity(rows.len());
         for (key, value) in rows {
             let record: DeviceJoinJournalRecord = serde_json::from_str(&value)?;
@@ -401,7 +398,7 @@ impl StoreDatabase {
                     .map_err(crate::database::DbError::from)
             })
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))
+            .map_err(DeviceJoinJournalError::Database)
     }
 
     #[cfg(test)]
@@ -420,7 +417,7 @@ impl StoreDatabase {
                     .map_err(crate::database::DbError::from)
             })
             .await
-            .map_err(|error| DeviceJoinJournalError::Journal(error.into_message()))
+            .map_err(DeviceJoinJournalError::Database)
     }
 }
 

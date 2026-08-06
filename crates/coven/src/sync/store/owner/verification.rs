@@ -183,7 +183,7 @@ impl<'a> StoreCommitVerifier<'a> {
             &head,
             head_ref.clone(),
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Database)?;
         let family = commit.candidate_family();
         let resolution = match &entry.value.change {
             MembershipChange::ResolutionActivation { resolution } => Some(resolution.clone()),
@@ -209,7 +209,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 .map(|(bytes, _)| MembershipAuthorityBytes::new(bytes.clone(), bytes.clone())),
             commit_ref,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::RemoteObject)?;
         let resolution_value = resolution_loaded.map(|(_, value)| value);
         let proof = RetainedMergeMembershipProof {
             commit: commit_ref.clone(),

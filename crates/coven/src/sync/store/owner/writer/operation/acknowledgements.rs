@@ -8,7 +8,11 @@ use crate::storage::VerifiedObjectWrites;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {
     #[error("database: {0}")]
-    Database(String),
+    Database(#[from] crate::database::DbError),
+    #[error("Store protocol: {0}")]
+    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    #[error("published Store acknowledgement count has no representable successor")]
+    PublishCountExhausted,
     #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("outbound Store acknowledgement is invalid: {0}")]
@@ -17,12 +21,6 @@ pub(crate) enum StoreAckError {
     Outbound(#[from] StoreError),
     #[error("Store acknowledgement snapshot: {0}")]
     Snapshot(#[from] snapshot::SnapshotError),
-}
-
-impl From<crate::database::DbError> for StoreAckError {
-    fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.into_message())
-    }
 }
 
 impl AuthorizedWriterOperation<'_> {
@@ -162,9 +160,9 @@ impl AuthorizedWriterOperation<'_> {
                     self.database
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
-                    published = published.checked_add(1).ok_or_else(|| {
-                        StoreAckError::Database("ack publish count exceeded u64".into())
-                    })?;
+                    published = published
+                        .checked_add(1)
+                        .ok_or(StoreAckError::PublishCountExhausted)?;
                     continue;
                 }
                 if activated.sequence >= outbound.reference.sequence {
@@ -197,9 +195,9 @@ impl AuthorizedWriterOperation<'_> {
                 crate::database::OutboundStoreAckActivation::Nonactivating(_) => {
                     self.finish_nonactivating_acknowledgement(outbound.reference)
                         .await?;
-                    published = published.checked_add(1).ok_or_else(|| {
-                        StoreAckError::Database("ack publish count exceeded u64".into())
-                    })?;
+                    published = published
+                        .checked_add(1)
+                        .ok_or(StoreAckError::PublishCountExhausted)?;
                     continue;
                 }
             };
@@ -285,7 +283,7 @@ impl AuthorizedWriterOperation<'_> {
             }
             published = published
                 .checked_add(1)
-                .ok_or_else(|| StoreAckError::Database("ack publish count exceeded u64".into()))?;
+                .ok_or(StoreAckError::PublishCountExhausted)?;
         }
         Ok(published)
     }

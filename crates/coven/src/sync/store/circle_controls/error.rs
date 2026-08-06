@@ -5,7 +5,7 @@ use crate::sync::store::{StoreError, StoreRegistrationError};
 #[derive(Debug, thiserror::Error)]
 pub enum CircleOperationError {
     #[error("database: {0}")]
-    Database(String),
+    Database(crate::database::DbError),
     #[error("circle protocol state is absent: {0}")]
     MissingState(&'static str),
     #[error("circle protocol state is invalid: {0}")]
@@ -80,7 +80,7 @@ impl From<crate::database::DbError> for CircleOperationError {
                 circle_id,
                 close_id,
             },
-            other => Self::Database(other.into_message()),
+            other => Self::Database(other),
         }
     }
 }

@@ -19,20 +19,16 @@ use crate::protocol::store_commit::device_join_exchange::{
 
 /// A join journal transition that contradicts the durable record. Workflow
 /// errors wrap it at the operation boundary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum DeviceJoinJournalError {
     #[error("device join journal transition is not the declared adjacent transition")]
     NonAdjacentJournalTransition,
     #[error("device join journal has a different durable value for this role and attempt")]
     JournalConflict,
     #[error("device join journal: {0}")]
-    Journal(String),
-}
-
-impl From<serde_json::Error> for DeviceJoinJournalError {
-    fn from(error: serde_json::Error) -> Self {
-        DeviceJoinJournalError::Journal(error.to_string())
-    }
+    Serialization(#[from] serde_json::Error),
+    #[error("device join journal: {0}")]
+    Database(#[from] crate::database::DbError),
 }
 
 use super::*;

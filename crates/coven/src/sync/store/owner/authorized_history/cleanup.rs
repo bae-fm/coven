@@ -239,7 +239,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             if materialized == *reference {
                 return Ok(());
             }
-            return Err(pull::StorePullError::Database(format!(
+            return Err(pull::StorePullError::InvalidState(format!(
                 "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
             )));
         }
@@ -248,7 +248,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let author = verified_commit.author().clone();
         pull::verify_device_join_activation_commit(&commit, expected_outcome)?;
         if &commit.membership_state != membership_state {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "device join activation differs from its expected Merge membership state"
                     .to_string(),
             ));
@@ -256,7 +256,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let predecessor_cut = commit
             .order
             .predecessor_cut()
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::Protocol)?;
         let frontier = predecessor_cut.0;
         let membership = self
             .history_verifier
@@ -269,7 +269,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .load_merge_commit_registrations(&commit, &author, &membership, &accepted_frontier)
             .await?;
         if !pull::membership_authorizes(Some(&membership), &commit, &author) {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "device join activation author is not authorized by its exact predecessor membership"
                     .to_string(),
             ));
@@ -288,12 +288,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await?;
         let (authorized_predecessor, recovery_author) = predecessor_state
             .preactivate_recovery_author(&commit, &registrations)
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::Protocol)?;
         let device_operations =
             crate::protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                 &commit,
             )
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::Protocol)?;
         let state_after = device_operations
             .apply_to(authorized_predecessor, &commit.device_state)
             .and_then(|state| {
@@ -304,7 +304,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     None,
                 )
             })
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::Protocol)?;
         let history = self
             .prepare_merge_history_successor(
                 &verified_commit,
@@ -324,7 +324,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         history
             .summary
             .open(&commit, reference, &head.value, &head_ref, &state_after)
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::Protocol)?;
         self.database
             .materialize_device_join_activation(
                 root,

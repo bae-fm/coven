@@ -50,7 +50,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     .value()
                     .order
                     .predecessor_cut()
-                    .map_err(|error| StorePullError::Database(error.to_string()))?;
+                    .map_err(StorePullError::Protocol)?;
                 return Ok(commit.value().author_registration == expected.registration
                     && ack.registration == expected.registration
                     && ack.store_cut == predecessor_cut

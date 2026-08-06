@@ -9,7 +9,7 @@ use local_store_writer::StoreOperationSigningContext;
 
 pub(crate) use operation::acknowledgements::StoreAckError;
 pub(super) use operation::prepare_partition_blob_locator;
-pub(super) use operation::StoreWriterAuthorizationError;
+pub(crate) use operation::StoreWriterAuthorizationError;
 pub(crate) use operation::{operations, reclaim, snapshot};
 
 #[derive(Clone, Copy)]

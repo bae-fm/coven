@@ -451,7 +451,7 @@ pub enum InitSyncError {
     #[error("cloud cipher and blob path scheme describe different storage modes")]
     IncoherentStorageRepresentation,
     #[error("Store row routing initialization failed: {0}")]
-    RowRouting(String),
+    RowRouting(crate::database::DbError),
     #[error("Store protocol root failed: {0}")]
     StoreProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
@@ -519,7 +519,7 @@ impl PreparedSyncComponents {
         }
         database
             .validate_store_write_routing(routing_encryption.as_ref())
-            .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
+            .map_err(InitSyncError::RowRouting)?;
 
         let cipher_is_plaintext = storage.is_plaintext();
         let representation_is_coherent = matches!(

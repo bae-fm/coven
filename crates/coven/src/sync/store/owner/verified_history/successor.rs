@@ -39,7 +39,7 @@ where
         }
         std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &value => Ok(()),
         std::collections::btree_map::Entry::Occupied(_) => {
-            Err(StorePullError::Database(conflict.to_string()))
+            Err(StorePullError::InvalidState(conflict.to_string()))
         }
     }
 }
@@ -66,7 +66,7 @@ pub(crate) fn insert_latest_acknowledgement(
         {
             Ok(())
         }
-        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::Database(
+        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::InvalidState(
             "Merge predecessor checkpoints contain forked acknowledgement proof chains".to_string(),
         )),
     }
@@ -97,7 +97,7 @@ fn insert_latest_announcement(
         {
             Ok(())
         }
-        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::Database(
+        std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::InvalidState(
             "Merge predecessor checkpoints contain conflicting announcement heads at one sequence"
                 .to_string(),
         )),
@@ -127,7 +127,7 @@ impl MergedRetainedMergeHistory {
             .keys()
             .any(|existing| existing.coord == reference.coord && existing != &reference)
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge predecessor checkpoints contain conflicting membership proofs at one Store coordinate"
                     .to_string(),
             ));
@@ -156,7 +156,7 @@ pub(crate) fn merge_retained_merge_history(
     for predecessor in predecessors {
         let predecessor_cut = predecessor.summary.causal_cut.clone();
         if predecessor.summary.store_root_hash != root.store_root_hash {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge predecessor checkpoint belongs to another Store".to_string(),
             ));
         }
@@ -178,7 +178,7 @@ pub(crate) fn merge_retained_merge_history(
                         .is_err()
                 })
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge successor membership omits its retained causal floor".to_string(),
             ));
         }
@@ -245,7 +245,7 @@ pub(crate) fn compose_merge_history_successor(
             .iter()
             .any(|activation| &activation.registration == registration.reference())
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge history registration is absent from its activating commit".to_string(),
             ));
         }
@@ -258,7 +258,7 @@ pub(crate) fn compose_merge_history_successor(
     }
     if let Some(retained) = evidence.acknowledgement {
         let (reference, _) = retained.latest().ok_or_else(|| {
-            StorePullError::Database(
+            StorePullError::InvalidState(
                 "Merge history acknowledgement proof chain is empty".to_string(),
             )
         })?;
@@ -266,7 +266,7 @@ pub(crate) fn compose_merge_history_successor(
             || retained.activating_commit != *commit_ref
             || retained.activating_commit_value != *commit
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge history acknowledgement differs from its activating commit".to_string(),
             ));
         }
@@ -278,7 +278,7 @@ pub(crate) fn compose_merge_history_successor(
     }
     if let Some(proof) = evidence.membership_proof {
         if proof.commit != *commit_ref {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge membership proof names another activating commit".to_string(),
             ));
         }
@@ -287,18 +287,18 @@ pub(crate) fn compose_merge_history_successor(
                 proof.entry.coord.clone(),
                 &proof.head_value.body.resolutions,
             )
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         merged.insert_membership_proof(commit_ref.clone(), proof)?;
     }
     let author_ref = commit.author_registration.clone();
     author_ref
         .verify_registration(author)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
     insert_exact(
         &mut merged.registrations,
         author_ref.device_id,
         ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
+            .map_err(StorePullError::Protocol)?,
         "Merge successor author registration conflicts with retained authority",
     )?;
     let mut post_frontier = BTreeMap::new();
@@ -331,16 +331,14 @@ pub(crate) fn compose_merge_history_successor(
         store_root_hash: root.store_root_hash,
         causal_cut,
         post_state: StoreDeviceStateRef::from_resolved(CommitFrontier(post_frontier), &state_after)
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
+            .map_err(StorePullError::Protocol)?,
         membership_floor,
         registrations,
         acknowledgements,
         membership_proofs,
         announcement_frontier,
     };
-    summary
-        .validate_shape()
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+    summary.validate_shape().map_err(StorePullError::Protocol)?;
     let StoreCommitCoord {
         stream_id,
         sequence,
@@ -356,7 +354,7 @@ pub(crate) fn compose_merge_history_successor(
                 first_slot.clone()
             }
             _ => {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "Merge successor has no exact retained announcement predecessor".to_string(),
                 ));
             }
@@ -388,12 +386,12 @@ pub(crate) fn compose_merge_snapshot_history_summary(
     } = merge_retained_merge_history(root, membership, predecessors)?;
     author_ref
         .verify_registration(author)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
     insert_exact(
         &mut registrations,
         author_ref.device_id,
         ReferencedStoreDeviceRegistration::verified(author_ref.clone(), author.clone())
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
+            .map_err(StorePullError::Protocol)?,
         "Merge snapshot author registration conflicts with retained authority",
     )?;
     let summary = RetainedVerifiedMergeHistorySummary {
@@ -401,7 +399,7 @@ pub(crate) fn compose_merge_snapshot_history_summary(
         store_root_hash: root.store_root_hash,
         causal_cut,
         post_state: StoreDeviceStateRef::from_resolved(coverage.clone(), state)
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
+            .map_err(StorePullError::Protocol)?,
         membership_floor: store_commit::MembershipCausalFloor::from_membership(membership),
         registrations,
         acknowledgements,
@@ -410,13 +408,9 @@ pub(crate) fn compose_merge_snapshot_history_summary(
     };
     summary
         .validate_snapshot_baseline()
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    if summary
-        .frontier()
-        .map_err(|error| StorePullError::Database(error.to_string()))?
-        != *frontier
-    {
-        return Err(StorePullError::Database(
+        .map_err(StorePullError::Protocol)?;
+    if summary.frontier().map_err(StorePullError::Protocol)? != *frontier {
+        return Err(StorePullError::InvalidState(
             "Merge snapshot history does not exactly cover its signed frontier".to_string(),
         ));
     }
@@ -430,7 +424,7 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
 ) -> Result<RetainedVerifiedMergeHistorySummary, StorePullError> {
     candidate_summary
         .validate_shape()
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
     let candidate_value = candidate.value();
     let candidate = candidate.reference();
     let abandonment_value = abandonment.value();
@@ -438,7 +432,7 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
     if candidate_summary.store_root_hash != candidate_value.store_root_hash
         || candidate_summary.store_root_hash != abandonment_value.store_root_hash
     {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Merge abandonment history belongs to another Store root".to_string(),
         ));
     }
@@ -449,7 +443,7 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
         || candidate_summary.causal_cut.get(&candidate.coord) != Some(candidate)
         || candidate_summary.membership_proofs.contains_key(candidate)
     {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Merge abandonment differs from its retained candidate history".to_string(),
         ));
     }
@@ -457,17 +451,11 @@ pub(crate) fn prepare_merge_abandonment_history_summary(
     summary
         .causal_cut
         .insert(abandonment.coord.clone(), abandonment.clone());
-    let frontier = CommitFrontier(
-        summary
-            .frontier()
-            .map_err(|error| StorePullError::Database(error.to_string()))?,
-    );
+    let frontier = CommitFrontier(summary.frontier().map_err(StorePullError::Protocol)?);
     summary.post_state = candidate_summary
         .post_state
         .with_frontier(frontier)
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
-    summary
-        .validate_shape()
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
+    summary.validate_shape().map_err(StorePullError::Protocol)?;
     Ok(summary)
 }

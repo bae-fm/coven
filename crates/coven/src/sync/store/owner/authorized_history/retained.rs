@@ -8,7 +8,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), pull::StorePullError> {
         let frontier = order
             .predecessor_cut()
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+            .map_err(pull::StorePullError::Protocol)?
             .0;
         let checkpoints = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
@@ -26,7 +26,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<MergeConflictResolutionAuthorization, pull::StorePullError> {
         let frontier = order
             .predecessor_cut()
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+            .map_err(pull::StorePullError::Protocol)?
             .0;
         let checkpoints = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
@@ -35,11 +35,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
             .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::MembershipChain)?;
         validate_retained_membership_floors(&checkpoints, &membership)?;
         prefix
             .validate_complete_membership(&membership)
-            .map_err(pull::StorePullError::Database)?;
+            .map_err(pull::StorePullError::InvalidState)?;
         let (device_state_ref, device_state) = self
             .retained_merge_device_state(&frontier, &checkpoints)
             .await?;
@@ -47,7 +47,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             &device_state,
             author_registration,
         ) {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "Merge conflict-resolution author is inactive at its predecessor cut".to_string(),
             ));
         }
@@ -73,7 +73,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<MergeOutboundAuthorization, pull::StorePullError> {
         let frontier = order
             .predecessor_cut()
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+            .map_err(pull::StorePullError::Protocol)?
             .0;
         let checkpoints = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
@@ -82,11 +82,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let membership = self
             .project_membership_to_verified_prefix(candidate_membership_heads, &prefix)
             .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::MembershipChain)?;
         validate_retained_membership_floors(&checkpoints, &membership)?;
         prefix
             .validate_complete_membership(&membership)
-            .map_err(pull::StorePullError::Database)?;
+            .map_err(pull::StorePullError::InvalidState)?;
         let (device_state_ref, device_state) = self
             .retained_merge_device_state(&frontier, &checkpoints)
             .await?;
@@ -94,12 +94,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             &device_state,
             author_registration,
         ) {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "Merge outbound author is inactive at its exact predecessor cut".to_string(),
             ));
         }
         let MembershipStatus::Resolved(resolved) = membership.status() else {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "Merge outbound predecessor membership is conflicted".to_string(),
             ));
         };
@@ -109,7 +109,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             device_state.recovery.clone(),
             resolved.state_hash,
         )
-        .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+        .map_err(pull::StorePullError::Protocol)?;
         Ok(MergeOutboundAuthorization {
             membership,
             membership_state,
@@ -151,18 +151,18 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .descriptor
                     .founder_recovery,
             )
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+            .map_err(pull::StorePullError::Protocol)?
         } else {
             ResolvedStoreDeviceState::merge(
                 checkpoints
                     .iter()
                     .map(|checkpoint| checkpoint.post_state.clone()),
             )
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?
+            .map_err(pull::StorePullError::Protocol)?
         };
         let reference =
             StoreDeviceStateRef::from_resolved(CommitFrontier(frontier.clone()), &state)
-                .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+                .map_err(pull::StorePullError::Protocol)?;
         Ok((reference, state))
     }
 
@@ -179,17 +179,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     > {
         let root = self.history_verifier.verified_root().reference();
         if verified_commit.store_root_hash() != root.store_root_hash {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                "authenticated Merge successor belongs to another Store root".to_string(),
-            ));
+            return Err(
+                crate::sync::store::owner::pull::StorePullError::InvalidState(
+                    "authenticated Merge successor belongs to another Store root".to_string(),
+                ),
+            );
         }
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
         let author = verified_commit.author();
         state_after.validate_canonical().map_err(|error| {
-            crate::sync::store::owner::pull::StorePullError::Database(format!(
-                "validate Merge successor post-state: {error}"
-            ))
+            crate::sync::store::owner::pull::StorePullError::context(
+                "validate Merge successor post-state",
+                error,
+            )
         })?;
         let predecessor_refs =
             crate::sync::store::owner::pull::commit_predecessor_references(commit);
@@ -200,13 +203,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .store_device_state_for_order(&commit.order)
             .await
-            .map_err(|error| {
-                crate::sync::store::owner::pull::StorePullError::Database(error.to_string())
-            })?;
+            .map_err(crate::sync::store::owner::pull::StorePullError::Database)?;
         if commit.device_state != expected_predecessor_ref {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                "Merge successor names another predecessor device state".to_string(),
-            ));
+            return Err(
+                crate::sync::store::owner::pull::StorePullError::InvalidState(
+                    "Merge successor names another predecessor device state".to_string(),
+                ),
+            );
         }
         if let Some(recovery_author) = recovery_author {
             let retained_recovery_registration =
@@ -233,10 +236,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 || !retained_recovery_registration
                 || !recovery_activation
             {
-                return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                    "Merge successor recovery author lacks its exact retained activation"
-                        .to_string(),
-                ));
+                return Err(
+                    crate::sync::store::owner::pull::StorePullError::InvalidState(
+                        "Merge successor recovery author lacks its exact retained activation"
+                            .to_string(),
+                    ),
+                );
             }
         }
         if !crate::sync::store::owner::verified_history::registration::device_state_has_active_registration(
@@ -244,7 +249,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             &commit.author_registration,
         ) && recovery_author != Some(&commit.author_registration)
         {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
+            return Err(crate::sync::store::owner::pull::StorePullError::InvalidState(
                 "Merge successor author is inactive at its exact predecessor cut".to_string(),
             ));
         }
@@ -381,12 +386,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .retained_merge_history_frontier(root.clone(), references)
             .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .map_err(pull::StorePullError::Database)?;
         if checkpoints
             .iter()
             .any(|checkpoint| checkpoint.summary.store_root_hash != root.store_root_hash)
         {
-            return Err(pull::StorePullError::Database(
+            return Err(pull::StorePullError::InvalidState(
                 "Merge operation is missing retained predecessor authority".to_string(),
             ));
         }

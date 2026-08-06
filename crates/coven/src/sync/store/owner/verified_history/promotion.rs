@@ -48,7 +48,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             return Ok(None);
         };
         if entry.value.coord() != transition.body.entry.coord {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge resolution activation differs from its exact transition".to_string(),
             ));
         }
@@ -83,7 +83,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             || transition.body.author_registration != commit.author_registration
             || commit.stream_activations() != expected_activations
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge resolution activation differs from its accepted Owner authority".to_string(),
             ));
         }
@@ -110,7 +110,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         acceptance
             .verify(&registration.value)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let state = merge_device_state_from_verified_history(
             &acceptance.device_state,
             &self.history.genesis,
@@ -118,7 +118,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             allowed_tips,
         )?;
         if !device_state_has_active_registration(&state, &acceptance.owner_registration) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "conflict-resolution Owner registration is not active at its exact device state"
                     .to_string(),
             ));
@@ -179,7 +179,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         request
             .verify(&root, &promoter.value)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let discovered = self
             .discover_merge_stream(&request.promoter_registration, &promoter.value, None)
             .await?;
@@ -192,12 +192,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .then_some((commit_ref, head_ref))
                 });
         let Some((commit, head)) = matches.next() else {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion request has no accepted Merge activation".to_string(),
             ));
         };
         if matches.next().is_some() {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion request has more than one Merge activation".to_string(),
             ));
         }
@@ -226,7 +226,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         verified: VerifiedOwnerPromotionRequestActivation,
     ) -> Result<(), StorePullError> {
         if acceptance.activation != verified.activation {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion acceptance names another request activation".to_string(),
             ));
         }
@@ -254,17 +254,17 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         request
             .verify(&root, &promoter.value)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         acceptance
             .verify(&candidate.value)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
 
         let opened = self
             .commit_verifier
             .load_head(activation_head, &promoter.value, activation_commit)
             .await?;
         let verified = self.history.commits.get(activation_commit).ok_or_else(|| {
-            StorePullError::Database(
+            StorePullError::InvalidState(
                 "Owner-promotion request activation is absent from its verified history"
                     .to_string(),
             )
@@ -277,12 +277,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Some(&verified.verified),
             )
             .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(|error| StorePullError::Store(Box::new(error)))?;
         if opened.value.head_hash() != activation_head.head_hash
             || opened.value.commit != *activation_commit
             || exact_head.as_ref() != Some(activation_head)
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion request is not activated by its exact Merge head".to_string(),
             ));
         }
@@ -292,7 +292,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             || verified_commit.device_state != request.predecessor_devices
             || verified_commit.author_registration != request.promoter_registration
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion request commit differs from its signed predecessor authority"
                     .to_string(),
             ));
@@ -309,7 +309,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 None,
             )
             .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::MembershipChain)?;
         verify_merge_membership_state_ref(
             &request.predecessor_membership,
             &membership,
@@ -322,7 +322,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             &verified.predecessor_state,
             &request.member_registration,
         ) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion request registrations are not active at its exact predecessor"
                     .to_string(),
             ));
@@ -341,7 +341,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 })
             || candidate.value.author_pubkey != request.member_pubkey
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Owner-promotion request does not name the exact active Owner and Member grants"
                     .to_string(),
             ));

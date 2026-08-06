@@ -23,7 +23,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<MergeStreamDiscovery, StorePullError> {
         let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits
         else {
-            return Err(StorePullError::Database(format!(
+            return Err(StorePullError::InvalidState(format!(
                 "Store registration {} has no Merge announcement anchor",
                 registration.device_id
             )));
@@ -41,7 +41,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         });
         let activation = registration
             .store_announcement_activation(registration_ref)
-            .map_err(|error| StorePullError::Database(error.to_string()))?
+            .map_err(StorePullError::Protocol)?
             .activation_id();
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -60,7 +60,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 break;
             }
             if !visited.insert(slot.clone()) {
-                return Err(StorePullError::Database(format!(
+                return Err(StorePullError::InvalidState(format!(
                     "Store announcement stream {stream_id} repeats a reserved slot"
                 )));
             }
@@ -171,7 +171,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             };
             predecessor = Some(object);
             sequence = sequence.checked_add(1).ok_or_else(|| {
-                StorePullError::Database(format!(
+                StorePullError::InvalidState(format!(
                     "Store announcement stream {stream_id} sequence overflow"
                 ))
             })?;
@@ -199,9 +199,11 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 CommitCoverageError::Object(error) => StorePullError::Object(error),
-                CommitCoverageError::MissingAncestry { commit_hash } => StorePullError::Database(
-                    format!("exact Store ancestry is missing commit {commit_hash}"),
-                ),
+                CommitCoverageError::MissingAncestry { commit_hash } => {
+                    StorePullError::InvalidState(format!(
+                        "exact Store ancestry is missing commit {commit_hash}"
+                    ))
+                }
             })
     }
 
@@ -420,12 +422,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .then(|| reference.clone())
             });
             let Some(reference) = next else {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "Merge history is cyclic or has an unresolved predecessor".to_string(),
                 ));
             };
             let verified = loaded.remove(&reference).ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "selected exclusion-history commit disappeared before verification".to_string(),
                 )
             })?;
@@ -435,9 +437,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .commit_verifier
                 .exact_next_announcement_slot(&commit.author_registration, &author, Some(&verified))
                 .await
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(|error| StorePullError::Store(Box::new(error)))?;
             let activation_head_ref = accepted_head.ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "Merge history commit has no accepted announcement head".to_string(),
                 )
             })?;
@@ -457,17 +459,17 @@ impl<'a> MergeHistoryVerifier<'a> {
                     pending_resolution.as_ref(),
                 )
                 .await
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::MembershipChain)?;
             verified_membership_prefix
                 .validate_complete_membership(&membership)
-                .map_err(StorePullError::Database)?;
+                .map_err(StorePullError::InvalidState)?;
             verify_merge_membership_state_ref(
                 &commit.membership_state,
                 &membership,
                 &predecessor_state,
             )?;
             if !membership_authorizes(Some(&membership), &commit, &author) {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "Merge history commit lacks exact membership authority".to_string(),
                 ));
             }
@@ -482,12 +484,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             let (authorized_predecessor, recovery_author) = predecessor_state
                 .clone()
                 .preactivate_recovery_author(&commit, &registrations)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
             if !device_state_has_active_registration(
                 &authorized_predecessor,
                 &commit.author_registration,
             ) {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "author exclusion history commit author is inactive at its predecessor"
                         .to_string(),
                 ));
@@ -505,14 +507,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
             let acknowledgement = self
                 .validate_commit_acknowledgement(&commit, &author)
                 .await
                 .map_err(|error| match error {
                     RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                    RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
                 })?;
             let membership_control =
                 if let Some(store_commit::StoreControl { transition }) = commit.control() {
@@ -525,7 +527,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                             pending_resolution.as_ref(),
                         ))
                         .await
-                        .map_err(StorePullError::Database)?;
+                        .map_err(StorePullError::InvalidState)?;
                     Some(VerifiedMergeMembershipControl {
                         activations,
                         head_activation: VerifiedMergeMembershipHeadActivation {
@@ -543,7 +545,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .await?;
             let state = operations
                 .apply_to(authorized_predecessor, &commit.device_state)
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
             let state = state
                 .apply_verified_lifecycle(
                     &commit,
@@ -551,7 +553,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     recovery_author.as_ref(),
                     owner_recovery,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
             let predecessor_histories = commit_predecessor_references(&commit)
                 .iter()
                 .map(|predecessor| {
@@ -560,7 +562,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .get(predecessor)
                         .map(|verified: &VerifiedMergeHistoryCommit| verified.history.clone())
                         .ok_or_else(|| {
-                            StorePullError::Database(
+                            StorePullError::InvalidState(
                                 "Merge history summary has an unresolved predecessor".to_string(),
                             )
                         })
@@ -615,7 +617,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     &activation_head_ref,
                     &state,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
             states.insert(reference.clone(), state.clone());
             self.history.commits.insert(
                 reference,

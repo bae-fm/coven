@@ -20,17 +20,11 @@ pub enum InviteError {
     #[error("Cannot revoke the last owner of a store")]
     LastOwner,
     #[error("membership mutation database state: {0}")]
-    Database(String),
+    Database(#[from] crate::database::DbError),
     #[error("pending membership mutation does not match this request: {0}")]
     PendingMutation(String),
     #[error("durable membership mutation is invalid: {0}")]
     InvalidDurableMutation(String),
-}
-
-impl From<crate::database::DbError> for InviteError {
-    fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.into_message())
-    }
 }
 
 impl From<crate::protocol::objects::StoreObjectError> for InviteError {

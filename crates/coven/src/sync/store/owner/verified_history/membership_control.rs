@@ -7,7 +7,7 @@ pub(crate) fn verify_merge_membership_state_ref(
     device_state: &ResolvedStoreDeviceState,
 ) -> Result<(), StorePullError> {
     let MembershipStatus::Resolved(resolved) = membership.status() else {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Store history membership state is conflicted".to_string(),
         ));
     };
@@ -17,9 +17,9 @@ pub(crate) fn verify_merge_membership_state_ref(
         device_state.recovery.clone(),
         resolved.state_hash,
     )
-    .map_err(|error| StorePullError::Database(error.to_string()))?;
+    .map_err(StorePullError::Protocol)?;
     if &expected != state {
-        return Err(StorePullError::Database(
+        return Err(StorePullError::InvalidState(
             "Store history membership reference differs from its exact resolved state".to_string(),
         ));
     }
@@ -89,7 +89,7 @@ impl VerifiedMergeMembershipPrefix {
             for proof in checkpoint.summary.membership_proofs.values() {
                 let Some(store_commit::StoreControl { transition }) = proof.commit_value.control()
                 else {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "retained Merge membership proof has no membership control".to_string(),
                     ));
                 };
@@ -104,7 +104,7 @@ impl VerifiedMergeMembershipPrefix {
                     std::collections::btree_map::Entry::Occupied(entry)
                         if entry.get() == &activation => {}
                     std::collections::btree_map::Entry::Occupied(_) => {
-                        return Err(StorePullError::Database(
+                        return Err(StorePullError::InvalidState(
                             "retained checkpoints disagree on a membership activation".to_string(),
                         ));
                     }
@@ -120,7 +120,7 @@ impl VerifiedMergeMembershipPrefix {
                         std::collections::btree_map::Entry::Occupied(entry)
                             if entry.get() == &activation => {}
                         std::collections::btree_map::Entry::Occupied(_) => {
-                            return Err(StorePullError::Database(
+                            return Err(StorePullError::InvalidState(
                                 "retained checkpoints disagree on a conflict resolution"
                                     .to_string(),
                             ));
@@ -532,7 +532,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .load_provider_access_grant(&access.grant_ref, administrator)
             .await?;
         if grant.value != access.grant {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device provider approval embeds a different access grant than its exact reference"
                     .to_string(),
             ));
@@ -542,7 +542,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             || activation.value().author_registration != access.grant.administrator
             || activation.author() != administrator
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device provider approval activation is not the administrator's exact sole access grant"
                     .to_string(),
             ));
@@ -552,7 +552,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         if !predecessor_verifies_provider_administrator(
             &membership,
@@ -560,7 +560,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             &activation.value().author_registration,
             provider_admin,
         ) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device provider approval activation lacks exact predecessor provider-administrator authority"
                     .to_string(),
             ));
@@ -569,7 +569,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .current_history_contains(&membership, &access.activation)
             .await?
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device provider approval activation is absent from current accepted Store history"
                     .to_string(),
             ));
@@ -588,7 +588,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commits
             .get(expected)
             .ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "provider-access activation is absent from its verified Merge graph"
                         .to_string(),
                 )
@@ -602,7 +602,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         registrations.insert(
             founder_ref.device_id,
             ReferencedStoreDeviceRegistration::verified(founder_ref, founder.value)
-                .map_err(|error| StorePullError::Database(error.to_string()))?,
+                .map_err(StorePullError::Protocol)?,
         );
         for recovered in self.discover_owner_recoveries(membership).await? {
             registrations.insert(recovered.reference().device_id, recovered);
@@ -618,7 +618,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 let registration_ref = registration.reference();
                 let inactive_cut = match state.devices.get(&registration_ref.device_id) {
                     Some(record) if record.registration != *registration_ref => {
-                        return Err(StorePullError::Database(
+                        return Err(StorePullError::InvalidState(
                             "current Merge device state names another registration revision"
                                 .to_string(),
                         ));
@@ -633,7 +633,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .discover_merge_stream(registration_ref, registration.value(), inactive_cut)
                     .await?;
                 if matches!(discovered.block, Some(MergeStreamBlock::Authenticated(_))) {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "an authenticated Merge stream position cannot be verified".to_string(),
                     ));
                 }
@@ -654,7 +654,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                                 .get(reference)
                                 .map(|commit| commit.state_after.clone())
                                 .ok_or_else(|| {
-                                    StorePullError::Database(
+                                    StorePullError::InvalidState(
                                         "current Merge frontier is absent from its verified graph"
                                             .to_string(),
                                     )
@@ -662,7 +662,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?
+                .map_err(StorePullError::Protocol)?
             };
             let registration_count = registrations.len();
             self.load_state_registrations(&next_state, &mut registrations)
@@ -677,10 +677,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             let state_fingerprint = ObjectHash::digest(
                 &serde_json::to_vec(&(&next, &next_state))
-                    .map_err(|error| StorePullError::Database(error.to_string()))?,
+                    .map_err(StorePullError::Serialization)?,
             );
             if !observed_states.insert(state_fingerprint) {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "current Merge authority discovery does not reach one stable frontier"
                         .to_string(),
                 ));
@@ -787,7 +787,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let root = self.root.reference().clone();
         let head_prefix =
             store_commit::semantic_prefix_from_exact_object(&activation_head.object, ".json")
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
@@ -799,12 +799,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         activation_head.object.verify(&head_bytes)?;
         let witness_head: StoreDeviceHead =
             serde_json::from_slice(&head_bytes).map_err(|error| {
-                StorePullError::Database(format!("membership revocation witness head: {error}"))
+                StorePullError::context("membership revocation witness head", error)
             })?;
         if witness_head.head_hash() != activation_head.head_hash
             || &witness_head.commit != activation_commit
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation witness head differs from its exact activation".to_string(),
             ));
         }
@@ -822,14 +822,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commits
             .get(&witness_head.commit)
             .ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "membership revocation witness is absent from its verified history".to_string(),
                 )
             })?
             .verified
             .clone();
         if witness_commit.author() != &witness_author.value {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation witness commit belongs to another author".to_string(),
             ));
         }
@@ -841,14 +841,14 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Some(&witness_commit),
             )
             .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(|error| StorePullError::Store(Box::new(error)))?;
         if exact_head.as_ref() != Some(activation_head) || opened.value != witness_head {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation witness is not an accepted exact head".to_string(),
             ));
         }
         if witness_commit.value().membership_state != *membership {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation witness commit names another membership state".to_string(),
             ));
         }
@@ -857,10 +857,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         let MembershipStatus::Resolved(current) = current_membership.status() else {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation witness state is conflicted".to_string(),
             ));
         };
@@ -869,7 +869,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             ..
         }) = current.grants.get(grant_id)
         else {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation witness grant is not tombstoned".to_string(),
             ));
         };
@@ -881,15 +881,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         let MembershipStatus::Resolved(predecessor) = predecessor_membership.status() else {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation candidate predecessor is conflicted".to_string(),
             ));
         };
         let Some(predecessor_record) = predecessor.active_grant(grant_id) else {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation grant was not active at the candidate predecessor"
                     .to_string(),
             ));
@@ -899,7 +899,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             || candidate_commit.membership_authority.as_ref()
                 != Some(&predecessor_record.creation_authority)
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation grant differs from the candidate's signed authority"
                     .to_string(),
             ));
@@ -908,7 +908,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .value()
             .order
             .predecessor_cut()
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::Protocol)?;
         let expected_stream = store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &candidate_commit.author_registration,
@@ -924,7 +924,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .get(&expected_stream)
                 .is_some_and(|covered| sequence <= covered.coord.sequence())
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "membership revocation candidate is not beyond the accepted witness cut"
                     .to_string(),
             ));
@@ -943,13 +943,13 @@ impl<'a> MergeHistoryVerifier<'a> {
                 activation_head: activation_head.clone(),
             },
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::RemoteObject)?;
         remote_object::VerifiedCandidateNonactivation::from_verified_membership_grant_revocation(
             durable,
             candidate_ref.clone(),
             verified_candidate_head,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))
+        .map_err(StorePullError::RemoteObject)
     }
 
     #[cfg(test)]

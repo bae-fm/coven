@@ -201,7 +201,7 @@ impl Store {
     ) -> Result<(), membership::InviteError> {
         self.authorize_writer()
             .await
-            .map_err(|error| membership::InviteError::Database(error.to_string()))?
+            .expect("authorize Store writer")
             .complete_revoke_rotation_adoption_for_test(pending_rotation, adopted_generation)
             .await
     }
@@ -455,7 +455,7 @@ impl Store {
         let mut history = self
             .authorize_history()
             .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .expect("authorize Store history");
         history
             .pull_readiness_for_test(
                 coverage,
@@ -477,7 +477,7 @@ impl Store {
         let mut history = self
             .authorize_history()
             .await
-            .map_err(|error| pull::StorePullError::Database(error.to_string()))?;
+            .expect("authorize Store history");
         history
             .verified_merge_membership_prefix_for_test(references, predecessors)
             .await
@@ -676,7 +676,7 @@ impl Store {
         offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, StorePullError> {
         if &offer.store_root != self.root.reference() {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "pending device join belongs to another Store root".to_string(),
             ));
         }

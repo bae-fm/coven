@@ -338,7 +338,7 @@ impl EffectiveAccessFixture {
     async fn pull_member(
         &self,
         store_dir: &crate::store_dir::StoreDir,
-    ) -> Result<StorePullResult, StorePullError> {
+    ) -> Result<StorePullResult, crate::sync::test_helpers::TestPullError> {
         self.member_device
             .pull_store(store_dir)
             .await

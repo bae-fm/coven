@@ -31,7 +31,7 @@ pub(crate) fn validate_retained_membership_floors(
             .membership_floor
             .is_included_in(membership)
     }) {
-        return Err(pull::StorePullError::Database(
+        return Err(pull::StorePullError::InvalidState(
             "Merge membership omits retained effective predecessor authority".to_string(),
         ));
     }
@@ -115,7 +115,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .commit()
                 .order
                 .predecessor_cut()
-                .map_err(|error| StoreError::Database(error.to_string()))?;
+                .map_err(StoreError::Protocol)?;
             if predecessor_cut
                 .commits()
                 .get(&expected_stream)
@@ -133,7 +133,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     }
                     crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(
                         error,
-                    ) => StoreError::Database(error),
+                    ) => StoreError::InvalidOutbound(error),
                 })?;
             let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
                 membership.status()
@@ -239,9 +239,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .load_ref(retained.commit_ref())
             .await?;
         if activation_commit.value() != retained.commit() {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                "retained exclusion activation differs from its authenticated commit".to_string(),
-            ));
+            return Err(
+                crate::sync::store::owner::pull::StorePullError::InvalidState(
+                    "retained exclusion activation differs from its authenticated commit"
+                        .to_string(),
+                ),
+            );
         }
         self.history_verifier
             .verify_author_exclusion_nonactivation(
@@ -302,9 +305,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .authenticate_bytes(reference, &verification.candidate.commit.bytes)
             .await?;
         if candidate.value() != verification.candidate.commit.value.value() {
-            return Err(crate::sync::store::owner::pull::StorePullError::Database(
-                "terminal cleanup candidate differs from its authenticated commit".to_string(),
-            ));
+            return Err(
+                crate::sync::store::owner::pull::StorePullError::InvalidState(
+                    "terminal cleanup candidate differs from its authenticated commit".to_string(),
+                ),
+            );
         }
         let target = crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
             coord: reference.coord.clone(),
@@ -346,9 +351,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     candidate.author(),
                     verification.candidate.head.object.clone(),
                 )
-                .map_err(|error| {
-                    crate::sync::store::owner::pull::StorePullError::Database(error.to_string())
-                })
+                .map_err(crate::sync::store::owner::pull::StorePullError::RemoteObject)
             }
         }
     }

@@ -168,7 +168,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .map_err(|error| match error {
                 crate::sync::store::owner::circles::packages::CirclePackageReadError::Database(
                     error,
-                ) => StoreError::Database(error.to_string()),
+                ) => StoreError::Database(error),
                 crate::sync::store::owner::circles::packages::CirclePackageReadError::Invalid(
                     error,
                 ) => StoreError::InvalidOutbound(error),

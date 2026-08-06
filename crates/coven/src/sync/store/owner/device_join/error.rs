@@ -26,6 +26,8 @@ pub enum DeviceJoinError {
     Provider(String),
     #[error("Store device join state: {0}")]
     Store(String),
+    #[error("Store device join database state: {0}")]
+    Database(#[from] crate::database::DbError),
     #[error("device join requires an activated local Store device")]
     ActiveDeviceRequired,
     #[error("device join requires the active local Owner authority")]
@@ -98,7 +100,8 @@ impl From<crate::protocol::store_commit::device_join_journal::DeviceJoinJournalE
         match error {
             E::NonAdjacentJournalTransition => DeviceJoinError::NonAdjacentJournalTransition,
             E::JournalConflict => DeviceJoinError::JournalConflict,
-            E::Journal(message) => DeviceJoinError::Store(message),
+            E::Serialization(error) => DeviceJoinError::Serialization(error),
+            E::Database(error) => DeviceJoinError::Database(error),
         }
     }
 }

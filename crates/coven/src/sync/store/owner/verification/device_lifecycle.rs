@@ -242,7 +242,7 @@ impl<'a> StoreCommitVerifier<'a> {
         owner: &StoreDeviceRegistration,
     ) -> Result<LoadedDeviceJoinAttemptEvidence, StorePullError> {
         if attempt.value.store_root != self.root.reference().clone() {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join attempt names another Store root".to_string(),
             ));
         }
@@ -255,7 +255,7 @@ impl<'a> StoreCommitVerifier<'a> {
             .value
             .provider_approval
             .verify(self.root.object(), owner, &administrator)
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(StorePullError::DeviceJoinExchange)?;
         Ok(LoadedDeviceJoinAttemptEvidence { attempt })
     }
 }

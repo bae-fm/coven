@@ -53,14 +53,14 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .iter()
                 .position(|candidate| candidate.snapshot.reference == selected.reference)
                 .ok_or_else(|| {
-                    StorePullError::Database(
+                    StorePullError::InvalidState(
                         "stable Store snapshot selection lost its verified candidate".to_string(),
                     )
                 })?;
             return Ok(Some(stable.swap_remove(index)));
         }
         Err(maximal_rejection.ok_or_else(|| {
-            StorePullError::Database(
+            StorePullError::InvalidState(
                 "Store snapshot candidates produced no stability decision".to_string(),
             )
         })?)
@@ -86,7 +86,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .get(reference)
                     .map(|commit| commit.history.clone())
                     .ok_or_else(|| {
-                        StorePullError::Database(
+                        StorePullError::InvalidState(
                             "Merge snapshot frontier is absent from its verified history"
                                 .to_string(),
                         )
@@ -115,9 +115,9 @@ impl<'a> MergeHistoryVerifier<'a> {
             snapshot.meta.coverage.clone(),
             &state.common.device_state,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
         if expected_device_state != snapshot.meta.state.devices {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge snapshot device state differs from its exact verified history".to_string(),
             ));
         }
@@ -140,7 +140,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             state.checkpoints.clone(),
         )?;
         if snapshot.meta.history_summary != canonical {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "Merge snapshot history summary differs from its exact verified cut".to_string(),
             ));
         }
@@ -166,7 +166,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .await?;
             let Some((_, _, latest, _)) = discovery.commits.last() else {
                 if accepted.contains_key(&stream_id) {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "accepted Merge snapshot history is absent from its author stream"
                             .to_string(),
                     ));
@@ -178,7 +178,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     || (latest.coord.sequence() == snapshot_tip.coord.sequence()
                         && latest != snapshot_tip)
                 {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "current Merge author stream does not contain the snapshot cut".to_string(),
                     ));
                 }
@@ -204,7 +204,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .acknowledgements
                 .get(&reference.registration.device_id)
                 .ok_or_else(|| {
-                    StorePullError::Database(
+                    StorePullError::InvalidState(
                         "verified acknowledgement history lacks its exact chain".to_string(),
                     )
                 })?
@@ -290,7 +290,6 @@ impl<'a> MergeHistoryVerifier<'a> {
             active_registrations: state.common.active_registrations,
             acknowledgements: retained_acknowledgements,
         };
-        VerifiedStoreSnapshotStability::from_authority(authority)
-            .map_err(|error| StorePullError::Database(error.to_string()))
+        VerifiedStoreSnapshotStability::from_authority(authority).map_err(StorePullError::Database)
     }
 }

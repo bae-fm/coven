@@ -297,10 +297,10 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             .await?;
         match status {
             MaterializedCheck::Yes => Ok(()),
-            MaterializedCheck::Missing => Err(StorePullError::Database(
+            MaterializedCheck::Missing => Err(StorePullError::InvalidState(
                 "Merge activation commit is absent from current accepted history".to_string(),
             )),
-            MaterializedCheck::Held(reason) => Err(StorePullError::Database(format!(
+            MaterializedCheck::Held(reason) => Err(StorePullError::InvalidState(format!(
                 "Merge activation commit is not current accepted history: {reason:?}"
             ))),
         }

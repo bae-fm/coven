@@ -9,7 +9,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         if verified_commit.value().device_join_cleanup_receipts()
             != std::slice::from_ref(&activation.receipt)
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join cleanup activation does not contain its exact sole receipt"
                     .to_string(),
             ));
@@ -19,7 +19,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         Ok(LoadedDeviceJoinCleanupActivation {
             verified_commit,
@@ -39,15 +39,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         if !membership.is_owner_now(&activation.verified_commit.author().author_pubkey) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join cleanup activation author is not an active Merge Owner".to_string(),
             ));
         }
         let [loaded] = <[_; 1]>::try_from(activation.receipts).map_err(|_| {
-            StorePullError::Database(
+            StorePullError::InvalidState(
                 "device join cleanup activation does not resolve to one verified receipt"
                     .to_string(),
             )
@@ -62,7 +62,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             &loaded.receipt.executor,
             expected,
         ) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join cleanup executor is not the effective Merge provider administrator"
                     .to_string(),
             ));
@@ -360,7 +360,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await
             .map_err(|error| match error {
                 RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         let founder = self.commit_verifier.load_founder_registration().await?;
         let founder_reference =
@@ -375,7 +375,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commits
             .get(attempt_activation)
             .ok_or_else(|| {
-                StorePullError::Database(
+                StorePullError::InvalidState(
                     "device join attempt activation is absent from its graph".into(),
                 )
             })?;
@@ -384,16 +384,16 @@ impl<'a> MergeHistoryVerifier<'a> {
             .value()
             .order
             .predecessor_cut()
-            .map_err(|error| StorePullError::Database(error.to_string()))?
+            .map_err(StorePullError::Protocol)?
             != *coverage
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join attempt activation predecessor differs from its signed bootstrap cut"
                     .to_string(),
             ));
         }
         if &activation.verified.value().membership_state != membership_state {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "device join attempt activation differs from its exact verified membership state"
                     .to_string(),
             ));
@@ -414,7 +414,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .then(|| reference.clone())
                 });
             let Some(reference) = next else {
-                return Err(StorePullError::Database(
+                return Err(StorePullError::InvalidState(
                     "verified device join bootstrap history has an unresolved predecessor"
                         .to_string(),
                 ));

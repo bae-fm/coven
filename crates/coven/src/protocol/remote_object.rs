@@ -263,7 +263,7 @@ pub(crate) enum CandidateCommitState {
 pub(crate) use super::store_commit::StoreBatchCommitDeletionTarget;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RemoteObjectRecordError {
+pub enum RemoteObjectRecordError {
     #[error("prepared stored bytes do not match their exact reference: {0}")]
     StoredBytes(String),
     #[error("prepared stored reference differs from the closed identity reference")]

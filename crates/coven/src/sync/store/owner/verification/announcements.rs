@@ -171,7 +171,7 @@ impl<'a> StoreCommitVerifier<'a> {
         if candidate_head.commit != *candidate_ref
             || candidate_head.author_registration != candidate_commit.author_registration
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "terminal candidate head names another commit or author".to_string(),
             ));
         }
@@ -181,7 +181,7 @@ impl<'a> StoreCommitVerifier<'a> {
             candidate_author,
             candidate_ref,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::Protocol)?;
         let verified_predecessor = match candidate_commit.order.predecessor() {
             Some(predecessor) => Some(self.load_ref(predecessor).await?),
             None => None,
@@ -194,17 +194,17 @@ impl<'a> StoreCommitVerifier<'a> {
                 verified_predecessor.as_ref(),
             )
             .await
-            .map_err(|error| StorePullError::Database(error.to_string()))?;
+            .map_err(|error| StorePullError::Store(Box::new(error)))?;
         let activation = candidate_author
             .store_announcement_activation(&candidate_commit.author_registration)
-            .map_err(|error| StorePullError::Database(error.to_string()))?
+            .map_err(StorePullError::Protocol)?
             .activation_id();
         if candidate_slot != *candidate_head_object.slot()
             || candidate_head.successor.activation != activation
             || candidate_head.successor.predecessor
                 != predecessor_head.map(|reference| reference.object)
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "terminal candidate head does not occupy its exact successor slot".to_string(),
             ));
         }
@@ -238,23 +238,21 @@ impl<'a> StoreCommitVerifier<'a> {
                 object.verify(&bytes)?;
                 let unverified: StoreDeviceHead =
                     serde_json::from_slice(&bytes).map_err(|error| {
-                        StorePullError::Database(format!(
-                            "parse competing terminal candidate head: {error}"
-                        ))
+                        StorePullError::context("parse competing terminal candidate head", error)
                     })?;
                 if object.slot() != candidate_head_object.slot()
                     || unverified.author_registration != candidate_head.author_registration
                     || unverified.commit.coord != candidate_head.commit.coord
                     || unverified.successor != candidate_head.successor
                 {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "competing terminal candidate head differs from the exact successor point"
                             .to_string(),
                     ));
                 }
                 let competing_commit = self.load_ref(&unverified.commit).await?;
                 if competing_commit.author() != candidate_author {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "competing terminal candidate belongs to another author".to_string(),
                     ));
                 }
@@ -264,9 +262,9 @@ impl<'a> StoreCommitVerifier<'a> {
                     candidate_author,
                     &unverified.commit,
                 )
-                .map_err(|error| StorePullError::Database(error.to_string()))?;
+                .map_err(StorePullError::Protocol)?;
                 if winner != unverified {
-                    return Err(StorePullError::Database(
+                    return Err(StorePullError::InvalidState(
                         "competing terminal candidate head is not authenticated".to_string(),
                     ));
                 }
@@ -313,7 +311,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 &locator.exclusion().proposal.target,
             )
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "author exclusion activation differs from its verified commit and predecessor"
                     .to_string(),
             ));
@@ -322,7 +320,7 @@ impl<'a> StoreCommitVerifier<'a> {
             .exclusions()
             .find_map(|(exclusion, cut)| (exclusion == locator.exclusion()).then_some(cut));
         if exact_cut != Some(&StoreHistoryCut(locator.accepted_cut().clone())) {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "author exclusion locator differs from the verified outcome cutoff".to_string(),
             ));
         }
@@ -330,7 +328,7 @@ impl<'a> StoreCommitVerifier<'a> {
             || candidate_head.author_registration != locator.exclusion().proposal.target
             || candidate_commit.author_registration != candidate_head.author_registration
         {
-            return Err(StorePullError::Database(
+            return Err(StorePullError::InvalidState(
                 "candidate head differs from the excluded author and exact candidate".to_string(),
             ));
         }
@@ -346,12 +344,12 @@ impl<'a> StoreCommitVerifier<'a> {
                 activation_head: verified_activation_head,
             },
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))?;
+        .map_err(StorePullError::RemoteObject)?;
         crate::protocol::remote_object::VerifiedCandidateNonactivation::from_verified_author_exclusion(
             durable,
             candidate_ref.clone(),
             verified_candidate_head,
         )
-        .map_err(|error| StorePullError::Database(error.to_string()))
+        .map_err(StorePullError::RemoteObject)
     }
 }
