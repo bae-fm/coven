@@ -335,10 +335,12 @@ impl SyncStorage for CloudSyncStorage {
                     ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
                         .await?;
                 loop {
-                    let chunk =
-                        crate::local_file::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
-                            .await
-                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    let chunk = coven_foundation::local_file::PlaintextChunkReader::next_chunk(
+                        &mut reader,
+                        1 << 20,
+                    )
+                    .await
+                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -405,7 +407,7 @@ impl SyncStorage for CloudSyncStorage {
                 None => Ok::<_, crate::storage::cloud::CloudHomeError>(None),
             }
         });
-        let staged = crate::local_file::AtomicStagedFile::create(spool_file)
+        let staged = coven_foundation::local_file::AtomicStagedFile::create(spool_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let (staged, written) =
@@ -413,14 +415,17 @@ impl SyncStorage for CloudSyncStorage {
                 .write_byte_stream(Box::pin(stream))
                 .await
                 .map_err(|error| match error {
-                    crate::local_file::ByteStreamWriteError::Source(error) => error.into(),
-                    crate::local_file::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
-                        StorageError::CleanupFailed {
-                            operation: Box::new(source.into()),
-                            cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
-                        }
+                    coven_foundation::local_file::ByteStreamWriteError::Source(error) => {
+                        error.into()
                     }
-                    crate::local_file::ByteStreamWriteError::Local(error) => {
+                    coven_foundation::local_file::ByteStreamWriteError::SourceCleanup {
+                        source,
+                        cleanup,
+                    } => StorageError::CleanupFailed {
+                        operation: Box::new(source.into()),
+                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+                    },
+                    coven_foundation::local_file::ByteStreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;
@@ -432,7 +437,7 @@ impl SyncStorage for CloudSyncStorage {
         }
         match staged.commit_new().await {
             Ok(()) => Ok(crate::protocol::objects::BlobSpoolWrite::Created),
-            Err(crate::local_file::CommitNewFileError::DestinationExists(_)) => {
+            Err(coven_foundation::local_file::CommitNewFileError::DestinationExists(_)) => {
                 let (stored_size, stored_hash) =
                     crate::storage::local_file::exact_file_facts(spool_file)
                         .await
@@ -453,10 +458,12 @@ impl SyncStorage for CloudSyncStorage {
                 )
                 .await?;
                 loop {
-                    let chunk =
-                        crate::local_file::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
-                            .await
-                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    let chunk = coven_foundation::local_file::PlaintextChunkReader::next_chunk(
+                        &mut reader,
+                        1 << 20,
+                    )
+                    .await
+                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -514,7 +521,7 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         {
-            let (size, digest) = crate::local_file::file_facts(stored_file)
+            let (size, digest) = coven_foundation::local_file::file_facts(stored_file)
                 .await
                 .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
             object.verify_stored_facts(
@@ -578,12 +585,12 @@ impl SyncStorage for CloudSyncStorage {
         blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let stored_destination = dest.with_extension("coven-stored-download");
         let stored = self
             .stage_exact_blob_download(blob, &stored_destination)
             .await?;
-        let mut plaintext = crate::local_file::AtomicStagedFile::create(dest)
+        let mut plaintext = coven_foundation::local_file::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let mut reader =
@@ -593,16 +600,16 @@ impl SyncStorage for CloudSyncStorage {
                 .write_plaintext(&mut reader)
                 .await
                 .map_err(|error| match error {
-                    crate::local_file::StreamWriteError::Source(
+                    coven_foundation::local_file::StreamWriteError::Source(
                         crate::storage::local_file::PlaintextChunkError::Remote(error),
                     ) => error,
-                    crate::local_file::StreamWriteError::Source(
+                    coven_foundation::local_file::StreamWriteError::Source(
                         crate::storage::local_file::PlaintextChunkError::InvalidContent(error),
                     ) => StorageError::InvalidContent(error),
-                    crate::local_file::StreamWriteError::Source(
+                    coven_foundation::local_file::StreamWriteError::Source(
                         crate::storage::local_file::PlaintextChunkError::Local(error),
                     )
-                    | crate::local_file::StreamWriteError::Local(error) => {
+                    | coven_foundation::local_file::StreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;
@@ -699,7 +706,7 @@ impl CloudSyncStorage {
         &self,
         blob: &crate::protocol::blob::locator::StoredBlobRef,
         dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
         let object = blob.object();
         self.validate_blob_locator_home(locator)?;
@@ -710,7 +717,7 @@ impl CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        let mut staged = crate::local_file::AtomicStagedFile::create(dest)
+        let mut staged = coven_foundation::local_file::AtomicStagedFile::create(dest)
             .await
             .map_err(StorageError::LocalFilesystem)?;
         self.exact
@@ -727,7 +734,7 @@ impl CloudSyncStorage {
                 CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
             })?;
         {
-            let (size, digest) = crate::local_file::file_facts(staged.path())
+            let (size, digest) = coven_foundation::local_file::file_facts(staged.path())
                 .await
                 .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
             object.verify_stored_facts(

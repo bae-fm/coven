@@ -1,9 +1,60 @@
 [workspace]
 members = [
     "crates/coven",
+    "crates/coven-foundation",
     "tools/owner-construction-check",
 ]
 resolver = "2"
+
+# One version pin per external dependency for the whole workspace. Members
+# select features on top of these entries; they never restate a version, so a
+# crate extracted from `coven` cannot drift onto a different release of a
+# dependency it shares with the crate it came from.
+[workspace.dependencies]
+argon2 = "0.5"
+async-trait = "0.1"
+aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
+aws-credential-types = "1.2"
+aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
+aws-sdk-sts = { version = "=1.107.0", default-features = false, features = ["rt-tokio"] }
+aws-smithy-http-client = { version = "1.1", default-features = false, features = ["default-client", "rustls-ring"] }
+axum = "0.7"
+base64 = "0.22"
+bytes = "1.11"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+crypto_box = { version = "0.9", features = ["seal"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+fallible-streaming-iterator = "0.1.9"
+futures-util = "0.3"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+keyring-core = "0.7"
+open = "5.3"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+rusqlite = { version = "0.40", default-features = false, features = ["session", "serialize", "bundled", "hooks", "column_metadata"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_urlencoded = "0.7"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3.27.0"
+thiserror = "1.0"
+tokio = "1.0"
+tracing = "0.1.41"
+url = "2.5.8"
+uuid = { version = "1.0", features = ["v4"] }
+x25519-dalek = "3.0.0"
+zeroize = { version = "1.9", features = ["derive"] }
+
+android-native-keyring-store = "0.5"
+apple-native-keyring-store = { version = "0.2", features = ["protected"] }
+security-framework = "3.7"
+windows-native-keyring-store = "0.5"
+
+coven-foundation = { path = "crates/coven-foundation", version = "1.0.0-rc.1" }
 
 [workspace.lints.rust]
 # Every `pub` not reachable from the crate's own root must be `pub(crate)` (or

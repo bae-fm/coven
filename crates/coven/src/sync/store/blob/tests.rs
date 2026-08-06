@@ -29,7 +29,7 @@ trait BlobTestStoreDirOps {
     async fn cache_total_bytes(&self, namespace: &str) -> u64;
 }
 
-impl BlobTestStoreDirOps for crate::store_dir::StoreDir {
+impl BlobTestStoreDirOps for coven_foundation::store_dir::StoreDir {
     async fn cache_total_bytes(&self, namespace: &str) -> u64 {
         self.cached_blob_files(namespace)
             .await
@@ -65,7 +65,7 @@ fn locator_hash(reference: &crate::protocol::blob::RowBlobRef) -> ObjectHash {
 }
 
 fn cache_path(
-    store_dir: &crate::store_dir::StoreDir,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     reference: &crate::protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     store_dir
@@ -74,7 +74,7 @@ fn cache_path(
 }
 
 fn pinned_path(
-    store_dir: &crate::store_dir::StoreDir,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     reference: &crate::protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     store_dir
@@ -377,9 +377,14 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     host_db
         .plant_blob_row_for_test("host-corrupt", false, host_bytes)
         .await;
-    crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "host-corrupt", host_bytes)
-        .await
-        .expect("store host-local source");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &store_dir,
+        "photos",
+        "host-corrupt",
+        host_bytes,
+    )
+    .await
+    .expect("store host-local source");
     let host_path = store_dir
         .local_blob_path("photos", "host-corrupt")
         .expect("host-local path");
@@ -572,7 +577,7 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .await
         .expect("first read populates cache");
     let path = cache_path(&ld, &reference);
-    crate::local_file::AtomicStagedFile::write_for_test(&path, &bytes[..8])
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, &bytes[..8])
         .await
         .expect("simulate a torn cache file");
 
@@ -722,9 +727,14 @@ async fn cache_eager_lands_in_cache_on_pull() {
         .expect("open source into exact test Store");
     let (_source_tmp, source_store_dir) = temp_store_dir();
     let cover = b"COVERBYTES";
-    crate::store_dir::StoreDir::store_local_blob(&source_store_dir, "photos", "ph01abcd", cover)
-        .await
-        .expect("store source blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &source_store_dir,
+        "photos",
+        "ph01abcd",
+        cover,
+    )
+    .await
+    .expect("store source blob");
     db1.execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01'); \
@@ -1686,7 +1696,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     host_db
         .plant_blob_row_for_test("strm-hst1", false, &full)
         .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst1", &full)
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst1", &full)
         .await
         .expect("store the host-provided local source");
     let host_path = ld
@@ -1704,7 +1714,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     .await
     .expect("open a stream over the local store");
 
-    crate::local_file::AtomicStagedFile::write_for_test(&host_path, &decoy)
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&host_path, &decoy)
         .await
         .expect("atomically replace the local-store file after open");
     assert_eq!(
@@ -1871,7 +1881,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     host_db
         .plant_blob_row_for_test("strm-hst3", false, &full)
         .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst3", &full)
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst3", &full)
         .await
         .expect("store the host-provided local source");
     let host_path = ld
@@ -2102,7 +2112,7 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
         )
         .await
         .expect("write a same-id cache decoy");
-    crate::store_dir::StoreDir::store_local_blob(
+    coven_foundation::store_dir::StoreDir::store_local_blob(
         &ld,
         &blob.namespace,
         &blob.id,
@@ -2183,9 +2193,14 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         .await;
 
     // The real bytes: the host-provided local store.
-    crate::store_dir::StoreDir::store_local_blob(&ld, &blob.namespace, &blob.id, &store_bytes)
-        .await
-        .expect("store the host-provided local copy");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &ld,
+        &blob.namespace,
+        &blob.id,
+        &store_bytes,
+    )
+    .await
+    .expect("store the host-provided local copy");
     let reference = db
         .row_blob_ref("note_photos", &blob.id)
         .await
@@ -2231,7 +2246,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 
     // A stale local-store file (a Remote + user-provided read must NOT serve it) and
     // the real cloud copy with distinct bytes.
-    crate::store_dir::StoreDir::store_local_blob(
+    coven_foundation::store_dir::StoreDir::store_local_blob(
         &ld,
         &blob.namespace,
         &blob.id,
@@ -2288,7 +2303,7 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
         .delete_blob_object(reference.stored().expect("remote blob has exact storage"))
         .await
         .expect("delete exact remote blob");
-    crate::store_dir::StoreDir::store_local_blob(
+    coven_foundation::store_dir::StoreDir::store_local_blob(
         &ld,
         &blob.namespace,
         &blob.id,
@@ -2357,7 +2372,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         .await
         .expect("open source into exact test Store");
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    crate::store_dir::StoreDir::store_local_blob(
+    coven_foundation::store_dir::StoreDir::store_local_blob(
         &source_store_dir,
         "photos",
         "lazy0001",
@@ -2634,9 +2649,14 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     .expect("plant the colliding-id rows");
 
     // Distinct bytes per source so the result reveals which gate was read.
-    crate::store_dir::StoreDir::store_local_blob(&ld, "ns_local", id, b"LOCAL-STORE-BYTES")
-        .await
-        .expect("store the Local blob's local copy");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &ld,
+        "ns_local",
+        id,
+        b"LOCAL-STORE-BYTES",
+    )
+    .await
+    .expect("store the Local blob's local copy");
     let remote_reference = ExactRemoteBlobFixture::new(&db, &storage)
         .install_for_row("note_covers", id, "ns_remote", b"REMOTE-CLOUD-BYTES")
         .await;
@@ -2937,7 +2957,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .await
         .expect("open source into exact test Store");
     let (_source_tmp, source_store_dir) = temp_store_dir();
-    crate::store_dir::StoreDir::store_local_blob(
+    coven_foundation::store_dir::StoreDir::store_local_blob(
         &source_store_dir,
         "photos",
         "mir0aaaa",
@@ -3431,7 +3451,7 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
             crate::sync::test_helpers::test_cache_locator_hash("new0bbbb"),
         )
         .unwrap();
-    let mut stage = crate::local_file::AtomicStagedFile::create(&dest)
+    let mut stage = coven_foundation::local_file::AtomicStagedFile::create(&dest)
         .await
         .expect("create concurrent populate stage");
     stage

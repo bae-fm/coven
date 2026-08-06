@@ -15,7 +15,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::protocol::blob::TransferLimits,
         device_id: String,
-        clock: crate::clock::ClockRef,
+        clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
@@ -37,7 +37,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::protocol::blob::TransferLimits,
         device_id: String,
-        clock: crate::clock::ClockRef,
+        clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
@@ -100,7 +100,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::protocol::blob::TransferLimits,
         device_id: String,
-        clock: crate::clock::ClockRef,
+        clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;

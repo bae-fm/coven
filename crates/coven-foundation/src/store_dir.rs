@@ -45,26 +45,26 @@ pub enum PathTokenError {
 }
 
 #[derive(Debug)]
-pub(crate) enum RequiredLocalBlobPathError {
+pub enum RequiredLocalBlobPathError {
     Path(PathTokenError),
     Missing { namespace: String, id: String },
     Io(String),
 }
 
 #[derive(Debug)]
-pub(crate) enum CachedLocatorRemovalError {
+pub enum CachedLocatorRemovalError {
     Path(PathTokenError),
     Io(String),
 }
 
 #[derive(Debug)]
-pub(crate) enum LocalBlobRemovalError {
+pub enum LocalBlobRemovalError {
     Path(PathTokenError),
     Io(String),
 }
 
 #[derive(Debug)]
-pub(crate) enum LocalBlobStoreError {
+pub enum LocalBlobStoreError {
     Path(PathTokenError),
     Io(String),
 }
@@ -87,7 +87,7 @@ impl From<PathTokenError> for LocalBlobStoreError {
 }
 
 #[derive(Debug)]
-pub(crate) enum StoreBlobFileError {
+pub enum StoreBlobFileError {
     Path(PathTokenError),
     Io(String),
     Integrity {
@@ -99,22 +99,22 @@ pub(crate) enum StoreBlobFileError {
     },
 }
 
-pub(crate) struct CachedBlobFile {
+pub struct CachedBlobFile {
     path: PathBuf,
     recency: u64,
     size: u64,
 }
 
 impl CachedBlobFile {
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn recency(&self) -> u64 {
+    pub fn recency(&self) -> u64 {
         self.recency
     }
 
-    pub(crate) fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         self.size
     }
 }
@@ -195,7 +195,7 @@ impl std::error::Error for PathTokenError {}
 /// Both `.` and `..` are refused: each is a directory-relative reference that a
 /// trailing path component normalizes away, so joining either onto `dir` resolves
 /// to `dir` itself or its parent rather than to a child of `dir`.
-pub(crate) fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
+pub fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
     if token.is_empty() {
         return Err(PathTokenError::Empty);
     }
@@ -225,7 +225,7 @@ pub(crate) fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
 /// and NUL forms are refused before an object key is built. The `cloud_path`
 /// never feeds a local file path, only the cloud object key, so this guards the
 /// keyspace, not the disk.
-pub(crate) fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
+pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
     if cloud_path.starts_with('/') {
         return Err(PathTokenError::Separator);
     }
@@ -400,7 +400,7 @@ impl StoreDir {
     /// Immutable stored bytes prepared for one blob locator. The locator hash is
     /// the file name, so retries reopen the same exact spool rather than sealing
     /// the plaintext again with fresh randomness.
-    pub(crate) fn outbound_blob_spool_path(
+    pub fn outbound_blob_spool_path(
         &self,
         locator_hash: crate::object_hash::ObjectHash,
     ) -> PathBuf {
@@ -409,7 +409,7 @@ impl StoreDir {
             .join(locator_hash.to_string())
     }
 
-    pub(crate) async fn remove_outbound_blob_spool(
+    pub async fn remove_outbound_blob_spool(
         &self,
         locator_hash: crate::object_hash::ObjectHash,
     ) -> Result<(), String> {
@@ -438,7 +438,7 @@ impl StoreDir {
         self.cache_folder_blob_path("pinned", namespace, &locator_hash.to_string())
     }
 
-    pub(crate) async fn populate_pinned_blob_from_file(
+    pub async fn populate_pinned_blob_from_file(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -453,7 +453,7 @@ impl StoreDir {
             .await
     }
 
-    pub(crate) async fn populate_cached_blob_from_file(
+    pub async fn populate_cached_blob_from_file(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -520,7 +520,7 @@ impl StoreDir {
         }
     }
 
-    pub(crate) async fn pinned_blob_is_exact(
+    pub async fn pinned_blob_is_exact(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -552,7 +552,7 @@ impl StoreDir {
         }
     }
 
-    pub(crate) async fn remote_blob_is_exact(
+    pub async fn remote_blob_is_exact(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -570,7 +570,7 @@ impl StoreDir {
         Ok(false)
     }
 
-    pub(crate) async fn cached_blob_is_exact(
+    pub async fn cached_blob_is_exact(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -596,7 +596,7 @@ impl StoreDir {
         self.cache_folder_blob_path("cache", namespace, &locator_hash.to_string())
     }
 
-    pub(crate) fn remote_blob_paths(
+    pub fn remote_blob_paths(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -607,7 +607,7 @@ impl StoreDir {
         ))
     }
 
-    pub(crate) async fn remove_cached_locator(
+    pub async fn remove_cached_locator(
         &self,
         namespace: &str,
         locator_hash: crate::object_hash::ObjectHash,
@@ -673,7 +673,7 @@ impl StoreDir {
             .join(id))
     }
 
-    pub(crate) async fn require_local_blob_path(
+    pub async fn require_local_blob_path(
         &self,
         namespace: &str,
         id: &str,
@@ -691,7 +691,7 @@ impl StoreDir {
         }
     }
 
-    pub(crate) async fn local_blob_path_if_present(
+    pub async fn local_blob_path_if_present(
         &self,
         namespace: &str,
         id: &str,
@@ -716,7 +716,7 @@ impl StoreDir {
         Ok(Some(path))
     }
 
-    pub(crate) async fn remove_local_blob(
+    pub async fn remove_local_blob(
         &self,
         namespace: &str,
         id: &str,
@@ -742,7 +742,7 @@ impl StoreDir {
         self.cache_folder_namespace_dir("cache", namespace)
     }
 
-    pub(crate) async fn cached_blob_files(
+    pub async fn cached_blob_files(
         &self,
         namespace: &str,
     ) -> Result<Vec<CachedBlobFile>, StoreBlobFileError> {
@@ -764,7 +764,7 @@ impl StoreDir {
             })
     }
 
-    pub(crate) async fn remove_cached_blob_file(
+    pub async fn remove_cached_blob_file(
         &self,
         file: &CachedBlobFile,
     ) -> Result<bool, StoreBlobFileError> {
@@ -776,7 +776,7 @@ impl StoreDir {
     /// Remove unpublished local, cached, and pinned blob files left by an
     /// earlier process. Files created at or after `process_start` belong to the
     /// current process and are left untouched.
-    pub(crate) fn remove_orphaned_blob_temps(
+    pub fn remove_orphaned_blob_temps(
         &self,
         process_start: std::time::SystemTime,
     ) -> std::io::Result<()> {
@@ -844,21 +844,21 @@ impl StoreDir {
     }
 
     /// Create the store directory tree if it is absent.
-    pub(crate) fn ensure_created(&self) -> std::io::Result<()> {
+    pub fn ensure_created(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.path)
     }
 
     /// Remove the complete store directory tree. Absence is success: the tree
     /// is already gone.
-    pub(crate) fn remove_tree(&self) -> std::io::Result<()> {
+    pub fn remove_tree(&self) -> std::io::Result<()> {
         match std::fs::remove_dir_all(&self.path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn store_local_blob(
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn store_local_blob(
         &self,
         namespace: &str,
         id: &str,
@@ -875,8 +875,8 @@ impl StoreDir {
         staged.commit().await.map_err(LocalBlobStoreError::Io)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn read_local_blob(
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn read_local_blob(
         &self,
         namespace: &str,
         id: &str,
@@ -1016,19 +1016,19 @@ async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
 /// atomically (temp + rename), so a reader and the writer touching the same
 /// cache file never tear it. This lets one writer and any number of read-only
 /// readers coexist on one store.
-pub(crate) struct StoreOpenGuard {
+pub struct StoreOpenGuard {
     _file: std::fs::File,
 }
 
 #[derive(Debug)]
-pub(crate) enum StoreOpenGuardError {
+pub enum StoreOpenGuardError {
     AlreadyOpen { store_dir: PathBuf },
     MalformedPath(String),
     Io(std::io::Error),
 }
 
 impl StoreOpenGuard {
-    pub(crate) fn acquire(store_dir: &StoreDir) -> Result<Self, StoreOpenGuardError> {
+    pub fn acquire(store_dir: &StoreDir) -> Result<Self, StoreOpenGuardError> {
         let db_path = store_dir.db_path();
         let Some(dir) = db_path.parent() else {
             return Err(StoreOpenGuardError::MalformedPath(format!(
@@ -1054,8 +1054,8 @@ impl StoreOpenGuard {
     }
 
     /// Acquire the guard for a test, panicking on refusal.
-    #[cfg(test)]
-    pub(crate) fn acquire_for_test(store_dir: &StoreDir) -> std::sync::Arc<Self> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn acquire_for_test(store_dir: &StoreDir) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self::acquire(store_dir).expect("acquire store open guard"))
     }
 }
@@ -1083,10 +1083,10 @@ impl From<PathBuf> for StoreDir {
     }
 }
 
-#[cfg(test)]
 /// A temp dir plus a [`StoreDir`] rooted at it. The returned `TempDir` must be
 /// held for the directory to outlive the test.
-pub(crate) fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
+#[cfg(any(test, feature = "test-utils"))]
+pub fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new(tmp.path());
     (tmp, dir)

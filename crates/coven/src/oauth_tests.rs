@@ -7,7 +7,7 @@ use test_support::{oauth_config, serve_token_response};
 fn pkce_verifier_is_url_safe() {
     let request = OAuthClients::for_tests()
         .build_authorize_request(
-            crate::config::CloudProvider::GoogleDrive,
+            coven_foundation::config::CloudProvider::GoogleDrive,
             "http://localhost/callback",
         )
         .expect("build authorize request");
@@ -101,13 +101,13 @@ fn build_authorize_request_includes_matching_random_state() {
 
     let first = clients
         .build_authorize_request(
-            crate::config::CloudProvider::GoogleDrive,
+            coven_foundation::config::CloudProvider::GoogleDrive,
             "http://localhost/callback",
         )
         .expect("build first authorize URL");
     let second = clients
         .build_authorize_request(
-            crate::config::CloudProvider::GoogleDrive,
+            coven_foundation::config::CloudProvider::GoogleDrive,
             "http://localhost/callback",
         )
         .expect("build second authorize URL");
@@ -172,19 +172,19 @@ async fn exchange_code_rejects_wrong_state_before_token_request() {
     let clients = OAuthClients::for_tests();
     let request = clients
         .build_authorize_request(
-            crate::config::CloudProvider::GoogleDrive,
+            coven_foundation::config::CloudProvider::GoogleDrive,
             "http://localhost/callback",
         )
         .expect("build authorize request");
 
     let result = clients
         .exchange_code(
-            crate::config::CloudProvider::GoogleDrive,
+            coven_foundation::config::CloudProvider::GoogleDrive,
             "auth-code",
             Some("wrong-state"),
             &request,
             "http://localhost/callback",
-            &crate::clock::SystemClock,
+            &coven_foundation::clock::SystemClock,
         )
         .await;
 
@@ -210,7 +210,7 @@ async fn exchange_code_posts_authorization_code_params() {
         "auth-code",
         "pkce-verifier",
         "http://localhost/callback",
-        &crate::clock::SystemClock,
+        &coven_foundation::clock::SystemClock,
     )
     .await
     .expect("exchange code");
@@ -251,7 +251,7 @@ async fn refresh_posts_refresh_token_params_and_reuses_existing_refresh_token() 
         &client,
         &config,
         "existing-refresh",
-        &crate::clock::SystemClock,
+        &coven_foundation::clock::SystemClock,
     )
     .await
     .expect("refresh");
@@ -279,8 +279,10 @@ async fn refresh_posts_refresh_token_params_and_reuses_existing_refresh_token() 
 fn into_tokens_classifies_invalid_grant_as_reauthorize() {
     let body =
         r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked"}"#;
-    let result = parse_token_response(body)
-        .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
+    let result = parse_token_response(body).into_tokens(
+        reqwest::StatusCode::BAD_REQUEST,
+        &coven_foundation::clock::SystemClock,
+    );
     match result {
         Err(OAuthError::Reauthorize(detail)) => {
             assert!(
@@ -295,8 +297,10 @@ fn into_tokens_classifies_invalid_grant_as_reauthorize() {
 #[test]
 fn into_tokens_classifies_unauthorized_client_as_reauthorize() {
     let body = r#"{"error":"unauthorized_client","error_description":"Client has been revoked"}"#;
-    let result = parse_token_response(body)
-        .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
+    let result = parse_token_response(body).into_tokens(
+        reqwest::StatusCode::BAD_REQUEST,
+        &coven_foundation::clock::SystemClock,
+    );
     assert!(
         matches!(result, Err(OAuthError::Reauthorize(_))),
         "expected Reauthorize, got {result:?}",
@@ -306,8 +310,10 @@ fn into_tokens_classifies_unauthorized_client_as_reauthorize() {
 #[test]
 fn into_tokens_leaves_other_provider_errors_as_token_exchange() {
     let body = r#"{"error":"invalid_request","error_description":"missing parameter"}"#;
-    let result = parse_token_response(body)
-        .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
+    let result = parse_token_response(body).into_tokens(
+        reqwest::StatusCode::BAD_REQUEST,
+        &coven_foundation::clock::SystemClock,
+    );
     match result {
         Err(OAuthError::TokenExchange(msg)) => {
             assert!(
@@ -323,7 +329,10 @@ fn into_tokens_leaves_other_provider_errors_as_token_exchange() {
 fn into_tokens_returns_tokens_on_success() {
     let body = r#"{"access_token":"new_at","refresh_token":"new_rt","expires_in":3600}"#;
     let tokens = parse_token_response(body)
-        .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock)
+        .into_tokens(
+            reqwest::StatusCode::OK,
+            &coven_foundation::clock::SystemClock,
+        )
         .expect("into_tokens");
     assert_eq!(tokens.access_token, "new_at");
     assert_eq!(tokens.refresh_token.as_deref(), Some("new_rt"));
@@ -333,8 +342,10 @@ fn into_tokens_returns_tokens_on_success() {
 #[test]
 fn into_tokens_missing_access_token_error_does_not_include_tokens() {
     let body = r#"{"refresh_token":"refresh-token-that-must-not-be-logged"}"#;
-    let result =
-        parse_token_response(body).into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock);
+    let result = parse_token_response(body).into_tokens(
+        reqwest::StatusCode::OK,
+        &coven_foundation::clock::SystemClock,
+    );
     match result {
         Err(OAuthError::TokenExchange(msg)) => {
             assert!(
@@ -368,7 +379,7 @@ async fn parse_failure_error_does_not_include_tokens() {
         "auth-code",
         "pkce-verifier",
         "http://localhost/callback",
-        &crate::clock::SystemClock,
+        &coven_foundation::clock::SystemClock,
     )
     .await;
 

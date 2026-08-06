@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::clock::ClockRef;
-use crate::config::Config;
 use crate::storage::cloud::setup::StorageSetupError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::storage::cloud::CloudHomeFactory;
 use crate::storage::{BlobChunking, CloudCipher, CloudSyncStorage};
 use crate::store_security::StoreSecurity;
+use coven_foundation::clock::ClockRef;
+use coven_foundation::config::Config;
 
 #[derive(Clone)]
 pub(crate) struct StoreCloudStorage {

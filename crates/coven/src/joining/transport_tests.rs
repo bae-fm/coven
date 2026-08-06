@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
-use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::joining::encode;
 use crate::keys::UserKeypair;
@@ -20,6 +19,7 @@ use crate::sync::store::{
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
 };
 use crate::sync::test_helpers::*;
+use coven_foundation::clock::SystemClock;
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -46,12 +46,12 @@ struct TransportFixture {
     /// The owner store's storage handle, retained so borrowing transports can
     /// point into it.
     owner_storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
-    owner_store_dir: crate::store_dir::StoreDir,
+    owner_store_dir: coven_foundation::store_dir::StoreDir,
     home: Arc<crate::InMemoryCloudHome>,
     member_pubkey: String,
     invite_code: String,
     join_request: String,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     /// The cloud home the joining device sees. Same principal as the owner's
     /// in the ordinary case; a different account for the cross-principal one,
@@ -165,7 +165,7 @@ impl TransportFixture {
             .expect("publish join snapshot acknowledgement");
         let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
-        let layout = crate::store_dir::StoreLayout::new(app.path());
+        let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
         let provider_binding = crate::storage::SyncStorage::provider_binding(&*store.storage())
             .await
             .expect("load owner provider binding");

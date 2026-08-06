@@ -90,7 +90,7 @@ struct CachedDerivation {
 /// rotated N times carries N generations.
 pub(crate) struct PassphraseVault {
     passphrase: Passphrase,
-    file: crate::atomic_file::AtomicFile,
+    file: coven_foundation::atomic_file::AtomicFile,
     derived: Mutex<Option<CachedDerivation>>,
 }
 
@@ -98,7 +98,7 @@ impl PassphraseVault {
     pub(crate) fn new(passphrase: Passphrase, path: PathBuf) -> Self {
         Self {
             passphrase,
-            file: crate::atomic_file::AtomicFile::new(path),
+            file: coven_foundation::atomic_file::AtomicFile::new(path),
             derived: Mutex::new(None),
         }
     }

@@ -3,7 +3,7 @@
 //! A cycle resets or increments the failure count, surfaces integrity / schema /
 //! asset alerts, and chooses an immediate, idle, or backoff wait.
 
-use crate::changeset::RowChange;
+use coven_foundation::changeset::RowChange;
 
 use super::cycle::SyncCycleResult;
 use super::status::DeviceActivity;

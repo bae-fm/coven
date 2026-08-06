@@ -151,7 +151,7 @@ async fn prepare_owner_sync_components(
     db: &Database,
     store: &TestStore,
     home: &Arc<crate::InMemoryCloudHome>,
-    store_dir: &crate::store_dir::StoreDir,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     signer: &UserKeypair,
     store_id: &str,
 ) -> crate::sync::cycle::SyncComponents {
@@ -193,7 +193,7 @@ async fn finalize_circle_epoch_close(
         .await
         .expect("publish local Circle epoch-close response");
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("activate the Circle epoch-close outcome");
 }

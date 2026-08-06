@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::joining::encode;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::test_helpers::*;
+use coven_foundation::clock::SystemClock;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -84,7 +84,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let owner_store = owner_device;
     let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
-    let layout = crate::store_dir::StoreLayout::new(app.path());
+    let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
     let new_client = || {
         crate::DeviceJoinClient::new(
             &invite_code,

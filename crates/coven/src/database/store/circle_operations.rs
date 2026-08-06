@@ -1200,7 +1200,7 @@ mod tests {
         let (membership, membership_authority) =
             merge_membership_ref(&author, &members, "multi-owner-control");
         let device = merge_device_authority(&author, store_root_hash, "multi-owner-device");
-        let ids = crate::id_provider::SequentialIdProvider::new("multi-owner-control");
+        let ids = coven_foundation::id_provider::SequentialIdProvider::new("multi-owner-control");
         let operation_id = crate::WriteId::from_generated("multi-owner-control-commit".to_string());
         let order = store_commit::StoreCommitOrder {
             seq: 1,

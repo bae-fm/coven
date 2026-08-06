@@ -12,11 +12,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::clock::SystemClock;
-use crate::config::HomeStorage;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
-use crate::id_provider::SequentialIdProvider;
 use crate::joining::BootstrapError;
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::protocol::blob::{CacheFill, Provenance};
@@ -35,11 +32,14 @@ use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::store_dir::StoreLayout;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
     test_synced_tables, test_synced_tables_with_blob, TestDevice,
 };
+use coven_foundation::clock::SystemClock;
+use coven_foundation::config::HomeStorage;
+use coven_foundation::id_provider::SequentialIdProvider;
+use coven_foundation::store_dir::StoreLayout;
 
 struct RestoreCloudKitOps {
     records: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
@@ -453,8 +453,8 @@ fn restore_code_with_sid(sid: &str) -> String {
 async fn restore_result_for(
     code_str: &str,
     app_dir: &std::path::Path,
-) -> Result<crate::config::Config, BootstrapError> {
-    let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
+) -> Result<coven_foundation::config::Config, BootstrapError> {
+    let ids: coven_foundation::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
     restore_from_code(
         code_str,
         &test_synced_tables(),
@@ -465,7 +465,7 @@ async fn restore_result_for(
         crate::oauth::OAuthClients::empty(),
         None,
         None,
-        &crate::store_dir::StoreLayout::new(app_dir),
+        &coven_foundation::store_dir::StoreLayout::new(app_dir),
         Arc::new(SystemClock),
         ids,
         |_| {},
@@ -510,7 +510,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         crate::oauth::OAuthClients::empty(),
         None,
         None,
-        &crate::store_dir::StoreLayout::new(app.path()),
+        &coven_foundation::store_dir::StoreLayout::new(app.path()),
         Arc::new(SystemClock),
         Arc::new(SequentialIdProvider::new("device")),
         |_| {},
@@ -685,7 +685,7 @@ async fn restore_with_cancel(
     app_dir: &std::path::Path,
     cancel: &tokio::sync::watch::Receiver<bool>,
     on_status: impl Fn(&str),
-) -> Result<crate::config::Config, BootstrapError> {
+) -> Result<coven_foundation::config::Config, BootstrapError> {
     restore_from_code(
         code,
         &test_synced_tables(),
@@ -696,7 +696,7 @@ async fn restore_with_cancel(
         crate::oauth::OAuthClients::empty(),
         None,
         None,
-        &crate::store_dir::StoreLayout::new(app_dir),
+        &coven_foundation::store_dir::StoreLayout::new(app_dir),
         Arc::new(SystemClock),
         Arc::new(SequentialIdProvider::new("dev")),
         on_status,
@@ -1051,7 +1051,7 @@ impl OwnerRecoveryRestoreFixture {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &migrations,
         )
         .expect("open recovered database");
@@ -1313,7 +1313,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open B db");
@@ -1537,7 +1537,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             ))
             .await;
         let (owner_tmp, owner_dir) = temp_store_dir();
-        crate::store_dir::StoreDir::store_local_blob(
+        coven_foundation::store_dir::StoreDir::store_local_blob(
             &owner_dir,
             "photos",
             "photo1",
@@ -1686,7 +1686,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id,
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open restored database");

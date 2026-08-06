@@ -28,7 +28,7 @@ pub(super) use reclaim::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSna
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
     storage: &'storage Arc<dyn SyncStorage>,
-    store_dir: &'storage crate::store_dir::StoreDir,
+    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     history_verifier: MergeHistoryVerifier<'storage>,
     blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,

@@ -36,12 +36,11 @@ pub(crate) async fn verify_snapshot_blob_spools(
     for blob in blobs {
         if let Some(spool_path) = &blob.spool_path {
             {
-                let (size, digest) =
-                    crate::local_file::file_facts(spool_path)
-                        .await
-                        .map_err(|error| {
-                            DbError::Message(format!("{label} snapshot blob spool: {error}"))
-                        })?;
+                let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
+                    .await
+                    .map_err(|error| {
+                        DbError::Message(format!("{label} snapshot blob spool: {error}"))
+                    })?;
                 blob.remote
                     .object()
                     .verify_stored_facts(

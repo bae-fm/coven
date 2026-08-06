@@ -5,8 +5,6 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::clock::{ClockRef, SystemClock};
-use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
@@ -14,10 +12,12 @@ use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
 use crate::protocol::blob::BlobTransitionObserver;
 use crate::protocol::synced_schema::SyncedTable;
-use crate::store_dir::StoreOpenGuard;
-use crate::store_dir::{LocalBlobStoreError, PathTokenError};
 use crate::store_sync::ConfigProvider;
 use crate::{Migration, MigrationError};
+use coven_foundation::clock::{ClockRef, SystemClock};
+use coven_foundation::config::{Config, HomeStorage};
+use coven_foundation::store_dir::StoreOpenGuard;
+use coven_foundation::store_dir::{LocalBlobStoreError, PathTokenError};
 
 pub type CovenResult<T> = Result<T, CovenError>;
 
@@ -159,16 +159,16 @@ pub struct CovenBuilder {
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
-impl From<crate::store_dir::StoreOpenGuardError> for CovenError {
-    fn from(error: crate::store_dir::StoreOpenGuardError) -> Self {
+impl From<coven_foundation::store_dir::StoreOpenGuardError> for CovenError {
+    fn from(error: coven_foundation::store_dir::StoreOpenGuardError) -> Self {
         match error {
-            crate::store_dir::StoreOpenGuardError::AlreadyOpen { store_dir } => {
+            coven_foundation::store_dir::StoreOpenGuardError::AlreadyOpen { store_dir } => {
                 CovenError::AlreadyOpen { store_dir }
             }
-            crate::store_dir::StoreOpenGuardError::MalformedPath(message) => {
+            coven_foundation::store_dir::StoreOpenGuardError::MalformedPath(message) => {
                 CovenError::MalformedPath(message)
             }
-            crate::store_dir::StoreOpenGuardError::Io(error) => CovenError::Io(error),
+            coven_foundation::store_dir::StoreOpenGuardError::Io(error) => CovenError::Io(error),
         }
     }
 }

@@ -20,7 +20,7 @@ impl CircleTransitionDraft {
         participants: Vec<CircleEpochCloseParticipant>,
         provisional_frontier: CommitFrontier,
         outcome_slot: ObjectSlot,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
@@ -165,7 +165,7 @@ impl CircleTransitionDraft {
         keyring: &str,
         intent: CircleEpochCloseIntent,
         responses: Vec<CircleEpochCloseSettlement>,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {
@@ -400,7 +400,7 @@ impl CircleTransitionDraft {
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let CircleControlState::EpochClose(close) = close_control.value.state() else {

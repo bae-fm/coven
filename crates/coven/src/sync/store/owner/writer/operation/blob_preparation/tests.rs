@@ -159,7 +159,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let source = temp.path().join("source");
     let plaintext = b"spool owned by another pending write";
-    crate::local_file::AtomicStagedFile::write_for_test(&source, plaintext)
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&source, plaintext)
         .await
         .expect("write blob plaintext");
     let fact = StoreWriteBlobFact {
@@ -222,7 +222,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     tokio::fs::remove_file(&spool)
         .await
         .expect("remove shared exact spool");
-    crate::atomic_file::sync_parent_dir(&spool)
+    coven_foundation::atomic_file::sync_parent_dir(&spool)
         .await
         .expect("sync removed shared exact spool");
 

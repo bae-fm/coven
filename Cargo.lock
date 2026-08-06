@@ -956,6 +956,7 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "chrono",
+ "coven-foundation",
  "crypto_box",
  "ed25519-dalek",
  "fallible-streaming-iterator",
@@ -972,7 +973,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
@@ -983,6 +983,27 @@ dependencies = [
  "windows-native-keyring-store",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "coven-foundation"
+version = "1.0.0-rc.1"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

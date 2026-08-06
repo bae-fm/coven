@@ -11,13 +11,13 @@ use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::SyncStorage;
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
 pub(crate) use crate::database::synthetic_store::*;
 pub(crate) use crate::storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
-pub(crate) use crate::store_dir::temp_store_dir;
+pub(crate) use coven_foundation::store_dir::temp_store_dir;
 
 #[cfg(test)]
 pub(crate) fn test_cache_locator_hash(label: &str) -> ObjectHash {
@@ -1277,7 +1277,7 @@ mod test_device {
         pub(crate) async fn drain_uploads(
             &self,
             store_dir: &StoreDir,
-            clock: &dyn crate::clock::Clock,
+            clock: &dyn coven_foundation::clock::Clock,
             routing_encryption: Option<&crate::encryption::EncryptionService>,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
@@ -1358,14 +1358,14 @@ mod test_device {
             let source = store_dir
                 .local_blob_path(&local.blob().namespace, &local.blob().id)
                 .expect("resolve host blob source");
-            crate::local_file::AtomicStagedFile::write_for_test(&source, bytes)
+            coven_foundation::local_file::AtomicStagedFile::write_for_test(&source, bytes)
                 .await
                 .expect("write host blob source");
             crate::sync::test_owner_graph::TestOwnerGraph::new(self.db.clone(), store_dir.clone())
                 .make_remote("notes", root_id, false)
                 .await
                 .expect("start exact make_remote");
-            let clock = crate::clock::FixedClock(
+            let clock = coven_foundation::clock::FixedClock(
                 chrono::DateTime::parse_from_rfc3339("2024-06-01T01:00:00Z")
                     .expect("valid exact blob publication time")
                     .with_timezone(&chrono::Utc),
@@ -1555,7 +1555,7 @@ mod test_device {
             let temp = tempfile::tempdir().expect("create exact blob spool directory");
             let plaintext = temp.path().join("plaintext");
             let spool = temp.path().join("stored");
-            crate::local_file::AtomicStagedFile::write_for_test(&plaintext, bytes)
+            coven_foundation::local_file::AtomicStagedFile::write_for_test(&plaintext, bytes)
                 .await
                 .expect("write exact blob plaintext");
             let slot = self
@@ -1615,7 +1615,7 @@ mod test_device {
             let temp = tempfile::tempdir().expect("create browsable blob spool directory");
             let plaintext = temp.path().join("plaintext");
             let spool = temp.path().join("stored");
-            crate::local_file::AtomicStagedFile::write_for_test(&plaintext, bytes)
+            coven_foundation::local_file::AtomicStagedFile::write_for_test(&plaintext, bytes)
                 .await
                 .expect("write browsable blob plaintext");
             let slot = self
@@ -1656,13 +1656,18 @@ mod test_device {
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
-            self.run_cycle_with(&crate::clock::SystemClock, None, store_dir, observer)
-                .await
+            self.run_cycle_with(
+                &coven_foundation::clock::SystemClock,
+                None,
+                store_dir,
+                observer,
+            )
+            .await
         }
 
         pub(crate) async fn run_cycle_with(
             &self,
-            clock: &dyn crate::clock::Clock,
+            clock: &dyn coven_foundation::clock::Clock,
             master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
@@ -1681,7 +1686,7 @@ mod test_device {
 
         pub(crate) async fn run_cycle_with_interceptor<I>(
             &self,
-            clock: &dyn crate::clock::Clock,
+            clock: &dyn coven_foundation::clock::Clock,
             master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
@@ -1704,7 +1709,7 @@ mod test_device {
             &self,
             store: std::sync::Arc<crate::sync::store::Store>,
             storage: std::sync::Arc<S>,
-            clock: &dyn crate::clock::Clock,
+            clock: &dyn coven_foundation::clock::Clock,
             master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
             observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
@@ -3492,8 +3497,8 @@ impl TestStore {
     pub(crate) async fn drain_uploads(
         &self,
         database: &crate::database::StoreDatabase,
-        store_dir: &crate::store_dir::StoreDir,
-        clock: &dyn crate::clock::Clock,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        clock: &dyn coven_foundation::clock::Clock,
         routing_encryption: Option<&crate::encryption::EncryptionService>,
         observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
     ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
@@ -4694,7 +4699,10 @@ where
         blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: crate::protocol::objects::BlobSpoolProtection,
         dest: &std::path::Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, crate::protocol::objects::StorageError> {
+    ) -> Result<
+        coven_foundation::local_file::AtomicStagedFile,
+        crate::protocol::objects::StorageError,
+    > {
         self.interceptor.before_blob_stage().await?;
         self.inner
             .stage_verified_blob_plaintext(blob, protection, dest)

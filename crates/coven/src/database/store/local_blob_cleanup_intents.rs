@@ -4,8 +4,8 @@ use crate::database::DbError;
 
 pub(crate) fn intents_from_changes(
     blob_decls: &crate::database::BlobDecls,
-    old_changes: &[crate::changeset::RowChange],
-    new_changes: &[crate::changeset::RowChange],
+    old_changes: &[coven_foundation::changeset::RowChange],
+    new_changes: &[coven_foundation::changeset::RowChange],
 ) -> Result<Vec<LocalBlobCleanupIntent>, crate::database::BlobDeclError> {
     if old_changes.len() != new_changes.len() {
         return Err(crate::database::BlobDeclError::ChangesetWalkMismatch {
@@ -16,8 +16,8 @@ pub(crate) fn intents_from_changes(
     let mut intents = Vec::new();
     for (old, new) in old_changes.iter().zip(new_changes) {
         let old_blob_to_drop = match old.op {
-            crate::changeset::ChangeOp::Delete => blob_decls.ref_from_change(old)?,
-            crate::changeset::ChangeOp::Update => {
+            coven_foundation::changeset::ChangeOp::Delete => blob_decls.ref_from_change(old)?,
+            coven_foundation::changeset::ChangeOp::Update => {
                 let Some(old_blob) = blob_decls.ref_from_change(old)? else {
                     continue;
                 };
@@ -29,7 +29,7 @@ pub(crate) fn intents_from_changes(
                 };
                 should_drop.then_some(old_blob)
             }
-            crate::changeset::ChangeOp::Insert => None,
+            coven_foundation::changeset::ChangeOp::Insert => None,
         };
         if let Some(blob) = old_blob_to_drop {
             let row_id = old.pk().ok_or_else(|| {
@@ -47,7 +47,7 @@ pub(crate) fn intents_from_changes(
     }
     Ok(intents)
 }
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 /// A transaction-local request that resolves into committed copy-specific cleanup
 /// obligations.

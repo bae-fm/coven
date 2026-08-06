@@ -59,11 +59,11 @@ impl S3CloudHome {
         access_key: String,
         secret_key: String,
         key_prefix: Option<String>,
-        custom_exact_slots: Option<crate::config::CustomS3ExactSlots>,
+        custom_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     ) -> Result<Self, CloudHomeError> {
         let exact_slots = endpoint.is_none()
             || custom_exact_slots
-                == Some(crate::config::CustomS3ExactSlots::StandardConditionalRequests);
+                == Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests);
         let credentials =
             Credentials::new(&access_key, &secret_key, None, None, "coven-cloud-home");
 
@@ -325,7 +325,7 @@ pub(crate) async fn open_cloud_home(
     access_key: String,
     secret_key: String,
     key_prefix: Option<String>,
-    custom_exact_slots: Option<crate::config::CustomS3ExactSlots>,
+    custom_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
 ) -> Result<S3CloudHome, CloudHomeError> {
     S3CloudHome::new(
         S3Runtime::new()?,

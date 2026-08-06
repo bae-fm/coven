@@ -166,7 +166,7 @@ pub(super) fn open_outbox_database(device_id: &str) -> Database {
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
     )
     .expect("open outbox database")

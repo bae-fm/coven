@@ -55,7 +55,7 @@ pub struct OAuthClientCreds {
 #[derive(Clone, Debug)]
 pub struct OAuthClients {
     #[cfg(feature = "oauth-providers")]
-    credentials: HashMap<crate::config::CloudProvider, OAuthClientCreds>,
+    credentials: HashMap<coven_foundation::config::CloudProvider, OAuthClientCreds>,
     #[cfg(feature = "oauth-providers")]
     client: reqwest::Client,
 }
@@ -66,16 +66,16 @@ pub struct OAuthClients {
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthClientCredsError {
     #[error("no OAuth client credentials configured for provider {0:?}")]
-    MissingProvider(crate::config::CloudProvider),
+    MissingProvider(coven_foundation::config::CloudProvider),
     #[error("provider {0:?} does not use OAuth")]
-    UnsupportedProvider(crate::config::CloudProvider),
+    UnsupportedProvider(coven_foundation::config::CloudProvider),
 }
 
 impl OAuthClients {
     /// Construct the OAuth clients this app can use.
     #[cfg(feature = "oauth-providers")]
     pub fn new(
-        credentials: HashMap<crate::config::CloudProvider, OAuthClientCreds>,
+        credentials: HashMap<coven_foundation::config::CloudProvider, OAuthClientCreds>,
     ) -> Result<Self, OAuthClientCredsError> {
         if let Some(provider) = credentials.keys().find(|provider| !provider.needs_oauth()) {
             return Err(OAuthClientCredsError::UnsupportedProvider(
@@ -102,7 +102,7 @@ impl OAuthClients {
     #[cfg(feature = "oauth-providers")]
     fn credentials_for(
         &self,
-        provider: &crate::config::CloudProvider,
+        provider: &coven_foundation::config::CloudProvider,
     ) -> Result<OAuthClientCreds, OAuthClientCredsError> {
         if !provider.needs_oauth() {
             return Err(OAuthClientCredsError::UnsupportedProvider(provider.clone()));
@@ -116,10 +116,10 @@ impl OAuthClients {
     #[cfg(feature = "oauth-providers")]
     pub(crate) fn config_for(
         &self,
-        provider: crate::config::CloudProvider,
+        provider: coven_foundation::config::CloudProvider,
     ) -> Result<OAuthConfig, OAuthClientCredsError> {
-        use crate::config::CloudProvider;
         use crate::storage::cloud::{dropbox, google_drive, onedrive};
+        use coven_foundation::config::CloudProvider;
 
         let credentials = self.credentials_for(&provider)?;
         match provider {
@@ -136,21 +136,21 @@ impl OAuthClients {
     pub(crate) fn for_tests() -> Self {
         Self::new(HashMap::from([
             (
-                crate::config::CloudProvider::GoogleDrive,
+                coven_foundation::config::CloudProvider::GoogleDrive,
                 OAuthClientCreds {
                     client_id: "test-client".to_string(),
                     client_secret: None,
                 },
             ),
             (
-                crate::config::CloudProvider::Dropbox,
+                coven_foundation::config::CloudProvider::Dropbox,
                 OAuthClientCreds {
                     client_id: "test-client".to_string(),
                     client_secret: None,
                 },
             ),
             (
-                crate::config::CloudProvider::OneDrive,
+                coven_foundation::config::CloudProvider::OneDrive,
                 OAuthClientCreds {
                     client_id: "test-client".to_string(),
                     client_secret: None,
@@ -163,9 +163,9 @@ impl OAuthClients {
     #[cfg(feature = "oauth-providers")]
     pub async fn authorize(
         &self,
-        provider: crate::config::CloudProvider,
+        provider: coven_foundation::config::CloudProvider,
         cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
         let config = self.config_for(provider)?;
         let client = &self.client;
@@ -299,7 +299,7 @@ impl OAuthClients {
     /// Build an authorization request for a host-managed redirect flow.
     pub fn build_authorize_request(
         &self,
-        provider: crate::config::CloudProvider,
+        provider: coven_foundation::config::CloudProvider,
         redirect_uri: &str,
     ) -> Result<AuthorizeRequest, OAuthError> {
         let mut entropy = [0_u8; 64];
@@ -311,12 +311,12 @@ impl OAuthClients {
     /// Exchange the result of [`Self::build_authorize_request`] for tokens.
     pub async fn exchange_code(
         &self,
-        provider: crate::config::CloudProvider,
+        provider: coven_foundation::config::CloudProvider,
         code: &str,
         callback_state: Option<&str>,
         request: &AuthorizeRequest,
         redirect_uri: &str,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
         request.verify_callback_state(callback_state)?;
         exchange_code(
@@ -338,10 +338,14 @@ impl OAuthClients {
         key_service: &crate::keys::StoreKeys,
         store_name: &str,
         cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<String, crate::storage::cloud::SetupError> {
         let tokens = self
-            .authorize(crate::config::CloudProvider::GoogleDrive, cancel, clock)
+            .authorize(
+                coven_foundation::config::CloudProvider::GoogleDrive,
+                cancel,
+                clock,
+            )
             .await
             .map_err(|error| {
                 crate::storage::cloud::SetupError(format!(
@@ -445,10 +449,14 @@ impl OAuthClients {
         key_service: &crate::keys::StoreKeys,
         store_name: &str,
         cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<String, crate::storage::cloud::SetupError> {
         let tokens = self
-            .authorize(crate::config::CloudProvider::Dropbox, cancel, clock)
+            .authorize(
+                coven_foundation::config::CloudProvider::Dropbox,
+                cancel,
+                clock,
+            )
             .await
             .map_err(|error| {
                 crate::storage::cloud::SetupError(format!("Dropbox authorization failed: {error}"))
@@ -498,10 +506,14 @@ impl OAuthClients {
         &self,
         key_service: &crate::keys::StoreKeys,
         cancel: tokio::sync::watch::Receiver<bool>,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<(String, String), crate::storage::cloud::SetupError> {
         let tokens = self
-            .authorize(crate::config::CloudProvider::OneDrive, cancel, clock)
+            .authorize(
+                coven_foundation::config::CloudProvider::OneDrive,
+                cancel,
+                clock,
+            )
             .await
             .map_err(|error| {
                 crate::storage::cloud::SetupError(format!("OneDrive authorization failed: {error}"))
@@ -680,7 +692,7 @@ impl TokenResponse {
     fn into_tokens(
         self,
         status: reqwest::StatusCode,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
         if let Some(error) = self.error {
             let detail = match self.error_description.as_deref() {
@@ -723,7 +735,7 @@ async fn post_token_request(
     client: &reqwest::Client,
     config: &OAuthConfig,
     params: Vec<(&str, String)>,
-    clock: &dyn crate::clock::Clock,
+    clock: &dyn coven_foundation::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
     let resp = client
         .post(&config.token_url)
@@ -847,7 +859,7 @@ async fn exchange_code(
     code: &str,
     verifier: &str,
     redirect_uri: &str,
-    clock: &dyn crate::clock::Clock,
+    clock: &dyn coven_foundation::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -869,7 +881,7 @@ pub(crate) async fn refresh(
     client: &reqwest::Client,
     config: &OAuthConfig,
     refresh_token: &str,
-    clock: &dyn crate::clock::Clock,
+    clock: &dyn coven_foundation::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
     let mut params = vec![
         ("grant_type", "refresh_token".to_string()),

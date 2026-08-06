@@ -1611,7 +1611,7 @@ fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids
     let circle_id = CircleId::from_bytes([7; 16]);
     let owner_pubkey = keys::public_key_hex(&fixture.signer);
     let recipient_slot = "recipient-slot".to_string();
-    let ids = crate::id_provider::SequentialIdProvider::new("duplicate Circle access");
+    let ids = coven_foundation::id_provider::SequentialIdProvider::new("duplicate Circle access");
     let epoch_id = CircleEpochId::generate(&ids);
     let leaf_id = AccessLeafId::generate(&ids);
     let leaf_hash = ObjectHash::digest(b"sealed access leaf");

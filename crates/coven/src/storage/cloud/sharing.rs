@@ -195,7 +195,6 @@ where
 #[cfg(all(test, feature = "oauth-providers"))]
 mod tests {
     use super::*;
-    use crate::clock::FixedClock;
     use crate::keys::StoreKeys;
     use crate::oauth::test_support::oauth_config;
     use crate::oauth::OAuthTokens;
@@ -204,6 +203,7 @@ mod tests {
     use axum::http::{Method, Response, StatusCode, Uri};
     use axum::Router;
     use chrono::{TimeZone, Utc};
+    use coven_foundation::clock::FixedClock;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 

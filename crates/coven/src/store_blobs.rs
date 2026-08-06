@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::config::Config;
 use crate::database::StoreDatabase;
 use crate::protocol::blob::RowBlobRef;
 use crate::storage::cloud::setup::StorageSetupError;
@@ -10,6 +9,7 @@ use crate::sync::store::blob::{
     BlobAccess, CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess,
 };
 use crate::sync::{BlobCacheError, BlobStream};
+use coven_foundation::config::Config;
 
 #[derive(Clone)]
 pub(crate) struct StoreBlobAccess {
@@ -144,7 +144,7 @@ impl StoreBlobAccess {
         &self,
         reference: &RowBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         match self.resolve().await? {
             ResolvedBlobAccess::Remote(access) => {
                 access
@@ -322,7 +322,7 @@ impl crate::blob::transition::VerifiedLocalCopyStaging for StoreBlobAccess {
         &self,
         reference: &RowBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         StoreBlobAccess::stage_verified_local_copy(self, reference, destination).await
     }
 }

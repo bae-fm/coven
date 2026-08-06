@@ -62,7 +62,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         };
         let mut eager = Vec::new();
         for change in &changes {
-            if change.op == crate::changeset::ChangeOp::Delete {
+            if change.op == coven_foundation::changeset::ChangeOp::Delete {
                 continue;
             }
             let blob = match self.database.blob_ref_from_change(change) {

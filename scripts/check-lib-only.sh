@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Check coven's library target alone, with the feature sets a production host
+# Check each library target alone, with the feature sets a production host
 # actually enables.
 #
 # `cargo clippy --all-targets --all-features` (the main CI gate) always turns
@@ -16,8 +16,11 @@
 # `test-utils`. If a demoted-to-`pub(crate)` item's only caller lived in test
 # code, this is where it goes dead.
 #
+# Every library crate in the workspace is checked this way, so a crate
+# extracted out of `coven` keeps the same guard over its own internals.
 set -eu
 
+cargo check -p coven-foundation --lib
 cargo check -p coven --lib
 # oauth-providers is off by default but a real (if optional) host
 # configuration — bae-bridge's "full" build turns it on — so check it too.

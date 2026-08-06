@@ -7,7 +7,6 @@ use super::verified_history::*;
 use super::*;
 
 mod authorized;
-use crate::changeset::RowChange;
 use crate::database::DbError;
 use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
 use crate::protocol::membership::MembershipChain;
@@ -24,6 +23,7 @@ use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 pub(super) use authorized::AuthorizedPull;
+use coven_foundation::changeset::RowChange;
 
 mod device_lifecycle_state;
 mod discovery;

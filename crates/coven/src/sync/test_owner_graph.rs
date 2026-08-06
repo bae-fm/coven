@@ -3,10 +3,10 @@ use std::sync::Arc;
 use crate::blob::transition::{ConnectedBlobTransitions, LocalBlobTransitions};
 use crate::database::StoreDatabase;
 use crate::storage::SyncStorage;
-use crate::store_dir::StoreDir;
 use crate::sync::store::blob::{
     CurrentRemoteBlobSource, LocalStoreBlobAccess, RemoteStoreBlobAccess, StoreBlobCache,
 };
+use coven_foundation::store_dir::StoreDir;
 
 #[derive(Clone)]
 pub(crate) struct TestOwnerGraph {
@@ -98,7 +98,7 @@ impl TestOwnerGraph {
             .drain_uploads(
                 &self.database,
                 &self.store_dir,
-                &crate::clock::SystemClock,
+                &coven_foundation::clock::SystemClock,
                 routing_encryption,
                 None,
             )
@@ -123,7 +123,7 @@ impl TestOwnerGraph {
         created_at: &str,
     ) {
         let source = source_dir.join(blob_id);
-        crate::local_file::AtomicStagedFile::write_for_test(&source, bytes)
+        coven_foundation::local_file::AtomicStagedFile::write_for_test(&source, bytes)
             .await
             .expect("write upload source");
         let reference = self

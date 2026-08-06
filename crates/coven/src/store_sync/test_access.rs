@@ -126,7 +126,7 @@ impl StoreSync {
     #[cfg(test)]
     pub(crate) fn connected_uses_store_dir_for_test(
         &self,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> bool {
         self.connected()
             .is_some_and(|sync| sync.uses_store_dir_for_test(store_dir))

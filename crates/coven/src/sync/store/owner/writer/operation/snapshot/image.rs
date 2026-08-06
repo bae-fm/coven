@@ -273,12 +273,12 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn install(
         self,
-        store_dir: &'storage crate::store_dir::StoreDir,
+        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::protocol::blob::TransferLimits,
         device_id: String,
-        clock: crate::clock::ClockRef,
+        clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
         routing_encryption: Option<&crate::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::RestoringStore<'storage>, SnapshotError> {

@@ -288,7 +288,7 @@ impl StoreDatabase {
             for blob in &batch.audiences.blobs {
                 if let Some(spool_path) = blob.spool_path() {
                     {
-                        let (size, digest) = crate::local_file::file_facts(spool_path)
+                        let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
                             .await
                             .map_err(|error| {
                                 DbError::Message(format!("prepared blob spool: {error}"))

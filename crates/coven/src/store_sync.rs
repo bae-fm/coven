@@ -6,8 +6,6 @@ use tokio::sync::watch;
 use tracing::{debug, error, info};
 
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
-use crate::clock::ClockRef;
-use crate::config::Config;
 use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
 use crate::protocol::blob::{BlobRef, BlobTransitionObserver};
@@ -19,12 +17,14 @@ use crate::storage::cloud::CloudHome;
 use crate::storage::BlobChunking;
 use crate::storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
 use crate::store_cloud_storage::StoreCloudStorage;
-use crate::store_dir::StoreOpenGuard;
 use crate::store_security::StoreSecurity;
 use crate::sync::cycle::SyncComponents;
 use crate::sync::store::blob::LocalStoreBlobAccess;
 use crate::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
 use crate::sync::Store;
+use coven_foundation::clock::ClockRef;
+use coven_foundation::config::Config;
+use coven_foundation::store_dir::StoreOpenGuard;
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
@@ -91,7 +91,7 @@ pub(crate) struct StoreSync {
     security: StoreSecurity,
     master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
     database: StoreDatabase,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
     clock: ClockRef,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
     open_guard: Arc<StoreOpenGuard>,

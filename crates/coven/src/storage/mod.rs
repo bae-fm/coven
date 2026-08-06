@@ -23,10 +23,10 @@ pub use cloud::test_utils::InMemoryCloudHome;
 
 #[cfg(feature = "oauth-providers")]
 pub async fn fetch_account_email(
-    provider: crate::config::CloudProvider,
+    provider: coven_foundation::config::CloudProvider,
     tokens: &crate::oauth::OAuthTokens,
 ) -> Result<String, crate::oauth::OAuthError> {
-    use crate::config::CloudProvider;
+    use coven_foundation::config::CloudProvider;
 
     let result = match provider {
         CloudProvider::GoogleDrive => cloud::account_email::fetch_google(tokens).await,

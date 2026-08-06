@@ -65,8 +65,8 @@ impl<'storage> StoreKeyrings<'storage> {
         recipient: &str,
         value: WrappedStoreKey,
     ) -> Result<PreparedWrappedStoreKey, StorageError> {
-        crate::store_dir::validate_path_token(&value.author_pubkey)?;
-        crate::store_dir::validate_path_token(recipient)?;
+        coven_foundation::store_dir::validate_path_token(&value.author_pubkey)?;
+        coven_foundation::store_dir::validate_path_token(recipient)?;
         if value.generation == 0 {
             return Err(StorageError::InvalidContent(
                 "wrapped Store-key generation must be positive".to_string(),

@@ -85,16 +85,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError<std::io:
 }
 
 /// One local file whose complete contents are installed with a durable rename.
-pub(crate) struct AtomicFile {
+pub struct AtomicFile {
     path: PathBuf,
 }
 
 impl AtomicFile {
-    pub(crate) fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 
-    pub(crate) fn read_optional(&self) -> Result<Option<Vec<u8>>, String> {
+    pub fn read_optional(&self) -> Result<Option<Vec<u8>>, String> {
         match std::fs::read(&self.path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -102,7 +102,7 @@ impl AtomicFile {
         }
     }
 
-    pub(crate) fn replace(&self, bytes: &[u8]) -> Result<(), String> {
+    pub fn replace(&self, bytes: &[u8]) -> Result<(), String> {
         let parent = parent_of(&self.path)?;
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create parent directory {}: {error}", parent.display()))?;
@@ -110,7 +110,7 @@ impl AtomicFile {
             .map_err(|error| format!("atomic write {}: {error}", self.path.display()))
     }
 
-    pub(crate) fn remove(&self) -> Result<(), String> {
+    pub fn remove(&self) -> Result<(), String> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -118,8 +118,8 @@ impl AtomicFile {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -132,7 +132,7 @@ fn parent_of(path: &Path) -> Result<&Path, String> {
 
 /// Flush the directory entry a rename onto `path` just wrote, so the installed
 /// file survives a crash. Every durable rename in the crate ends here.
-pub(crate) async fn sync_parent_dir(path: &Path) -> Result<(), String> {
+pub async fn sync_parent_dir(path: &Path) -> Result<(), String> {
     let parent = parent_of(path)?;
     flush_directory(parent)
         .await

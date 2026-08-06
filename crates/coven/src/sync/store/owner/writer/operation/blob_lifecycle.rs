@@ -7,7 +7,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         cipher: &dyn CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
         self.writer
@@ -35,7 +35,7 @@ impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn gc_tombstones(
         &self,
         cipher: &dyn CloudCipherAccess,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
         let activated_uploaders = self

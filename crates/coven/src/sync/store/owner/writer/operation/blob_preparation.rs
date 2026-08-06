@@ -444,7 +444,8 @@ fn partition_blob_facts<'a>(
         .filter(|change| {
             matches!(
                 change.op,
-                crate::changeset::ChangeOp::Insert | crate::changeset::ChangeOp::Update
+                coven_foundation::changeset::ChangeOp::Insert
+                    | coven_foundation::changeset::ChangeOp::Update
             )
         })
         .map(|change| {
@@ -549,7 +550,7 @@ async fn remove_durable_file(path: &std::path::Path, require_present: bool) -> R
         }
         Err(error) => return Err(format!("remove prepared blob {}: {error}", path.display())),
     }
-    crate::atomic_file::sync_parent_dir(path).await
+    coven_foundation::atomic_file::sync_parent_dir(path).await
 }
 
 pub(crate) fn prepare_partition_blob_locator(

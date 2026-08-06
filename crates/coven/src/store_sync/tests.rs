@@ -1,17 +1,17 @@
 use std::sync::{Arc, RwLock};
 
 use super::*;
-use crate::clock::SystemClock;
-use crate::config::{CloudProvider, HomeStorage};
 use crate::encryption::MasterKeyring;
 use crate::keys::{test_keyring, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys};
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::store_dir::StoreDir;
-use crate::store_dir::StoreOpenGuard;
 use crate::store_membership::StoreMembership;
+use coven_foundation::clock::SystemClock;
+use coven_foundation::config::{CloudProvider, HomeStorage};
+use coven_foundation::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreOpenGuard;
 
 struct NoImmutableCopyHome;
 

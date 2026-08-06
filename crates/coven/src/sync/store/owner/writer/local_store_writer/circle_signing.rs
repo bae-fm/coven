@@ -72,7 +72,7 @@ impl LocalStoreWriter {
         keyring: &str,
         intent: crate::protocol::circle::CircleEpochCloseIntent,
         responses: Vec<crate::protocol::circle::CircleEpochCloseSettlement>,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
     ) -> Result<
         crate::protocol::circle::CircleTransitionDraft,
         crate::protocol::circle::CircleTransitionError,

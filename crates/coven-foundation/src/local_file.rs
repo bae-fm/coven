@@ -13,7 +13,7 @@ use crate::atomic_file::{sync_parent_dir, sync_parent_dir_blocking};
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
 /// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
 /// destination.
-pub(crate) const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
+pub const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
 
 /// Whether `path`'s file name marks it as an atomic-write temp sibling.
 pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
@@ -23,7 +23,7 @@ pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StreamWriteError<E> {
+pub enum StreamWriteError<E> {
     Source(E),
     Local(String),
 }
@@ -40,14 +40,14 @@ impl<E: std::fmt::Display> std::fmt::Display for StreamWriteError<E> {
 impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for StreamWriteError<E> {}
 
 #[derive(Debug)]
-pub(crate) enum ByteStreamWriteError<E> {
+pub enum ByteStreamWriteError<E> {
     Source(E),
     SourceCleanup { source: E, cleanup: String },
     Local(String),
 }
 
 #[async_trait]
-pub(crate) trait PlaintextChunkReader: Send {
+pub trait PlaintextChunkReader: Send {
     type Error: Send;
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, Self::Error>;
 }
@@ -65,14 +65,14 @@ struct AtomicTempFile {
 
 /// A provider download path that becomes visible at its destination only after
 /// the caller has verified the completed file.
-pub(crate) struct AtomicStagedFile {
+pub struct AtomicStagedFile {
     destination: PathBuf,
     staged: Option<AtomicTempFile>,
 }
 
 /// A staged file that has been installed at its destination while the caller's
 /// durable transaction is still deciding whether that installation commits.
-pub(crate) struct PublishedAtomicFile {
+pub struct PublishedAtomicFile {
     destination: PathBuf,
 }
 
@@ -91,7 +91,7 @@ impl AtomicStagedFile {
         is_temp_blob_path(path)
     }
 
-    pub(crate) async fn create(destination: &Path) -> Result<Self, String> {
+    pub async fn create(destination: &Path) -> Result<Self, String> {
         let parent = destination
             .parent()
             .ok_or_else(|| format!("blob path has no parent dir: {}", destination.display()))?;
@@ -105,7 +105,7 @@ impl AtomicStagedFile {
         })
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self
             .staged
             .as_ref()
@@ -113,7 +113,7 @@ impl AtomicStagedFile {
             .path
     }
 
-    pub(crate) async fn read_bytes(&self) -> Result<Vec<u8>, String> {
+    pub async fn read_bytes(&self) -> Result<Vec<u8>, String> {
         tokio::fs::read(self.path())
             .await
             .map_err(|error| format!("read staged blob {}: {error}", self.path().display()))
@@ -122,7 +122,7 @@ impl AtomicStagedFile {
     /// Hand the reserved path to a writer that performs its own atomic
     /// replacement. The retained descriptor is closed first so publication
     /// always names the replacement inode.
-    pub(crate) fn path_for_atomic_replacement(&mut self) -> &Path {
+    pub fn path_for_atomic_replacement(&mut self) -> &Path {
         self.staged
             .as_mut()
             .expect("atomic stage is unpublished")
@@ -130,7 +130,7 @@ impl AtomicStagedFile {
         self.path()
     }
 
-    pub(crate) async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+    pub async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
         let staged = self.staged.as_mut().expect("atomic stage is unpublished");
@@ -157,7 +157,7 @@ impl AtomicStagedFile {
     /// Fill this unpublished stage from a plaintext stream and fsync the
     /// completed file. The caller verifies higher-level content facts before
     /// publishing the stage.
-    pub(crate) async fn write_plaintext<R: PlaintextChunkReader>(
+    pub async fn write_plaintext<R: PlaintextChunkReader>(
         &mut self,
         source: &mut R,
     ) -> Result<u64, StreamWriteError<R::Error>> {
@@ -198,7 +198,7 @@ impl AtomicStagedFile {
         Ok(written)
     }
 
-    pub(crate) async fn write_byte_stream<E: Send>(
+    pub async fn write_byte_stream<E: Send>(
         mut self,
         mut stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
     ) -> Result<(Self, u64), ByteStreamWriteError<E>> {
@@ -269,7 +269,7 @@ impl AtomicStagedFile {
 
     /// Fill this unpublished stage from one opened source file while computing
     /// the exact identity of the copied bytes from that same descriptor.
-    pub(crate) async fn copy_from(self, source: &Path) -> Result<(Self, u64, [u8; 32]), String> {
+    pub async fn copy_from(self, source: &Path) -> Result<(Self, u64, [u8; 32]), String> {
         let input = tokio::fs::File::open(source)
             .await
             .map_err(|error| format!("open copy source {}: {error}", source.display()))?;
@@ -325,7 +325,7 @@ impl AtomicStagedFile {
         }
     }
 
-    pub(crate) async fn commit(self) -> Result<(), String> {
+    pub async fn commit(self) -> Result<(), String> {
         self.commit_with_sync(|path| {
             let path = path.to_path_buf();
             async move { sync_parent_dir(&path).await }
@@ -380,7 +380,7 @@ impl AtomicStagedFile {
     /// Publish a verified user-owned destination without replacing an existing
     /// path. The staged file is a sibling, so the hard link exposes one complete
     /// inode atomically and fails if another file already owns the name.
-    pub(crate) async fn commit_new(self) -> Result<(), CommitNewFileError> {
+    pub async fn commit_new(self) -> Result<(), CommitNewFileError> {
         self.commit_new_with_sync(|path| {
             let path = path.to_path_buf();
             async move { sync_parent_dir(&path).await }
@@ -454,15 +454,15 @@ impl AtomicStagedFile {
         Ok(())
     }
 
-    pub(crate) async fn discard(mut self) -> Result<(), String> {
+    pub async fn discard(mut self) -> Result<(), String> {
         self.take_stage().cleanup().await
     }
 
-    pub(crate) fn discard_blocking(mut self) -> Result<(), String> {
+    pub fn discard_blocking(mut self) -> Result<(), String> {
         self.take_stage().cleanup_blocking()
     }
 
-    pub(crate) fn publish_for_transaction(mut self) -> Result<PublishedAtomicFile, String> {
+    pub fn publish_for_transaction(mut self) -> Result<PublishedAtomicFile, String> {
         let staged = self.take_stage();
         staged.publish_blocking(&self.destination)?;
         Ok(PublishedAtomicFile {
@@ -492,15 +492,15 @@ impl AtomicStagedFile {
             })
     }
 
-    #[cfg(test)]
-    pub(crate) async fn write_for_test(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn write_for_test(destination: &Path, bytes: &[u8]) -> Result<(), String> {
         let mut staged = Self::create(destination).await?;
         staged.write_bytes(bytes).await?;
         staged.commit().await
     }
 
-    #[cfg(test)]
-    pub(crate) fn leave_unpublished_for_test(mut self) -> PathBuf {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn leave_unpublished_for_test(mut self) -> PathBuf {
         let mut staged = self.take_stage();
         let path = staged.path.clone();
         staged.disarm();
@@ -517,7 +517,7 @@ impl Drop for AtomicStagedFile {
 }
 
 impl PublishedAtomicFile {
-    pub(crate) fn rollback(self) -> Result<(), String> {
+    pub fn rollback(self) -> Result<(), String> {
         match std::fs::remove_file(&self.destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -659,13 +659,13 @@ impl Drop for AtomicTempFile {
 /// Size and SHA-256 digest of the file at `path`, streamed. The one
 /// filesystem primitive for computing a file's identity facts; callers hold
 /// the protocol reference and compare.
-pub(crate) async fn file_facts(path: &Path) -> Result<(u64, [u8; 32]), String> {
+pub async fn file_facts(path: &Path) -> Result<(u64, [u8; 32]), String> {
     let (_, size, digest) =
         read_selected_with_facts(path, ExactReadSelection::IdentityOnly).await?;
     Ok((size, digest))
 }
 
-pub(crate) async fn file_len(path: &Path) -> Result<u64, String> {
+pub async fn file_len(path: &Path) -> Result<u64, String> {
     tokio::fs::metadata(path)
         .await
         .map(|metadata| metadata.len())
@@ -739,7 +739,7 @@ async fn read_open_file_with_facts(
 /// Each read positions the descriptor itself, and the mutex makes that seek and
 /// its read one operation, so concurrent readers of one handle cannot interleave
 /// into each other's ranges.
-pub(crate) struct OpenFile {
+pub struct OpenFile {
     file: tokio::sync::Mutex<tokio::fs::File>,
     path: PathBuf,
     size: u64,
@@ -747,7 +747,7 @@ pub(crate) struct OpenFile {
 
 impl OpenFile {
     /// Open `path` and stat it for the length its reads are bounded by.
-    pub(crate) async fn open(path: &Path) -> Result<Self, String> {
+    pub async fn open(path: &Path) -> Result<Self, String> {
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|error| format!("open local file {}: {error}", path.display()))?;
@@ -763,14 +763,14 @@ impl OpenFile {
         })
     }
 
-    pub(crate) fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
     /// Read exactly `len` bytes at `offset`. The caller bounds the range against
     /// [`size`](Self::size); a file that cannot supply them is an error, never a
     /// short result.
-    pub(crate) async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, String> {
         use tokio::io::AsyncSeekExt;
 
         if len == 0 {

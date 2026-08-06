@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::code_envelope::{self, EnvelopeError};
+use coven_foundation::code_envelope::{self, EnvelopeError};
 
 #[cfg(test)]
 use crate::protocol::membership::{MembershipCoord, MembershipGrantId};
@@ -50,20 +50,21 @@ pub(crate) fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     // absolute path would put that create/delete outside the stores root. Reject
     // it the moment the code is parsed: a decoded `InviteCode` always carries a
     // `store_id` that is a single safe path component.
-    crate::store_dir::validate_path_token(&code.store_id).map_err(JoinCodeError::InvalidStoreId)?;
+    coven_foundation::store_dir::validate_path_token(&code.store_id)
+        .map_err(JoinCodeError::InvalidStoreId)?;
     // `owner_pubkey` pins the membership-chain founder the joiner authenticates
     // the invite against (`join.rs`): a malformed value can't name a real chain,
     // so it is refused here rather than surfacing as an opaque chain-lookup
     // failure deep in the join.
-    crate::code_envelope::decode_fixed_hex("owner public key", &code.owner_pubkey, 32)
+    coven_foundation::code_envelope::decode_fixed_hex("owner public key", &code.owner_pubkey, 32)
         .map_err(JoinCodeError::InvalidOwnerPubkey)?;
-    crate::code_envelope::decode_fixed_hex(
+    coven_foundation::code_envelope::decode_fixed_hex(
         "wrapped-key author public key",
         &code.wrapped_key.owner_pubkey,
         32,
     )
     .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
-    crate::code_envelope::decode_fixed_hex(
+    coven_foundation::code_envelope::decode_fixed_hex(
         "wrapped-key recipient public key",
         &code.wrapped_key.recipient_pubkey,
         32,
@@ -134,7 +135,7 @@ pub struct InviteCodeInfo {
     pub store_name: String,
     pub owner_pubkey: String,
     pub store_root_hash: crate::protocol::store_commit::ObjectHash,
-    pub cloud_provider: crate::config::CloudProvider,
+    pub cloud_provider: coven_foundation::config::CloudProvider,
     /// Whether the joining device must run an OAuth flow before joining, so the
     /// host fetches the token first — mirrors `RestoreCodeInfo::needs_oauth`.
     pub needs_oauth: bool,
@@ -171,7 +172,7 @@ pub enum JoinCodeError {
     #[error(
         "The store id in this invite code is invalid. Ask the inviter to generate a new one. ({0})"
     )]
-    InvalidStoreId(crate::store_dir::PathTokenError),
+    InvalidStoreId(coven_foundation::store_dir::PathTokenError),
     /// `owner_pubkey` pins the membership-chain founder (`join.rs`); a value
     /// that isn't 32 bytes of hex can't name one, so it is refused at decode.
     #[error(

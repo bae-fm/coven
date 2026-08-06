@@ -14,7 +14,7 @@ impl StoreSync {
         security: StoreSecurity,
         master_keys: Arc<dyn crate::keys::MasterKeyCustody>,
         database: StoreDatabase,
-        store_dir: crate::store_dir::StoreDir,
+        store_dir: coven_foundation::store_dir::StoreDir,
         clock: ClockRef,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,

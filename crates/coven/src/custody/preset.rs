@@ -19,7 +19,7 @@ use std::sync::RwLock;
 
 use crate::envelope::{Passphrase, PassphraseVault};
 use crate::keys::KeyError;
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 /// A secret a store keeps under custody: where a passphrase-wrapped one is
 /// written, and how it converts to and from the plaintext bytes the envelope

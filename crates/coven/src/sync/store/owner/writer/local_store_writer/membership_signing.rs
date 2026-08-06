@@ -12,7 +12,7 @@ impl LocalStoreWriter {
         crate::sync::store::membership::InviteError,
     > {
         let signer = self.identity.clone();
-        crate::blocking::run(move || {
+        coven_foundation::blocking::run(move || {
             crate::protocol::wrapped_store_key::WrappedStoreKey::seal_keyring(
                 &store_id,
                 &recipient,

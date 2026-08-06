@@ -136,7 +136,7 @@ impl BlobBody {
     }
 
     pub async fn from_file(path: &Path) -> Result<Self, String> {
-        let len = crate::local_file::file_len(path).await?;
+        let len = coven_foundation::local_file::file_len(path).await?;
         let reader = crate::storage::local_file::open_reader(path).await?;
         Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))
     }

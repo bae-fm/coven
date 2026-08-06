@@ -2,7 +2,7 @@ use super::cipher::*;
 use super::*;
 
 /// How a cloud home names its blob objects. Paired with the at-rest
-/// [`CloudCipher`] by the home's [`HomeStorage`](crate::config::HomeStorage): an
+/// [`CloudCipher`] by the home's [`HomeStorage`](coven_foundation::config::HomeStorage): an
 /// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
 #[derive(Clone, Copy)]
 pub(crate) enum BlobPathScheme {
@@ -17,7 +17,7 @@ pub(crate) enum BlobPathScheme {
 impl BlobPathScheme {
     /// The blob-path scheme a home's storage mode selects: an opaque home
     /// obfuscates (`Hashed`), a browsable home is readable (`Plain`).
-    pub(crate) fn for_storage(storage: crate::config::HomeStorage) -> Self {
+    pub(crate) fn for_storage(storage: coven_foundation::config::HomeStorage) -> Self {
         if storage.is_opaque() {
             BlobPathScheme::Hashed
         } else {
@@ -368,7 +368,7 @@ pub(super) fn check_stored_blob_length(
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for ExactBlobPlaintextReader {
+impl coven_foundation::local_file::PlaintextChunkReader for ExactBlobPlaintextReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(

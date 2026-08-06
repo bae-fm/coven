@@ -35,11 +35,11 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     // A's wall clock reads far ahead of B's (A in the "future").
     let a_hlc = Arc::new(Hlc::new(
         "dev-a".into(),
-        crate::clock::clock_from_millis(|| 9_000),
+        coven_foundation::clock::clock_from_millis(|| 9_000),
     ));
     let b_hlc = Arc::new(Hlc::new(
         "dev-b".into(),
-        crate::clock::clock_from_millis(|| 1_000),
+        coven_foundation::clock::clock_from_millis(|| 1_000),
     ));
 
     // A stamps and publishes an edit of n1 through the Store outbox so its
@@ -167,10 +167,13 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
 async fn pull_advances_register_as_each_changeset_applies() {
     // A's wall clock reads far ahead of B's, so only the pull's advance can lift
     // B's clock above A's applied stamp.
-    let a_hlc = Hlc::new("dev-a".into(), crate::clock::clock_from_millis(|| 9_000));
+    let a_hlc = Hlc::new(
+        "dev-a".into(),
+        coven_foundation::clock::clock_from_millis(|| 9_000),
+    );
     let b_hlc = Arc::new(Hlc::new(
         "dev-b".into(),
-        crate::clock::clock_from_millis(|| 1_000),
+        coven_foundation::clock::clock_from_millis(|| 1_000),
     ));
 
     let a_stamp = a_hlc.now().to_string();
@@ -213,7 +216,10 @@ async fn pull_advances_register_as_each_changeset_applies() {
 
 #[tokio::test]
 async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row() {
-    let remote_hlc = Hlc::new("dev-a".into(), crate::clock::clock_from_millis(|| 9_000));
+    let remote_hlc = Hlc::new(
+        "dev-a".into(),
+        coven_foundation::clock::clock_from_millis(|| 9_000),
+    );
     let remote_stamp = remote_hlc.now().to_string();
     let source = open_test_db();
     let storage = Arc::new(
@@ -240,7 +246,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
 
     let local_hlc = Arc::new(Hlc::new(
         "dev-b".into(),
-        crate::clock::clock_from_millis(|| 1_000),
+        coven_foundation::clock::clock_from_millis(|| 1_000),
     ));
     let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
     let (_tmp, store_dir) = temp_store_dir();
@@ -298,13 +304,19 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
 /// backward and even within the same millisecond as the persisted mark.
 #[test]
 fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
-    let hlc1 = Hlc::new("dev-a".into(), crate::clock::clock_from_millis(|| 5_000));
+    let hlc1 = Hlc::new(
+        "dev-a".into(),
+        coven_foundation::clock::clock_from_millis(|| 5_000),
+    );
     let last_row_stamp = hlc1.now();
     let persisted = hlc1.high_water().to_string();
     assert_eq!(persisted, last_row_stamp.to_string());
 
     // Restart with the wall clock jumped *backward* and seed from the mark.
-    let hlc2 = Hlc::new("dev-a".into(), crate::clock::clock_from_millis(|| 1_000));
+    let hlc2 = Hlc::new(
+        "dev-a".into(),
+        coven_foundation::clock::clock_from_millis(|| 1_000),
+    );
     hlc2.seed(&Timestamp::parse(&persisted).expect("parse high-water"));
     let next = hlc2.now();
     assert!(
@@ -313,7 +325,10 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
     );
 
     // Same-millisecond restart: seed at exactly the persisted mark; still advances.
-    let hlc3 = Hlc::new("dev-a".into(), crate::clock::clock_from_millis(|| 5_000));
+    let hlc3 = Hlc::new(
+        "dev-a".into(),
+        coven_foundation::clock::clock_from_millis(|| 5_000),
+    );
     hlc3.seed(&Timestamp::parse(&persisted).expect("parse high-water"));
     let after_same_ms = hlc3.now();
     assert!(
@@ -439,7 +454,7 @@ async fn register_seeds_from_persisted_high_water() {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "dev-a".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("open register database before restart");
@@ -456,7 +471,7 @@ async fn register_seeds_from_persisted_high_water() {
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         Arc::new(Hlc::new(
             "dev-a".into(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
         )),
         &migrations,
     )
@@ -479,7 +494,7 @@ async fn register_seeds_from_on_disk_rows_above_high_water() {
     let db = open_test_db_with_hlc(
         Arc::new(Hlc::new(
             "dev-a".into(),
-            crate::clock::clock_from_millis(|| 9_000_000_000_000),
+            coven_foundation::clock::clock_from_millis(|| 9_000_000_000_000),
         )),
         move |conn| {
             conn.execute(
@@ -514,7 +529,7 @@ async fn restart_does_not_seed_past_grossly_future_synced_row() {
     let db = open_test_db_with_hlc(
         Arc::new(Hlc::new(
             "dev-local".into(),
-            crate::clock::clock_from_millis(move || wall),
+            coven_foundation::clock::clock_from_millis(move || wall),
         )),
         move |conn| {
             conn.execute(
@@ -553,7 +568,7 @@ async fn restart_seeds_past_within_bound_synced_row() {
     let db = open_test_db_with_hlc(
         Arc::new(Hlc::new(
             "dev-local".into(),
-            crate::clock::clock_from_millis(move || wall),
+            coven_foundation::clock::clock_from_millis(move || wall),
         )),
         move |conn| {
             conn.execute(
@@ -590,7 +605,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     let b_wall: u64 = 1_700_000_000_000;
     let b_hlc = Arc::new(Hlc::new(
         "dev-b".into(),
-        crate::clock::clock_from_millis(move || b_wall),
+        coven_foundation::clock::clock_from_millis(move || b_wall),
     ));
 
     // B already holds an honest local edit of n1, stamped at its own wall time.
@@ -658,7 +673,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     let b_wall: u64 = 1_700_000_000_000;
     let b_hlc = Arc::new(Hlc::new(
         "dev-b".into(),
-        crate::clock::clock_from_millis(move || b_wall),
+        coven_foundation::clock::clock_from_millis(move || b_wall),
     ));
 
     // B holds an honest local edit at its own wall time.
@@ -737,7 +752,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "dev-self".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("open database before installing protocol_state fault");

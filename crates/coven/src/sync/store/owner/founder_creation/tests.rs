@@ -140,7 +140,7 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "founder-rollback-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open founder rollback database")

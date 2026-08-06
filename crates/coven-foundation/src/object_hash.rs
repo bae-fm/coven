@@ -20,7 +20,7 @@ impl ObjectHash {
         Self(Sha256::digest(bytes).into())
     }
 
-    pub(crate) fn from_digest(bytes: [u8; 32]) -> Self {
+    pub fn from_digest(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 

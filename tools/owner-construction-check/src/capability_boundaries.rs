@@ -188,7 +188,7 @@ pub(crate) const AMBIENT_BOUNDARY: &[GatedCapability] = &[
         kind: "ambient wall clock",
         crates: &[],
         path_patterns: &[&["SystemTime", "now"], &["Instant", "now"], &["Utc", "now"]],
-        allowed: &["crates/coven/src/clock.rs"],
+        allowed: &["crates/coven-foundation/src/clock.rs"],
     },
     GatedCapability {
         kind: "ambient randomness",
@@ -208,7 +208,7 @@ pub(crate) const AMBIENT_BOUNDARY: &[GatedCapability] = &[
         kind: "ambient identifier generation (uuid)",
         crates: &[],
         path_patterns: &[&["Uuid", "new_v4"]],
-        allowed: &["crates/coven/src/id_provider.rs"],
+        allowed: &["crates/coven-foundation/src/id_provider.rs"],
     },
 ];
 
@@ -238,10 +238,10 @@ pub(crate) const FILESYSTEM_BOUNDARY: &[GatedCapability] = &[GatedCapability {
 /// - `host_write.rs`, `blob_preparation.rs`, `snapshot.rs`,
 ///   `snapshot/image.rs`: blob and snapshot staging with rollback state.
 const FILESYSTEM_HOMES: &[&str] = &[
-    "crates/coven/src/atomic_file.rs",
-    "crates/coven/src/local_file.rs",
-    "crates/coven/src/store_dir.rs",
-    "crates/coven/src/config.rs",
+    "crates/coven-foundation/src/atomic_file.rs",
+    "crates/coven-foundation/src/local_file.rs",
+    "crates/coven-foundation/src/store_dir.rs",
+    "crates/coven-foundation/src/config.rs",
     "crates/coven/src/custody.rs",
     "crates/coven/src/envelope.rs",
     "crates/coven/src/identity_custody.rs",
@@ -613,11 +613,11 @@ mod tests {
     fn clock_and_id_providers_own_their_ambient_reads() {
         let files = vec![
             file(
-                "crates/coven/src/clock.rs",
+                "crates/coven-foundation/src/clock.rs",
                 "fn now() -> chrono::DateTime<chrono::Utc> { chrono::Utc::now() }",
             ),
             file(
-                "crates/coven/src/id_provider.rs",
+                "crates/coven-foundation/src/id_provider.rs",
                 "fn new_id() -> String { uuid::Uuid::new_v4().to_string() }",
             ),
         ];

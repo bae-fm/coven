@@ -13,7 +13,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::clock::{FixedClock, SystemClock};
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::encryption::EncryptionService;
@@ -24,9 +23,10 @@ use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::store_dir::StoreDir;
 use crate::sync::cycle;
 use crate::sync::test_helpers::*;
+use coven_foundation::clock::{FixedClock, SystemClock};
+use coven_foundation::store_dir::StoreDir;
 
 const T0: &str = "2024-01-01T00:00:00Z";
 
@@ -1312,7 +1312,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
     // Remove the seed writes so the cycle takes the initial-snapshot path; the rows
@@ -1362,7 +1362,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
     assert_eq!(db.pending_write_count().await, 0);
@@ -1493,7 +1493,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "restored-snapshot-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
             None,
         )
@@ -1552,9 +1552,11 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
-        .await
-        .expect("store host-provided snapshot blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &store_dir, "photos", "cover1", b"cover",
+    )
+    .await
+    .expect("store host-provided snapshot blob");
     assert_eq!(db.pending_write_count().await, 0);
     let device = storage.open_into(&db).await.expect("open exact test Store");
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_prepare(Arc::clone(
@@ -1594,7 +1596,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         "failed preparation must not orphan its current snapshot spool",
     );
     assert_eq!(
-        crate::store_dir::StoreDir::read_local_blob(&store_dir, "photos", "cover1", 5)
+        coven_foundation::store_dir::StoreDir::read_local_blob(&store_dir, "photos", "cover1", 5)
             .await
             .expect("read retained snapshot source"),
         Some(b"cover".to_vec()),
@@ -1616,7 +1618,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "snapshot-cleanup-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open snapshot cleanup database")
@@ -1637,9 +1639,11 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&store_dir, "photos", "cover1", b"cover")
-        .await
-        .expect("store cleanup source blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &store_dir, "photos", "cover1", b"cover",
+    )
+    .await
+    .expect("store cleanup source blob");
     let device = storage.open_into(&db).await.expect("open cleanup Store");
     let interceptor = Arc::new(CycleStorageInterceptor::reject_blob_create(Arc::clone(
         &storage,
@@ -1729,9 +1733,14 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
              ('row-b', 'blob-shared', 6, '{hash}', '0000000001000-0000-M')"
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&store_dir, "assets", "blob-shared", b"shared")
-        .await
-        .expect("store shared snapshot blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &store_dir,
+        "assets",
+        "blob-shared",
+        b"shared",
+    )
+    .await
+    .expect("store shared snapshot blob");
     let device = storage
         .open_into(&db)
         .await
@@ -1773,7 +1782,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     );
     let (external_dir, store_dir) = temp_store_dir();
     let external_path = external_dir.path().join("audio1.flac");
-    crate::local_file::AtomicStagedFile::write_for_test(&external_path, b"AUDIO")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&external_path, b"AUDIO")
         .await
         .expect("write external snapshot blob");
     db.execute_test_sql(
@@ -3036,7 +3045,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
 
@@ -3142,10 +3151,10 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
         crate::protocol::blob::content_hash(b"second"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-a", b"first")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-a", b"first")
         .await
         .expect("store first write's blob");
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-b", b"second")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-b", b"second")
         .await
         .expect("store second write's blob");
 
@@ -3227,7 +3236,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
     let write_id = crate::database::StoreDatabase::new(&db)
@@ -3283,7 +3292,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         "rotation pause creates neither a cloud upload nor a Created handoff",
     );
     assert_eq!(
-        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "hponly", 5)
+        coven_foundation::store_dir::StoreDir::read_local_blob(&ld, "photos", "hponly", 5)
             .await
             .expect("read rotation-paused local blob"),
         Some(b"cover".to_vec()),
@@ -3373,7 +3382,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
         .await
         .expect("store host-provided blob");
     crate::sync::test_owner_graph::TestOwnerGraph::new(
@@ -3461,9 +3470,14 @@ async fn ready_make_remote_provider_transport_is_offline() {
         crate::protocol::blob::content_hash(b"cover"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "transport-blob", b"cover")
-        .await
-        .expect("store host-provided blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &ld,
+        "photos",
+        "transport-blob",
+        b"cover",
+    )
+    .await
+    .expect("store host-provided blob");
     crate::sync::test_owner_graph::TestOwnerGraph::new(
         crate::database::StoreDatabase::new(&db),
         ld.clone(),
@@ -3512,10 +3526,10 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         crate::protocol::blob::content_hash(b"second"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "firstblob", b"first")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "firstblob", b"first")
         .await
         .expect("store first host-provided blob");
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "secondblob", b"second")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "secondblob", b"second")
         .await
         .expect("store second host-provided blob");
 
@@ -3551,7 +3565,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         .await
         .is_err());
     assert!(
-        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "firstblob", 5)
+        coven_foundation::store_dir::StoreDir::read_local_blob(&ld, "photos", "firstblob", 5)
             .await
             .expect("read first local")
             .is_some(),
@@ -3625,9 +3639,14 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         crate::protocol::blob::content_hash(b"already durable"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "remoteonly", b"already durable")
-        .await
-        .expect("store the first publication's host-provided blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &ld,
+        "photos",
+        "remoteonly",
+        b"already durable",
+    )
+    .await
+    .expect("store the first publication's host-provided blob");
 
     run_cycle_in_task(Arc::clone(&pass_through), device.clone(), ld.clone())
         .await
@@ -3651,7 +3670,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .await
         .expect("read back the first exact remote blob object");
     assert!(
-        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "remoteonly", 15)
+        coven_foundation::store_dir::StoreDir::read_local_blob(&ld, "photos", "remoteonly", 15)
             .await
             .expect("read cache-lazy host blob after publication")
             .is_none(),
@@ -3716,7 +3735,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         crate::protocol::blob::content_hash(b"lazy"),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&ld, "photos", "lazyblob", b"lazy")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "lazyblob", b"lazy")
         .await
         .expect("store cache-lazy host-provided blob");
     let pending = crate::database::StoreDatabase::new(&db)
@@ -3754,7 +3773,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the failed predecessor remains prepared ahead of the blob write",
     );
     assert!(
-        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "lazyblob", 4)
+        coven_foundation::store_dir::StoreDir::read_local_blob(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local")
             .is_some(),
@@ -3810,7 +3829,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .await
         .expect("retry leaves the exact cache-lazy blob readable");
     assert!(
-        crate::store_dir::StoreDir::read_local_blob(&ld, "photos", "lazyblob", 4)
+        coven_foundation::store_dir::StoreDir::read_local_blob(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local after publish")
             .is_none(),
@@ -5731,7 +5750,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "pending-rotation-reopen-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open pending-rotation database")

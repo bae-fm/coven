@@ -9,7 +9,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
@@ -19,9 +18,10 @@ use crate::oauth::OAuthTokens;
 use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::store_dir::StoreLayout;
 use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
 use crate::Migration;
+use coven_foundation::config::{Config, HomeStorage};
+use coven_foundation::store_dir::StoreLayout;
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they
@@ -39,7 +39,7 @@ impl RestoreSource {
     async fn open_cloud_home(
         &self,
         store_keys: &StoreKeys,
-        clock: crate::clock::ClockRef,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
         use crate::storage::cloud::*;
 
@@ -197,14 +197,14 @@ pub async fn restore_from_cloud(
     authority: &crate::protocol::recovery::RestoreAuthority,
     continuation_device_signer: Option<&UserKeypair>,
     layout: &StoreLayout,
-    clock: crate::clock::ClockRef,
-    ids: crate::id_provider::IdRef,
+    clock: coven_foundation::clock::ClockRef,
+    ids: coven_foundation::id_provider::IdRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
-    crate::store_dir::validate_path_token(store_id)
+    coven_foundation::store_dir::validate_path_token(store_id)
         .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
     crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &source.join_info,
@@ -448,8 +448,8 @@ pub async fn restore_from_code(
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     layout: &StoreLayout,
-    clock: crate::clock::ClockRef,
-    ids: crate::id_provider::IdRef,
+    clock: coven_foundation::clock::ClockRef,
+    ids: coven_foundation::id_provider::IdRef,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -576,7 +576,7 @@ mod tests {
 
         let store_keys = StoreKeys::bind(store_id.to_string());
         source
-            .open_cloud_home(&store_keys, Arc::new(crate::clock::SystemClock))
+            .open_cloud_home(&store_keys, Arc::new(coven_foundation::clock::SystemClock))
             .await
             .expect("build restore cloud home for Dropbox");
 
@@ -617,7 +617,7 @@ mod open_cloud_home_tests {
 
         let store_keys = StoreKeys::bind("store-id".to_string());
         source
-            .open_cloud_home(&store_keys, Arc::new(crate::clock::SystemClock))
+            .open_cloud_home(&store_keys, Arc::new(coven_foundation::clock::SystemClock))
             .await
             .expect("build S3 cloud home");
 
@@ -649,7 +649,7 @@ mod open_cloud_home_tests {
 
         let store_keys = StoreKeys::bind("store-id".to_string());
         let result = source
-            .open_cloud_home(&store_keys, Arc::new(crate::clock::SystemClock))
+            .open_cloud_home(&store_keys, Arc::new(coven_foundation::clock::SystemClock))
             .await;
 
         match result {

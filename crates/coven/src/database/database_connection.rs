@@ -150,7 +150,7 @@ mod tests {
             BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "liveness".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &[],
         )
         .expect("open database");
@@ -199,7 +199,7 @@ mod tests {
             BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "drop-async".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &[],
         )
         .expect("open");

@@ -5,8 +5,8 @@
 //! deterministic fake ([`FixedClock`] / [`SteppingClock`]) and pass it to the
 //! unit under test.
 //!
-//! [`crate::protocol::hlc::Hlc`] retains this same clock and derives epoch
-//! milliseconds for hybrid-logical-clock math. Other consumers use the full
+//! The hybrid logical clock retains this same clock and derives epoch
+//! milliseconds from it. Other consumers use the full
 //! `DateTime<Utc>` for `created_at`, `updated_at`, and expiry comparisons.
 
 use chrono::{DateTime, Utc};
@@ -22,8 +22,11 @@ pub trait Clock: Send + Sync {
 /// `CovenReadHandle`) so they clone the handle, not the implementation.
 pub type ClockRef = Arc<dyn Clock>;
 
-#[cfg(test)]
-pub(crate) fn clock_from_millis(source: impl Fn() -> u64 + Send + Sync + 'static) -> ClockRef {
+/// A [`ClockRef`] reading epoch milliseconds from a test-supplied source, for
+/// the hybrid-logical-clock tests that think in milliseconds rather than
+/// `DateTime`s.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn clock_from_millis(source: impl Fn() -> u64 + Send + Sync + 'static) -> ClockRef {
     Arc::new(ClosureClock(move || {
         let millis: i64 = source().try_into().expect("test clock millis fit in i64");
         DateTime::from_timestamp_millis(millis).expect("valid test clock instant")
@@ -42,10 +45,8 @@ impl Clock for SystemClock {
 // Test clock fakes are exposed to downstream crates' tests via the `test-utils`
 // feature, so any crate that consumes `Clock` tests against the same fakes
 // instead of mirroring them.
-#[cfg(test)]
-pub(crate) use fakes::ClosureClock;
 #[cfg(any(test, feature = "test-utils"))]
-pub use fakes::{FixedClock, SteppingClock};
+pub use fakes::{ClosureClock, FixedClock, SteppingClock};
 
 #[cfg(any(test, feature = "test-utils"))]
 mod fakes {
@@ -54,10 +55,8 @@ mod fakes {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Delegates each read to a supplied test function.
-    #[cfg(test)]
-    pub(crate) struct ClosureClock<F>(pub F);
+    pub struct ClosureClock<F>(pub F);
 
-    #[cfg(test)]
     impl<F> Clock for ClosureClock<F>
     where
         F: Fn() -> DateTime<Utc> + Send + Sync,

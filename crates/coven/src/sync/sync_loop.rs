@@ -15,12 +15,12 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info};
 
-use crate::clock::ClockRef;
-use crate::config::Config;
 use crate::protocol::blob::BlobTransitionObserver;
+use coven_foundation::clock::ClockRef;
+use coven_foundation::config::Config;
 #[cfg(test)]
-use crate::store_dir::StoreDir;
-use crate::store_dir::StoreOpenGuard;
+use coven_foundation::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreOpenGuard;
 
 use super::cycle::SyncComponents;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};

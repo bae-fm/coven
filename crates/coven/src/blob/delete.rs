@@ -109,7 +109,7 @@ pub(crate) struct TombstoneDrain<'a> {
     pending_rotation: &'a dyn CloudRotationAccess,
     store_id: &'a str,
     keypair: &'a UserKeypair,
-    clock: &'a dyn crate::clock::Clock,
+    clock: &'a dyn coven_foundation::clock::Clock,
 }
 
 /// Serialized form of a `blob_tombstones/{exact_object_hash}{suffix}` object: the durable,
@@ -290,7 +290,7 @@ impl<'a> TombstoneDrain<'a> {
         pending_rotation: &'a dyn CloudRotationAccess,
         store_id: &'a str,
         keypair: &'a UserKeypair,
-        clock: &'a dyn crate::clock::Clock,
+        clock: &'a dyn coven_foundation::clock::Clock,
     ) -> Self {
         TombstoneDrain {
             db,

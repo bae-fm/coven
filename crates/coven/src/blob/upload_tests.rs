@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::clock::{Clock, FixedClock};
 use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
@@ -21,8 +20,9 @@ use crate::storage::cloud::{
     RevokeOutcome, UploadProgress,
 };
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::store_dir::StoreDir;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
+use coven_foundation::clock::{Clock, FixedClock};
+use coven_foundation::store_dir::StoreDir;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";
@@ -287,7 +287,7 @@ impl UploadFixture {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             limits,
             "test-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
         .expect("open upload database");
@@ -373,7 +373,7 @@ impl UploadFixture {
                 .parent()
                 .expect("Store directory has a parent")
                 .join(format!("{id}.source"));
-            crate::local_file::AtomicStagedFile::write_for_test(&path, bytes)
+            coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
             crate::database::StoreDatabase::new(&self.db)

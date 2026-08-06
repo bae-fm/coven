@@ -603,7 +603,7 @@ async fn remove_snapshot_spool(
             return Err(format!("remove snapshot spool {}: {error}", path.display()));
         }
     }
-    crate::atomic_file::sync_parent_dir(path).await
+    coven_foundation::atomic_file::sync_parent_dir(path).await
 }
 
 pub(crate) fn select_maximal_store_snapshot(

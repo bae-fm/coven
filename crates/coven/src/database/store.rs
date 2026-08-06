@@ -231,7 +231,7 @@ pub(crate) struct StoreDatabase {
     blob_decls: std::sync::Arc<crate::database::BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: crate::protocol::blob::TransferLimits,
-    ids: crate::id_provider::IdRef,
+    ids: coven_foundation::id_provider::IdRef,
     write_statuses: std::sync::Arc<
         std::sync::Mutex<
             std::collections::HashMap<
@@ -333,15 +333,15 @@ impl StoreDatabase {
 
     pub(crate) fn blob_ref_from_change(
         &self,
-        change: &crate::changeset::RowChange,
+        change: &coven_foundation::changeset::RowChange,
     ) -> Result<Option<crate::protocol::blob::BlobRef>, crate::database::BlobDeclError> {
         self.blob_decls.ref_from_change(change)
     }
 
     pub(crate) fn validate_local_blob_cleanup_changes(
         &self,
-        old_changes: &[crate::changeset::RowChange],
-        new_changes: &[crate::changeset::RowChange],
+        old_changes: &[coven_foundation::changeset::RowChange],
+        new_changes: &[coven_foundation::changeset::RowChange],
     ) -> Result<(), crate::database::BlobDeclError> {
         crate::database::local_blob_cleanup_intents::intents_from_changes(
             self.blob_decls.as_ref(),
@@ -724,7 +724,7 @@ impl StoreDatabase {
     }
 }
 
-impl crate::id_provider::IdProvider for StoreDatabase {
+impl coven_foundation::id_provider::IdProvider for StoreDatabase {
     fn new_id(&self) -> String {
         self.ids.new_id()
     }

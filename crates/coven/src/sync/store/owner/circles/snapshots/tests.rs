@@ -20,7 +20,7 @@ impl CircleSnapshotFixture {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             local_device_id.to_string(),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(coven_foundation::clock::SystemClock),
             &crate::sync::test_helpers::test_migrations(),
         )
         .expect("open Circle snapshot test database");

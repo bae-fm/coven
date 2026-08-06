@@ -32,7 +32,7 @@ fn database() -> crate::database::StoreDatabase {
         chrono::Duration::days(30),
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "status-test".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
     )
     .expect("open status test database");

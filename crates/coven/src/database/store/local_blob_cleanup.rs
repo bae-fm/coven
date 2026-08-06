@@ -119,13 +119,13 @@ fn record_durable_intent(
 
 pub(crate) struct LocalBlobCleanup<'operation> {
     database: &'operation StoreDatabase,
-    store_dir: &'operation crate::store_dir::StoreDir,
+    store_dir: &'operation coven_foundation::store_dir::StoreDir,
 }
 
 impl<'operation> LocalBlobCleanup<'operation> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
-        store_dir: &'operation crate::store_dir::StoreDir,
+        store_dir: &'operation coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             database,

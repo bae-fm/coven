@@ -70,7 +70,7 @@ impl StoreMembership {
     ) -> Result<String, SyncError> {
         let _mutation = self.mutations.lock().await;
         let proposal = self.sync.propose_device_exclusion(device_id).await?;
-        Ok(crate::code_envelope::encode_code(
+        Ok(coven_foundation::code_envelope::encode_code(
             DEVICE_EXCLUSION_CODE_PREFIX,
             &proposal,
         ))
@@ -94,7 +94,7 @@ impl StoreMembership {
     ) -> Result<String, SyncError> {
         let _mutation = self.mutations.lock().await;
         let request = self.sync.begin_owner_promotion(device_id).await?;
-        Ok(crate::code_envelope::encode_code(
+        Ok(coven_foundation::code_envelope::encode_code(
             OWNER_PROMOTION_REQUEST_CODE_PREFIX,
             &request,
         ))
@@ -104,7 +104,7 @@ impl StoreMembership {
         let request = decode_operation_code(OWNER_PROMOTION_REQUEST_CODE_PREFIX, code)?;
         let _mutation = self.mutations.lock().await;
         let acceptance = self.sync.accept_owner_promotion(request).await?;
-        Ok(crate::code_envelope::encode_code(
+        Ok(coven_foundation::code_envelope::encode_code(
             OWNER_PROMOTION_ACCEPTANCE_CODE_PREFIX,
             &acceptance,
         ))
@@ -121,15 +121,15 @@ fn decode_operation_code<T: serde::de::DeserializeOwned>(
     prefix: &str,
     code: &str,
 ) -> Result<T, SyncError> {
-    crate::code_envelope::decode_code(prefix, code).map_err(|error| {
+    coven_foundation::code_envelope::decode_code(prefix, code).map_err(|error| {
         let message = match error {
-            crate::code_envelope::EnvelopeError::MissingPrefix => {
+            coven_foundation::code_envelope::EnvelopeError::MissingPrefix => {
                 format!("expected a code beginning with {prefix}")
             }
-            crate::code_envelope::EnvelopeError::InvalidBase64 => {
+            coven_foundation::code_envelope::EnvelopeError::InvalidBase64 => {
                 "the code is not valid base64url".to_string()
             }
-            crate::code_envelope::EnvelopeError::InvalidJson(error) => {
+            coven_foundation::code_envelope::EnvelopeError::InvalidJson(error) => {
                 format!("the code payload is invalid: {error}")
             }
         };
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn operation_codes_require_their_exact_workflow_prefix() {
-        let encoded = crate::code_envelope::encode_code(
+        let encoded = coven_foundation::code_envelope::encode_code(
             DEVICE_EXCLUSION_CODE_PREFIX,
             &TestOperation { id: 7 },
         );

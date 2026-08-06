@@ -6,7 +6,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         authority: &crate::protocol::blob::RowBlobAuthority,
         stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.blob_source
             .stage_verified_plaintext(authority, stored, destination)
             .await

@@ -47,7 +47,7 @@ impl AuthorizedWriterOperation<'_> {
     /// restarting during cleanup resets that exact journal to Pending.
     pub(crate) async fn drain_uploads(
         &self,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
         routing_encryption: Option<&EncryptionService>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<DrainOutcome, DbError> {
@@ -238,7 +238,7 @@ impl AuthorizedWriterOperation<'_> {
         &self,
         stored: &StoredBlobRef,
         source_path: &std::path::Path,
-    ) -> Result<(), crate::store_dir::StoreBlobFileError> {
+    ) -> Result<(), coven_foundation::store_dir::StoreBlobFileError> {
         let locator = stored.locator();
         self.store_dir
             .populate_pinned_blob_from_file(

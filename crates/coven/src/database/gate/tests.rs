@@ -1,7 +1,7 @@
 use super::*;
-use crate::changeset::ChangeOp;
 use crate::database::resolve_and_apply_changeset;
 use crate::database::walk_changeset as walk;
+use coven_foundation::changeset::ChangeOp;
 use rusqlite::session::Session as RqSession;
 use rusqlite::Connection;
 
@@ -35,7 +35,7 @@ impl ConnectionTestSql for Connection {
             self,
             bytes,
             tables,
-            crate::protocol::hlc::now_wall_ms(&crate::clock::SystemClock),
+            crate::protocol::hlc::now_wall_ms(&coven_foundation::clock::SystemClock),
         )
         .expect("apply test changeset");
     }
@@ -247,7 +247,7 @@ fn create_remote_root_schema(c: &Connection) {
     );
 }
 
-fn has_row(changes: &[crate::changeset::RowChange], table: &str, pk: &str) -> bool {
+fn has_row(changes: &[coven_foundation::changeset::RowChange], table: &str, pk: &str) -> bool {
     changes
         .iter()
         .any(|c| c.table == table && c.pk() == Some(pk))
@@ -1561,7 +1561,12 @@ fn second_flip_is_idempotent_under_lww() {
 
 // ---- retract (gate true→false) -------------------------------------------
 
-fn has_op(changes: &[crate::changeset::RowChange], table: &str, pk: &str, op: ChangeOp) -> bool {
+fn has_op(
+    changes: &[coven_foundation::changeset::RowChange],
+    table: &str,
+    pk: &str,
+    op: ChangeOp,
+) -> bool {
     changes
         .iter()
         .any(|c| c.table == table && c.pk() == Some(pk) && c.op == op)

@@ -10,7 +10,6 @@
 
 use tokio::sync::watch;
 
-use crate::config::Config;
 use crate::joining::{BootstrapError, DeviceJoinClient};
 use crate::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
@@ -18,6 +17,7 @@ use crate::sync::store::{
     DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportTiming,
     DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
+use coven_foundation::config::Config;
 
 /// Everything a joining device needs, in the one blob a host renders as a join
 /// code.
@@ -69,7 +69,7 @@ impl DeviceJoinInvite {
 fn scanned_invite_client(
     invite: &DeviceJoinInvite,
     join_request_code: &str,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
@@ -78,7 +78,7 @@ fn scanned_invite_client(
     oauth_clients: crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<std::sync::Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
 ) -> Result<DeviceJoinClient, BootstrapError> {
     DeviceJoinClient::new(
         &invite.invite_code,
@@ -103,7 +103,7 @@ fn scanned_invite_client(
 pub async fn join_with_scanned_invite(
     invite: &[u8],
     join_request_code: &str,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
@@ -112,7 +112,7 @@ pub async fn join_with_scanned_invite(
     oauth_clients: crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<std::sync::Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     timing: DeviceJoinTransportTiming,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
@@ -142,7 +142,7 @@ pub async fn join_with_scanned_invite(
 pub async fn close_scanned_invite_join(
     invite: &[u8],
     join_request_code: &str,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
@@ -151,7 +151,7 @@ pub async fn close_scanned_invite_join(
     oauth_clients: crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<std::sync::Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     timing: DeviceJoinTransportTiming,
 ) -> Result<(), BootstrapError> {
     let invite = DeviceJoinInvite::from_bytes(invite)?;
@@ -182,10 +182,10 @@ pub async fn close_scanned_invite_join(
 fn scanned_invite_test_client(
     invite: &DeviceJoinInvite,
     join_request_code: &str,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
 ) -> Result<DeviceJoinClient, BootstrapError> {
     Ok(scanned_invite_client(
@@ -211,10 +211,10 @@ fn scanned_invite_test_client(
 pub async fn join_with_scanned_invite_over_test_home(
     invite: &[u8],
     join_request_code: &str,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
     timing: DeviceJoinTransportTiming,
     on_status: impl Fn(&str),
@@ -240,10 +240,10 @@ pub async fn join_with_scanned_invite_over_test_home(
 pub async fn close_scanned_invite_join_over_test_home(
     invite: &[u8],
     join_request_code: &str,
-    layout: crate::store_dir::StoreLayout,
+    layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
     timing: DeviceJoinTransportTiming,
 ) -> Result<(), BootstrapError> {

@@ -12,7 +12,6 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
-use crate::clock::FixedClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
@@ -22,13 +21,14 @@ use crate::protocol::membership::MemberRole;
 use crate::protocol::objects::StorageError;
 use crate::protocol::synced_schema::BlobDecl;
 use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
-use crate::store_dir::StoreDir;
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
     plaintext_cipher, pubkey_hex, InterceptedStorage, ProviderObjectExistsInterception,
     StorageInterceptor, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
+use coven_foundation::clock::FixedClock;
+use coven_foundation::store_dir::StoreDir;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -48,7 +48,7 @@ fn open_outbox_db() -> Database {
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
     )
     .expect("open outbox database");
@@ -112,7 +112,7 @@ impl<'a> TombstoneCollector<'a> {
         })
     }
 
-    async fn collect(&self, clock: &dyn crate::clock::Clock) -> Result<usize, String> {
+    async fn collect(&self, clock: &dyn coven_foundation::clock::Clock) -> Result<usize, String> {
         self.store
             .authorize_writer()
             .await
@@ -194,7 +194,7 @@ async fn drain_at(
     storage: &dyn crate::storage::SyncStorage,
     cipher: &dyn crate::storage::CloudCipherAccess,
     keypair: &UserKeypair,
-    clock: &dyn crate::clock::Clock,
+    clock: &dyn coven_foundation::clock::Clock,
 ) -> Result<usize, String> {
     TombstoneDrain::new(
         store_database,
@@ -476,7 +476,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         .expect("load exact upload row");
     let source_dir = tempfile::tempdir().expect("create upload source directory");
     let source_path = source_dir.path().join("upload-row");
-    crate::local_file::AtomicStagedFile::write_for_test(&source_path, b"upload body")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&source_path, b"upload body")
         .await
         .expect("write upload source");
     let enqueue_row = row.clone();

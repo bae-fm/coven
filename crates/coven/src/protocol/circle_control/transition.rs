@@ -12,7 +12,7 @@ impl CircleTransitionDraft {
         store_membership: StoreMembershipStateRef,
         membership_authority: MembershipGrantCreationAuthority,
         mut store_members: Vec<(String, MemberRole)>,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let author_pubkey = keys::public_key_hex(signer);
@@ -167,7 +167,7 @@ impl CircleTransitionDraft {
         member_pubkey: String,
         role: crate::protocol::circle::CircleRole,
         bootstrap: CircleBootstrapRef,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if current_roster_chain.try_resolved()? != *current_roster {
@@ -310,7 +310,7 @@ impl CircleTransitionDraft {
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         if name.trim().is_empty() {
@@ -511,7 +511,7 @@ impl CircleTransitionDraft {
         chosen_metadata: &CircleMetadata,
         keyring: &str,
         losing_branches: Vec<ResolvedConflictBranch>,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_successor_context(
@@ -704,7 +704,7 @@ impl CircleTransitionDraft {
         current_roster: &CircleMaterializedRoster,
         current_metadata: &CircleMetadata,
         keyring: &str,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let context = circle_delete_successor_context(

@@ -12,14 +12,14 @@ fn store_database(db: &crate::database::Database) -> crate::database::StoreDatab
 struct HistoryPublisher<'fixture> {
     database: &'fixture crate::database::Database,
     device: &'fixture crate::sync::test_helpers::TestDevice,
-    store_dir: &'fixture crate::store_dir::StoreDir,
+    store_dir: &'fixture coven_foundation::store_dir::StoreDir,
 }
 
 impl<'fixture> HistoryPublisher<'fixture> {
     fn new(
         database: &'fixture crate::database::Database,
         device: &'fixture crate::sync::test_helpers::TestDevice,
-        store_dir: &'fixture crate::store_dir::StoreDir,
+        store_dir: &'fixture coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             database,
@@ -60,7 +60,7 @@ struct PublishedHistory {
     device: crate::sync::test_helpers::TestDevice,
     membership: MembershipChain,
     _temp: tempfile::TempDir,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl PublishedHistory {

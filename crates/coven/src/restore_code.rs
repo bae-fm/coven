@@ -14,13 +14,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::code_envelope::{self, EnvelopeError};
 use crate::protocol::membership::MembershipFloor;
 #[cfg(test)]
 use crate::protocol::membership::{MembershipCoord, MembershipGrantId, MembershipHeadRef};
 #[cfg(test)]
 use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::CloudHomeJoinInfo;
+use coven_foundation::code_envelope::{self, EnvelopeError};
 
 pub(crate) const RESTORE_CODE_VERSION: u8 = 4;
 
@@ -95,7 +95,7 @@ pub enum RestoreCodeError {
     #[error(
         "The store id in this restore code is invalid. Regenerate it on the source device. ({0})"
     )]
-    InvalidStoreId(crate::store_dir::PathTokenError),
+    InvalidStoreId(coven_foundation::store_dir::PathTokenError),
     #[error("The encryption key in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidEncryptionKey(String),
     #[error(
@@ -146,7 +146,8 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
     // absolute path would put that create/delete outside the stores root. Reject
     // it the moment the code is parsed: a decoded `RestoreCode` always carries a
     // `sid` that is a single safe path component.
-    crate::store_dir::validate_path_token(&code.sid).map_err(RestoreCodeError::InvalidStoreId)?;
+    coven_foundation::store_dir::validate_path_token(&code.sid)
+        .map_err(RestoreCodeError::InvalidStoreId)?;
     // A restore code is unsigned, so a crafted one could name a share the
     // decoder holds no rights to. Restore recovers your own zone, never a
     // shared one, so reject the case structurally at decode.
@@ -159,13 +160,13 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
     }
     match &code.authority {
         RestoreAuthority::ActivatedContinuation(continuation) => {
-            crate::code_envelope::decode_fixed_hex(
+            coven_foundation::code_envelope::decode_fixed_hex(
                 "identity signing key",
                 &continuation.identity_signing_secret,
                 64,
             )
             .map_err(RestoreCodeError::InvalidSigningKey)?;
-            crate::code_envelope::decode_fixed_hex(
+            coven_foundation::code_envelope::decode_fixed_hex(
                 "device signing key",
                 &continuation.device_signing_secret,
                 64,
@@ -173,7 +174,7 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
             .map_err(RestoreCodeError::InvalidSigningKey)?;
         }
         RestoreAuthority::OwnerRecovery(recovery) => {
-            crate::code_envelope::decode_fixed_hex(
+            coven_foundation::code_envelope::decode_fixed_hex(
                 "Owner identity signing key",
                 &recovery.owner_identity_secret,
                 64,
@@ -186,8 +187,12 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
             }
         }
     }
-    crate::code_envelope::decode_fixed_hex("founder public key", &code.founder_pubkey, 32)
-        .map_err(RestoreCodeError::InvalidFounderKey)?;
+    coven_foundation::code_envelope::decode_fixed_hex(
+        "founder public key",
+        &code.founder_pubkey,
+        32,
+    )
+    .map_err(RestoreCodeError::InvalidFounderKey)?;
     if code.membership_floor.0.is_empty() {
         return Err(RestoreCodeError::EmptyMembershipFloor);
     }
@@ -201,7 +206,7 @@ pub(crate) fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeErr
 pub struct RestoreCodeInfo {
     pub store_id: String,
     pub store_name: String,
-    pub cloud_provider: crate::config::CloudProvider,
+    pub cloud_provider: coven_foundation::config::CloudProvider,
     pub needs_oauth: bool,
 }
 

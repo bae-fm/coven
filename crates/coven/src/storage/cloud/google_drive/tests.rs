@@ -10,7 +10,7 @@ use crate::oauth::OAuthTokens;
 
 fn home() -> GoogleDriveCloudHome {
     let config = crate::oauth::OAuthClients::for_tests()
-        .config_for(crate::config::CloudProvider::GoogleDrive)
+        .config_for(coven_foundation::config::CloudProvider::GoogleDrive)
         .expect("Google Drive test client");
     let session = OAuthSession::new(
         OAuthTokens {
@@ -19,7 +19,7 @@ fn home() -> GoogleDriveCloudHome {
             expires_at: None,
         },
         StoreKeys::bind("test".to_string()),
-        Arc::new(crate::clock::SystemClock),
+        Arc::new(coven_foundation::clock::SystemClock),
         config,
         "Google Drive",
     );
@@ -122,9 +122,9 @@ async fn immutable_copy_test_home() -> (
     (
         home()
             .with_endpoints(endpoint.clone(), endpoint)
-            .with_ids(Arc::new(crate::id_provider::SequentialIdProvider::new(
-                "drive-create",
-            ))),
+            .with_ids(Arc::new(
+                coven_foundation::id_provider::SequentialIdProvider::new("drive-create"),
+            )),
         requests,
         shutdown_tx,
     )
@@ -263,7 +263,7 @@ struct FailingMultipartBodyReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for FailingMultipartBodyReader {
+impl coven_foundation::local_file::PlaintextChunkReader for FailingMultipartBodyReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(
@@ -285,7 +285,7 @@ struct EarlyEofMultipartBodyReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for EarlyEofMultipartBodyReader {
+impl coven_foundation::local_file::PlaintextChunkReader for EarlyEofMultipartBodyReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(
@@ -306,7 +306,7 @@ struct PausedMultipartBodyReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for PausedMultipartBodyReader {
+impl coven_foundation::local_file::PlaintextChunkReader for PausedMultipartBodyReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(
@@ -449,9 +449,9 @@ async fn mutable_create_test_home_with_delete_status(
     (
         home()
             .with_endpoints(endpoint.clone(), endpoint)
-            .with_ids(Arc::new(crate::id_provider::SequentialIdProvider::new(
-                "drive-create",
-            ))),
+            .with_ids(Arc::new(
+                coven_foundation::id_provider::SequentialIdProvider::new("drive-create"),
+            )),
         requests,
         deletes,
         server,

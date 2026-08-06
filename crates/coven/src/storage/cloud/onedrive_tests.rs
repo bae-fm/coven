@@ -16,7 +16,7 @@ fn onedrive_does_not_accept_drive_cancellation_status() {
 
 fn home() -> OneDriveCloudHome {
     let config = crate::oauth::OAuthClients::for_tests()
-        .config_for(crate::config::CloudProvider::OneDrive)
+        .config_for(coven_foundation::config::CloudProvider::OneDrive)
         .expect("OneDrive test client");
     let session = OAuthSession::new(
         OAuthTokens {
@@ -25,7 +25,7 @@ fn home() -> OneDriveCloudHome {
             expires_at: None,
         },
         StoreKeys::bind("test".to_string()),
-        Arc::new(crate::clock::SystemClock),
+        Arc::new(coven_foundation::clock::SystemClock),
         config,
         "OneDrive",
     );
@@ -313,7 +313,7 @@ fn parse_list_page_skips_malformed_flat_names() {
 #[test]
 fn oauth_config_uses_consumers_endpoint() {
     let config = crate::oauth::OAuthClients::for_tests()
-        .config_for(crate::config::CloudProvider::OneDrive)
+        .config_for(coven_foundation::config::CloudProvider::OneDrive)
         .expect("build OneDrive oauth config");
     assert!(config.auth_url.contains("/consumers/"));
     assert!(config.token_url.contains("/consumers/"));

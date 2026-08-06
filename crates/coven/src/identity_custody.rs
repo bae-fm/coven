@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::custody::preset::{self, CustodySecret, InMemoryCustody, PassphraseCustody};
 use crate::keys::{DeviceIdentityCustody, KeyError, StoreKeys, UserKeypair, SIGN_SECRETKEYBYTES};
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 pub(crate) use crate::envelope::Passphrase;
 

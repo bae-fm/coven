@@ -16,9 +16,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::CloudHomeError;
-use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
 use crate::oauth::{self, OAuthConfig, OAuthTokens};
+use coven_foundation::clock::ClockRef;
 
 /// Waits out one retry delay. A field so tests exercise the retry schedule
 /// (attempt count, honored `Retry-After`) without sleeping real seconds.
@@ -333,12 +333,12 @@ impl OAuthSession {
 #[cfg(all(test, feature = "oauth-providers"))]
 mod tests {
     use super::*;
-    use crate::clock::{FixedClock, SystemClock};
     use crate::oauth::test_support::{oauth_config, serve_token_response};
     use axum::body::Body;
     use axum::http::Response;
     use axum::Router;
     use chrono::{TimeZone, Utc};
+    use coven_foundation::clock::{FixedClock, SystemClock};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::oneshot;

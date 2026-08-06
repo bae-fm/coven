@@ -13,7 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::id_provider::{IdRef, UuidProvider};
+use coven_foundation::id_provider::{IdRef, UuidProvider};
 
 use super::{
     combine_cleanup_failure, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome,

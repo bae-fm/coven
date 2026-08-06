@@ -19,6 +19,12 @@
 //! Within-region references are unrestricted — this gate asserts the direction
 //! between regions, not the structure inside one.
 //!
+//! A region that has become a crate of its own leaves this table: Cargo's own
+//! dependency graph is then the gate, and it is the stronger one, because it
+//! forbids the upward reference at resolution rather than by inspection. So the
+//! table shrinks as the workspace splits, and holds exactly the regions still
+//! sharing the `coven` crate.
+//!
 //! Tests are held to the same direction as the code they exercise. A test that
 //! reaches up a region is an integration test in the wrong module, or a fixture
 //! that belongs to the layer whose types it builds; either way the regions
@@ -41,7 +47,9 @@ use crate::{is_test_source, RustFile};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Region {
     /// Injectable primitives and value modules with no coven dependencies of
-    /// their own: clocks, ids, staged files, layout, configuration.
+    /// their own. The clock, id, staged-file, store-layout, and configuration
+    /// modules now live in the `coven-foundation` crate; what remains here are
+    /// the value modules still inside `coven`.
     Foundation,
     /// Key custody, encryption, and sealed-secret owners.
     Keys,
@@ -63,15 +71,6 @@ pub(crate) enum Region {
 /// Every top-level module must appear here; an unassigned module fails the
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
-    ("atomic_file", Region::Foundation),
-    ("changeset", Region::Foundation),
-    ("clock", Region::Foundation),
-    ("code_envelope", Region::Foundation),
-    ("config", Region::Foundation),
-    ("id_provider", Region::Foundation),
-    ("local_file", Region::Foundation),
-    ("object_hash", Region::Foundation),
-    ("store_dir", Region::Foundation),
     ("write", Region::Foundation),
     ("custody", Region::Keys),
     ("encryption", Region::Keys),
@@ -86,7 +85,6 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("oauth", Region::Storage),
     ("storage", Region::Storage),
     ("blob", Region::Replication),
-    ("blocking", Region::Foundation),
     ("sync", Region::Replication),
     ("joining", Region::Domain),
     ("restoration", Region::Domain),

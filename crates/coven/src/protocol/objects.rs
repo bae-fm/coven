@@ -370,11 +370,11 @@ impl StorageError {
     }
 }
 
-impl From<crate::store_dir::PathTokenError> for StorageError {
+impl From<coven_foundation::store_dir::PathTokenError> for StorageError {
     /// A blob id/namespace/cloud_path that can't form a safe object key is bad
     /// data, surfaced so the caller refuses the blob rather than reaching storage
     /// with a key that could escape its prefix.
-    fn from(e: crate::store_dir::PathTokenError) -> Self {
+    fn from(e: coven_foundation::store_dir::PathTokenError) -> Self {
         StorageError::Parse(format!("unsafe blob path: {e}"))
     }
 }

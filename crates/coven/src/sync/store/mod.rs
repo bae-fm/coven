@@ -1,6 +1,6 @@
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 use super::cycle::SyncCycleFailure;
 use crate::protocol::store_commit::{CommitFrontier, StoreProtocolRoot};

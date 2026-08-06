@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::blob::transition::LocalBlobTransitions;
-use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::database::StoreDatabase;
 use crate::keys::UserKeypair;
@@ -31,13 +30,14 @@ use crate::protocol::store_commit::ObjectHash;
 use crate::protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
-use crate::store_dir::StoreDir;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use crate::Migration;
+use coven_foundation::clock::SystemClock;
+use coven_foundation::store_dir::StoreDir;
 
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -252,7 +252,7 @@ async fn pending_deletes(db: &Database) -> Vec<String> {
 
 async fn assert_scoped_flip_journaled_atomically(
     db: &Database,
-    expected_changes: &[(&str, crate::changeset::ChangeOp)],
+    expected_changes: &[(&str, coven_foundation::changeset::ChangeOp)],
 ) {
     assert!(
         db.has_store_partition_for_test()
@@ -933,8 +933,8 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     assert_scoped_flip_journaled_atomically(
         &db,
         &[
-            ("notes", crate::changeset::ChangeOp::Delete),
-            ("note_photos", crate::changeset::ChangeOp::Delete),
+            ("notes", coven_foundation::changeset::ChangeOp::Delete),
+            ("note_photos", coven_foundation::changeset::ChangeOp::Delete),
         ],
     )
     .await;
@@ -1061,8 +1061,8 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     assert_scoped_flip_journaled_atomically(
         &db,
         &[
-            ("notes", crate::changeset::ChangeOp::Insert),
-            ("note_photos", crate::changeset::ChangeOp::Insert),
+            ("notes", coven_foundation::changeset::ChangeOp::Insert),
+            ("note_photos", coven_foundation::changeset::ChangeOp::Insert),
         ],
     )
     .await;
@@ -1104,9 +1104,14 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         crate::protocol::blob::content_hash(bytes),
     ))
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&lib, "covers", "cover-host-scoped", bytes)
-        .await
-        .expect("store host-provided fixture");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &lib,
+        "covers",
+        "cover-host-scoped",
+        bytes,
+    )
+    .await
+    .expect("store host-provided fixture");
     owners
         .make_remote("notes", "n-host-scoped", false)
         .await
@@ -1187,8 +1192,8 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     assert_scoped_flip_journaled_atomically(
         &db,
         &[
-            ("notes", crate::changeset::ChangeOp::Insert),
-            ("note_covers", crate::changeset::ChangeOp::Insert),
+            ("notes", coven_foundation::changeset::ChangeOp::Insert),
+            ("note_covers", coven_foundation::changeset::ChangeOp::Insert),
         ],
     )
     .await;
@@ -1255,7 +1260,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         ),
     )
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coveraaa", &cover)
+    coven_foundation::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coveraaa", &cover)
         .await
         .expect("store the host-provided cover in the local store");
 
@@ -1403,7 +1408,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         ),
     )
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coverhost", &cover)
+    coven_foundation::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coverhost", &cover)
         .await
         .expect("store host-provided cover");
 
@@ -1520,7 +1525,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             ),
         )
         .await;
-        crate::store_dir::StoreDir::store_local_blob(&lib, "covers", cover, bytes)
+        coven_foundation::store_dir::StoreDir::store_local_blob(&lib, "covers", cover, bytes)
             .await
             .expect("store host-provided cover");
     }
@@ -1659,7 +1664,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     tokio::fs::create_dir_all(pinned.parent().unwrap())
         .await
         .unwrap();
-    crate::local_file::AtomicStagedFile::write_for_test(&pinned, &bytes)
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&pinned, &bytes)
         .await
         .unwrap();
     let sequence = storage.publish_fixture_position(&lib, "pin-position").await;
@@ -1711,7 +1716,7 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     tokio::fs::create_dir_all(cached.parent().unwrap())
         .await
         .unwrap();
-    crate::local_file::AtomicStagedFile::write_for_test(&cached, &bytes)
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&cached, &bytes)
         .await
         .unwrap();
     let sequence = storage
@@ -1820,7 +1825,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         ),
     )
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coverrrr", &cover)
+    coven_foundation::store_dir::StoreDir::store_local_blob(&lib_a, "covers", "coverrrr", &cover)
         .await
         .expect("store host-provided blob");
 
@@ -1898,9 +1903,14 @@ async fn make_remote_rejects_remote_root() {
         ),
     )
     .await;
-    crate::store_dir::StoreDir::store_local_blob(&lib, "covers", "coverrrr", b"REMOTE-ROOT")
-        .await
-        .expect("store host-provided blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &lib,
+        "covers",
+        "coverrrr",
+        b"REMOTE-ROOT",
+    )
+    .await
+    .expect("store host-provided blob");
 
     let err = owners
         .make_remote("notes", "n-remote-root", true)

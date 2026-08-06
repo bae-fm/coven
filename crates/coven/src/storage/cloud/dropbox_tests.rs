@@ -16,7 +16,7 @@ fn home() -> DropboxCloudHome {
 
 fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
     let config = crate::oauth::OAuthClients::for_tests()
-        .config_for(crate::config::CloudProvider::Dropbox)
+        .config_for(coven_foundation::config::CloudProvider::Dropbox)
         .expect("Dropbox test client");
     let session = OAuthSession::new(
         OAuthTokens {
@@ -25,7 +25,7 @@ fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
             expires_at: None,
         },
         StoreKeys::bind("test".to_string()),
-        Arc::new(crate::clock::SystemClock),
+        Arc::new(coven_foundation::clock::SystemClock),
         config,
         "Dropbox",
     );
@@ -424,7 +424,7 @@ fn dropbox_api_arg_escapes_non_ascii_for_headers() {
 #[test]
 fn oauth_config_uses_dropbox_urls() {
     let config = crate::oauth::OAuthClients::for_tests()
-        .config_for(crate::config::CloudProvider::Dropbox)
+        .config_for(coven_foundation::config::CloudProvider::Dropbox)
         .expect("build Dropbox oauth config");
     assert_eq!(config.auth_url, "https://www.dropbox.com/oauth2/authorize");
     assert_eq!(config.token_url, "https://api.dropboxapi.com/oauth2/token");

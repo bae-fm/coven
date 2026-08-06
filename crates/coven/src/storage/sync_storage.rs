@@ -169,7 +169,7 @@ pub(crate) trait SyncStorage: Send + Sync {
         blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError>;
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError>;
 
     /// Open a reader that serves plaintext ranges of a stored blob by fetching
     /// only the sealed chunks covering each range. The ranged counterpart of
@@ -381,7 +381,7 @@ where
         blob: &crate::protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, StorageError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         (**self)
             .stage_verified_blob_plaintext(blob, protection, dest)
             .await

@@ -423,7 +423,7 @@ pub enum DbError {
     #[error("{0}")]
     AudiencePackage(#[from] crate::protocol::audience_package::AudiencePackageError),
     #[error("{0}")]
-    ObjectHash(#[from] crate::object_hash::InvalidObjectHash),
+    ObjectHash(#[from] coven_foundation::object_hash::InvalidObjectHash),
     #[error("{0}")]
     BlobLocator(#[from] crate::protocol::blob::locator::BlobLocatorError),
     #[error("{0}")]
@@ -435,7 +435,7 @@ pub enum DbError {
     #[error("{0}")]
     Storage(#[from] crate::protocol::objects::StorageError),
     #[error("unsafe blob path: {0}")]
-    BlobPath(#[from] crate::store_dir::PathTokenError),
+    BlobPath(#[from] coven_foundation::store_dir::PathTokenError),
     #[error("{0}")]
     Io(#[from] std::io::Error),
     /// A stored integer column did not fit the type the schema says it holds.
@@ -458,7 +458,7 @@ pub enum DbError {
     #[error("{0}")]
     BlobOpeningAuthority(#[from] crate::protocol::blob::BlobOpeningAuthorityError),
     #[error("{0}")]
-    CommitNewFile(#[from] crate::local_file::CommitNewFileError),
+    CommitNewFile(#[from] coven_foundation::local_file::CommitNewFileError),
     /// Staging a write's audience-move blobs failed. The implementation of
     /// [`AudienceBlobMoveStaging`] is injected from above, so its failure is
     /// carried as an opaque source rather than named here.
@@ -585,7 +585,7 @@ struct DatabaseState {
     /// here for the same single-owner reason as `blob_tombstone_grace`.
     transfer_limits: crate::protocol::blob::TransferLimits,
     store_runtime: crate::database::StoreDatabaseRuntime,
-    ids: crate::id_provider::IdRef,
+    ids: coven_foundation::id_provider::IdRef,
     write_statuses:
         Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
     #[cfg(test)]

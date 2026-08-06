@@ -290,7 +290,7 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "scoped-replay-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("open scoped replay database")
@@ -338,7 +338,7 @@ impl EffectiveAccessFixture {
 
     async fn pull_member(
         &self,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<StorePullResult, crate::sync::test_helpers::TestPullError> {
         self.member_device
             .pull_store(store_dir)
@@ -395,8 +395,8 @@ impl EffectiveAccessFixture {
     async fn create(
         label: &str,
         member_database: &Database,
-        owner_store_dir: &crate::store_dir::StoreDir,
-        member_store_dir: &crate::store_dir::StoreDir,
+        owner_store_dir: &coven_foundation::store_dir::StoreDir,
+        member_store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Self {
         let owner_database = open_scoped_replay_database();
         let owner = crate::keys::UserKeypair::generate();

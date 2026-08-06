@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::encryption::MasterKeyring;
 pub use crate::envelope::Passphrase;
 use crate::keys::{KeyError, MasterKeyCustody, StoreKeys};
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 pub(crate) mod preset;
 use preset::{CustodySecret, InMemoryCustody, PassphraseCustody};

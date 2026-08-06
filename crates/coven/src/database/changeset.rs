@@ -5,7 +5,7 @@ use rusqlite::hooks::Action;
 use rusqlite::session::ChangesetIter;
 use rusqlite::types::ValueRef;
 
-use crate::changeset::{ChangeOp, RowChange};
+use coven_foundation::changeset::{ChangeOp, RowChange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UpdateValue {

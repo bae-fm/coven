@@ -14,7 +14,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "prepared-audience-objects".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
     )
     .expect("open database");
@@ -199,9 +199,12 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
 
     let directory = tempfile::tempdir().expect("temp dir");
     let spool = directory.path().join("blob.spool");
-    crate::local_file::AtomicStagedFile::write_for_test(&spool, b"stored representation")
-        .await
-        .expect("write spool");
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(
+        &spool,
+        b"stored representation",
+    )
+    .await
+    .expect("write spool");
     let blob_remote = crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
         crate::protocol::remote_object::SharedObjectRecord {
             identity: crate::protocol::remote_object::SharedLiveSetObjectRef {

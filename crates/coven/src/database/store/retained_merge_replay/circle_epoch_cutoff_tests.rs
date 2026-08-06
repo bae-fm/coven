@@ -1,9 +1,9 @@
 use super::*;
-use crate::id_provider::SequentialIdProvider;
 use crate::protocol::causal_grants::AuthorStreamId;
 use crate::protocol::circle::{CircleControlCoord, CircleEpochId, CircleId};
 use crate::protocol::membership::MembershipGrantId;
 use crate::protocol::objects::ObjectSlot;
+use coven_foundation::id_provider::SequentialIdProvider;
 
 fn commit_reference(stream_id: AuthorStreamId, sequence: u64, label: &str) -> StoreBatchCommitRef {
     let bytes = format!("{label}-stored");

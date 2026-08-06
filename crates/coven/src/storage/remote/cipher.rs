@@ -170,7 +170,7 @@ impl CloudCipher {
     /// The at-rest cipher a home's storage mode selects: an opaque home seals
     /// under its store key (`Encrypted`), a browsable home stores in the clear
     /// (`Plaintext`). The sibling of [`BlobPathScheme::for_storage`] — together
-    /// they map a [`HomeStorage`](crate::config::HomeStorage) to its
+    /// they map a [`HomeStorage`](coven_foundation::config::HomeStorage) to its
     /// (path scheme, at-rest cipher) pair.
     ///
     /// `encryption` is the store master service; it is required for (and only
@@ -180,7 +180,7 @@ impl CloudCipher {
     /// [`BlobRangeReader`] under this cipher, so a read applies the same
     /// protection the upload sealed under.
     pub(crate) fn for_storage(
-        storage: crate::config::HomeStorage,
+        storage: coven_foundation::config::HomeStorage,
         encryption: Option<EncryptionService>,
     ) -> Option<Self> {
         if storage.is_opaque() {
@@ -286,7 +286,7 @@ impl CloudCipher {
         aad_context: &[u8],
         chunk_size: std::num::NonZeroU32,
     ) -> Result<BlobBody, String> {
-        let plaintext_len = crate::local_file::file_len(file_path).await?;
+        let plaintext_len = coven_foundation::local_file::file_len(file_path).await?;
         let header = SealedBlobHeader::new(
             chunk_size,
             plaintext_len,

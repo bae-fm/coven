@@ -10,11 +10,11 @@
 
 use tracing::{debug, info, warn};
 
-use crate::changeset::RowChange;
 use crate::database::DbError;
 use crate::protocol::blob::BlobTransitionObserver;
 use crate::protocol::blob::DrainOutcome;
-use crate::store_dir::StoreDir;
+use coven_foundation::changeset::RowChange;
+use coven_foundation::store_dir::StoreDir;
 
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
@@ -181,7 +181,7 @@ struct CompletedPullCycle {
 
 struct AuthorizedSyncCycle<'cycle, 'store> {
     device_id: &'cycle str,
-    clock: &'cycle dyn crate::clock::Clock,
+    clock: &'cycle dyn coven_foundation::clock::Clock,
     cipher: &'cycle dyn CloudCipherAccess,
     pending_rotation: &'cycle dyn CloudRotationAccess,
     master_keys: Option<&'cycle dyn crate::keys::MasterKeyCustody>,
@@ -887,7 +887,7 @@ impl SyncComponents {
 
     pub(crate) async fn drain_uploads(
         &self,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<crate::protocol::blob::DrainOutcome, DbError> {
         self.store
@@ -1090,7 +1090,7 @@ impl SyncComponents {
 
     pub(crate) async fn run_cycle(
         &self,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
         master_keys: Option<&dyn crate::keys::MasterKeyCustody>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {

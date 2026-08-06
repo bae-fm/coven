@@ -19,11 +19,11 @@ impl CloudHomeFactory {
 
     pub(crate) async fn create(
         &self,
-        config: &crate::config::Config,
-        clock: crate::clock::ClockRef,
+        config: &coven_foundation::config::Config,
+        clock: coven_foundation::clock::ClockRef,
         cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
     ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
-        use crate::config::CloudProvider;
+        use coven_foundation::config::CloudProvider;
 
         #[cfg(not(feature = "oauth-providers"))]
         let _ = (&clock, &self.oauth_clients);

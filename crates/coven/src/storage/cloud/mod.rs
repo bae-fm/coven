@@ -142,7 +142,7 @@ pub async fn write_cloud_object_stream(
     destination: &Path,
     stream: CloudObjectStream,
 ) -> Result<u64, CloudFileReadError> {
-    let staged = crate::local_file::AtomicStagedFile::create(destination)
+    let staged = coven_foundation::local_file::AtomicStagedFile::create(destination)
         .await
         .map_err(CloudFileReadError::Local)?;
     let (staged, written) =
@@ -150,13 +150,14 @@ pub async fn write_cloud_object_stream(
             .write_byte_stream(stream)
             .await
             .map_err(|error| match error {
-                crate::local_file::ByteStreamWriteError::Source(error) => {
+                coven_foundation::local_file::ByteStreamWriteError::Source(error) => {
                     CloudFileReadError::Source(error)
                 }
-                crate::local_file::ByteStreamWriteError::SourceCleanup { source, cleanup } => {
-                    CloudFileReadError::SourceCleanup { source, cleanup }
-                }
-                crate::local_file::ByteStreamWriteError::Local(error) => {
+                coven_foundation::local_file::ByteStreamWriteError::SourceCleanup {
+                    source,
+                    cleanup,
+                } => CloudFileReadError::SourceCleanup { source, cleanup },
+                coven_foundation::local_file::ByteStreamWriteError::Local(error) => {
                     CloudFileReadError::Local(error)
                 }
             })?;
@@ -281,8 +282,8 @@ impl std::fmt::Debug for CloudHomeJoinInfo {
 }
 
 impl CloudHomeJoinInfo {
-    pub fn cloud_provider(&self) -> crate::config::CloudProvider {
-        use crate::config::CloudProvider;
+    pub fn cloud_provider(&self) -> coven_foundation::config::CloudProvider {
+        use coven_foundation::config::CloudProvider;
         match self {
             CloudHomeJoinInfo::S3 { .. } => CloudProvider::S3,
             CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,

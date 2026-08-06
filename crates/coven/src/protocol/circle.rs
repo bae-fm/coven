@@ -455,7 +455,7 @@ macro_rules! generated_hex_id {
         pub struct $name([u8; 16]);
 
         impl $name {
-            pub(crate) fn generate(ids: &dyn crate::id_provider::IdProvider) -> Self {
+            pub(crate) fn generate(ids: &dyn coven_foundation::id_provider::IdProvider) -> Self {
                 Self(generated_id_bytes(ids, $domain))
             }
         }
@@ -472,7 +472,7 @@ generated_hex_id!(CircleEpochId, CIRCLE_EPOCH_ID_GENERATION_DOMAIN);
 generated_hex_id!(AccessLeafId, ACCESS_LEAF_ID_GENERATION_DOMAIN);
 
 pub(crate) fn generated_id_digest(
-    ids: &dyn crate::id_provider::IdProvider,
+    ids: &dyn coven_foundation::id_provider::IdProvider,
     domain: &[u8],
 ) -> ObjectHash {
     let id = ids.new_id();
@@ -482,7 +482,10 @@ pub(crate) fn generated_id_digest(
     ObjectHash::digest(&material)
 }
 
-fn generated_id_bytes(ids: &dyn crate::id_provider::IdProvider, domain: &[u8]) -> [u8; 16] {
+fn generated_id_bytes(
+    ids: &dyn coven_foundation::id_provider::IdProvider,
+    domain: &[u8],
+) -> [u8; 16] {
     generated_id_digest(ids, domain).as_bytes()[..16]
         .try_into()
         .expect("SHA-256 digest prefix has fixed length")

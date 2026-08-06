@@ -9,7 +9,7 @@ use crate::protocol::blob::locator::RemoteAudience;
 use crate::protocol::blob::{Provenance, RowBlobAuthority};
 use crate::protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
 use crate::storage::SyncStorage;
-use crate::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreDir;
 
 #[doc(hidden)]
 pub(crate) struct HostWriteBlobStaging {
@@ -421,7 +421,7 @@ impl StagedAudienceBlobFile {
                 return Err(format!("remove staged audience blob: {error}"));
             }
         }
-        crate::atomic_file::sync_parent_dir(&self.path).await
+        coven_foundation::atomic_file::sync_parent_dir(&self.path).await
     }
 }
 
@@ -458,7 +458,7 @@ fn source_authority(
 
 enum MoveSourcePlaintext {
     Existing(PathBuf),
-    Downloaded(crate::local_file::AtomicStagedFile),
+    Downloaded(coven_foundation::local_file::AtomicStagedFile),
 }
 
 impl MoveSourcePlaintext {

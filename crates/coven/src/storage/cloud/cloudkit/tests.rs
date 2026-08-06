@@ -1,8 +1,8 @@
 use super::chunking::*;
 use super::exact::*;
 use super::*;
-use crate::id_provider::SequentialIdProvider;
 use crate::storage::cloud::{no_progress, BlobBody};
+use coven_foundation::id_provider::SequentialIdProvider;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -581,7 +581,7 @@ struct FailingBodyReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for FailingBodyReader {
+impl coven_foundation::local_file::PlaintextChunkReader for FailingBodyReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(
@@ -605,7 +605,7 @@ struct PausedBodyReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for PausedBodyReader {
+impl coven_foundation::local_file::PlaintextChunkReader for PausedBodyReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(

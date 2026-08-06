@@ -1,0 +1,37 @@
+[package]
+name = "coven-foundation"
+version = "1.0.0-rc.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Clocks, identifier sources, staged file writes, store layout, and configuration underneath Coven"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
+
+[lib]
+name = "coven_foundation"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# The clock and id fakes downstream crates test against, so every consumer of
+# `Clock`/`IdProvider` tests against one set of fakes instead of mirroring them.
+test-utils = []
+
+[lints]
+workspace = true

@@ -13,7 +13,7 @@ struct FailingBodyReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for FailingBodyReader {
+impl coven_foundation::local_file::PlaintextChunkReader for FailingBodyReader {
     type Error = crate::storage::local_file::PlaintextChunkError;
 
     async fn next_chunk(
@@ -252,7 +252,7 @@ async fn atomic_temp_paths(directory: &std::path::Path) -> Vec<std::path::PathBu
         if entry
             .file_name()
             .to_string_lossy()
-            .starts_with(crate::local_file::TEMP_BLOB_PREFIX)
+            .starts_with(coven_foundation::local_file::TEMP_BLOB_PREFIX)
         {
             temps.push(entry.path());
         }

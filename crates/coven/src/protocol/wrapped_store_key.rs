@@ -218,7 +218,7 @@ impl WrappedStoreKeyRef {
 
     pub(crate) fn validate_identity(&self) -> Result<(), StorageError> {
         for pubkey in [&self.owner_pubkey, &self.recipient_pubkey] {
-            crate::store_dir::validate_path_token(pubkey)?;
+            coven_foundation::store_dir::validate_path_token(pubkey)?;
             let bytes = hex::decode(pubkey).map_err(|_| {
                 StorageError::InvalidContent(
                     "wrapped Store-key ref contains an invalid public key".to_string(),

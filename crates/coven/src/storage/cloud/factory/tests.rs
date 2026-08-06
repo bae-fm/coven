@@ -1,12 +1,12 @@
 use super::*;
-use crate::clock::FixedClock;
-use crate::config::{CloudProvider, Config, HomeStorage};
 use crate::keys::StoreKeys;
 use crate::storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
 };
-use crate::store_dir::StoreDir;
+use coven_foundation::clock::FixedClock;
+use coven_foundation::config::{CloudProvider, Config, HomeStorage};
+use coven_foundation::store_dir::StoreDir;
 use std::sync::Mutex;
 
 struct ScopeRecordingOps {
@@ -179,7 +179,8 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
         StoreKeys::bind(config.store_id.clone()),
         crate::oauth::OAuthClients::empty(),
     );
-    let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+    let clock: coven_foundation::clock::ClockRef =
+        std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
     let error = match factory.create(&config, clock, None).await {
         Ok(_) => panic!("a provider with no bucket must not build a cloud home"),
@@ -195,7 +196,8 @@ async fn neither_owner_nor_zone_builds_a_private_home() {
     let config = cloudkit_config(None);
     let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
-    let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+    let clock: coven_foundation::clock::ClockRef =
+        std::sync::Arc::new(FixedClock(chrono::Utc::now()));
     let factory = CloudHomeFactory::new(key_service, crate::oauth::OAuthClients::empty());
 
     let home = factory
@@ -215,7 +217,8 @@ async fn both_owner_and_zone_build_a_shared_home() {
     let config = cloudkit_config(Some(("owner-name", "zone-name")));
     let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
-    let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+    let clock: coven_foundation::clock::ClockRef =
+        std::sync::Arc::new(FixedClock(chrono::Utc::now()));
     let factory = CloudHomeFactory::new(key_service, crate::oauth::OAuthClients::empty());
 
     let home = factory
@@ -239,7 +242,8 @@ async fn mixed_owner_zone_is_a_configuration_error() {
     config.cloud_home.cloudkit_owner_name = Some("owner-name".to_string());
     let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
-    let clock: crate::clock::ClockRef = std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+    let clock: coven_foundation::clock::ClockRef =
+        std::sync::Arc::new(FixedClock(chrono::Utc::now()));
     let factory = CloudHomeFactory::new(key_service, crate::oauth::OAuthClients::empty());
 
     let result = factory.create(&config, clock, Some(ops)).await;

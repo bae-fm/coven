@@ -1,7 +1,7 @@
 use super::device_state::merge_history_cuts;
 use super::*;
 
-pub use crate::object_hash::ObjectHash;
+pub use coven_foundation::object_hash::ObjectHash;
 
 /// Closed coordinate of one Store commit in its author stream.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

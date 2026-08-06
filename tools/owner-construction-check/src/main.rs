@@ -838,12 +838,20 @@ fn check(
     })
 }
 
+// The database module's own files: raw SQLite and SQL are its subject, so the
+// boundary exempts them.
+const DATABASE_MODULE_ROOT: &str = "crates/coven/src/database.rs";
+const DATABASE_MODULE_DIR: &str = "crates/coven/src/database/";
+// Declares the tables Coven owns, which the boundary reads to tell a Coven
+// table name from a host's.
+const COVEN_SCHEMA_FILE: &str = "crates/coven/src/database/coven_schema.rs";
+
 fn find_database_boundary_violations(files: &[RustFile]) -> Vec<DatabaseBoundaryViolation> {
     let mut violations = BTreeSet::new();
     let coven_tables = collect_coven_table_names(files);
     for file in files {
-        if file.relative_path == "crates/coven/src/database.rs"
-            || file.relative_path.starts_with("crates/coven/src/database/")
+        if file.relative_path == DATABASE_MODULE_ROOT
+            || file.relative_path.starts_with(DATABASE_MODULE_DIR)
         {
             continue;
         }
@@ -915,7 +923,7 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
 fn collect_coven_table_names(files: &[RustFile]) -> BTreeSet<String> {
     let mut tables = BTreeSet::new();
     for file in files {
-        if file.relative_path != "crates/coven/src/database/coven_schema.rs" {
+        if file.relative_path != COVEN_SCHEMA_FILE {
             continue;
         }
         for item in &file.syntax.items {
@@ -1935,6 +1943,59 @@ fn could_be_local_associated_function_path(segments: &[&syn::PathSegment]) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every gate in this tool keys on a raw repository path. A path key whose
+    /// file has been renamed or moved does not fail — it simply stops matching,
+    /// and the gate it belongs to silently covers nothing. That has happened
+    /// twice. Resolve every declared key against the working tree so a move
+    /// that strands one fails here instead of going quiet.
+    #[test]
+    fn every_declared_path_key_resolves_to_a_file_in_the_tree() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("tool lives two directories under the repository root")
+            .to_path_buf();
+
+        let mut keys: Vec<(String, String)> = Vec::new();
+        for (flag, boundary) in CAPABILITY_BOUNDARY_FLAGS {
+            for capability in *boundary {
+                for home in capability.allowed {
+                    keys.push((format!("{flag} ({})", capability.kind), (*home).to_string()));
+                }
+            }
+        }
+        for (path, owner, method) in COMPOSITION_ROOTS {
+            keys.push((
+                format!("composition root {owner}::{method}"),
+                (*path).to_string(),
+            ));
+        }
+        for path in [DATABASE_MODULE_ROOT, DATABASE_MODULE_DIR, COVEN_SCHEMA_FILE] {
+            keys.push(("--database-boundary".to_string(), path.to_string()));
+        }
+
+        let stranded: Vec<String> = keys
+            .into_iter()
+            .filter(|(_, key)| {
+                let resolved = root.join(key);
+                // A key ending in `/` names a directory prefix; every other key
+                // names one file.
+                if key.ends_with('/') {
+                    !resolved.is_dir()
+                } else {
+                    !resolved.is_file()
+                }
+            })
+            .map(|(gate, key)| format!("{gate}: {key}"))
+            .collect();
+
+        assert!(
+            stranded.is_empty(),
+            "path keys no longer resolve, so the gates keyed on them cover nothing:\n{}",
+            stranded.join("\n")
+        );
+    }
 
     #[test]
     fn paths_cannot_skip_over_their_parent_module() {

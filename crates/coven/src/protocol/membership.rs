@@ -835,7 +835,7 @@ pub enum HeldStorePositionReason {
 }
 
 pub(crate) enum ApplyOutcome {
-    Applied(Vec<crate::changeset::RowChange>),
+    Applied(Vec<coven_foundation::changeset::RowChange>),
     Held(HeldStorePositionReason),
 }
 

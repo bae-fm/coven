@@ -126,15 +126,15 @@ fn increment(state: &mut HlcState) {
 pub struct Hlc {
     device_id: String,
     state: Mutex<HlcState>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
 }
 
 impl Hlc {
     pub fn try_new(
         device_id: String,
-        clock: crate::clock::ClockRef,
-    ) -> Result<Self, crate::store_dir::PathTokenError> {
-        crate::store_dir::validate_path_token(&device_id)?;
+        clock: coven_foundation::clock::ClockRef,
+    ) -> Result<Self, coven_foundation::store_dir::PathTokenError> {
+        coven_foundation::store_dir::validate_path_token(&device_id)?;
         Ok(Self {
             device_id,
             state: Mutex::new(HlcState {
@@ -146,7 +146,7 @@ impl Hlc {
     }
 
     /// Create a new HLC with the given device ID.
-    pub fn new(device_id: String, clock: crate::clock::ClockRef) -> Self {
+    pub fn new(device_id: String, clock: coven_foundation::clock::ClockRef) -> Self {
         Self::try_new(device_id, clock).expect("device_id must be a safe path token")
     }
 
@@ -275,7 +275,7 @@ impl UpdatedAtStamper {
 /// round-trips, gate/FK mechanics tests), where the honest receiver-now is real
 /// wall time and the future-skew bound is incidental, not under test.
 #[cfg(test)]
-pub(crate) fn now_wall_ms(clock: &dyn crate::clock::Clock) -> u64 {
+pub(crate) fn now_wall_ms(clock: &dyn coven_foundation::clock::Clock) -> u64 {
     clock
         .now()
         .timestamp_millis()
@@ -286,7 +286,7 @@ pub(crate) fn now_wall_ms(clock: &dyn crate::clock::Clock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::{ClosureClock, FixedClock, SystemClock};
+    use coven_foundation::clock::{ClosureClock, FixedClock, SystemClock};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn instant(ms: u64) -> chrono::DateTime<chrono::Utc> {
@@ -294,11 +294,11 @@ mod tests {
             .expect("valid test clock instant")
     }
 
-    fn fixed_clock(ms: u64) -> crate::clock::ClockRef {
+    fn fixed_clock(ms: u64) -> coven_foundation::clock::ClockRef {
         Arc::new(FixedClock(instant(ms)))
     }
 
-    fn advancing_clock(start: u64) -> (Arc<AtomicU64>, crate::clock::ClockRef) {
+    fn advancing_clock(start: u64) -> (Arc<AtomicU64>, coven_foundation::clock::ClockRef) {
         let time = Arc::new(AtomicU64::new(start));
         let time_clone = time.clone();
         (
@@ -324,7 +324,7 @@ mod tests {
     fn new_rejects_empty_device_id() {
         assert!(matches!(
             Hlc::try_new(String::new(), Arc::new(SystemClock)),
-            Err(crate::store_dir::PathTokenError::Empty),
+            Err(coven_foundation::store_dir::PathTokenError::Empty),
         ));
     }
 

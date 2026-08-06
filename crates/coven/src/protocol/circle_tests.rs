@@ -38,7 +38,7 @@ fn founder_payload_is_complete_and_acyclic() {
 
     let (membership, membership_authority) =
         merge_membership_ref(&owner, &members, "founder-circle-merge");
-    let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
+    let ids = coven_foundation::id_provider::SequentialIdProvider::new("founder-circle");
     let candidate_family = candidate_family("founder-circle");
     let creation = CircleTransitionDraft::founder(
         ObjectHash::digest(b"store-root"),
@@ -119,7 +119,7 @@ fn access_verification_rejects_signed_context_and_proof_substitution() {
         (peer_pubkey.clone(), membership::MemberRole::Member),
     ];
     let (membership, authority) = merge_membership_ref(&owner, &members, "access-verification");
-    let ids = crate::id_provider::SequentialIdProvider::new("access-verification");
+    let ids = coven_foundation::id_provider::SequentialIdProvider::new("access-verification");
     let candidate_family = candidate_family("access-verification");
     let creation = CircleTransitionDraft::founder(
         ObjectHash::digest(b"store-root"),

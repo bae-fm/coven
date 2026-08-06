@@ -40,7 +40,7 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn read_local_blob_for_test(
         &self,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         table: &str,
         row_id: &str,
     ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {

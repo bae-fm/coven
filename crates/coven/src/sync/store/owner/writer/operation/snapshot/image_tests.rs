@@ -361,7 +361,7 @@ struct PublishedScopedSnapshot {
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     membership: crate::protocol::membership::MembershipChain,
     _store_dir_temp: tempfile::TempDir,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl PublishedScopedSnapshot {
@@ -492,7 +492,7 @@ impl PublishedScopedSnapshot {
                 crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
                 crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
                 Some(&routing),
             )
@@ -938,7 +938,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         .await
         .expect("verify pre-migration scoped snapshot");
     let routing = crate::encryption::EncryptionService::from_key([42; 32]);
-    let store_dir = crate::store_dir::StoreDir::new(destination.path());
+    let store_dir = coven_foundation::store_dir::StoreDir::new(destination.path());
     let database = bootstrap
         .install(
             &store_dir,
@@ -946,7 +946,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "joining-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &target_migrations,
             Some(&routing),
         )
@@ -1175,7 +1175,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             )
             .await
             .expect("verify bootstrap authority");
-        let store_dir = crate::store_dir::StoreDir::new(destination.path());
+        let store_dir = coven_foundation::store_dir::StoreDir::new(destination.path());
         let installed = bootstrap
             .install(
                 &store_dir,
@@ -1183,7 +1183,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
                 crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
                 crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
                 None,
             )
@@ -1383,7 +1383,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
             ))
             .await;
         let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
-        crate::store_dir::StoreDir::store_local_blob(
+        coven_foundation::store_dir::StoreDir::store_local_blob(
             &source_dir,
             "photos",
             "photo1",
@@ -1409,7 +1409,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         .await
         .expect("prepare source blob publication");
         components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish source blob");
 
@@ -1589,7 +1589,7 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
         remote: replacement_remote,
         spool_path: None,
     };
-    let store_dir = crate::store_dir::StoreDir::new(dir.path());
+    let store_dir = coven_foundation::store_dir::StoreDir::new(dir.path());
     let error =
         SnapshotDatabaseImage::replace(store_dir.as_ref().join("snapshot-closure.db"), &image)
             .and_then(|image| image.install_blob_graph(&[prepared]))

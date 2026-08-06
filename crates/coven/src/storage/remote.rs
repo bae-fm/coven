@@ -282,7 +282,7 @@ impl CloudSyncStorage {
                         "an opaque-home blob requires an uploader for {namespace}/{id}"
                     ))
                 })?;
-                Ok(crate::store_dir::StoreDir::uploader_hashed_key(
+                Ok(coven_foundation::store_dir::StoreDir::uploader_hashed_key(
                     namespace, uploader, id,
                 )?)
             }
@@ -292,8 +292,8 @@ impl CloudSyncStorage {
                         "unobfuscated blob-path home requires a cloud_path for blob {namespace}/{id}"
                     ))
                 })?;
-                crate::store_dir::validate_path_token(namespace)?;
-                crate::store_dir::validate_cloud_path(path)?;
+                coven_foundation::store_dir::validate_path_token(namespace)?;
+                coven_foundation::store_dir::validate_cloud_path(path)?;
                 Ok(format!("{namespace}/{path}"))
             }
         }
@@ -457,7 +457,7 @@ async fn run_storage_cpu<T>(
 where
     T: Send + 'static,
 {
-    crate::blocking::run(work)
+    coven_foundation::blocking::run(work)
         .await
         .map_err(|error| StorageError::Storage(format!("{operation}: {error}")))?
 }

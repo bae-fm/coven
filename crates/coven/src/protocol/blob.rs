@@ -59,7 +59,7 @@
 //! until the next read re-fetches it — covers are not pinned. A **Local** blob is not
 //! in the cache: a user-provided Local blob is the user's file at its path (an
 //! external ref); a host-provided Local blob is in coven's local store, whose
-//! paths and file operations are owned by [`crate::store_dir::StoreDir`]. The cache is the mechanism for *remoteness* — so
+//! paths and file operations are owned by [`coven_foundation::store_dir::StoreDir`]. The cache is the mechanism for *remoteness* — so
 //! `CacheEager`/`CacheLazy`/pin/budget describe a blob only while it is Remote, never
 //! while it is Local.
 //!
@@ -75,7 +75,7 @@
 //!   bytes: a positioned read of a local file, or the sealed chunks covering the
 //!   range fetched from the cloud object and opened — plus pin/unpin, clear, and
 //!   budget eviction.
-//! - [`crate::store_dir::StoreDir`] — coven's own copy of a **host-provided Local**
+//! - [`coven_foundation::store_dir::StoreDir`] — coven's own copy of a **host-provided Local**
 //!   blob, in `storage/local/<namespace>/<id>`. Never evicted; the budget sweep
 //!   never walks it.
 //! - [`upload`] — the cloud-write half: drain the durable upload queue, sealing
@@ -227,7 +227,7 @@ pub enum Provenance {
     /// the bytes back to a user file, so it **needs a destination path**.
     UserProvided,
     /// The host hands coven the data; coven keeps its own copy in the local store
-    /// (`storage/local/<namespace>/<id>`, owned by [`crate::store_dir::StoreDir`]). `make_local`
+    /// (`storage/local/<namespace>/<id>`, owned by [`coven_foundation::store_dir::StoreDir`]). `make_local`
     /// restores it to the local store, so it needs **no path**.
     HostProvided,
 }

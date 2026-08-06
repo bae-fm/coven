@@ -23,7 +23,7 @@ fn open(path: &Path, device_id: &str) -> Database {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
     )
     .expect("open exclusion test database")
@@ -543,7 +543,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
                 crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
                 crate::protocol::blob::TransferLimits::one_at_a_time(),
                 "post-snapshot-joining-device".to_string(),
-                std::sync::Arc::new(crate::clock::SystemClock),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
                 None,
             )
@@ -2001,7 +2001,7 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
                 crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
                 crate::protocol::blob::TransferLimits::one_at_a_time(),
                 device_id,
-                std::sync::Arc::new(crate::clock::SystemClock),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
                 None,
             )

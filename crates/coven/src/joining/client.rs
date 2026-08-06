@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::supported_version;
 use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService, MasterKeyring};
@@ -19,11 +18,12 @@ use crate::keys::{
 use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::store::{
     InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
 };
 use crate::Migration;
+use coven_foundation::config::{CloudProvider, Config, ConfigError, HomeStorage};
+use coven_foundation::store_dir::{StoreDir, StoreLayout};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -187,7 +187,7 @@ async fn build_cloud_home_for_join(
     oauth_clients: &crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
 ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
     use crate::storage::cloud::*;
@@ -333,7 +333,7 @@ pub struct DeviceJoinClient {
     oauth_clients: crate::oauth::OAuthClients,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    clock: crate::clock::ClockRef,
+    clock: coven_foundation::clock::ClockRef,
     #[cfg(any(test, feature = "test-utils"))]
     test_home: Option<Arc<dyn CloudHome>>,
 }
@@ -357,7 +357,7 @@ impl DeviceJoinClient {
         oauth_clients: crate::oauth::OAuthClients,
         oauth_tokens: Option<crate::oauth::OAuthTokens>,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        clock: crate::clock::ClockRef,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, BootstrapError> {
         let code = crate::joining::decode(invite_code)
             .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?;
@@ -369,7 +369,7 @@ impl DeviceJoinClient {
             custom_s3_exact_slots,
         )
         .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
-        crate::store_dir::validate_path_token(&code.store_id)
+        coven_foundation::store_dir::validate_path_token(&code.store_id)
             .map_err(|error| BootstrapError::InvalidCode(format!("invalid store id: {error}")))?;
         let store_dir = layout.store_dir(&code.store_id);
         let store_keys = StoreKeys::bind(code.store_id.clone());

@@ -1,7 +1,5 @@
 use super::*;
 
-use crate::clock::SystemClock;
-use crate::config::{CloudProvider, Config, HomeStorage};
 use crate::encryption::EncryptionService;
 use crate::keys::{test_keyring, StoreKeys};
 use crate::protocol::blob::{CacheFill, Provenance};
@@ -14,6 +12,8 @@ use crate::storage::cloud::CloudHomeError;
 use crate::storage::{BlobPathScheme, CloudCipher};
 use crate::store_sync::{ConfigProvider, SyncError};
 use crate::sync::test_helpers::{open_test_db_with_blob, read_test_db, temp_store_dir, TestStore};
+use coven_foundation::clock::SystemClock;
+use coven_foundation::config::{CloudProvider, Config, HomeStorage};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -42,7 +42,7 @@ fn test_key_custody() -> Arc<dyn crate::keys::MasterKeyCustody> {
     let store_keys = test_store_keys("unused-store-id");
     crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate()).resolve(
         &store_keys,
-        &crate::store_dir::StoreDir::new("unused-store-dir"),
+        &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
     )
 }
 
@@ -54,7 +54,7 @@ fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
         .resolve(
             &store_keys,
-            &crate::store_dir::StoreDir::new("unused-store-dir"),
+            &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
         )
 }
 

@@ -36,7 +36,7 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("open copied Circle routing database")
@@ -51,7 +51,7 @@ fn open_persistent_circle_test_db(path: &std::path::Path) -> Database {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open circle database")
@@ -640,9 +640,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("capture scoped Circle blob row")
         .write_id;
-    crate::store_dir::StoreDir::store_local_blob(&store_dir, "files", blob_id, blob_bytes)
-        .await
-        .expect("stage Circle blob");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &store_dir, "files", blob_id, blob_bytes,
+    )
+    .await
+    .expect("stage Circle blob");
     let components = prepare_owner_sync_components(
         &db,
         &store,
@@ -653,7 +655,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     )
     .await;
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle row and blob");
     let historical_commit = match crate::database::StoreDatabase::new(&db)
@@ -735,7 +737,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("capture late concurrent Circle row")
         .write_id;
-    crate::store_dir::StoreDir::store_local_blob(
+    coven_foundation::store_dir::StoreDir::store_local_blob(
         &concurrent_store_dir,
         "files",
         late_id,
@@ -766,7 +768,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("authorize concurrent Circle writer Store");
     concurrent_writer
         .drain_uploads(
-            &crate::clock::SystemClock,
+            &coven_foundation::clock::SystemClock,
             Some(&EncryptionService::from_key([42; 32])),
             None,
         )
@@ -1187,7 +1189,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("capture pre-close Circle row")
         .write_id;
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish pre-close Circle package");
     let package_commit_ref = match crate::database::StoreDatabase::new(&db)
@@ -1395,7 +1397,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     _home.replace_exact_object(&participant.response_slot, correct_stored);
 
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("activate the exact Circle epoch-close outcome");
     assert!(crate::database::StoreDatabase::new(&db)
@@ -2189,7 +2191,7 @@ impl ClosingFounderCircle {
             .await
             .expect("capture owner Circle row");
         self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish owner Circle row");
         match crate::database::StoreDatabase::new(&self.db)
@@ -3171,7 +3173,7 @@ impl SilentParticipantCircle {
             .await
             .expect("capture Circle document row");
         self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish the accepted old-epoch Circle row");
         let covered_commit_ref = match crate::database::StoreDatabase::new(&self.db)
@@ -3201,7 +3203,7 @@ impl SilentParticipantCircle {
             .await
             .expect("exclude the silent participant");
         self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("finalize the successor after exclusion");
         covered_commit_ref
@@ -3316,7 +3318,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .expect("publish Owner close response");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("cycle cannot finalize the stalled close");
     assert_eq!(
@@ -3339,7 +3341,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .expect("exclude the silent participant");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close after exclusion");
     assert!(StoreDatabase::new(&fixture.db)
@@ -3507,7 +3509,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         .expect("capture Circle document row");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the accepted old-epoch Circle row");
 
@@ -3549,7 +3551,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         .expect("exclude the silent participant");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the successor after exclusion");
 
@@ -3732,7 +3734,7 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .expect("capture Circle document row");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the accepted old-epoch Circle row");
     fixture
@@ -3791,7 +3793,7 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .expect("publish Owner close response");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the successor with both responses");
 
@@ -3972,7 +3974,7 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
         .expect("capture Circle document row");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the accepted Circle row");
     fixture
@@ -4106,7 +4108,7 @@ async fn slot_race_response_first_adopts_the_response() {
         .expect("exclusion adopts the participant's response");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close");
     assert!(StoreDatabase::new(&fixture.db)
@@ -4160,7 +4162,7 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
     fixture.silent_publish_response().await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close after exclusion");
     assert!(StoreDatabase::new(&fixture.db)
@@ -4231,7 +4233,7 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .expect("re-running the exclusion is idempotent");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close after exclusion");
     assert!(StoreDatabase::new(&fixture.db)
@@ -4309,7 +4311,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
     // Finalize honestly to obtain a real signed outcome and its successor.
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the honest close");
     let honest = fixture.finalized_close_outcome().await;

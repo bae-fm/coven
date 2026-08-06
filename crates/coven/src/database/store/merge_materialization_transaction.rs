@@ -28,7 +28,6 @@ use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
     RetainedMergeMaterializationCache, StoreDatabase,
 };
-use crate::changeset::RowChange;
 use crate::database::blob_records::{
     live_blob_row, validate_live_blob_row, validate_stored_locator_on,
     validate_stored_row_binding_on,
@@ -62,6 +61,7 @@ use crate::protocol::store_commit::{
 };
 use crate::protocol::synced_schema::SyncedTable;
 use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
+use coven_foundation::changeset::RowChange;
 
 pub(crate) struct AppliedMergeMaterialization {
     pub(crate) outcome: ApplyOutcome,

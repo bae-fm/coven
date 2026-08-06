@@ -32,7 +32,7 @@ use crate::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
 fn exact_cache_path(
-    store_dir: &crate::store_dir::StoreDir,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     reference: &crate::protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -45,7 +45,7 @@ fn exact_cache_path(
 }
 
 fn exact_pinned_path(
-    store_dir: &crate::store_dir::StoreDir,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     reference: &crate::protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -82,7 +82,7 @@ trait PullTestDatabaseOps {
         source: &crate::database::Database,
         storage: &Arc<CloudSyncStorage>,
         identity: &UserKeypair,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> (
         std::collections::BTreeMap<String, u64>,
         crate::sync::store::StorePullResult,
@@ -154,7 +154,7 @@ impl PullTestDatabaseOps for crate::database::Database {
         source: &crate::database::Database,
         storage: &Arc<CloudSyncStorage>,
         identity: &UserKeypair,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> (
         std::collections::BTreeMap<String, u64>,
         crate::sync::store::StorePullResult,
@@ -216,7 +216,7 @@ trait PullTestStoreDirOps {
     async fn store_local(&self, id: &str, bytes: &[u8]);
 }
 
-impl PullTestStoreDirOps for crate::store_dir::StoreDir {
+impl PullTestStoreDirOps for coven_foundation::store_dir::StoreDir {
     async fn store_local(&self, id: &str, bytes: &[u8]) {
         self.store_local_blob("photos", id, bytes)
             .await
@@ -269,7 +269,7 @@ trait TestStoreStorage: Sync {
     async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String>;
 
@@ -281,7 +281,7 @@ trait TestStoreStorage: Sync {
         local_seq: u64,
         message: &str,
         keypair: &UserKeypair,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, String> {
         let configured_tables: Vec<_> = db.synced_tables().iter().map(SyncedTable::name).collect();
         let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
@@ -335,7 +335,7 @@ trait TestStoreStorage: Sync {
         outgoing: Vec<u8>,
         local_seq: u64,
         keypair: &UserKeypair,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
     ) {
         let result = self
             .sync_for_test(db, tables, outgoing, local_seq, "", keypair, store_dir)
@@ -350,7 +350,7 @@ impl TestStoreStorage for TestStore {
     async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         self.bind_device(db, keypair)
@@ -366,7 +366,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
     async fn store_for_test_publish(
         &self,
         db: &crate::database::Database,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         if crate::database::StoreDatabase::new(db)
@@ -400,7 +400,7 @@ trait PullTestStoreOps {
     async fn make_root_remote(
         &self,
         db: &crate::database::Database,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     );
 
@@ -430,7 +430,7 @@ impl PullTestStoreOps for TestStore {
     async fn make_root_remote(
         &self,
         db: &crate::database::Database,
-        store_dir: &crate::store_dir::StoreDir,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     ) {
         self.open_into(db).await.expect("open exact test Store");
@@ -444,7 +444,7 @@ impl PullTestStoreOps for TestStore {
             .await
             .expect("queue exact blob fixture upload");
         let outcome = device
-            .drain_uploads(store_dir, &crate::clock::SystemClock, None, None)
+            .drain_uploads(store_dir, &coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("upload exact blob fixture");
         assert!(outcome.uploaded() > 0);
@@ -649,7 +649,7 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "restart-test-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open file-backed blob test database")
@@ -1877,7 +1877,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "test-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
         )
     };
@@ -2231,7 +2231,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
     )
     .expect("open copied retained collision database");
@@ -5372,12 +5372,22 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     .await;
     // The host stores both blobs in the local store (their Local home) before the
     // inline push reads them to upload.
-    crate::store_dir::StoreDir::store_local_blob(&ld1, "photos", "peager01", b"EAGER-BYTES")
-        .await
-        .expect("store eager blob in local store");
-    crate::store_dir::StoreDir::store_local_blob(&ld1, "covers", "clazy001", b"LAZY-BYTES")
-        .await
-        .expect("store lazy blob in local store");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &ld1,
+        "photos",
+        "peager01",
+        b"EAGER-BYTES",
+    )
+    .await
+    .expect("store eager blob in local store");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &ld1,
+        "covers",
+        "clazy001",
+        b"LAZY-BYTES",
+    )
+    .await
+    .expect("store lazy blob in local store");
     storage.make_root_remote(&db1, &ld1, "n1").await;
 
     // Both blobs reached the cloud — the inline push uploads regardless of fill.

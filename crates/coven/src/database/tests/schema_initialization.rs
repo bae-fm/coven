@@ -22,7 +22,7 @@ fn ordinary_open_rejects_coven_schema_without_initialization_marker() {
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "unmarked-schema-open".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
             1,
             "things",

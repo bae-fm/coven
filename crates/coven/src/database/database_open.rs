@@ -371,7 +371,7 @@ impl DatabaseCore {
             blob_tombstone_grace: self.blob_tombstone_grace,
             transfer_limits: self.transfer_limits,
             store_runtime: crate::database::StoreDatabaseRuntime::new(),
-            ids: Arc::new(crate::id_provider::UuidProvider),
+            ids: Arc::new(coven_foundation::id_provider::UuidProvider),
             write_statuses: Arc::new(std::sync::Mutex::new(HashMap::new())),
             #[cfg(test)]
             test_pause_points: Arc::new(TestPausePoints::default()),

@@ -1,5 +1,5 @@
 //! Storage-side adapters over the foundation staged-file machinery in
-//! [`crate::local_file`]: typed plaintext chunk sources whose remote errors
+//! [`coven_foundation::local_file`]: typed plaintext chunk sources whose remote errors
 //! stay classified, and exact-fact reads expressed in protocol hashes.
 
 use std::path::Path;
@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
 pub(crate) struct PlaintextReader(
-    Box<dyn crate::local_file::PlaintextChunkReader<Error = PlaintextChunkError>>,
+    Box<dyn coven_foundation::local_file::PlaintextChunkReader<Error = PlaintextChunkError>>,
 );
 
 impl PlaintextReader {
@@ -21,7 +21,8 @@ impl PlaintextReader {
 
     #[cfg(test)]
     pub(crate) fn from_test_reader(
-        reader: impl crate::local_file::PlaintextChunkReader<Error = PlaintextChunkError> + 'static,
+        reader: impl coven_foundation::local_file::PlaintextChunkReader<Error = PlaintextChunkError>
+            + 'static,
     ) -> Self {
         Self(Box::new(reader))
     }
@@ -51,7 +52,7 @@ pub(super) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> 
 pub(super) async fn exact_file_facts(
     path: &Path,
 ) -> Result<(u64, crate::protocol::store_commit::ObjectHash), String> {
-    let (size, digest) = crate::local_file::file_facts(path).await?;
+    let (size, digest) = coven_foundation::local_file::file_facts(path).await?;
     Ok((
         size,
         crate::protocol::store_commit::ObjectHash::from_digest(digest),
@@ -64,7 +65,7 @@ struct FilePlaintextReader {
 }
 
 #[async_trait]
-impl crate::local_file::PlaintextChunkReader for FilePlaintextReader {
+impl coven_foundation::local_file::PlaintextChunkReader for FilePlaintextReader {
     type Error = PlaintextChunkError;
 
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError> {

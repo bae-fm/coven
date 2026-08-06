@@ -488,7 +488,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
     pub(crate) async fn begin_joining_store(
         self,
         database: StoreDatabase,
-        store_dir: &'storage crate::store_dir::StoreDir,
+        store_dir: &'storage coven_foundation::store_dir::StoreDir,
     ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
         self.observation
             .into_joining_store(database, store_dir, self.identity)
@@ -528,7 +528,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     pub(crate) async fn into_joining_store(
         self,
         database: StoreDatabase,
-        store_dir: &'storage crate::store_dir::StoreDir,
+        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         identity: UserKeypair,
     ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
         let Self {

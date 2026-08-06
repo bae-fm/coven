@@ -8,29 +8,20 @@
 //! let _ = coven::store_sync::StoreSync::connect;
 //! ```
 
-pub(crate) mod atomic_file;
 pub(crate) mod blob;
-pub(crate) mod blocking;
-pub(crate) mod changeset;
 pub(crate) mod circles;
-pub(crate) mod clock;
-mod code_envelope;
-pub(crate) mod config;
 pub(crate) mod coven;
 pub(crate) mod custody;
 pub(crate) mod database;
 pub(crate) mod encryption;
 pub(crate) mod envelope;
 mod handle;
-pub(crate) mod id_provider;
 pub(crate) mod identity_custody;
 pub(crate) mod join_code;
 pub(crate) mod joining;
 pub(crate) mod keyring_backend;
 pub(crate) mod keys;
-pub(crate) mod local_file;
 pub(crate) mod oauth;
-pub(crate) mod object_hash;
 pub(crate) mod protocol;
 mod read_handle;
 pub(crate) mod restoration;
@@ -39,7 +30,6 @@ pub(crate) mod storage;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
 pub(crate) mod store_cloud_storage;
-pub(crate) mod store_dir;
 pub(crate) mod store_foundation;
 pub(crate) mod store_joining;
 pub(crate) mod store_membership;
@@ -55,17 +45,21 @@ mod blob_facade_tests;
 
 pub use database::rusqlite;
 
-pub use atomic_file::{write_atomic, WriteError};
 pub use blob::{MakeLocalError, MakeRemoteError};
-pub use changeset::{ChangeOp, RowChange};
 pub use circles::{CircleError, Circles};
-pub use clock::{Clock, ClockRef, SystemClock};
+pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
+pub use coven_foundation::atomic_file::{write_atomic, WriteError};
+pub use coven_foundation::changeset::{ChangeOp, RowChange};
+pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 #[cfg(any(test, feature = "test-utils"))]
-pub use clock::{FixedClock, SteppingClock};
-pub use config::{
+pub use coven_foundation::clock::{FixedClock, SteppingClock};
+pub use coven_foundation::config::{
     CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, HomeStorage,
 };
-pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_foundation::id_provider::SequentialIdProvider;
+pub use coven_foundation::id_provider::{IdProvider, IdRef, UuidProvider};
+pub use coven_foundation::store_dir::{StoreDir, StoreLayout};
 pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
 pub use database::{
     BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
@@ -76,9 +70,6 @@ pub use database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use encryption::EncryptionService;
 pub use encryption::{EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE};
 pub use handle::CovenHandle;
-#[cfg(any(test, feature = "test-utils"))]
-pub use id_provider::SequentialIdProvider;
-pub use id_provider::{IdProvider, IdRef, UuidProvider};
 pub use identity_custody::{rewrap_passphrase_identity_custody, IdentityCustody};
 pub use joining::{
     abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
@@ -150,7 +141,6 @@ pub use storage::{
     CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
     ExactSlotStorage, PartSink, S3CloudHome, UploadProgress,
 };
-pub use store_dir::{StoreDir, StoreLayout};
 pub use sync::{
     BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
     DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,

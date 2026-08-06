@@ -98,7 +98,7 @@
 use crate::database::DbError;
 use crate::protocol::objects::StorageError;
 use crate::storage::SyncStorage;
-use crate::store_dir::{
+use coven_foundation::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };
 
@@ -124,7 +124,7 @@ impl<'a> RemoteBlobAccess<'a> {
         &self,
         stored: &crate::protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, BlobCacheError> {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.storage
             .stage_verified_blob_plaintext(stored, self.protection.clone(), destination)
             .await
@@ -331,9 +331,9 @@ impl From<StorageError> for BlobCacheError {
     }
 }
 
-impl From<crate::store_dir::LocalBlobStoreError> for BlobCacheError {
-    fn from(e: crate::store_dir::LocalBlobStoreError) -> Self {
-        use crate::store_dir::LocalBlobStoreError;
+impl From<coven_foundation::store_dir::LocalBlobStoreError> for BlobCacheError {
+    fn from(e: coven_foundation::store_dir::LocalBlobStoreError) -> Self {
+        use coven_foundation::store_dir::LocalBlobStoreError;
         match e {
             LocalBlobStoreError::Path(p) => BlobCacheError::Path(p),
             LocalBlobStoreError::Io(s) => BlobCacheError::Io(s),
@@ -374,7 +374,7 @@ pub struct BlobStream {
 pub(super) enum BlobStreamSource {
     /// A file on this device: the user's own external file, the local store, or
     /// a cache copy of a Remote blob.
-    Local(crate::local_file::OpenFile),
+    Local(coven_foundation::local_file::OpenFile),
     /// A Remote blob with no cache copy: ranges are served from the cloud object
     /// a chunk at a time.
     Remote(crate::storage::BlobRangeReader),

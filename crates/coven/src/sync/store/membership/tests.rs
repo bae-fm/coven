@@ -25,7 +25,7 @@ struct MergeFixture {
     owner: UserKeypair,
     owner_pubkey: String,
     _store_dir_temp: tempfile::TempDir,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl MergeFixture {

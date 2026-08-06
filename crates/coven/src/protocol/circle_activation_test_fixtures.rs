@@ -142,7 +142,7 @@ pub(crate) fn test_circle_activation(label: &str, active: bool) -> TestCircleAct
     let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(
         format!("{label} candidate family").as_bytes(),
     ));
-    let ids = crate::id_provider::SequentialIdProvider::new(label);
+    let ids = coven_foundation::id_provider::SequentialIdProvider::new(label);
     let draft = CircleTransitionDraft::founder(
         store_root_hash,
         candidate_family,

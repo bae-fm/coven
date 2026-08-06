@@ -14,18 +14,18 @@ use serde::Serialize;
 /// Prefix on a pasted coven code, so a string from an unrelated format is
 /// rejected immediately with a clear "missing prefix" error rather than
 /// failing confusingly at base64 or JSON decode.
-pub(crate) const PREFIX: &str = "coven:";
+pub const PREFIX: &str = "coven:";
 
 /// An envelope-level decode failure. Each caller maps this to its own
 /// user-facing error type.
-pub(crate) enum EnvelopeError {
+pub enum EnvelopeError {
     MissingPrefix,
     InvalidBase64,
     InvalidJson(String),
 }
 
 /// Encode `code` as `{prefix}{base64url(json)}`.
-pub(crate) fn encode_code<T: Serialize>(prefix: &str, code: &T) -> String {
+pub fn encode_code<T: Serialize>(prefix: &str, code: &T) -> String {
     let json = serde_json::to_vec(code).expect("code is always serializable");
     let b64 = URL_SAFE_NO_PAD.encode(&json);
     format!("{prefix}{b64}")
@@ -34,7 +34,7 @@ pub(crate) fn encode_code<T: Serialize>(prefix: &str, code: &T) -> String {
 /// Decode `{prefix}{base64url(json)}` back into `T`. Trims surrounding
 /// whitespace first, so a pasted code with stray leading/trailing newlines
 /// still decodes.
-pub(crate) fn decode_code<T: DeserializeOwned>(prefix: &str, s: &str) -> Result<T, EnvelopeError> {
+pub fn decode_code<T: DeserializeOwned>(prefix: &str, s: &str) -> Result<T, EnvelopeError> {
     let trimmed = s.trim();
     let payload = trimmed
         .strip_prefix(prefix)
@@ -46,11 +46,7 @@ pub(crate) fn decode_code<T: DeserializeOwned>(prefix: &str, s: &str) -> Result<
 }
 
 /// Decode fixed-length hex material carried inside a pasted code.
-pub(crate) fn decode_fixed_hex(
-    label: &str,
-    value: &str,
-    expected_len: usize,
-) -> Result<Vec<u8>, String> {
+pub fn decode_fixed_hex(label: &str, value: &str, expected_len: usize) -> Result<Vec<u8>, String> {
     let bytes = hex::decode(value).map_err(|error| format!("{label} is not hex: {error}"))?;
     if bytes.len() != expected_len {
         return Err(format!(

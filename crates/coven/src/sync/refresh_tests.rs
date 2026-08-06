@@ -13,7 +13,6 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::MasterKeyCustody;
 use crate::keys::UserKeypair;
@@ -24,6 +23,7 @@ use crate::storage::{CloudCipher, CloudCipherAccess, PendingRotation};
 use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
+use coven_foundation::clock::SystemClock;
 
 const LIB_ID: &str = "lib-refresh-test";
 

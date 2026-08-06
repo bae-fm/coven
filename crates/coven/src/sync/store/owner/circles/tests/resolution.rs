@@ -25,9 +25,9 @@ struct ConflictFixture {
     founder_pubkey: String,
     circle_id: CircleId,
     _dir1: tempfile::TempDir,
-    dir1: crate::store_dir::StoreDir,
+    dir1: coven_foundation::store_dir::StoreDir,
     _dir2: tempfile::TempDir,
-    dir2: crate::store_dir::StoreDir,
+    dir2: coven_foundation::store_dir::StoreDir,
 }
 
 impl ConflictFixture {

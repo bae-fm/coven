@@ -17,7 +17,7 @@ pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
-    store_dir: &'storage crate::store_dir::StoreDir,
+    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: StoreRootRef,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
@@ -433,7 +433,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
-        store_dir: &'storage crate::store_dir::StoreDir,
+        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: StoreRootRef,
         local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {

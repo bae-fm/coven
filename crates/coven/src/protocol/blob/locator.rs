@@ -5,7 +5,7 @@ use crate::encryption::KeyFingerprint;
 use crate::protocol::circle::{Audience, CircleId};
 use crate::protocol::objects::ExactObjectRef;
 use crate::protocol::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
-use crate::store_dir::{validate_cloud_path, validate_path_token};
+use coven_foundation::store_dir::{validate_cloud_path, validate_path_token};
 
 const RESERVED_READABLE_VERSION_SEGMENT: &str = ".coven-versions";
 

@@ -154,7 +154,7 @@ impl<'identity> CircleAccessDraft<'identity> {
         store_membership: &StoreMembershipStateRef,
         store_members: &[(String, MemberRole)],
         bootstraps: &std::collections::BTreeMap<String, CircleBootstrapRef>,
-        ids: &dyn crate::id_provider::IdProvider,
+        ids: &dyn coven_foundation::id_provider::IdProvider,
         signer: &'identity dyn crate::keys::IdentityKeyAuthority,
     ) -> Result<Self, CircleTransitionError> {
         let author_pubkey = keys::public_key_hex(signer);

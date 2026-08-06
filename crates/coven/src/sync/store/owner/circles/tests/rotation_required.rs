@@ -71,7 +71,7 @@ struct RotationFixture {
     member_pubkey: String,
     member_db: Database,
     member_device: RotationMemberDevice,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
     _store_temp: tempfile::TempDir,
     custody: crate::sync::test_helpers::TestCustody,
 }
@@ -79,7 +79,7 @@ struct RotationFixture {
 struct RotationMemberDevice {
     device: TestDevice,
     _temp: tempfile::TempDir,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl RotationMemberDevice {
@@ -307,9 +307,14 @@ impl RotationFixture {
             .capture_document_with_file_for_test(document_id, file_id, audience, bytes, stamp)
             .await
             .expect("capture document and its file row");
-        crate::store_dir::StoreDir::store_local_blob(&self.store_dir, "files", file_id, bytes)
-            .await
-            .expect("stage the document file bytes");
+        coven_foundation::store_dir::StoreDir::store_local_blob(
+            &self.store_dir,
+            "files",
+            file_id,
+            bytes,
+        )
+        .await
+        .expect("stage the document file bytes");
         write_id
     }
 
@@ -494,7 +499,7 @@ impl RotationFixture {
             .capture_document(row_id, Some(self.circle_id), "2026-07-23T00:10:00Z")
             .await;
         self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish the Circle package");
         let published = match crate::database::StoreDatabase::new(&self.db)
@@ -524,7 +529,7 @@ impl RotationFixture {
             .await;
 
         self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("owner acknowledges the snapshot cut");
         member.pull().await;
@@ -532,7 +537,7 @@ impl RotationFixture {
             .publish_acknowledgements("2026-07-23T00:20:00Z")
             .await;
         self.components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("owner activates the member acknowledgement");
         (circle_package, published)
@@ -585,7 +590,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Store-audience and unaffected-Circle writes");
     assert!(matches!(
@@ -614,7 +619,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .await;
     let _ = fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await;
     match crate::database::StoreDatabase::new(&fixture.db)
         .write_status(&blocked_write)
@@ -768,7 +773,7 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle content after the close");
     assert!(matches!(
@@ -796,7 +801,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .await;
     let _ = fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await;
     assert!(matches!(
         crate::database::StoreDatabase::new(&fixture.db)
@@ -846,7 +851,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .expect("return the durable write to publication after the close");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the formerly blocked write under the successor epoch");
     let published = match crate::database::StoreDatabase::new(&fixture.db)
@@ -938,7 +943,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the accepted Circle row");
 
@@ -1082,7 +1087,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle content after an unrelated Store removal");
     assert!(matches!(
@@ -1271,7 +1276,7 @@ async fn publish_acknowledged_store_snapshot(
 struct RestoreTarget {
     _temp: tempfile::TempDir,
     database_path: std::path::PathBuf,
-    store_dir: crate::store_dir::StoreDir,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl RestoreTarget {
@@ -1279,7 +1284,7 @@ impl RestoreTarget {
         let temp = tempfile::tempdir().expect("restore destination");
         Self {
             database_path: temp.path().join("store.db"),
-            store_dir: crate::store_dir::StoreDir::new(temp.path()),
+            store_dir: coven_foundation::store_dir::StoreDir::new(temp.path()),
             _temp: temp,
         }
     }
@@ -1311,7 +1316,7 @@ async fn restore_store_snapshot<'a>(
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&EncryptionService::from_key([42; 32])),
         )
@@ -1362,7 +1367,7 @@ impl ActiveMemberCircleSnapshot {
         .await
         .expect("capture Circle content");
         components
-            .run_cycle(&crate::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish pre-close Circle content");
 
@@ -1548,7 +1553,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
             crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
             crate::protocol::blob::TransferLimits::one_at_a_time(),
             "crash-restore-device".to_string(),
-            std::sync::Arc::new(crate::clock::SystemClock),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &circle_routing_migrations(),
             Some(&routing),
         )
@@ -1609,7 +1614,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
             .expect("capture old-epoch Circle content");
     }
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish old-epoch Circle content");
 
@@ -1766,7 +1771,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     .await
     .expect("capture Circle content");
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish pre-close Circle content");
     components
@@ -1785,7 +1790,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     .await
     .expect("capture Circle content");
     components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish post-close Circle content");
 
@@ -1849,7 +1854,7 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
     // (soon-rotated-away) epoch.
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("cycle publishes the owner's Circle acknowledgement");
     let (old_authoring, _) = StoreDatabase::new(&fixture.db)
@@ -1920,7 +1925,7 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
     // snapshot unusable as coverage evidence.
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner publishes its Circle acknowledgement");
     assert!(!fixture
@@ -1938,7 +1943,7 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner activates the member's Circle acknowledgement");
 
@@ -2018,7 +2023,7 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle content");
 
@@ -2068,7 +2073,7 @@ async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish pre-close Circle content");
 
@@ -2114,7 +2119,7 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner activates the member's Circle acknowledgement");
 
@@ -2356,7 +2361,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the Circle document and its file");
     let published = fixture.stored_blobs().await;
@@ -2392,7 +2397,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
             .drain_tombstones(
                 &cipher,
                 &crate::storage::PendingRotation::default(),
-                &crate::clock::FixedClock(deleted_at),
+                &coven_foundation::clock::FixedClock(deleted_at),
             )
             .await
             .expect("write the signed tombstone"),
@@ -2409,7 +2414,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         "the tombstone is written at its exact slot"
     );
 
-    let past = crate::clock::FixedClock(
+    let past = coven_foundation::clock::FixedClock(
         deleted_at + crate::protocol::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
     );
     let collected = writer
@@ -2460,7 +2465,7 @@ async fn an_audience_move_restamps_the_blob_rows_it_drags() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the Circle document and its file");
     assert_eq!(
@@ -2481,7 +2486,7 @@ async fn an_audience_move_restamps_the_blob_rows_it_drags() {
     );
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("republish the document and its re-sealed file under the Store audience");
 }
@@ -2520,7 +2525,7 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish both documents and their files");
 
@@ -2566,7 +2571,7 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("republish both documents under their destination audiences");
 
@@ -2670,7 +2675,7 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the Circle document and its file");
     let published = fixture.stored_blobs().await;
@@ -2684,7 +2689,7 @@ async fn interrupted_audience_blob_reclaim_resumes_on_restart() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("republish the document under the Store audience");
     fixture.release_retained_replay_ownership().await;
@@ -2791,7 +2796,7 @@ async fn circle_snapshot_reclaim_deletes_a_superseded_generation_image() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle content past the acknowledged frontier");
     fixture
@@ -3116,7 +3121,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         .expect("add the second Circle member");
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("activate the second member's access");
 
@@ -3211,7 +3216,7 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner activates the member acknowledgement");
     assert!(
@@ -3265,7 +3270,7 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
         .await;
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner activates the member acknowledgement");
 
@@ -3332,7 +3337,7 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
     // epoch.
     fixture
         .components
-        .run_cycle(&crate::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner acknowledges under the pre-rotation epoch");
     let (old_authoring, _) = StoreDatabase::new(&fixture.db)

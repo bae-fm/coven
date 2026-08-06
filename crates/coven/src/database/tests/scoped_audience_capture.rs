@@ -25,7 +25,7 @@ fn scoped_store(
         crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         device.to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("open scoped Store");
@@ -75,9 +75,9 @@ fn inspect_database<R>(
 }
 
 fn has_change(
-    changes: &[crate::changeset::RowChange],
+    changes: &[coven_foundation::changeset::RowChange],
     table: &str,
-    op: crate::changeset::ChangeOp,
+    op: coven_foundation::changeset::ChangeOp,
     primary_key: &str,
 ) -> bool {
     changes
@@ -315,7 +315,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     for routing_id in [&store_account_route, &circle_account_route] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
-                && change.op == crate::changeset::ChangeOp::Insert
+                && change.op == coven_foundation::changeset::ChangeOp::Insert
                 && change.pk() == Some(routing_id)
         }));
     }
@@ -328,7 +328,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     let circle_changes = crate::database::walk_changeset(&circle.2).expect("walk Circle partition");
     assert!(circle_changes.iter().any(|change| {
         change.table == "_coven_row_routes"
-            && change.op == crate::changeset::ChangeOp::Insert
+            && change.op == coven_foundation::changeset::ChangeOp::Insert
             && change.pk() == Some(&circle_account_route)
     }));
     let local = partition("local");
@@ -340,7 +340,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(has_change(
         &local_changes,
         "accounts",
-        crate::changeset::ChangeOp::Insert,
+        coven_foundation::changeset::ChangeOp::Insert,
         "local-account"
     ));
     assert!(
@@ -578,18 +578,18 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     let circle_changes = crate::database::walk_changeset(&circle.1).expect("walk Circle partition");
     assert!(circle_changes.iter().any(|change| {
         change.table == "accounts"
-            && change.op == crate::changeset::ChangeOp::Insert
+            && change.op == coven_foundation::changeset::ChangeOp::Insert
             && change.pk() == Some("store-account")
     }));
     assert!(circle_changes.iter().any(|change| {
         change.table == "transactions"
-            && change.op == crate::changeset::ChangeOp::Insert
+            && change.op == coven_foundation::changeset::ChangeOp::Insert
             && change.pk() == Some("store-transaction")
     }));
     for routing_id in [&store_account_route, &store_transaction_route] {
         assert!(circle_changes.iter().any(|change| {
             change.table == "_coven_row_routes"
-                && change.op == crate::changeset::ChangeOp::Insert
+                && change.op == coven_foundation::changeset::ChangeOp::Insert
                 && change.pk() == Some(routing_id)
         }));
     }
@@ -604,7 +604,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     for routing_id in [&store_account_route, &store_transaction_route] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
-                && change.op == crate::changeset::ChangeOp::Update
+                && change.op == coven_foundation::changeset::ChangeOp::Update
                 && change.pk() == Some(routing_id)
         }));
     }
@@ -909,7 +909,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         assert!(has_change(
             &store_mirror_retract,
             "_coven_audience",
-            crate::changeset::ChangeOp::Delete,
+            coven_foundation::changeset::ChangeOp::Delete,
             route
         ));
     }
@@ -990,13 +990,13 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     assert!(has_change(
         &store_destination,
         "accounts",
-        crate::changeset::ChangeOp::Insert,
+        coven_foundation::changeset::ChangeOp::Insert,
         "store-move-account"
     ));
     assert!(has_change(
         &store_destination,
         "transactions",
-        crate::changeset::ChangeOp::Insert,
+        coven_foundation::changeset::ChangeOp::Insert,
         "store-move-transaction"
     ));
     assert_eq!(
@@ -1074,7 +1074,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         assert!(has_change(
             &circle_delete,
             table,
-            crate::changeset::ChangeOp::Delete,
+            coven_foundation::changeset::ChangeOp::Delete,
             row_id
         ));
     }
@@ -1090,7 +1090,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         assert!(has_change(
             &store_delete,
             "_coven_audience",
-            crate::changeset::ChangeOp::Delete,
+            coven_foundation::changeset::ChangeOp::Delete,
             route
         ));
     }
@@ -1548,7 +1548,7 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         assert!(has_change(
             &circle,
             table,
-            crate::changeset::ChangeOp::Insert,
+            coven_foundation::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -1659,7 +1659,7 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
         assert!(has_change(
             &store_destination,
             table,
-            crate::changeset::ChangeOp::Insert,
+            coven_foundation::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -1826,7 +1826,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         assert!(has_change(
             &local_seed,
             table,
-            crate::changeset::ChangeOp::Insert,
+            coven_foundation::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -1863,7 +1863,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
     assert!(has_change(
         &store,
         "folders",
-        crate::changeset::ChangeOp::Insert,
+        coven_foundation::changeset::ChangeOp::Insert,
         "required-folder"
     ));
     let circle = crate::database::walk_changeset(&partition(&circle_id).1)
@@ -1879,7 +1879,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         assert!(has_change(
             &circle,
             table,
-            crate::changeset::ChangeOp::Insert,
+            coven_foundation::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -1924,7 +1924,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         assert!(has_change(
             &sibling,
             table,
-            crate::changeset::ChangeOp::Insert,
+            coven_foundation::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -1937,7 +1937,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
     assert!(has_change(
         &sibling_store,
         "folders",
-        crate::changeset::ChangeOp::Insert,
+        coven_foundation::changeset::ChangeOp::Insert,
         "required-folder"
     ));
     for (_, changeset) in &sibling_partitions {
@@ -1992,7 +1992,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         assert!(!has_change(
             &changes,
             "folders",
-            crate::changeset::ChangeOp::Delete,
+            coven_foundation::changeset::ChangeOp::Delete,
             "required-folder"
         ));
         for id in ["sibling-document", "sibling-detail"] {
@@ -2066,7 +2066,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
     assert!(has_change(
         &store_retraction,
         "folders",
-        crate::changeset::ChangeOp::Delete,
+        coven_foundation::changeset::ChangeOp::Delete,
         "required-folder"
     ));
     assert!(
@@ -2122,7 +2122,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         assert!(has_change(
             &store_destination,
             table,
-            crate::changeset::ChangeOp::Insert,
+            coven_foundation::changeset::ChangeOp::Insert,
             id
         ));
     }
@@ -2157,7 +2157,7 @@ async fn scoped_descendant_keeps_store_ancestor() {
         assert!(has_change(
             &store_delete,
             table,
-            crate::changeset::ChangeOp::Delete,
+            coven_foundation::changeset::ChangeOp::Delete,
             id
         ));
     }

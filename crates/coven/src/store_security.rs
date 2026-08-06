@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::config::{Config, HomeStorage};
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
 use crate::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
@@ -8,6 +7,7 @@ use crate::keys::{
 };
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_foundation::config::{Config, HomeStorage};
 
 pub(crate) struct EstablishedStoreIdentity {
     keypair: UserKeypair,
@@ -21,7 +21,7 @@ impl EstablishedStoreIdentity {
     pub(crate) async fn initialize_sync_components(
         &self,
         database: crate::database::StoreDatabase,
-        store_dir: crate::store_dir::StoreDir,
+        store_dir: coven_foundation::store_dir::StoreDir,
         local_blob_access: crate::sync::store::blob::LocalStoreBlobAccess,
         storage: Arc<CloudSyncStorage>,
         initialization: crate::sync::cycle::StoreInitialization,
@@ -45,7 +45,7 @@ impl EstablishedStoreIdentity {
         &self,
         database: crate::database::StoreDatabase,
         storage: Arc<dyn crate::storage::SyncStorage>,
-        store_dir: crate::store_dir::StoreDir,
+        store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Result<crate::sync::Store, crate::sync::store::StoreError> {
         crate::sync::Store::load(database, storage, store_dir, self.keypair.clone()).await
     }
@@ -248,7 +248,7 @@ impl StoreSecurity {
         };
 
         let provider = match cloud_provider {
-            crate::config::CloudProvider::S3 => {
+            coven_foundation::config::CloudProvider::S3 => {
                 let credentials = self
                     .keys
                     .get_cloud_home_credentials()
@@ -290,7 +290,7 @@ impl StoreSecurity {
                     secret_key,
                 }
             }
-            crate::config::CloudProvider::CloudKit => {
+            coven_foundation::config::CloudProvider::CloudKit => {
                 if config.cloud_home.cloudkit_owner_name.is_some()
                     || config.cloud_home.cloudkit_zone_name.is_some()
                 {
@@ -300,18 +300,20 @@ impl StoreSecurity {
                 }
                 CloudHomeJoinInfo::CloudKit
             }
-            crate::config::CloudProvider::GoogleDrive => CloudHomeJoinInfo::GoogleDrive {
-                folder_id: config
-                    .cloud_home
-                    .google_drive_folder_id
-                    .clone()
-                    .ok_or_else(|| {
-                        crate::storage::cloud::setup::SetupError(
-                            "Google Drive folder ID not configured".to_string(),
-                        )
-                    })?,
-            },
-            crate::config::CloudProvider::Dropbox => {
+            coven_foundation::config::CloudProvider::GoogleDrive => {
+                CloudHomeJoinInfo::GoogleDrive {
+                    folder_id: config
+                        .cloud_home
+                        .google_drive_folder_id
+                        .clone()
+                        .ok_or_else(|| {
+                            crate::storage::cloud::setup::SetupError(
+                                "Google Drive folder ID not configured".to_string(),
+                            )
+                        })?,
+                }
+            }
+            coven_foundation::config::CloudProvider::Dropbox => {
                 CloudHomeJoinInfo::Dropbox {
                     folder_path: config.cloud_home.dropbox_folder_path.clone().ok_or_else(
                         || {
@@ -322,7 +324,7 @@ impl StoreSecurity {
                     )?,
                 }
             }
-            crate::config::CloudProvider::OneDrive => CloudHomeJoinInfo::OneDrive {
+            coven_foundation::config::CloudProvider::OneDrive => CloudHomeJoinInfo::OneDrive {
                 drive_id: config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
                     crate::storage::cloud::setup::SetupError(
                         "OneDrive drive ID not configured".to_string(),

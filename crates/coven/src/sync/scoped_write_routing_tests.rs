@@ -42,7 +42,7 @@ async fn capture_scoped_write_then_reopen(
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("open scoped Store");
@@ -100,7 +100,7 @@ async fn capture_scoped_write_then_reopen(
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
     .expect("reopen scoped Store");
@@ -230,7 +230,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "circle-only-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
             1,
             "accounts",
@@ -342,7 +342,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "move-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
             1,
             "accounts",
@@ -415,7 +415,10 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     let store_rows = crate::database::walk_changeset(&store.1).expect("walk Store move partition");
     assert_eq!(store_rows.len(), 1);
     assert_eq!(store_rows[0].table, "_coven_audience");
-    assert_eq!(store_rows[0].op, crate::changeset::ChangeOp::Update);
+    assert_eq!(
+        store_rows[0].op,
+        coven_foundation::changeset::ChangeOp::Update
+    );
 
     let destination_rows = crate::database::walk_changeset(
         &partitions
@@ -425,15 +428,15 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
             .1,
     )
     .expect("walk destination move partition");
-    assert!(destination_rows
-        .iter()
-        .any(|row| { row.table == "accounts" && row.op == crate::changeset::ChangeOp::Insert }));
     assert!(destination_rows.iter().any(|row| {
-        row.table == "_coven_row_routes" && row.op == crate::changeset::ChangeOp::Insert
+        row.table == "accounts" && row.op == coven_foundation::changeset::ChangeOp::Insert
+    }));
+    assert!(destination_rows.iter().any(|row| {
+        row.table == "_coven_row_routes" && row.op == coven_foundation::changeset::ChangeOp::Insert
     }));
     assert!(destination_rows
         .iter()
-        .all(|row| row.op != crate::changeset::ChangeOp::Delete));
+        .all(|row| row.op != coven_foundation::changeset::ChangeOp::Delete));
 }
 
 #[tokio::test]
@@ -461,7 +464,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         BLOB_TOMBSTONE_GRACE,
         crate::protocol::blob::TransferLimits::one_at_a_time(),
         "foreign-key-move-device".to_string(),
-        std::sync::Arc::new(crate::clock::SystemClock),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
             1,
             "scoped relationship",

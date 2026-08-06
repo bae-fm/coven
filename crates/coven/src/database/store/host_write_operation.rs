@@ -2,8 +2,8 @@ use crate::database::local_blob_cleanup_intents::LocalBlobCleanupIntent;
 use crate::database::DbError;
 use crate::encryption::EncryptionService;
 use crate::protocol::blob::BlobRef;
-use crate::store_dir::{PathTokenError, StoreDir};
 use crate::WriteReceipt;
+use coven_foundation::store_dir::{PathTokenError, StoreDir};
 
 use super::host_sql_transaction::HostSqlTransaction;
 use super::{SqlContext, StoreDatabase};
@@ -85,8 +85,8 @@ struct NewBlob {
 struct StagedBlob {
     namespace: String,
     id: String,
-    staged: Option<crate::local_file::AtomicStagedFile>,
-    published: Option<crate::local_file::PublishedAtomicFile>,
+    staged: Option<coven_foundation::local_file::AtomicStagedFile>,
+    published: Option<coven_foundation::local_file::PublishedAtomicFile>,
 }
 
 struct StagedBlobBatch {
@@ -96,7 +96,7 @@ struct StagedBlobBatch {
 impl StagedBlob {
     async fn stage<E>(store_dir: &StoreDir, blob: NewBlob) -> Result<Self, HostWriteError<E>> {
         let destination = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-        let staged = crate::local_file::AtomicStagedFile::create(&destination)
+        let staged = coven_foundation::local_file::AtomicStagedFile::create(&destination)
             .await
             .map_err(HostWriteError::Blob)?;
         let mut staged_blob = Self {
@@ -123,7 +123,7 @@ impl StagedBlob {
         Ok(staged_blob)
     }
 
-    fn staged_mut(&mut self) -> &mut crate::local_file::AtomicStagedFile {
+    fn staged_mut(&mut self) -> &mut coven_foundation::local_file::AtomicStagedFile {
         self.staged.as_mut().expect("blob is staged")
     }
 

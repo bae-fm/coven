@@ -3,7 +3,7 @@
 //! Contains the OAuth sign-in flows for Google Drive, Dropbox, and OneDrive,
 //! as well as managed service signup/login, disconnect, and account display logic.
 
-use crate::config::{CloudProvider, Config};
+use coven_foundation::config::{CloudProvider, Config};
 
 /// Why building the sync storage from config failed. Each arm preserves the
 /// typed error the layer below produced — notably [`CloudHomeError`], so the
@@ -42,7 +42,7 @@ pub(crate) fn require_exact_slot_capabilities_config(
 
 pub(crate) fn require_exact_slot_capabilities_join_info(
     join_info: &crate::storage::cloud::CloudHomeJoinInfo,
-    custom_s3_exact_slots: Option<crate::config::CustomS3ExactSlots>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
 ) -> Result<(), CloudProvider> {
     let provider = join_info.cloud_provider();
     let custom_endpoint = matches!(
@@ -79,13 +79,13 @@ pub(crate) fn require_exact_slot_capabilities_home(
 fn exact_slot_capabilities_supported(
     provider: &CloudProvider,
     custom_s3_endpoint: bool,
-    custom_s3_exact_slots: Option<crate::config::CustomS3ExactSlots>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
 ) -> bool {
     match provider {
         CloudProvider::S3 if !custom_s3_endpoint => true,
         CloudProvider::S3 => {
             custom_s3_exact_slots
-                == Some(crate::config::CustomS3ExactSlots::StandardConditionalRequests)
+                == Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests)
         }
         CloudProvider::GoogleDrive
         | CloudProvider::Dropbox
@@ -103,7 +103,7 @@ pub struct SetupError(pub String);
 mod tests {
     use super::*;
     use crate::storage::cloud::CloudHomeJoinInfo;
-    use crate::store_dir::StoreDir;
+    use coven_foundation::store_dir::StoreDir;
 
     #[test]
     fn exact_slot_admission_is_universal_and_uses_local_s3_assertions() {

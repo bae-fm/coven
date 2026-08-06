@@ -1,4 +1,4 @@
-# Durable local writes go through `crate::atomic_file` — never a hand-rolled
+# Durable local writes go through `coven_foundation::atomic_file` — never a hand-rolled
 # open/write/fsync/rename at the call site.
 #
 # The reason is a platform split that only one implementation can carry: the
@@ -15,8 +15,8 @@
 # `#[allow(clippy::disallowed_methods)]` plus a comment saying why, so each
 # exception is visible in review rather than blending into the crowd.
 disallowed-methods = [
-    { path = "std::fs::File::sync_all", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir_blocking`, so the non-Unix arm stays in one place" },
-    { path = "std::fs::File::sync_data", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir_blocking`, so the non-Unix arm stays in one place" },
-    { path = "tokio::fs::File::sync_all", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir`, so the non-Unix arm stays in one place" },
-    { path = "tokio::fs::File::sync_data", reason = "install file contents with `coven::write_atomic`, or flush a directory with `crate::atomic_file::sync_parent_dir`, so the non-Unix arm stays in one place" },
+    { path = "std::fs::File::sync_all", reason = "install file contents with `coven::write_atomic`, or flush a directory with `coven_foundation::atomic_file::sync_parent_dir_blocking`, so the non-Unix arm stays in one place" },
+    { path = "std::fs::File::sync_data", reason = "install file contents with `coven::write_atomic`, or flush a directory with `coven_foundation::atomic_file::sync_parent_dir_blocking`, so the non-Unix arm stays in one place" },
+    { path = "tokio::fs::File::sync_all", reason = "install file contents with `coven::write_atomic`, or flush a directory with `coven_foundation::atomic_file::sync_parent_dir`, so the non-Unix arm stays in one place" },
+    { path = "tokio::fs::File::sync_data", reason = "install file contents with `coven::write_atomic`, or flush a directory with `coven_foundation::atomic_file::sync_parent_dir`, so the non-Unix arm stays in one place" },
 ]

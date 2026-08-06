@@ -12,63 +12,70 @@ name = "coven"
 path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-serde_urlencoded = "0.7"
-thiserror = "1.0"
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-hex = "0.4"
-base64 = "0.22"
-sha2 = "0.10"
-hmac = "0.12"
-hkdf = "0.12"
-argon2 = "0.5"
-zeroize = { version = "1.9", features = ["derive"] }
-chacha20poly1305 = "0.10"
-ed25519-dalek = { version = "2.2", features = ["rand_core"] }
-crypto_box = { version = "0.9", features = ["seal"] }
-x25519-dalek = "3.0.0"
-rand = "0.9"
-uuid = { version = "1.0", features = ["v4"] }
-url = "2.5.8"
-fallible-streaming-iterator = "0.1.9"
-keyring-core = "0.7"
-bytes = "1.11"
-futures-util = "0.3"
-tracing = "0.1.41"
-tokio = { version = "1.0", features = ["full"] }
-tempfile = "3.27.0"
-rusqlite = { version = "0.40", default-features = false, features = ["session", "serialize", "bundled", "hooks", "column_metadata"] }
-axum = "0.7"
-open = { version = "5.3", optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
-aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
-aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
-aws-sdk-sts = { version = "=1.107.0", default-features = false, features = ["rt-tokio"] }
-aws-credential-types = "1.2"
-aws-smithy-http-client = { version = "1.1", default-features = false, features = ["default-client", "rustls-ring"] }
+coven-foundation = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hkdf = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }
+chacha20poly1305 = { workspace = true }
+ed25519-dalek = { workspace = true }
+crypto_box = { workspace = true }
+x25519-dalek = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+fallible-streaming-iterator = { workspace = true }
+keyring-core = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
+axum = { workspace = true }
+open = { workspace = true, optional = true }
+reqwest = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-sdk-sts = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-smithy-http-client = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-apple-native-keyring-store = { version = "0.2", features = ["protected"] }
+apple-native-keyring-store = { workspace = true }
 # Only for downcasting the OSStatus out of `keyring_core::Error::PlatformFailure`
 # in `map_keyring_error` (see crates/coven/src/keys.rs) — coven never calls the
 # Security framework directly otherwise.
-security-framework = "3.7"
+security-framework = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-native-keyring-store = "0.5"
+android-native-keyring-store = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-native-keyring-store = "0.5"
+windows-native-keyring-store = { workspace = true }
 
 [dev-dependencies]
-keyring-core = "0.7"
-tokio = { version = "1.0", features = ["test-util"] }
+keyring-core = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+# A `cfg(test)` build of this crate re-exports the foundation clock and id
+# fakes, which exist only under that crate's own `test-utils`. `cfg(test)`
+# enables no `[features]` of this crate, so the fakes arrive through this edge.
+coven-foundation = { workspace = true, features = ["test-utils"] }
 
 [features]
-test-utils = []
+# Hosts building test doubles against Coven get the same fakes Coven itself
+# tests with, foundation clock and id fakes included.
+test-utils = ["coven-foundation/test-utils"]
 oauth-providers = ["dep:open"]
 
 [lints]
@@ -84,4 +91,3 @@ workspace = true
 [[test]]
 name = "apple_keyring"
 required-features = ["test-utils"]
-

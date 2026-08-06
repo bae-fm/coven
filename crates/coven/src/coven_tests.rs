@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::config::Config;
 use crate::keys::test_keyring;
 use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::protocol::objects::ObjectSlot;
@@ -11,10 +10,11 @@ use crate::storage::cloud::{
     ExactSlotStorage, UploadProgress,
 };
 use crate::storage::CloudCipher;
-use crate::store_dir::StoreDir;
 use crate::sync::test_helpers::TestStore;
 use crate::{WriteId, WriteReceipt};
 use async_trait::async_trait;
+use coven_foundation::config::Config;
+use coven_foundation::store_dir::StoreDir;
 use rusqlite::{params, OptionalExtension};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -263,7 +263,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
         .expect("load gated changeset");
     let rows = crate::database::walk_changeset(&changeset).expect("walk gated changeset");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].op, crate::changeset::ChangeOp::Insert);
+    assert_eq!(rows[0].op, coven_foundation::changeset::ChangeOp::Insert);
     assert_eq!(rows[0].pk(), Some("root-1"));
     assert_eq!(rows[0].col(1), Some("Private"));
     assert_eq!(rows[0].col(2), Some("1"));
@@ -288,7 +288,7 @@ async fn configured_clock_is_the_hlc_wall_source() {
     let handle = Coven::builder(config(StoreDir::new(tmp.path())))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
-        .clock(Arc::new(crate::clock::FixedClock(clock)))
+        .clock(Arc::new(coven_foundation::clock::FixedClock(clock)))
         .open()
         .expect("open handle");
 
@@ -925,7 +925,7 @@ async fn open_removes_orphaned_local_blob_temps() {
     let final_path = dir
         .local_blob_path("media-files", "tempaaaa")
         .expect("local path");
-    let mut staged = crate::local_file::AtomicStagedFile::create(&final_path)
+    let mut staged = coven_foundation::local_file::AtomicStagedFile::create(&final_path)
         .await
         .expect("allocate local blob stage");
     staged
@@ -994,7 +994,7 @@ async fn orphaned_final_blob_is_replaced_by_next_write() {
     let path = dir
         .local_blob_path("media-files", "orphaaaa")
         .expect("local path");
-    crate::local_file::AtomicStagedFile::write_for_test(&path, b"orphaned bytes")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, b"orphaned bytes")
         .await
         .expect("write orphaned file");
 
@@ -1792,7 +1792,7 @@ async fn blob_stage_failure_does_not_run_sql() {
 async fn replacement_deletes_old_blob_after_sql_drops_reference() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new(tmp.path());
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
         .await
         .expect("store old");
     handle
@@ -1812,7 +1812,7 @@ async fn replacement_deletes_old_blob_after_sql_drops_reference() {
         .await
         .expect("seed row");
     handle.publish_current_writes().await;
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
         .await
         .expect("restore published blob locally");
     let old_ref = BlobRef {
@@ -2053,7 +2053,7 @@ async fn pending_write_blob_ownership_survives_restart() {
 async fn author_delete_drops_all_local_blob_copies() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new(tmp.path());
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
         .await
         .expect("store old");
     handle
@@ -2088,13 +2088,13 @@ async fn author_delete_drops_all_local_blob_copies() {
     let cached = dir
         .cache_blob_path("media-files", locator_hash)
         .expect("cache path");
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
         .await
         .expect("restore published blob locally");
-    crate::local_file::AtomicStagedFile::write_for_test(&pinned, b"old")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&pinned, b"old")
         .await
         .expect("write pinned blob");
-    crate::local_file::AtomicStagedFile::write_for_test(&cached, b"old")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&cached, b"old")
         .await
         .expect("write cached blob");
     let old_ref = BlobRef {
@@ -2136,9 +2136,14 @@ async fn author_delete_drops_all_local_blob_copies() {
 async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new(tmp.path());
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldddddd", b"old")
-        .await
-        .expect("store old");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &dir,
+        "media-files",
+        "oldddddd",
+        b"old",
+    )
+    .await
+    .expect("store old");
     handle
         .sql(|sql| {
             sql.execute(
@@ -2168,9 +2173,14 @@ async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
     let pinned = dir
         .pinned_blob_path("media-files", locator_hash)
         .expect("pinned path");
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldddddd", b"old")
-        .await
-        .expect("restore published blob locally");
+    coven_foundation::store_dir::StoreDir::store_local_blob(
+        &dir,
+        "media-files",
+        "oldddddd",
+        b"old",
+    )
+    .await
+    .expect("restore published blob locally");
     std::fs::create_dir_all(&pinned).expect("create pinned blocker");
     let old_ref = BlobRef {
         namespace: "media-files".to_string(),
@@ -2264,7 +2274,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
     let local = dir
         .local_blob_path("media-files", blob_id)
         .expect("local path");
-    crate::local_file::AtomicStagedFile::write_for_test(&local, b"live")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&local, b"live")
         .await
         .expect("write local blob");
 
@@ -2315,10 +2325,10 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
     let cached = dir
         .cache_blob_path("media-files", locator_hash)
         .expect("cache path");
-    crate::local_file::AtomicStagedFile::write_for_test(&pinned, b"live")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&pinned, b"live")
         .await
         .expect("write pinned blob");
-    crate::local_file::AtomicStagedFile::write_for_test(&cached, b"live")
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&cached, b"live")
         .await
         .expect("write cached blob");
     let delete = source
@@ -2394,7 +2404,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
 async fn replacement_is_rejected_while_sql_still_references_old_blob() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new(tmp.path());
-    crate::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldbbbb", b"old")
+    coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldbbbb", b"old")
         .await
         .expect("store old");
     handle
@@ -3084,8 +3094,8 @@ async fn concurrent_same_blob_cache_writes_never_tear() {
     let a = vec![b'A'; 64 * 1024];
     let b = vec![b'B'; 64 * 1024];
     let (ra, rb) = tokio::join!(
-        crate::local_file::AtomicStagedFile::write_for_test(&dest, &a),
-        crate::local_file::AtomicStagedFile::write_for_test(&dest, &b),
+        coven_foundation::local_file::AtomicStagedFile::write_for_test(&dest, &a),
+        coven_foundation::local_file::AtomicStagedFile::write_for_test(&dest, &b),
     );
     ra.expect("first concurrent cache write");
     rb.expect("second concurrent cache write");

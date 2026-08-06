@@ -161,7 +161,7 @@ impl LocalStoreWriter {
         cipher: &dyn crate::storage::CloudCipherAccess,
         pending_rotation: &dyn crate::storage::CloudRotationAccess,
         store_id: &str,
-        clock: &dyn crate::clock::Clock,
+        clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         crate::blob::delete::TombstoneDrain::new(
             database,

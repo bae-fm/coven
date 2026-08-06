@@ -29,7 +29,7 @@ impl UploadedBlobSpool {
                 ))
             }
         }
-        crate::atomic_file::sync_parent_dir(&self.path).await
+        coven_foundation::atomic_file::sync_parent_dir(&self.path).await
     }
 }
 
@@ -369,12 +369,11 @@ impl StoreDatabase {
         for prepared in loaded.blobs {
             if let Some(spool_path) = prepared.spool_path() {
                 {
-                    let (size, digest) =
-                        crate::local_file::file_facts(spool_path)
-                            .await
-                            .map_err(|error| {
-                                DbError::Message(format!("prepared blob spool: {error}"))
-                            })?;
+                    let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
+                        .await
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared blob spool: {error}"))
+                        })?;
                     prepared
                         .blob()
                         .object()

@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
-use crate::clock::ClockRef;
 use crate::database::{Database, DbError, StoreDatabase};
 use crate::encryption::SealError;
 use crate::keys::{
@@ -43,8 +42,6 @@ use crate::storage::cloud::CloudHome;
 use crate::storage::CloudCipher;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
-use crate::store_dir::StoreDir;
-use crate::store_dir::StoreOpenGuard;
 use crate::store_foundation::StoreFoundation;
 use crate::store_joining::StoreJoining;
 use crate::store_membership::StoreMembership;
@@ -54,6 +51,9 @@ use crate::store_security::StoreSecurity;
 use crate::store_sync::{ConfigProvider, StoreSync, SyncError};
 use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::{BlobCacheError, BlobStream};
+use coven_foundation::clock::ClockRef;
+use coven_foundation::store_dir::StoreDir;
+use coven_foundation::store_dir::StoreOpenGuard;
 use tokio::sync::watch;
 
 /// A Remote blob read needs sync storage; if building it from config fails
