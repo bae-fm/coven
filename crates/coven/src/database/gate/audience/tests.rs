@@ -1,7 +1,7 @@
 use super::inbound::*;
 use super::routing::*;
 use super::*;
-use crate::protocol::synced_schema::{RowIdentity, SyncedTable};
+use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
 use rusqlite::session::{ConflictAction, Session};
 
 fn routing_schema(conn: &Connection) {
@@ -46,9 +46,9 @@ fn note_gates(conn: &Connection) -> Gates {
 }
 
 fn routing_key() -> RowRoutingKey {
-    crate::protocol::circle::derive_row_routing_key(
+    coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([7; 32]),
-        crate::protocol::store_commit::ObjectHash::digest(b"audience test"),
+        coven_protocol::store_commit::ObjectHash::digest(b"audience test"),
     )
     .expect("derive test row-routing key")
 }

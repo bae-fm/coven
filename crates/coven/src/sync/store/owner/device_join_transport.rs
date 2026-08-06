@@ -22,9 +22,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::protocol::store_commit::{DeviceJoinAttemptId, ObjectHash, STORE_PROTOCOL_VERSION};
 use crate::storage::SyncStorage;
 use crate::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
@@ -35,6 +32,9 @@ use crate::sync::store::{
     ProviderAdminJoinTerminal, ProvisionalDeviceBootstrap, Store,
 };
 use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash, STORE_PROTOCOL_VERSION};
 
 /// The prefix every transport slot's logical key starts with.
 const TRANSPORT_ROOT: &str = "store-v1/device-join-transport";
@@ -203,7 +203,7 @@ device_join_artifact!(
     TransferProvisionalBootstrap
 );
 device_join_artifact!(
-    crate::protocol::store_commit::device_join_exchange::ProviderReadyDeviceBootstrap,
+    coven_protocol::store_commit::device_join_exchange::ProviderReadyDeviceBootstrap,
     ProviderReadyBootstrap,
     TransferProviderReadyBootstrap
 );

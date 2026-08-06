@@ -22,8 +22,8 @@ fn scoped_store(
     let database = Database::open(
         &store_dir.db_path(),
         tables,
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         device.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,

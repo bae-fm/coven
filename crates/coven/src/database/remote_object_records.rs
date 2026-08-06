@@ -11,7 +11,7 @@ pub(crate) enum RemoteStoredRepresentationRef<'a> {
 pub(crate) fn candidate_graph_exact_objects(
     commit: &StoreBatchCommit,
 ) -> Result<Vec<ExactObjectRef>, DbError> {
-    crate::protocol::remote_object::CandidateObjectGraph::from_commit(commit)
+    coven_protocol::remote_object::CandidateObjectGraph::from_commit(commit)
         .map(|graph| graph.exact_objects().cloned().collect())
         .map_err(|error| DbError::context("closed candidate object graph", error))
 }
@@ -29,7 +29,7 @@ pub(crate) fn validate_remote_object_on(
         RemoteStoredRepresentationRef::Inline(expected) => stored.inline_bytes() == Some(expected),
         RemoteStoredRepresentationRef::Blob => matches!(
             stored,
-            crate::protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
+            coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
         ),
     };
     if remote.object() != expected_object
@@ -196,7 +196,7 @@ pub(crate) fn index_retained_replay_owner_on(
 pub(crate) fn load_protocol_inert_object_on(
     conn: &Connection,
     object_id: ObjectHash,
-) -> Result<crate::protocol::remote_object::ProtocolInertObject, DbError> {
+) -> Result<coven_protocol::remote_object::ProtocolInertObject, DbError> {
     let state: String = conn
         .query_row(
             "SELECT state FROM protocol_inert_objects WHERE object_id = ?1",
@@ -204,13 +204,13 @@ pub(crate) fn load_protocol_inert_object_on(
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    let inert: crate::protocol::remote_object::ProtocolInertObject = serde_json::from_str(&state)
+    let inert: coven_protocol::remote_object::ProtocolInertObject = serde_json::from_str(&state)
         .map_err(|error| {
-        DbError::context(
-            format!("protocol-inert object {object_id} has invalid closed state"),
-            error,
-        )
-    })?;
+            DbError::context(
+                format!("protocol-inert object {object_id} has invalid closed state"),
+                error,
+            )
+        })?;
     inert
         .validate()
         .map_err(|error| DbError::context(format!("protocol-inert object {object_id}"), error))?;
@@ -316,25 +316,25 @@ pub(crate) fn record_reclaimed_store_package_on(
     if remote_exists {
         let remote = load_remote_object_on(conn, object_id)?;
         match reclaimed.authorization().target() {
-            crate::protocol::reclaim::ReclaimTarget::StorePackage(target) => {
+            coven_protocol::reclaim::ReclaimTarget::StorePackage(target) => {
                 remote.validate_reclaimable_store_package(&target.package, &target.activation)
             }
-            crate::protocol::reclaim::ReclaimTarget::CirclePackage(target) => {
+            coven_protocol::reclaim::ReclaimTarget::CirclePackage(target) => {
                 remote.validate_reclaimable_circle_package(&target.package, &target.activation)
             }
-            crate::protocol::reclaim::ReclaimTarget::CircleBootstrapImage(target) => remote
+            coven_protocol::reclaim::ReclaimTarget::CircleBootstrapImage(target) => remote
                 .validate_reclaimable_circle_bootstrap_image(
                     &target.coverage.bootstrap.image,
                     &target.coverage.activation_commit,
                 ),
-            crate::protocol::reclaim::ReclaimTarget::CircleSnapshotImage(target) => {
+            coven_protocol::reclaim::ReclaimTarget::CircleSnapshotImage(target) => {
                 let root = required_store_root_authority_on(conn)?;
                 let owner = target
                     .snapshot_owner(root.store_root_hash)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }
-            crate::protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
+            coven_protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
                 remote.validate_reclaimable_stored_blob(&target.blob)
             }
         }
@@ -525,7 +525,7 @@ pub(crate) fn update_remote_object_on(
 pub(crate) fn begin_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
-    nonactivation: crate::protocol::remote_object::CandidateNonactivation,
+    nonactivation: coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<Option<ExactObjectRef>, DbError> {
     let mut remote = load_remote_object_on(conn, object_id)?;
     let inert = remote
@@ -542,8 +542,8 @@ pub(crate) fn begin_remote_candidate_nonactivation_on(
 pub(crate) fn begin_remote_candidate_nonactivation_with_verified_head_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
-    nonactivation: crate::protocol::remote_object::CandidateNonactivation,
-    head_nonactivation: &crate::protocol::remote_object::VerifiedCandidateHeadNonactivation,
+    nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    head_nonactivation: &coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
 ) -> Result<Option<ExactObjectRef>, DbError> {
     let mut remote = load_remote_object_on(conn, object_id)?;
     let inert = remote
@@ -564,7 +564,7 @@ pub(crate) fn finish_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     remote: RemoteObjectRecord,
-    inert: Option<crate::protocol::remote_object::ProtocolInertObject>,
+    inert: Option<coven_protocol::remote_object::ProtocolInertObject>,
 ) -> Result<Option<ExactObjectRef>, DbError> {
     let Some(inert) = inert else {
         let cleanup = remote.cleanup_target().cloned();
@@ -628,10 +628,10 @@ pub(crate) fn replace_prepared_merge_head_remote_on(
         RemoteObjectRecord::RetainedAuthority(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead { .. }
+                coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead { .. }
             ) && matches!(
                 &record.state,
-                crate::protocol::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
+                coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
                     if ownership.pending == BTreeSet::from([candidate.clone()])
             )
     ) {
@@ -650,7 +650,7 @@ pub(crate) fn replace_prepared_merge_head_remote_on(
             "prepared Merge head disappeared during replacement".to_string(),
         ));
     }
-    let winner_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+    let winner_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
         head_hash: winner.head_hash(),
         object: winner_prepared.reference().clone(),
     };
@@ -679,12 +679,12 @@ pub(crate) fn mark_remote_object_uploaded_on(
     ) = (&current, &expected)
     {
         let expected_owner = match &expected_record.state {
-            crate::protocol::remote_object::CandidateObjectState::Prepared { ownership }
-            | crate::protocol::remote_object::CandidateObjectState::UploadedVerified {
-                ownership,
-            } => ownership.pending.iter().next(),
-            crate::protocol::remote_object::CandidateObjectState::CleanupPending { .. }
-            | crate::protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => None,
+            coven_protocol::remote_object::CandidateObjectState::Prepared { ownership }
+            | coven_protocol::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.iter().next()
+            }
+            coven_protocol::remote_object::CandidateObjectState::CleanupPending { .. }
+            | coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => None,
         };
         if expected_record.identity.domain.shared_destination()
             == Some(current_record.identity.domain.clone())
@@ -694,10 +694,10 @@ pub(crate) fn mark_remote_object_uploaded_on(
             && expected_owner.is_some_and(|owner| {
                 matches!(
                     &current_record.state,
-                    crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership }
+                    coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership }
                         if ownership.pending.contains(owner)
                             || ownership.activated.contains(
-                                &crate::protocol::remote_object::SharedObjectOwner::StoreCommit(
+                                &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(
                                     owner.clone(),
                                 ),
                             )
@@ -713,12 +713,12 @@ pub(crate) fn mark_remote_object_uploaded_on(
     ) = (&current, &expected)
     {
         let expected_owner = match &expected_record.state {
-            crate::protocol::remote_object::CandidateObjectState::Prepared { ownership }
-            | crate::protocol::remote_object::CandidateObjectState::UploadedVerified {
-                ownership,
-            } => ownership.pending.iter().next(),
-            crate::protocol::remote_object::CandidateObjectState::CleanupPending { .. }
-            | crate::protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => None,
+            coven_protocol::remote_object::CandidateObjectState::Prepared { ownership }
+            | coven_protocol::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.iter().next()
+            }
+            coven_protocol::remote_object::CandidateObjectState::CleanupPending { .. }
+            | coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => None,
         };
         if expected_record.identity.domain.retained_destination()
             == Some(current_record.identity.domain.clone())
@@ -728,7 +728,7 @@ pub(crate) fn mark_remote_object_uploaded_on(
             && expected_owner.is_some_and(|owner| {
                 matches!(
                     &current_record.state,
-                    crate::protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                    coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
                         ownership
                     } if ownership.pending.contains(owner) || ownership.activated.contains(owner)
                 )
@@ -778,7 +778,7 @@ pub(crate) fn mark_reusable_retained_authority_uploaded_on(
             "reusable remote object {object_id} is not retained authority"
         )));
     };
-    let crate::protocol::remote_object::RetainedAuthorityObjectState::Prepared {
+    let coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared {
         ownership: expected_ownership,
     } = &expected_record.state
     else {
@@ -810,15 +810,15 @@ pub(crate) fn mark_reusable_retained_authority_uploaded_on(
         )));
     }
     let owns_candidate = match &current_record.state {
-        crate::protocol::remote_object::RetainedAuthorityObjectState::Prepared { ownership } => {
+        coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { ownership } => {
             ownership.pending.contains(candidate)
         }
-        crate::protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+        coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
             ownership,
         } => ownership.pending.contains(candidate) || ownership.activated.contains(candidate),
-        crate::protocol::remote_object::RetainedAuthorityObjectState::CleanupPending { .. }
-        | crate::protocol::remote_object::RetainedAuthorityObjectState::AbsentVerified { .. }
-        | crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
+        coven_protocol::remote_object::RetainedAuthorityObjectState::CleanupPending { .. }
+        | coven_protocol::remote_object::RetainedAuthorityObjectState::AbsentVerified { .. }
+        | coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
             ..
         } => false,
     };
@@ -845,7 +845,7 @@ pub(crate) fn merge_prepared_remote_object(
     proposed: &RemoteObjectRecord,
     owner: &StoreBatchCommitRef,
 ) -> Result<RemoteObjectRecord, DbError> {
-    use crate::protocol::remote_object::{OwnedObjectState, SharedLiveSetObjectDomain};
+    use coven_protocol::remote_object::{OwnedObjectState, SharedLiveSetObjectDomain};
 
     if &existing == proposed {
         return Ok(existing);
@@ -856,12 +856,12 @@ pub(crate) fn merge_prepared_remote_object(
     ) = (&existing, proposed)
     {
         let proposed_owner = match &proposed_record.state {
-            crate::protocol::remote_object::CandidateObjectState::Prepared { ownership }
-            | crate::protocol::remote_object::CandidateObjectState::UploadedVerified {
-                ownership,
-            } => ownership.pending.contains(owner),
-            crate::protocol::remote_object::CandidateObjectState::CleanupPending { .. }
-            | crate::protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => false,
+            coven_protocol::remote_object::CandidateObjectState::Prepared { ownership }
+            | coven_protocol::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.contains(owner)
+            }
+            coven_protocol::remote_object::CandidateObjectState::CleanupPending { .. }
+            | coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => false,
         };
         if proposed_record.identity.domain.shared_destination()
             != Some(existing_record.identity.domain.clone())
@@ -888,7 +888,7 @@ pub(crate) fn merge_prepared_remote_object(
             }
             OwnedObjectState::RetirementPending { former_candidates } => {
                 record.state = OwnedObjectState::UploadedVerified {
-                    ownership: crate::protocol::remote_object::SharedObjectOwnership {
+                    ownership: coven_protocol::remote_object::SharedObjectOwnership {
                         pending: BTreeSet::from([owner.clone()]),
                         activated: BTreeSet::new(),
                         nonactivated: former_candidates.clone(),
@@ -921,12 +921,12 @@ pub(crate) fn merge_prepared_remote_object(
             )));
         }
         let proposed_owner = match &proposed_record.state {
-            crate::protocol::remote_object::CandidateObjectState::Prepared { ownership }
-            | crate::protocol::remote_object::CandidateObjectState::UploadedVerified {
-                ownership,
-            } => ownership.pending.contains(owner),
-            crate::protocol::remote_object::CandidateObjectState::CleanupPending { .. }
-            | crate::protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => false,
+            coven_protocol::remote_object::CandidateObjectState::Prepared { ownership }
+            | coven_protocol::remote_object::CandidateObjectState::UploadedVerified { ownership } => {
+                ownership.pending.contains(owner)
+            }
+            coven_protocol::remote_object::CandidateObjectState::CleanupPending { .. }
+            | coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. } => false,
         };
         if !proposed_owner {
             return Err(DbError::Message(format!(
@@ -982,7 +982,7 @@ pub(crate) fn merge_prepared_remote_object(
             ownership.pending.insert(owner.clone());
             if proposed_uploaded {
                 existing.state = OwnedObjectState::UploadedVerified {
-                    ownership: crate::protocol::remote_object::SharedObjectOwnership {
+                    ownership: coven_protocol::remote_object::SharedObjectOwnership {
                         pending: ownership.pending.clone(),
                         activated: std::collections::BTreeSet::new(),
                         nonactivated: ownership.nonactivated.clone(),
@@ -994,13 +994,13 @@ pub(crate) fn merge_prepared_remote_object(
             ownership.pending.insert(owner.clone());
         }
         OwnedObjectState::RetirementPending { former_candidates } => {
-            let ownership = crate::protocol::remote_object::PendingCandidateOwnership {
+            let ownership = coven_protocol::remote_object::PendingCandidateOwnership {
                 pending: std::collections::BTreeSet::from([owner.clone()]),
                 nonactivated: former_candidates.clone(),
             };
             existing.state = if proposed_uploaded {
                 OwnedObjectState::UploadedVerified {
-                    ownership: crate::protocol::remote_object::SharedObjectOwnership {
+                    ownership: coven_protocol::remote_object::SharedObjectOwnership {
                         pending: ownership.pending,
                         activated: std::collections::BTreeSet::new(),
                         nonactivated: ownership.nonactivated,

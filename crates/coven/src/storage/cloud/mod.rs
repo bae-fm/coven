@@ -38,7 +38,7 @@ mod sharing;
 #[cfg(test)]
 mod test_server;
 
-use crate::protocol::objects::ObjectSlot;
+use coven_protocol::objects::ObjectSlot;
 pub(crate) use factory::CloudHomeFactory;
 #[cfg(feature = "oauth-providers")]
 pub(crate) use google_drive::{folder_search_query, supports_all_drives};
@@ -384,13 +384,13 @@ pub(crate) fn range_header(start: u64, end: u64) -> String {
 pub trait ExactSlotStorage: Send + Sync {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError>;
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError>;
 
     async fn cross_principal_evidence(
         &self,
-    ) -> Result<crate::protocol::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
-        use crate::protocol::objects::{GoogleDriveCorpus, StoreProviderBinding};
-        use crate::protocol::provider::CrossPrincipalProviderEvidence;
+    ) -> Result<coven_protocol::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
+        use coven_protocol::objects::{GoogleDriveCorpus, StoreProviderBinding};
+        use coven_protocol::provider::CrossPrincipalProviderEvidence;
 
         match self.provider_binding().await?.store {
             StoreProviderBinding::GoogleDrive {
@@ -433,12 +433,12 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn observe_at(
         &self,
         slot: &ObjectSlot,
-    ) -> Result<Option<crate::protocol::objects::ExactObjectRef>, CloudHomeError> {
+    ) -> Result<Option<coven_protocol::objects::ExactObjectRef>, CloudHomeError> {
         match self.read_at(slot).await {
-            Ok(bytes) => Ok(Some(crate::protocol::objects::ExactObjectRef::new(
+            Ok(bytes) => Ok(Some(coven_protocol::objects::ExactObjectRef::new(
                 slot.clone(),
                 bytes.len() as u64,
-                crate::protocol::store_commit::ObjectHash::digest(&bytes),
+                coven_protocol::store_commit::ObjectHash::digest(&bytes),
             ))),
             Err(CloudHomeError::NotFound(_)) => Ok(None),
             Err(error) => Err(error),
@@ -571,19 +571,19 @@ mod retryable_tests;
 #[cfg(test)]
 mod streaming_tests;
 
-impl From<CloudHomeError> for crate::protocol::objects::StorageError {
+impl From<CloudHomeError> for coven_protocol::objects::StorageError {
     fn from(e: CloudHomeError) -> Self {
         match e {
-            CloudHomeError::NotFound(key) => crate::protocol::objects::StorageError::NotFound(key),
+            CloudHomeError::NotFound(key) => coven_protocol::objects::StorageError::NotFound(key),
             CloudHomeError::AlreadyExists(key) => {
-                crate::protocol::objects::StorageError::AlreadyExists(key)
+                coven_protocol::objects::StorageError::AlreadyExists(key)
             }
             CloudHomeError::Configuration(msg) => {
-                crate::protocol::objects::StorageError::Configuration(msg)
+                coven_protocol::objects::StorageError::Configuration(msg)
             }
-            CloudHomeError::Transport(msg) => crate::protocol::objects::StorageError::Storage(msg),
+            CloudHomeError::Transport(msg) => coven_protocol::objects::StorageError::Storage(msg),
             CloudHomeError::CleanupFailed { operation, cleanup } => {
-                crate::protocol::objects::StorageError::CleanupFailed {
+                coven_protocol::objects::StorageError::CleanupFailed {
                     operation: Box::new(Self::from(*operation)),
                     cleanup: Box::new(Self::from(*cleanup)),
                 }
@@ -591,24 +591,24 @@ impl From<CloudHomeError> for crate::protocol::objects::StorageError {
             CloudHomeError::UnresolvedOutcome {
                 operation,
                 readback,
-            } => crate::protocol::objects::StorageError::UnresolvedOutcome {
+            } => coven_protocol::objects::StorageError::UnresolvedOutcome {
                 operation: Box::new(Self::from(*operation)),
                 readback: Box::new(Self::from(*readback)),
             },
             CloudHomeError::Io(io_err) => {
-                crate::protocol::objects::StorageError::Storage(format!("I/O error: {io_err}"))
+                coven_protocol::objects::StorageError::Storage(format!("I/O error: {io_err}"))
             }
         }
     }
 }
 
 /// Slot and reference validation lives on the protocol values and reports
-/// [`crate::protocol::objects::StorageError`]; provider code folds it into its
+/// [`coven_protocol::objects::StorageError`]; provider code folds it into its
 /// own configuration vocabulary.
-impl From<crate::protocol::objects::StorageError> for CloudHomeError {
-    fn from(error: crate::protocol::objects::StorageError) -> Self {
+impl From<coven_protocol::objects::StorageError> for CloudHomeError {
+    fn from(error: coven_protocol::objects::StorageError) -> Self {
         match error {
-            crate::protocol::objects::StorageError::Configuration(message) => {
+            coven_protocol::objects::StorageError::Configuration(message) => {
                 CloudHomeError::Configuration(message)
             }
             other => CloudHomeError::Configuration(other.to_string()),

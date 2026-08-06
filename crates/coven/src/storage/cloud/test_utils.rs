@@ -17,7 +17,7 @@ use super::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
     CloudHomeError, ExactSlotStorage, PartSink, UploadProgress,
 };
-use crate::protocol::objects::ObjectSlot;
+use coven_protocol::objects::ObjectSlot;
 
 #[derive(Clone)]
 struct AppendPause {
@@ -55,7 +55,7 @@ impl Drop for ExactStreamReadGuard {
 /// arming state is shared across clones, like the backing store.
 #[derive(Clone)]
 pub struct InMemoryCloudHome {
-    provider_binding: crate::protocol::objects::ResolvedProviderBinding,
+    provider_binding: coven_protocol::objects::ResolvedProviderBinding,
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     exact_slot_allocations: Arc<AtomicUsize>,
     deletes: Arc<Mutex<Vec<String>>>,
@@ -95,18 +95,18 @@ struct TargetedDeleteFailure {
 impl InMemoryCloudHome {
     pub fn new() -> Self {
         Self {
-            provider_binding: crate::protocol::objects::ResolvedProviderBinding {
-                store: crate::protocol::objects::StoreProviderBinding::S3 {
-                    endpoint: crate::protocol::objects::S3EndpointBinding::Custom {
+            provider_binding: coven_protocol::objects::ResolvedProviderBinding {
+                store: coven_protocol::objects::StoreProviderBinding::S3 {
+                    endpoint: coven_protocol::objects::S3EndpointBinding::Custom {
                         origin: "https://in-memory.invalid".to_string(),
                     },
                     region: "test".to_string(),
                     bucket: "in-memory".to_string(),
                     key_prefix: None,
                 },
-                device: crate::protocol::objects::ProviderDeviceBinding {
-                    principal: crate::protocol::objects::ProviderPrincipalId::CustomS3Credential {
-                        access_key_id_hash: crate::protocol::store_commit::ObjectHash::digest(
+                device: coven_protocol::objects::ProviderDeviceBinding {
+                    principal: coven_protocol::objects::ProviderPrincipalId::CustomS3Credential {
+                        access_key_id_hash: coven_protocol::store_commit::ObjectHash::digest(
                             b"coven.s3-access-key-id.v1\0in-memory",
                         ),
                     },
@@ -139,7 +139,7 @@ impl InMemoryCloudHome {
 
     pub fn with_provider_binding(
         mut self,
-        binding: crate::protocol::objects::ResolvedProviderBinding,
+        binding: coven_protocol::objects::ResolvedProviderBinding,
     ) -> Self {
         binding
             .validate()
@@ -356,7 +356,7 @@ impl InMemoryCloudHome {
     }
 
     /// Whether one exact protocol object is currently stored.
-    pub fn contains_exact_object(&self, object: &crate::protocol::objects::ExactObjectRef) -> bool {
+    pub fn contains_exact_object(&self, object: &coven_protocol::objects::ExactObjectRef) -> bool {
         let key = Self::exact_storage_key(object.slot()).expect("test exact slot is valid");
         self.writes.lock().unwrap().contains_key(&key)
     }
@@ -435,10 +435,10 @@ impl InMemoryCloudHome {
     fn exact_storage_key(slot: &ObjectSlot) -> Result<String, CloudHomeError> {
         Self::validate_exact_slot(slot)?;
         Ok(match slot.physical() {
-            crate::protocol::objects::PhysicalObjectLocator::LogicalKey => {
+            coven_protocol::objects::PhysicalObjectLocator::LogicalKey => {
                 slot.logical_key().to_string()
             }
-            crate::protocol::objects::PhysicalObjectLocator::Opaque(provider_id) => {
+            coven_protocol::objects::PhysicalObjectLocator::Opaque(provider_id) => {
                 format!("{}#exact#{provider_id}", slot.logical_key())
             }
         })
@@ -753,21 +753,21 @@ impl CloudHome for InMemoryCloudHome {
 impl ExactSlotStorage for InMemoryCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
         Ok(self.provider_binding.clone())
     }
 
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
         match &self.provider_binding.store {
-            crate::protocol::objects::StoreProviderBinding::GoogleDrive { .. } => {
+            coven_protocol::objects::StoreProviderBinding::GoogleDrive { .. } => {
                 let allocation = self.exact_slot_allocations.fetch_add(1, Ordering::SeqCst) + 1;
                 ObjectSlot::opaque(logical_key.to_string(), format!("in-memory-{allocation}"))
                     .map_err(CloudHomeError::from)
             }
-            crate::protocol::objects::StoreProviderBinding::S3 { .. }
-            | crate::protocol::objects::StoreProviderBinding::Dropbox { .. }
-            | crate::protocol::objects::StoreProviderBinding::OneDrive { .. }
-            | crate::protocol::objects::StoreProviderBinding::CloudKit { .. } => {
+            coven_protocol::objects::StoreProviderBinding::S3 { .. }
+            | coven_protocol::objects::StoreProviderBinding::Dropbox { .. }
+            | coven_protocol::objects::StoreProviderBinding::OneDrive { .. }
+            | coven_protocol::objects::StoreProviderBinding::CloudKit { .. } => {
                 ObjectSlot::logical(logical_key.to_string()).map_err(CloudHomeError::from)
             }
         }
@@ -843,15 +843,15 @@ mod tests;
 /// [`InMemoryCloudHome`] itself, which they bind to their own provider.
 #[cfg(test)]
 pub(crate) fn test_cloud_home() -> std::sync::Arc<InMemoryCloudHome> {
-    test_cloud_home_with_binding(crate::protocol::objects::ResolvedProviderBinding {
-        store: crate::protocol::objects::StoreProviderBinding::GoogleDrive {
-            corpus: crate::protocol::objects::GoogleDriveCorpus::SharedDrive {
+    test_cloud_home_with_binding(coven_protocol::objects::ResolvedProviderBinding {
+        store: coven_protocol::objects::StoreProviderBinding::GoogleDrive {
+            corpus: coven_protocol::objects::GoogleDriveCorpus::SharedDrive {
                 drive_id: "test-drive".to_string(),
                 folder_id: "test-folder".to_string(),
             },
         },
-        device: crate::protocol::objects::ProviderDeviceBinding {
-            principal: crate::protocol::objects::ProviderPrincipalId::GoogleDrive {
+        device: coven_protocol::objects::ProviderDeviceBinding {
+            principal: coven_protocol::objects::ProviderPrincipalId::GoogleDrive {
                 permission_id: "test-permission".to_string(),
             },
         },
@@ -860,7 +860,7 @@ pub(crate) fn test_cloud_home() -> std::sync::Arc<InMemoryCloudHome> {
 
 #[cfg(test)]
 pub(crate) fn test_cloud_home_with_binding(
-    binding: crate::protocol::objects::ResolvedProviderBinding,
+    binding: coven_protocol::objects::ResolvedProviderBinding,
 ) -> std::sync::Arc<InMemoryCloudHome> {
     std::sync::Arc::new(InMemoryCloudHome::new().with_provider_binding(binding))
 }

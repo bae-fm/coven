@@ -8,7 +8,7 @@ use coven_foundation::changeset::RowChange;
 use super::cycle::SyncCycleResult;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
-use crate::protocol::objects::RotationPending;
+use coven_protocol::objects::RotationPending;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoopWait {
@@ -140,11 +140,11 @@ pub(crate) fn after_failure(
 mod tests {
     use super::*;
 
-    use crate::protocol::causal_grants::AuthorStreamId;
-    use crate::protocol::membership::HeldStorePositionReason;
-    use crate::protocol::objects::ExactObjectRef;
-    use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
     use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
+    use coven_protocol::causal_grants::AuthorStreamId;
+    use coven_protocol::membership::HeldStorePositionReason;
+    use coven_protocol::objects::ExactObjectRef;
+    use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
 
     fn held(n: usize) -> Vec<HeldStorePosition> {
         (0..n)
@@ -160,7 +160,7 @@ mod tests {
                         },
                         commit_hash: ObjectHash::digest(format!("commit-{i}").as_bytes()),
                         object: ExactObjectRef::new(
-                            crate::protocol::objects::ObjectSlot::logical(format!(
+                            coven_protocol::objects::ObjectSlot::logical(format!(
                                 "test-commit-{i}"
                             ))
                             .expect("test commit slot"),
@@ -283,7 +283,7 @@ mod tests {
     fn rotation_pending_alert_takes_priority_over_every_other_alert() {
         let alerts = SyncLoopAlerts {
             rotation_pending: Some(RotationPending {
-                state: crate::protocol::objects::RotationPendingState::LocalCommitted {
+                state: coven_protocol::objects::RotationPendingState::LocalCommitted {
                     generation: 2,
                 },
                 live_generation: 1,

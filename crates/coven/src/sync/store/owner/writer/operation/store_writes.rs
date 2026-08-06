@@ -2,18 +2,18 @@ use super::*;
 use crate::storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
-    pub(super) fn local_device_id(&self) -> &crate::protocol::store_commit::StoreDeviceId {
+    pub(super) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
         self.writer.device_id()
     }
 
-    pub(crate) fn announcement_stream_id(&self) -> crate::protocol::membership::AuthorStreamId {
+    pub(crate) fn announcement_stream_id(&self) -> coven_protocol::membership::AuthorStreamId {
         self.writer
             .announcement_stream_id(self.store_root().store_root_hash)
     }
 
     pub(crate) async fn latest_local_store_position(
         &self,
-    ) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, crate::database::DbError>
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, crate::database::DbError>
     {
         self.database
             .latest_local_store_position(self.announcement_stream_id())
@@ -56,7 +56,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 let commit = &batch.commit.value;
                 if !matches!(
                     commit.body,
-                    crate::protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
+                    coven_protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
                 ) {
                     operation.publish_prepared_remote_objects(&write_id).await?;
                     database.retire_uploaded_blob_spools().await?;
@@ -295,7 +295,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
         let routing_key = routing_encryption
             .map(|encryption| {
-                crate::protocol::circle::derive_row_routing_key(
+                coven_protocol::circle::derive_row_routing_key(
                     encryption,
                     self.store_root().store_root_hash,
                 )
@@ -314,11 +314,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         write_id: &crate::WriteId,
     ) -> Result<(), StoreError> {
-        use crate::protocol::objects::{
+        use coven_protocol::objects::{
             BlobWriteAuthority, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
             StoreObjectError,
         };
-        use crate::protocol::store_commit::{
+        use coven_protocol::store_commit::{
             circle_package_semantic_prefix, package_semantic_prefix, ObjectHash,
         };
 
@@ -328,39 +328,39 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         for prepared in database.prepared_remote_objects(write_id).await? {
             let remote = prepared.record;
             let prepared_state = match &remote {
-                crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) => {
+                coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) => {
                     matches!(
                         record.state,
-                        crate::protocol::remote_object::CandidateCommitState::Prepared
+                        coven_protocol::remote_object::CandidateCommitState::Prepared
                     )
                 }
-                crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record) => {
+                coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record) => {
                     matches!(
                         record.state,
-                        crate::protocol::remote_object::CandidateObjectState::Prepared { .. }
+                        coven_protocol::remote_object::CandidateObjectState::Prepared { .. }
                     )
                 }
-                crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) => {
+                coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) => {
                     matches!(
                         record.state,
-                        crate::protocol::remote_object::OwnedObjectState::Prepared { .. }
+                        coven_protocol::remote_object::OwnedObjectState::Prepared { .. }
                     )
                 }
-                crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(_) => false,
+                coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(_) => false,
             };
             match remote.bytes().stored() {
-                crate::protocol::remote_object::RemoteStoredRepresentation::Inline {
+                coven_protocol::remote_object::RemoteStoredRepresentation::Inline {
                     bytes,
                     object,
                 } => {
-                    let package = crate::protocol::audience_package::AudiencePackage::parse(
+                    let package = coven_protocol::audience_package::AudiencePackage::parse(
                         remote.bytes().canonical_semantic_bytes(),
                     )
                     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                     let stream_id = package.commit_coord().stream_id.to_string();
                     let sequence = package.commit_coord().sequence;
                     let (context, prefix) = match package.audience() {
-                        crate::protocol::audience_package::PackageAudience::Store => (
+                        coven_protocol::audience_package::PackageAudience::Store => (
                             ProtocolObjectContext::store_encrypted(
                                 store_root_hash,
                                 ProtocolObjectDomain::StorePackage,
@@ -372,7 +372,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                 ObjectHash::digest(remote.bytes().canonical_semantic_bytes()),
                             ),
                         ),
-                        crate::protocol::audience_package::PackageAudience::Circle {
+                        coven_protocol::audience_package::PackageAudience::Circle {
                             circle_id,
                             control,
                             ..
@@ -413,8 +413,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .await
                         .map_err(StoreError::readback)?;
                 }
-                crate::protocol::remote_object::RemoteStoredRepresentation::Blob { object } => {
-                    let locator = crate::protocol::blob::locator::BlobLocator::parse(
+                coven_protocol::remote_object::RemoteStoredRepresentation::Blob { object } => {
+                    let locator = coven_protocol::blob::locator::BlobLocator::parse(
                         remote.bytes().canonical_semantic_bytes(),
                     )
                     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -424,7 +424,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .await?;
                     let authority = BlobWriteAuthority::new(&registration);
                     let blob =
-                        crate::protocol::blob::locator::StoredBlobRef::new(locator, object.clone())
+                        coven_protocol::blob::locator::StoredBlobRef::new(locator, object.clone())
                             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                     if prepared_state {
                         let path = prepared.spool_path.as_deref().ok_or_else(|| {
@@ -455,7 +455,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         }
                     })?;
                 }
-                crate::protocol::remote_object::RemoteStoredRepresentation::ExternalExact {
+                coven_protocol::remote_object::RemoteStoredRepresentation::ExternalExact {
                     ..
                 } => {
                     return Err(StoreError::InvalidOutbound(format!(

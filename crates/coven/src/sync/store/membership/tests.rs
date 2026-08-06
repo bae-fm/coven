@@ -1,18 +1,18 @@
 use super::*;
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
-use crate::protocol::membership::{
-    validate_membership_floor, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
-    MembershipCoord, MembershipGrantId, MembershipHeadRef,
-};
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess};
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{MasterKeyCustody, UserKeypair};
+use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
+use coven_protocol::membership::{
+    validate_membership_floor, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
+    MembershipCoord, MembershipGrantId, MembershipHeadRef,
+};
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
@@ -111,7 +111,7 @@ fn altered_exact(reference: &ExactObjectRef, label: &[u8]) -> ExactObjectRef {
     ExactObjectRef::new(
         reference.slot().clone(),
         label.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(label),
+        coven_protocol::store_commit::ObjectHash::digest(label),
     )
 }
 
@@ -286,7 +286,7 @@ async fn forked_membership_cursor_preserves_the_accepted_reference() {
         .await
         .unwrap();
     let mut fork = current.clone();
-    fork.head_hash = crate::protocol::store_commit::ObjectHash::digest(b"forked head");
+    fork.head_hash = coven_protocol::store_commit::ObjectHash::digest(b"forked head");
     fork.object = altered_exact(&current.object, b"forked object");
 
     assert!(fixture
@@ -395,11 +395,11 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         .is_none());
 
     let chain = fixture.load().await;
-    let choice = crate::protocol::membership::MembershipConflictChoice::new(
+    let choice = coven_protocol::membership::MembershipConflictChoice::new(
         "foreign-choice".to_string(),
         Vec::new(),
-        crate::protocol::store_commit::ObjectHash::digest(b"foreign conflict"),
-        crate::protocol::membership::MembershipConflictSelection::RevocationBranch {
+        coven_protocol::store_commit::ObjectHash::digest(b"foreign conflict"),
+        coven_protocol::membership::MembershipConflictSelection::RevocationBranch {
             heads: vec![chain
                 .head_refs()
                 .first()
@@ -415,7 +415,7 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
         matches!(
             &result,
             Err(MembershipOpsError::Invite(InviteError::Membership(
-                crate::protocol::membership::MembershipError::InvalidConflictResolution
+                coven_protocol::membership::MembershipError::InvalidConflictResolution
             )))
         ),
         "foreign conflict choice returned {result:?}"
@@ -601,7 +601,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         fixture.store.root.store_root_hash,
         ProtocolObjectDomain::StoreMembershipHead,
     );
-    let prefix = crate::protocol::store_commit::membership_head_slot_prefix(
+    let prefix = coven_protocol::store_commit::membership_head_slot_prefix(
         &founder_ref.coord.author_pubkey,
         &founder_ref.coord.author_owner_grant,
         AuthorStreamId::from_bytes([99; 32]),
@@ -652,7 +652,7 @@ async fn invite_carries_the_founder_and_exact_root() {
     assert_eq!(invite.store_root, fixture.store.root);
     assert!(matches!(
         invite.membership_floor,
-        crate::protocol::membership::MembershipFloor(ref floor) if !floor.is_empty()
+        coven_protocol::membership::MembershipFloor(ref floor) if !floor.is_empty()
     ));
 }
 
@@ -738,13 +738,13 @@ async fn head_cursor_persist_never_regresses() {
         .clone();
     let mut higher = current.clone();
     higher.coord.seq = 10;
-    higher.coord.entry_hash = crate::protocol::store_commit::ObjectHash::digest(b"entry 10");
-    higher.head_hash = crate::protocol::store_commit::ObjectHash::digest(b"head 10");
+    higher.coord.entry_hash = coven_protocol::store_commit::ObjectHash::digest(b"entry 10");
+    higher.head_hash = coven_protocol::store_commit::ObjectHash::digest(b"head 10");
     higher.object = altered_exact(&current.object, b"object 10");
     let mut lower = higher.clone();
     lower.coord.seq = 9;
-    lower.coord.entry_hash = crate::protocol::store_commit::ObjectHash::digest(b"entry 9");
-    lower.head_hash = crate::protocol::store_commit::ObjectHash::digest(b"head 9");
+    lower.coord.entry_hash = coven_protocol::store_commit::ObjectHash::digest(b"entry 9");
+    lower.head_hash = coven_protocol::store_commit::ObjectHash::digest(b"head 9");
     lower.object = altered_exact(&current.object, b"object 9");
 
     fixture
@@ -799,7 +799,7 @@ async fn head_cursor_rejects_a_reference_from_another_author_stream() {
 async fn pruned_membership_author_stream_is_replaced_and_persisted() {
     let db = open_test_db();
     let author = hex::encode([3; coven_keys::keys::SIGN_PUBLICKEYBYTES]);
-    let grant = MembershipGrantId(crate::protocol::store_commit::ObjectHash::digest(
+    let grant = MembershipGrantId(coven_protocol::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));
     let database = crate::database::StoreDatabase::new(&db);
@@ -821,13 +821,13 @@ async fn pruned_membership_author_stream_is_replaced_and_persisted() {
 
 #[test]
 fn membership_floor_rejects_unsorted_author_streams() {
-    let grant = MembershipGrantId(crate::protocol::store_commit::ObjectHash::digest(
+    let grant = MembershipGrantId(coven_protocol::store_commit::ObjectHash::digest(
         b"floor ordering grant",
     ));
     let object = ExactObjectRef::new(
         ObjectSlot::logical("test/floor/head.json".to_string()).unwrap(),
         1,
-        crate::protocol::store_commit::ObjectHash::digest(b"x"),
+        coven_protocol::store_commit::ObjectHash::digest(b"x"),
     );
     let make = |author: &str, stream: u8| MembershipHeadRef {
         coord: MembershipCoord {
@@ -835,9 +835,9 @@ fn membership_floor_rejects_unsorted_author_streams() {
             author_owner_grant: grant.clone(),
             stream_id: AuthorStreamId::from_bytes([stream; 32]),
             seq: 1,
-            entry_hash: crate::protocol::store_commit::ObjectHash::digest(author.as_bytes()),
+            entry_hash: coven_protocol::store_commit::ObjectHash::digest(author.as_bytes()),
         },
-        head_hash: crate::protocol::store_commit::ObjectHash::digest(&[stream]),
+        head_hash: coven_protocol::store_commit::ObjectHash::digest(&[stream]),
         object: object.clone(),
     };
     let later = make("bbbb", 2);
@@ -860,7 +860,7 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     let mut second = first.clone();
     second.coord.author_pubkey = hex::encode([8; 32]);
     second.coord.author_owner_grant = MembershipGrantId(
-        crate::protocol::store_commit::ObjectHash::digest(b"second grant"),
+        coven_protocol::store_commit::ObjectHash::digest(b"second grant"),
     );
     second.coord.stream_id = AuthorStreamId::from_bytes([8; 32]);
     second.object = altered_exact(&first.object, b"second exact head");

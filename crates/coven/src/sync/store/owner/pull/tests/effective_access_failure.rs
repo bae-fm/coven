@@ -36,7 +36,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
             &owner,
             &coven_keys::keys::public_key_hex(&second_owner),
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "Unresolved Membership Store",
         )
@@ -84,7 +84,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .invite_member(
             &target_pubkey,
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "unresolved-effective-access",
             "Unresolved Membership Store",
@@ -95,7 +95,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .invite_member(
             &target_pubkey,
             None,
-            crate::protocol::membership::MemberRole::Follower,
+            coven_protocol::membership::MemberRole::Follower,
             &encryption,
             "unresolved-effective-access",
             "Unresolved Membership Store",

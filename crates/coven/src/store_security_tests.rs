@@ -9,83 +9,81 @@ use crate::storage::cloud::CloudHomeJoinInfo;
 use coven_foundation::config::{CloudProvider, HomeStorage};
 use coven_foundation::store_dir::StoreDir;
 
-fn membership_floor(author_pubkey: String) -> Vec<crate::protocol::membership::MembershipHeadRef> {
-    let coord = crate::protocol::membership::MembershipCoord {
+fn membership_floor(author_pubkey: String) -> Vec<coven_protocol::membership::MembershipHeadRef> {
+    let coord = coven_protocol::membership::MembershipCoord {
         author_pubkey,
-        author_owner_grant: crate::protocol::membership::MembershipGrantId(
-            crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
+        author_owner_grant: coven_protocol::membership::MembershipGrantId(
+            coven_protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
         ),
         stream_id: "0000000000000000000000000000000000000000000000000000000000000001"
             .parse()
             .expect("canonical test author stream id"),
         seq: 1,
-        entry_hash: crate::protocol::store_commit::ObjectHash::digest(
-            b"restore test founder entry",
-        ),
+        entry_hash: coven_protocol::store_commit::ObjectHash::digest(b"restore test founder entry"),
     };
     let stored = b"restore setup membership head";
-    vec![crate::protocol::membership::MembershipHeadRef {
+    vec![coven_protocol::membership::MembershipHeadRef {
         coord,
-        head_hash: crate::protocol::store_commit::ObjectHash::digest(
+        head_hash: coven_protocol::store_commit::ObjectHash::digest(
             b"restore setup membership head semantic bytes",
         ),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/membership/heads/restore-setup/1.json".to_string(),
             )
             .expect("valid test membership-head slot"),
             stored.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(stored),
+            coven_protocol::store_commit::ObjectHash::digest(stored),
         ),
     }]
 }
 
-fn store_root() -> crate::protocol::store_commit::StoreRootRef {
+fn store_root() -> coven_protocol::store_commit::StoreRootRef {
     let stored = b"restore setup Store root";
-    crate::protocol::store_commit::StoreRootRef {
-        store_root_id: crate::protocol::store_commit::ObjectHash::digest(
+    coven_protocol::store_commit::StoreRootRef {
+        store_root_id: coven_protocol::store_commit::ObjectHash::digest(
             b"restore setup Store root identity",
         ),
-        store_root_hash: crate::protocol::store_commit::ObjectHash::digest(stored),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        store_root_hash: coven_protocol::store_commit::ObjectHash::digest(stored),
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/protocol/root/restore-setup.json".to_string(),
             )
             .expect("valid test Store-root slot"),
             stored.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(stored),
+            coven_protocol::store_commit::ObjectHash::digest(stored),
         ),
     }
 }
 
-fn restore_authority() -> crate::protocol::recovery::RestoreAuthority {
-    let owner_grant = crate::protocol::membership::MembershipGrantId(
-        crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
+fn restore_authority() -> coven_protocol::recovery::RestoreAuthority {
+    let owner_grant = coven_protocol::membership::MembershipGrantId(
+        coven_protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
     );
     let root = store_root();
     let owner_pubkey = hex::encode([7u8; 32]);
-    let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
-        first_slot: crate::protocol::objects::ObjectSlot::logical(
+    let anchor = coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
+        first_slot: coven_protocol::objects::ObjectSlot::logical(
             "store-v1/recovery/restore-setup/first.json".to_string(),
         )
         .expect("valid recovery slot"),
     };
-    let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+    let activation = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
         &root,
         &owner_pubkey,
         &owner_grant,
         &anchor,
     )
     .expect("valid recovery activation");
-    crate::protocol::recovery::RestoreAuthority::OwnerRecovery(
-        crate::protocol::recovery::OwnerRecoveryAuthority {
+    coven_protocol::recovery::RestoreAuthority::OwnerRecovery(
+        coven_protocol::recovery::OwnerRecoveryAuthority {
             owner_identity_secret: hex::encode(
                 coven_keys::keys::UserKeypair::generate().to_keypair_bytes(),
             ),
             owner_grant: owner_grant.clone(),
-            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+            recovery: coven_protocol::store_commit::OwnerRecoveryCursor {
                 owner_grant,
-                position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                position: coven_protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                     activation,
                 },
             },
@@ -156,7 +154,7 @@ fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
             &config,
             store_root(),
             hex::encode([7u8; 32]),
-            crate::protocol::membership::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+            coven_protocol::membership::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
             restore_authority(),
         )
         .expect("generate restore code");
@@ -191,7 +189,7 @@ fn generate_restore_code_rejects_a_share_joined_cloudkit_config() {
             &config,
             store_root(),
             hex::encode([7u8; 32]),
-            crate::protocol::membership::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+            coven_protocol::membership::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
             restore_authority(),
         )
         .expect_err("a share-joined CloudKit config must not generate a restore code");
@@ -217,7 +215,7 @@ fn generate_restore_code_private_cloudkit_round_trips() {
             &config,
             store_root(),
             hex::encode([7u8; 32]),
-            crate::protocol::membership::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
+            coven_protocol::membership::MembershipFloor(membership_floor(hex::encode([7u8; 32]))),
             restore_authority(),
         )
         .expect("a private CloudKit config generates a restore code");

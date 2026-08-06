@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct CircleStreamAuthority {
     pub(super) activation_id: StreamActivationId,
-    pub(super) first_slot: crate::protocol::objects::ObjectSlot,
+    pub(super) first_slot: coven_protocol::objects::ObjectSlot,
     pub(super) registration: StoreDeviceRegistration,
     pub(super) activated_here: bool,
 }
@@ -15,9 +15,9 @@ pub(super) enum CircleHeadKind {
 }
 
 pub(super) enum CircleHeadValue {
-    Control(crate::protocol::circle::CircleControlHead),
-    Roster(crate::protocol::circle::CircleRosterHead),
-    Metadata(crate::protocol::circle::CircleMetadataHead),
+    Control(coven_protocol::circle::CircleControlHead),
+    Roster(coven_protocol::circle::CircleRosterHead),
+    Metadata(coven_protocol::circle::CircleMetadataHead),
 }
 
 pub(super) struct CircleHeadPosition<'a> {
@@ -25,10 +25,10 @@ pub(super) struct CircleHeadPosition<'a> {
     pub(super) circle_id: CircleId,
     pub(super) author_pubkey: &'a str,
     pub(super) device_id: &'a str,
-    pub(super) stream_id: crate::protocol::causal_grants::AuthorStreamId,
-    pub(super) author_owner_grant: &'a crate::protocol::membership::MembershipGrantId,
+    pub(super) stream_id: coven_protocol::causal_grants::AuthorStreamId,
+    pub(super) author_owner_grant: &'a coven_protocol::membership::MembershipGrantId,
     pub(super) seq: u64,
-    pub(super) successor: &'a crate::protocol::store_commit::SuccessorLink,
+    pub(super) successor: &'a coven_protocol::store_commit::SuccessorLink,
 }
 
 impl CircleHeadValue {
@@ -192,7 +192,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(context, &predecessor_object, predecessor_prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let predecessor = CircleHeadValue::parse(kind, &predecessor_bytes)?;
             let predecessor_position = predecessor.position()?;
             if predecessor.semantic_prefix(predecessor_object.clone()) != predecessor_prefix
@@ -236,13 +236,13 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&context, &reference.object, &prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            let head: crate::protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+            let head: coven_protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse covered Circle control head: {error}"
-                ))
-            })?;
+                    CircleOperationError::InvalidState(format!(
+                        "parse covered Circle control head: {error}"
+                    ))
+                })?;
             let CircleControlCoord {
                 stream_id,
                 author_owner_grant,
@@ -289,10 +289,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
         claimed_activation_id: StreamActivationId,
-        stream_id: crate::protocol::causal_grants::AuthorStreamId,
+        stream_id: coven_protocol::causal_grants::AuthorStreamId,
         circle_id: CircleId,
-        grant_id: &crate::protocol::membership::MembershipGrantId,
-        expected_anchor: fn(CircleId, crate::protocol::objects::ObjectSlot) -> GrantStreamAnchor,
+        grant_id: &coven_protocol::membership::MembershipGrantId,
+        expected_anchor: fn(CircleId, coven_protocol::objects::ObjectSlot) -> GrantStreamAnchor,
     ) -> Result<CircleStreamAuthority, CircleOperationError> {
         let root = self.root().clone();
         let current = commit

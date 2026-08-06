@@ -1,9 +1,9 @@
 use super::*;
-use crate::protocol::causal_grants::AuthorStreamId;
-use crate::protocol::circle::{CircleControlCoord, CircleEpochId, CircleId};
-use crate::protocol::membership::MembershipGrantId;
-use crate::protocol::objects::ObjectSlot;
 use coven_foundation::id_provider::SequentialIdProvider;
+use coven_protocol::causal_grants::AuthorStreamId;
+use coven_protocol::circle::{CircleControlCoord, CircleEpochId, CircleId};
+use coven_protocol::membership::MembershipGrantId;
+use coven_protocol::objects::ObjectSlot;
 
 fn commit_reference(stream_id: AuthorStreamId, sequence: u64, label: &str) -> StoreBatchCommitRef {
     let bytes = format!("{label}-stored");
@@ -13,7 +13,7 @@ fn commit_reference(stream_id: AuthorStreamId, sequence: u64, label: &str) -> St
             sequence,
         },
         commit_hash: ObjectHash::digest(format!("{label}-semantic").as_bytes()),
-        object: crate::protocol::objects::ExactObjectRef::new(
+        object: coven_protocol::objects::ExactObjectRef::new(
             ObjectSlot::logical(format!("store-v1/commits/{label}.json"))
                 .expect("valid commit slot"),
             bytes.len() as u64,

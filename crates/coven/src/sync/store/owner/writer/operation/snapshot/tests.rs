@@ -12,8 +12,8 @@ fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
@@ -109,7 +109,7 @@ async fn selector_keeps_semantic_and_stored_snapshot_hashes_distinct() {
         let database_path = destination.path().join("store.db");
         let selected = store
             .prepare_snapshot_bootstrap(
-                &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+                &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
                 1,
                 &database_path,
                 &signer,
@@ -248,7 +248,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
 
     let mut wrong_successor = published.meta;
     wrong_successor.body_mut().successor.next_slot =
-        crate::protocol::objects::ObjectSlot::logical("wrong-successor.json".to_string())
+        coven_protocol::objects::ObjectSlot::logical("wrong-successor.json".to_string())
             .expect("valid wrong successor slot");
     assert!(writer
         .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_successor.to_bytes())
@@ -387,10 +387,10 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("load published snapshot image ownership");
     assert!(matches!(
         image_ownership,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::SharedLiveSetObjectDomain::StoreSnapshotImage {
+                coven_protocol::remote_object::SharedLiveSetObjectDomain::StoreSnapshotImage {
                     reference
                 } if reference == &first.image
             )

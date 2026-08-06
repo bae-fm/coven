@@ -1,22 +1,22 @@
-use crate::protocol::circle_control::StoreMembershipStateRef;
-use crate::protocol::membership::StoreMembershipRoleGrant;
-use crate::protocol::membership_mutation::{
+use crate::sync::store::operations::{
+    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
+};
+use coven_keys::encryption::EncryptionService;
+use coven_keys::keys;
+use coven_protocol::circle_control::StoreMembershipStateRef;
+use coven_protocol::membership::StoreMembershipRoleGrant;
+use coven_protocol::membership_mutation::{
     PreparedMembershipPublication, PreparedMembershipTransition,
 };
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     membership_head_slot_prefix, owner_recovery_semantic_prefix, GrantStreamAnchor,
     OwnerPromotionAcceptance, OwnerPromotionAnchors,
     OwnerPromotionFinalization as OwnerPromotionFinalizationPoint, OwnerPromotionId,
     OwnerPromotionRequest, OwnerPromotionRequestActivation, OwnerPromotionStaleReason,
     StoreDeviceRegistrationRef, StreamActivation, StreamAnchorDomain,
 };
-use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
-use crate::sync::store::operations::{
-    PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
-};
-use coven_keys::encryption::EncryptionService;
-use coven_keys::keys;
+use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 
 use super::authority::target_key;
 use super::journal::{
@@ -29,8 +29,8 @@ pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-    root: crate::protocol::store_commit::StoreRootRef,
-    membership: crate::protocol::membership::MembershipChain,
+    root: coven_protocol::store_commit::StoreRootRef,
+    membership: coven_protocol::membership::MembershipChain,
 }
 
 enum OwnerPromotionPreparation {
@@ -75,8 +75,8 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
-        root: crate::protocol::store_commit::StoreRootRef,
-        membership: crate::protocol::membership::MembershipChain,
+        root: coven_protocol::store_commit::StoreRootRef,
+        membership: coven_protocol::membership::MembershipChain,
     ) -> Self {
         Self {
             writer,
@@ -122,7 +122,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     fn exact_member_grant(
         &self,
         member_pubkey: &str,
-    ) -> Result<crate::protocol::membership::MembershipGrantId, OwnerPromotionError> {
+    ) -> Result<coven_protocol::membership::MembershipGrantId, OwnerPromotionError> {
         let grants = self.membership.active_grant_ids(member_pubkey);
         let Some(grant) = grants.iter().next() else {
             return Err(OwnerPromotionError::Protocol(
@@ -131,7 +131,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         };
         if grants.len() != 1
             || self.membership.active_grant(grant).is_none_or(|record| {
-                record.role != crate::protocol::membership::StoreMembershipRoleGrant::Member
+                record.role != coven_protocol::membership::StoreMembershipRoleGrant::Member
             })
         {
             return Err(OwnerPromotionError::Protocol(
@@ -562,7 +562,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .writer
             .finish_membership_transition(
                 transition.as_ref().clone(),
-                crate::protocol::membership::MembershipHeadActivation::StoreCommit {
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit {
                     commit: candidate.reference.clone(),
                 },
             )
@@ -710,7 +710,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .await
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
         if candidate_commit.control()
-            != Some(&crate::protocol::store_commit::StoreControl {
+            != Some(&coven_protocol::store_commit::StoreControl {
                 transition: transition.transition.clone(),
             })
             || !transition
@@ -718,7 +718,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 .matches_head(&publication.head, &publication.head_ref)
             || !matches!(
                 &publication.head.activation,
-                crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit }
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }
                     if commit == &candidate_ref
             )
         {
@@ -734,7 +734,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .load_membership(&predecessor.heads, &predecessor.resolutions)
             .await
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(OwnerPromotionError::Protocol(
                 "Owner promotion predecessor membership is conflicted".to_string(),
@@ -757,18 +757,18 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .add_entry(transition.entry.clone())
             .and_then(|()| membership.activate_head_ref(publication.head_ref.clone()))
             .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(OwnerPromotionError::Protocol(
                 "finalized Owner promotion produced conflicted membership".to_string(),
             ));
         };
-        let crate::protocol::membership::MembershipChange::SetMember {
+        let coven_protocol::membership::MembershipChange::SetMember {
             user_pubkey,
             role:
                 StoreMembershipRoleGrant::Owner {
                     recovery:
-                        crate::protocol::membership::OwnerRecoveryAnchorRef::Promotion {
+                        coven_protocol::membership::OwnerRecoveryAnchorRef::Promotion {
                             acceptance: promotion_acceptance,
                         },
                 },
@@ -789,10 +789,10 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 "Merge Owner promotion recovery stream already exists".to_string(),
             ));
         }
-        recovery.push(crate::protocol::store_commit::OwnerRecoveryCursor {
+        recovery.push(coven_protocol::store_commit::OwnerRecoveryCursor {
             owner_grant: grant_id.clone(),
-            position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
-                activation: crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+            position: coven_protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                activation: coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
                     &operation.root,
                     user_pubkey,
                     grant_id,
@@ -861,7 +861,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 &transition,
                 &publication,
                 candidate,
-                crate::protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
+                coven_protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                     transition: journal_transition,
                     remote_objects,
                 },

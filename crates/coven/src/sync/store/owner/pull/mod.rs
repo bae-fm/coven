@@ -8,22 +8,22 @@ use super::*;
 
 mod authorized;
 use crate::database::DbError;
-use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
-use crate::protocol::membership::MembershipChain;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{BlobSpoolProtection, ExactObjectRef, StorageError};
-use crate::protocol::store_commit::{
-    ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
-    ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceStateRef, StoreHistoryCut,
-    StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
-};
-use crate::protocol::{circle, store_commit};
 use crate::sync::store::circle_controls::activation::{
     VerifiedCircleActivations, VerifiedStreamActivationPrefix,
 };
 pub(super) use authorized::AuthorizedPull;
 use coven_foundation::changeset::RowChange;
+use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
+use coven_protocol::membership::MembershipChain;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{BlobSpoolProtection, ExactObjectRef, StorageError};
+use coven_protocol::store_commit::{
+    ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
+    ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceStateRef, StoreHistoryCut,
+    StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+};
+use coven_protocol::{circle, store_commit};
 
 mod device_lifecycle_state;
 mod discovery;
@@ -85,7 +85,7 @@ pub(crate) struct StorePullExecution {
 }
 
 pub(crate) use super::verification::{CommitCoverageError, LoadedDeviceJoinAttemptEvidence};
-pub(crate) use crate::protocol::membership::{HeldStorePositionReason, LocalStoreMembership};
+pub(crate) use coven_protocol::membership::{HeldStorePositionReason, LocalStoreMembership};
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use discovery::*;
 pub(crate) use join_activation::*;

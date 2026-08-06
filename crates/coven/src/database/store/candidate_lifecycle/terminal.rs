@@ -3,7 +3,7 @@ use super::*;
 impl StoreDatabase {
     pub(crate) async fn merge_candidate_terminal_verifications(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         write_id: WriteId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
         self.connection
@@ -76,14 +76,14 @@ impl StoreDatabase {
 
     pub(crate) async fn reconcile_merge_candidate_terminal_head(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         write_id: WriteId,
-        verified: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        verified: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         if !matches!(
             verified.proof(),
-            crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
-                | crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+            coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                | coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
         ) {
             return Err(DbError::Message(
                 "terminal head reconciliation received another proof family".to_string(),

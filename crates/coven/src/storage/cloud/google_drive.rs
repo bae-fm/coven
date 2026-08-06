@@ -22,8 +22,8 @@ use super::{
     CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::oauth::OAuthConfig;
-use crate::protocol::objects::{ObjectSlot, PhysicalObjectLocator};
 use coven_foundation::id_provider::{IdRef, UuidProvider};
+use coven_protocol::objects::{ObjectSlot, PhysicalObjectLocator};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";

@@ -4,14 +4,14 @@ use crate::database::{
     PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage, StoreWriteBlobFact,
     StoreWriteBlobFacts,
 };
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{BlobWriteAuthority, ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     circle_package_semantic_prefix, package_semantic_prefix, CandidateFamilyId, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
 };
-use crate::protocol::{audience_package, circle, remote_object};
-use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
+use coven_protocol::{audience_package, circle, remote_object};
 
 impl AuthorizedWriterOperation<'_> {
     #[allow(clippy::too_many_arguments)]
@@ -52,7 +52,7 @@ impl AuthorizedWriterOperation<'_> {
         let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
         let (remote_audience, protection) = match partition.audience {
             circle::Audience::Store => (
-                crate::protocol::blob::locator::RemoteAudience::Store,
+                coven_protocol::blob::locator::RemoteAudience::Store,
                 storage
                     .store_blob_protection()
                     .map_err(|source| StoreError::BlobStorage {
@@ -71,7 +71,7 @@ impl AuthorizedWriterOperation<'_> {
                     .circle_publication_context(circle_id, control.coordinate().clone())
                     .await?;
                 (
-                    crate::protocol::blob::locator::RemoteAudience::Circle(circle_id),
+                    coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
                     access.blob_protection(),
                 )
             }
@@ -194,8 +194,8 @@ impl AuthorizedWriterOperation<'_> {
     pub(super) async fn prepare_partition_blob(
         &self,
         fact: &StoreWriteBlobFact,
-        audience: crate::protocol::blob::locator::RemoteAudience,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        audience: coven_protocol::blob::locator::RemoteAudience,
+        protection: coven_protocol::objects::BlobSpoolProtection,
         authority: &BlobWriteAuthority<'_>,
     ) -> Result<
         (
@@ -293,15 +293,15 @@ impl AuthorizedWriterOperation<'_> {
             }
         }
         let host_path = match fact.blob.provenance {
-            crate::protocol::blob::Provenance::HostProvided => Some(
+            coven_protocol::blob::Provenance::HostProvided => Some(
                 self.store_dir
                     .local_blob_path(&fact.blob.namespace, &fact.blob.id)
                     .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             ),
-            crate::protocol::blob::Provenance::UserProvided => None,
+            coven_protocol::blob::Provenance::UserProvided => None,
         };
         let source = if let Some(path) = &fact.external_path {
-            if fact.blob.provenance != crate::protocol::blob::Provenance::UserProvided {
+            if fact.blob.provenance != coven_protocol::blob::Provenance::UserProvided {
                 return Err(StoreError::InvalidOutbound(format!(
                     "host-provided blob {}/{} carries an external path",
                     fact.blob.namespace, fact.blob.id
@@ -382,7 +382,7 @@ impl AuthorizedWriterOperation<'_> {
             Ok(prepared) => prepared,
             Err(error) => {
                 let created_spool = (spool_write
-                    == crate::protocol::objects::BlobSpoolWrite::Created)
+                    == coven_protocol::objects::BlobSpoolWrite::Created)
                     .then(|| PreparedBlobSpool::new(&spool_path));
                 return Err(source.cleanup_failure(created_spool, error).await);
             }
@@ -410,7 +410,7 @@ impl AuthorizedWriterOperation<'_> {
                 namespace: fact.blob.namespace.clone(),
                 id: fact.blob.id.clone(),
             })?;
-        let authority = crate::protocol::blob::RowBlobAuthority::Remote(previous.authority.clone());
+        let authority = coven_protocol::blob::RowBlobAuthority::Remote(previous.authority.clone());
         let destination = self
             .store_dir
             .storage_dir()
@@ -555,13 +555,13 @@ async fn remove_durable_file(path: &std::path::Path, require_present: bool) -> R
 
 pub(crate) fn prepare_partition_blob_locator(
     fact: &StoreWriteBlobFact,
-    audience: crate::protocol::blob::locator::RemoteAudience,
-    protection: &crate::protocol::objects::BlobSpoolProtection,
+    audience: coven_protocol::blob::locator::RemoteAudience,
+    protection: &coven_protocol::objects::BlobSpoolProtection,
     authority: &BlobWriteAuthority<'_>,
-) -> Result<crate::protocol::blob::locator::BlobLocator, StoreError> {
+) -> Result<coven_protocol::blob::locator::BlobLocator, StoreError> {
     match protection {
-        crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
-            crate::protocol::blob::locator::BlobLocator::opaque(
+        coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
+            coven_protocol::blob::locator::BlobLocator::opaque(
                 fact.blob.namespace.clone(),
                 fact.blob.id.clone(),
                 authority.reference.clone(),
@@ -572,13 +572,13 @@ pub(crate) fn prepare_partition_blob_locator(
                 fact.plaintext_hash,
             )
         }
-        crate::protocol::objects::BlobSpoolProtection::Browsable => {
-            if audience != crate::protocol::blob::locator::RemoteAudience::Store {
+        coven_protocol::objects::BlobSpoolProtection::Browsable => {
+            if audience != coven_protocol::blob::locator::RemoteAudience::Store {
                 return Err(StoreError::InvalidOutbound(
                     "Circle blob cannot use Browsable storage".to_string(),
                 ));
             }
-            crate::protocol::blob::locator::BlobLocator::browsable(
+            coven_protocol::blob::locator::BlobLocator::browsable(
                 fact.blob.namespace.clone(),
                 fact.blob.id.clone(),
                 authority.reference.clone(),
@@ -655,8 +655,8 @@ pub(super) fn close_prepared_blobs(
 > {
     let mut exact_blobs = std::collections::BTreeMap::<
         (
-            crate::protocol::blob::locator::RemoteAudience,
-            crate::protocol::store_commit::ObjectHash,
+            coven_protocol::blob::locator::RemoteAudience,
+            coven_protocol::store_commit::ObjectHash,
         ),
         PreparedPartitionBlob,
     >::new();

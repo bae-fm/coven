@@ -157,7 +157,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             })?;
         let expected_head_key = format!(
             "{}.json",
-            crate::protocol::store_commit::head_slot_prefix(
+            coven_protocol::store_commit::head_slot_prefix(
                 &activation_head.author_registration.device_id.to_string(),
                 commit_ref.coord.sequence(),
             )
@@ -168,7 +168,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .to_string(),
             ));
         }
-        let activation_head = crate::protocol::store_commit::StoreDeviceHeadRef {
+        let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: activation_head.head_hash(),
             object: activation_head_object.clone(),
         };
@@ -229,7 +229,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     pub(crate) fn record_verified_circle_activations(
         &self,
         verified_commit: &VerifiedStoreBatchCommit,
-        activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         let conn = self.transaction;
         let commit = verified_commit.value();
@@ -260,8 +260,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     )));
                 }
                 match (&leaf.disposition, &access.active) {
-                    (crate::protocol::circle::CircleAccessDisposition::Active { .. }, Some(_))
-                    | (crate::protocol::circle::CircleAccessDisposition::Inactive, None) => {}
+                    (coven_protocol::circle::CircleAccessDisposition::Active { .. }, Some(_))
+                    | (coven_protocol::circle::CircleAccessDisposition::Inactive, None) => {}
                     _ => {
                         return Err(DbError::Message(format!(
                             "circle {circle_id} access state differs from its disposition"
@@ -281,10 +281,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let mut existing_controls = Vec::new();
             for bytes in rows {
                 let bytes = bytes.map_err(DbError::from)?;
-                let control: crate::protocol::circle::CircleControl =
-                    serde_json::from_slice(&bytes).map_err(|error| {
-                        DbError::context("parse activated circle control", error)
-                    })?;
+                let control: coven_protocol::circle::CircleControl = serde_json::from_slice(&bytes)
+                    .map_err(|error| DbError::context("parse activated circle control", error))?;
                 existing_controls.push(control);
             }
             drop(statement);
@@ -315,7 +313,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     )));
                 }
             }
-            let next_state = crate::protocol::circle_activation::CircleCurrentState::from_verified(
+            let next_state = coven_protocol::circle_activation::CircleCurrentState::from_verified(
                 commit.candidate_family(),
                 activation,
             )
@@ -351,8 +349,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             .map_err(DbError::from)?;
             if let Some(access) = &activation.local_access {
                 let disposition = match access.leaf.value.disposition {
-                    crate::protocol::circle::CircleAccessDisposition::Active { .. } => "active",
-                    crate::protocol::circle::CircleAccessDisposition::Inactive => "inactive",
+                    coven_protocol::circle::CircleAccessDisposition::Active { .. } => "active",
+                    coven_protocol::circle::CircleAccessDisposition::Inactive => "inactive",
                 };
                 conn.execute(
                     "INSERT INTO circle_access_cache

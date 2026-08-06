@@ -381,7 +381,7 @@ pub(crate) fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<O
             } = &state
             {
                 let locator = stored.locator();
-                if !crate::protocol::blob::locator_describes_row(
+                if !coven_protocol::blob::locator_describes_row(
                     locator,
                     reference.blob(),
                     reference.plaintext_size(),

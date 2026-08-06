@@ -955,6 +955,7 @@ dependencies = [
  "chrono",
  "coven-foundation",
  "coven-keys",
+ "coven-protocol",
  "ed25519-dalek",
  "fallible-streaming-iterator",
  "futures-util",
@@ -1025,6 +1026,26 @@ dependencies = [
  "windows-native-keyring-store",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "coven-protocol"
+version = "1.0.0-rc.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "coven-foundation",
+ "coven-keys",
+ "hex",
+ "hkdf",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]

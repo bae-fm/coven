@@ -73,7 +73,7 @@ impl BlobChunking {
 /// nothing else to check and no whole-object pass to amortize.
 pub(crate) struct BlobRangeReader {
     pub(super) exact: Arc<dyn ExactSlotStorage>,
-    pub(super) slot: crate::protocol::objects::ObjectSlot,
+    pub(super) slot: coven_protocol::objects::ObjectSlot,
     pub(super) opener: coven_keys::encryption::SealedBlobOpener,
     pub(super) plaintext_size: u64,
     pub(super) window: std::num::NonZeroU64,
@@ -159,7 +159,7 @@ pub(super) struct ExactBlobPlaintextReader {
     source: crate::storage::local_file::PlaintextReader,
     opening: ExactBlobOpening,
     remaining: u64,
-    hasher: Option<crate::protocol::blob::ContentHasher>,
+    hasher: Option<coven_protocol::blob::ContentHasher>,
     expected_hash: ObjectHash,
     locator_hash: ObjectHash,
     pending: Vec<u8>,
@@ -170,8 +170,8 @@ impl ExactBlobPlaintextReader {
     pub(super) async fn new(
         stored_file: &Path,
         store_id: &str,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        protection: coven_protocol::objects::BlobSpoolProtection,
     ) -> Result<Self, StorageError> {
         let locator = blob.locator();
         let mut source = crate::storage::local_file::open_reader(stored_file)
@@ -180,12 +180,12 @@ impl ExactBlobPlaintextReader {
 
         let opening = match (locator, protection) {
             (
-                crate::protocol::blob::locator::BlobLocator::Opaque {
+                coven_protocol::blob::locator::BlobLocator::Opaque {
                     scope,
                     key_fingerprint,
                     ..
                 },
-                crate::protocol::objects::BlobSpoolProtection::Opaque(master),
+                coven_protocol::objects::BlobSpoolProtection::Opaque(master),
             ) => {
                 let prefix = read_source_exact(
                     &mut source,
@@ -207,18 +207,18 @@ impl ExactBlobPlaintextReader {
                 }
             }
             (
-                crate::protocol::blob::locator::BlobLocator::Browsable { .. },
-                crate::protocol::objects::BlobSpoolProtection::Browsable,
+                coven_protocol::blob::locator::BlobLocator::Browsable { .. },
+                coven_protocol::objects::BlobSpoolProtection::Browsable,
             ) => {
                 check_stored_blob_length(blob, locator.plaintext_size())?;
                 ExactBlobOpening::Browsable
             }
-            (crate::protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
+            (coven_protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "opaque blob locator requires audience encryption".to_string(),
                 ));
             }
-            (crate::protocol::blob::locator::BlobLocator::Browsable { .. }, _) => {
+            (coven_protocol::blob::locator::BlobLocator::Browsable { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "browsable blob locator cannot use audience encryption".to_string(),
                 ));
@@ -234,9 +234,7 @@ impl ExactBlobPlaintextReader {
             // provider's bytes — the two homes verify by different means, not by
             // one mechanism plus a spare.
             hasher: match opening {
-                ExactBlobOpening::Browsable => {
-                    Some(crate::protocol::blob::ContentHasher::default())
-                }
+                ExactBlobOpening::Browsable => Some(coven_protocol::blob::ContentHasher::default()),
                 ExactBlobOpening::Opaque { .. } => None,
             },
             source,
@@ -312,9 +310,9 @@ pub(crate) fn split_sealed_blob(
 /// whatever it decrypts to.
 pub(super) fn verified_sealed_blob_opener(
     prefix: &[u8],
-    blob: &crate::protocol::blob::locator::StoredBlobRef,
+    blob: &coven_protocol::blob::locator::StoredBlobRef,
     key_fingerprint: &coven_keys::encryption::KeyFingerprint,
-    scope: &crate::protocol::blob::BlobScope,
+    scope: &coven_protocol::blob::BlobScope,
     master: &EncryptionService,
     aad_context: &[u8],
 ) -> Result<coven_keys::encryption::SealedBlobOpener, StorageError> {
@@ -361,7 +359,7 @@ pub(super) fn verified_sealed_blob_opener(
 /// pins the stored object's exact size, so a length the framing cannot produce
 /// means the object is not the one the row names.
 pub(super) fn check_stored_blob_length(
-    blob: &crate::protocol::blob::locator::StoredBlobRef,
+    blob: &coven_protocol::blob::locator::StoredBlobRef,
     expected: u64,
 ) -> Result<(), StorageError> {
     if blob.object().stored_size() != expected {

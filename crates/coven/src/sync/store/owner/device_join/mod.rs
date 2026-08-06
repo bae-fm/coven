@@ -11,22 +11,22 @@ use super::{
     RegistrationOutbox, StoreKeyrings,
 };
 use crate::database::DeviceJoinBootstrapPlan;
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
-use crate::protocol::provider::{
+use crate::storage::SyncStorage;
+use crate::sync::store::{Store, StoreDatabase};
+use coven_keys::keys::UserKeypair;
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::objects::{ProtocolObjectDomain, ProviderDeviceBinding, StoreProviderBinding};
+use coven_protocol::provider::{
     ActivatedStoreMemberProviderAccessGrant, CrossPrincipalProbeChallenge,
     CrossPrincipalProbeResponse, DeviceJoinChallengePublicationAuthorization,
     ProviderAccessGrantId, ProviderAccessWithdrawal, ProviderAdminGrantId,
     ProviderAdminGrantRecord, StoreMemberProviderAccessGrantRef,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
     DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
 };
-use crate::storage::SyncStorage;
-use crate::sync::store::{Store, StoreDatabase};
-use coven_keys::keys::UserKeypair;
 
 mod authorized_join;
 mod cleanup;
@@ -40,9 +40,9 @@ pub(super) use authorized_join::{AuthorizedJoin, AuthorizedProviderAdministrator
 #[derive(Clone, Copy)]
 pub(crate) struct PendingDeviceJoinHistoryConstruction;
 
-pub use crate::protocol::store_commit::device_join_exchange::*;
 pub use authorized_join::DeviceProviderAccessAdministrator;
 pub use cleanup::*;
+pub use coven_protocol::store_commit::device_join_exchange::*;
 pub use error::*;
 pub(crate) use joiner::*;
 pub use journal::*;

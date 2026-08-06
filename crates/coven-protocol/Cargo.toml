@@ -1,0 +1,46 @@
+[package]
+name = "coven-protocol"
+version = "1.0.0-rc.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Coven's deterministic protocol model: signed values, parsing, and validation"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
+
+[lib]
+name = "coven_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+coven-foundation = { workspace = true }
+coven-keys = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# `cfg(test)` builds reach the foundation clock and id fakes and the keys test
+# hooks, which exist only under those crates' own `test-utils`. `cfg(test)`
+# enables no `[features]` of this crate, so they arrive through these edges.
+coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-keys = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[features]
+# The protocol fixtures the layers above build their tests from: circle and
+# provider test values, and the signed-object constructors that need them.
+# Those constructors take a deterministic id source, so this pulls the
+# foundation fakes through with it.
+test-utils = ["coven-foundation/test-utils"]
+
+[lints]
+workspace = true

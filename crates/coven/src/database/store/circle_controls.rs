@@ -8,11 +8,11 @@ use crate::database::{
     required_store_root_authority_on, DbError, PreparedCircleOperationRow,
     VerifiedMergeMaterialization,
 };
-use crate::protocol::circle::{CircleOperationId, CircleOperationState};
-use crate::protocol::circle_activation::VerifiedCircleActivations;
-use crate::protocol::circle_journal::CircleOperationJournal;
-use crate::protocol::remote_object::remote_object_id;
-use crate::protocol::store_commit::{
+use coven_protocol::circle::{CircleOperationId, CircleOperationState};
+use coven_protocol::circle_activation::VerifiedCircleActivations;
+use coven_protocol::circle_journal::CircleOperationJournal;
+use coven_protocol::remote_object::remote_object_id;
+use coven_protocol::store_commit::{
     commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
@@ -263,7 +263,7 @@ impl StoreDatabase {
     pub(crate) async fn block_circle_operation(
         &self,
         operation_id: &CircleOperationId,
-        block: crate::protocol::circle::CircleOperationBlock,
+        block: coven_protocol::circle::CircleOperationBlock,
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.connection
@@ -395,7 +395,7 @@ impl StoreDatabase {
                     );
                     if control_ref != &expected_ref
                         || !commit.operations().is_some_and(
-                            crate::protocol::store_commit::StoreCommitOperations::is_circle_control_activation_only,
+                            coven_protocol::store_commit::StoreCommitOperations::is_circle_control_activation_only,
                         )
                     {
                         return Err(DbError::Message(
@@ -472,7 +472,7 @@ impl StoreDatabase {
                     .map(remote_object_id)
                     .collect::<Vec<_>>();
                 for access in &creation.access {
-                    if let crate::protocol::circle::CircleAccessDisposition::Active {
+                    if let coven_protocol::circle::CircleAccessDisposition::Active {
                         bootstrap: Some(bootstrap),
                         ..
                     } = &access.leaf.value.disposition
@@ -519,7 +519,7 @@ impl StoreDatabase {
                 if !journal.is_finalizing()
                     && matches!(
                     journal.intent,
-                    crate::protocol::circle_journal::CircleOperationIntent::RemoveMember { .. }
+                    coven_protocol::circle_journal::CircleOperationIntent::RemoveMember { .. }
                 )
                 {
                     let mut waiting = journal;

@@ -3,7 +3,7 @@ use super::*;
 impl StoreSync {
     pub(crate) async fn members(
         &self,
-    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, SyncError> {
+    ) -> Result<Vec<coven_protocol::membership::MemberInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         match self.command_authority().await? {
             CommandAuthority::Connected(sync) => sync.members().await.map_err(Into::into),
@@ -43,7 +43,7 @@ impl StoreSync {
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
+        role: coven_protocol::membership::MemberRole,
     ) -> Result<crate::join_code::InviteCode, SyncError> {
         let active = self.active().ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
@@ -88,7 +88,7 @@ impl StoreSync {
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, SyncError> {
+    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .propose_device_exclusion(device_id)
@@ -98,7 +98,7 @@ impl StoreSync {
 
     pub(crate) async fn cancel_device_exclusion(
         &self,
-        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
@@ -109,7 +109,7 @@ impl StoreSync {
 
     pub(crate) async fn finalize_device_exclusion(
         &self,
-        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
@@ -121,7 +121,7 @@ impl StoreSync {
     pub(crate) async fn begin_owner_promotion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, SyncError> {
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .begin_owner_promotion(device_id)
@@ -131,8 +131,8 @@ impl StoreSync {
 
     pub(crate) async fn accept_owner_promotion(
         &self,
-        request: crate::protocol::store_commit::OwnerPromotionRequest,
-    ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, SyncError> {
+        request: coven_protocol::store_commit::OwnerPromotionRequest,
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionAcceptance, SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .accept_owner_promotion(request)
@@ -142,7 +142,7 @@ impl StoreSync {
 
     pub(crate) async fn finalize_owner_promotion(
         &self,
-        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+        acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<(), SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?

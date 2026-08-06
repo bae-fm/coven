@@ -15,9 +15,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::protocol::blob::{CacheFill, Provenance};
-use crate::protocol::store_commit::SnapshotMeta;
-use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -27,6 +24,9 @@ use coven_foundation::clock::{FixedClock, SystemClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::blob::{CacheFill, Provenance};
+use coven_protocol::store_commit::SnapshotMeta;
+use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 
 const T0: &str = "2024-01-01T00:00:00Z";
 
@@ -36,21 +36,21 @@ const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WriteRevocationRequest {
-    producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer,
-    authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
-    locator: crate::protocol::provider::ProviderAccessLocator,
-    protected_slots: Vec<crate::protocol::objects::ObjectSlot>,
+    producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer,
+    authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
+    locator: coven_protocol::provider::ProviderAccessLocator,
+    protected_slots: Vec<coven_protocol::objects::ObjectSlot>,
 }
 
 struct ConfirmedWriteRevocation {
-    withdrawal: crate::protocol::provider::ProviderAccessWithdrawal,
+    withdrawal: coven_protocol::provider::ProviderAccessWithdrawal,
     requests: Mutex<Vec<WriteRevocationRequest>>,
 }
 
 impl ConfirmedWriteRevocation {
-    fn direct(locator: crate::protocol::provider::ProviderAccessLocator) -> Self {
+    fn direct(locator: coven_protocol::provider::ProviderAccessLocator) -> Self {
         Self {
-            withdrawal: crate::protocol::provider::ProviderAccessWithdrawal::Direct {
+            withdrawal: coven_protocol::provider::ProviderAccessWithdrawal::Direct {
                 locator,
                 verified_absent: true,
             },
@@ -70,12 +70,12 @@ impl ConfirmedWriteRevocation {
 impl crate::sync::store::DeviceJoinWriteRevocationExecutor for ConfirmedWriteRevocation {
     async fn revoke_write_authority(
         &self,
-        producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer,
-        authority: &crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
-        locator: &crate::protocol::provider::ProviderAccessLocator,
-        protected_slots: &[crate::protocol::objects::ObjectSlot],
+        producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer,
+        authority: &coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef,
+        locator: &coven_protocol::provider::ProviderAccessLocator,
+        protected_slots: &[coven_protocol::objects::ObjectSlot],
     ) -> Result<
-        crate::protocol::provider::ProviderAccessWithdrawal,
+        coven_protocol::provider::ProviderAccessWithdrawal,
         crate::sync::store::DeviceJoinError,
     > {
         self.requests
@@ -151,7 +151,7 @@ async fn invite_test_member(
             owner,
             &pubkey_hex(member),
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             encryption,
             "Test Store",
         )
@@ -220,7 +220,7 @@ trait CycleTestDatabaseOps {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Option<crate::protocol::blob::locator::StoredBlobRef>;
+    ) -> Option<coven_protocol::blob::locator::StoredBlobRef>;
     async fn make_remote_intent_present(&self, root_table: &str, root_id: &str) -> bool;
     async fn pending_write_count(&self) -> i64;
 }
@@ -259,7 +259,7 @@ impl CycleTestDatabaseOps for Database {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Option<crate::protocol::blob::locator::StoredBlobRef> {
+    ) -> Option<coven_protocol::blob::locator::StoredBlobRef> {
         self.row_blob_ref(table, row_id)
             .await
             .expect("resolve exact blob row")
@@ -310,8 +310,8 @@ impl CycleTestStoreOps for TestStore {
         match device.load_store_package_for_test(&reference).await {
             Ok(package) => package.is_some(),
             Err(crate::sync::store::StoreError::Object(
-                crate::protocol::objects::StoreObjectError::Storage(
-                    crate::protocol::objects::StorageError::NotFound(_),
+                coven_protocol::objects::StoreObjectError::Storage(
+                    coven_protocol::objects::StorageError::NotFound(_),
                 ),
             )) => false,
             Err(error) => panic!("load Store package: {error}"),
@@ -347,7 +347,7 @@ impl CycleTestStoreOps for TestStore {
                     db_image: marker.to_vec(),
                     blobs: Vec::new(),
                 },
-                crate::protocol::store_commit::CommitFrontier(BTreeMap::new()),
+                coven_protocol::store_commit::CommitFrontier(BTreeMap::new()),
                 db.schema_version(),
                 T0.to_string(),
             )
@@ -643,7 +643,7 @@ fn exercise_post_attempt_cancellation<'a>(
             joiner_disposition,
             JoinerCancellationDisposition::WriteRevocation
         ) {
-            let crate::protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
+            let coven_protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: first_ack,
             } = &provisional.request.expected_registration.acknowledgements
             else {
@@ -653,7 +653,7 @@ fn exercise_post_attempt_cancellation<'a>(
                 provisional.request.registration_slot.clone(),
                 first_ack.clone(),
             ];
-            if let crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal {
+            if let coven_protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal {
                 response_slot,
             } = &provisional.request.response
             {
@@ -662,8 +662,8 @@ fn exercise_post_attempt_cancellation<'a>(
             assert_eq!(
                 joiner_revocation.requests(),
                 vec![WriteRevocationRequest {
-                    producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer::Joiner,
-                    authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::MemberAccess(
+                    producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer::Joiner,
+                    authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::MemberAccess(
                         provisional.request.approval.access_grant.grant_ref.clone(),
                     ),
                     locator: joiner_access_locator.clone(),
@@ -772,7 +772,7 @@ fn exercise_post_attempt_cancellation<'a>(
         assert_eq!(owner_complete_retry, owner_complete);
         let mut forged_activation = activation.clone();
         forged_activation.activation.commit_hash =
-            crate::protocol::store_commit::ObjectHash::digest(b"forged cleanup activation");
+            coven_protocol::store_commit::ObjectHash::digest(b"forged cleanup activation");
         let mut cleanup_observation = storage
             .pending_device_join_observation(&pending, &offer)
             .await
@@ -813,8 +813,8 @@ fn exercise_post_attempt_cancellation<'a>(
 
 #[tokio::test]
 async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
-    use crate::protocol::membership::MemberRole;
-    use crate::protocol::objects::{
+    use coven_protocol::membership::MemberRole;
+    use coven_protocol::objects::{
         ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
     };
 
@@ -859,7 +859,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     let member = &member;
 
     Box::pin(async move {
-        use crate::protocol::objects::{
+        use coven_protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
         };
         use crate::sync::store::{JoinerJoinTerminal, ProviderAdminJoinTerminal};
@@ -871,7 +871,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
         let owner_binding = crate::storage::SyncStorage::provider_binding(&*storage.storage())
             .await
             .expect("resolve owner provider binding");
-        let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
+        let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
             &owner_binding.store
         else {
             panic!("cross-principal test Store is not Dropbox");
@@ -969,7 +969,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .revoke_device_provider_admission_writes(cancellation.clone(), &revocation)
             .await
             .expect("revoke absent provider-administrator writes");
-        let crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
+        let coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
             &provisional.request.approval.admission
         else {
             panic!("missing-provider test did not create a cross-principal challenge");
@@ -977,8 +977,8 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
         assert_eq!(
             revocation.requests(),
             vec![WriteRevocationRequest {
-                producer: crate::protocol::store_commit::device_join_exchange::DeviceJoinProducer::ProviderAdministrator,
-                authority: crate::protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::ProviderAdministrator(
+                producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer::ProviderAdministrator,
+                authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::ProviderAdministrator(
                     provisional
                         .request
                         .approval
@@ -1071,7 +1071,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                         &keypair,
                         &pubkey_hex(&peer),
                         None,
-                        crate::protocol::membership::MemberRole::Member,
+                        coven_protocol::membership::MemberRole::Member,
                         &EncryptionService::from_key([42; 32]),
                         "Test Store",
                     )
@@ -1170,7 +1170,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                         &keypair,
                         &pubkey_hex(&peer),
                         None,
-                        crate::protocol::membership::MemberRole::Member,
+                        coven_protocol::membership::MemberRole::Member,
                         &EncryptionService::from_key([42; 32]),
                         "Test Store",
                     )
@@ -1309,7 +1309,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
@@ -1359,7 +1359,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     db.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "cover1", b"cover")
@@ -1454,8 +1454,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .expect("live row remains pending its own remote locator");
     assert!(matches!(
         live.authority(),
-        crate::protocol::blob::RowBlobAuthority::PendingRemote(
-            crate::protocol::blob::locator::RemoteAudience::Store
+        coven_protocol::blob::RowBlobAuthority::PendingRemote(
+            coven_protocol::blob::locator::RemoteAudience::Store
         )
     ));
     assert!(live.stored().is_none());
@@ -1490,8 +1490,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .install(
             &restore_dir,
             tables.clone(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "restored-snapshot-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
@@ -1523,12 +1523,12 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
     let tables = vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .remote_root(),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .carries_blob(BlobDecl::new(
             "photos",
@@ -1549,7 +1549,7 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
     db.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at)
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -1615,8 +1615,8 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         Database::open(
             &database_path,
             tables.clone(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "snapshot-cleanup-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
@@ -1636,7 +1636,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     db.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at)
              VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -1703,7 +1703,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
     let keypair = UserKeypair::generate();
     let tables = vec![SyncedTable::new(
         "assets",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .remote_root()
     .carries_blob(
@@ -1726,7 +1726,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
     );
     let (_temp, store_dir) = temp_store_dir();
-    let hash = crate::protocol::blob::content_hash(b"shared");
+    let hash = coven_protocol::blob::content_hash(b"shared");
     db.execute_test_sql(&format!(
         "INSERT INTO assets (id, blob_id, size, hash, _updated_at) VALUES
              ('row-a', 'blob-shared', 6, '{hash}', '0000000001000-0000-M'),
@@ -1795,7 +1795,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
              (id, note_id, kind, size, hash, _updated_at, created_at)
              VALUES ('audio1', 'n1', 'audio', 5, '{}',
                      '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"AUDIO"),
+        coven_protocol::blob::content_hash(b"AUDIO"),
     ))
     .await;
     crate::database::StoreDatabase::new(&db)
@@ -1849,9 +1849,9 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         .into_iter()
         .find(|registration| registration.value().device_id.to_string() == device_id)
         .expect("local Store registration is activated");
-    let record = crate::protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+    let record = coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
         &stored,
-        crate::protocol::remote_object::SnapshotObjectOwner {
+        coven_protocol::remote_object::SnapshotObjectOwner {
             activation: registration
                 .value()
                 .store_snapshot_activation(registration.reference())
@@ -1864,9 +1864,8 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     let object_id = record.object_id().to_string();
     let state = serde_json::to_string(&record).expect("serialize exact user blob state");
     let locator_hash = stored.locator().locator_hash().to_string();
-    let audience =
-        serde_json::to_string(&crate::protocol::audience_package::PackageAudience::Store)
-            .expect("serialize Store audience");
+    let audience = serde_json::to_string(&coven_protocol::audience_package::PackageAudience::Store)
+        .expect("serialize Store audience");
     db.test_sql(move |database| {
         database.install_blob_binding(
             &object_id,
@@ -1914,7 +1913,7 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
 /// is refused as a takeover attempt.
 #[tokio::test]
 async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -2014,7 +2013,7 @@ async fn owner_anchor_installs_founder_device_genesis() {
 /// branch that previously adopted any founder on trust.
 #[tokio::test]
 async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -2078,7 +2077,7 @@ fn cloud_objects(home: &InMemoryCloudHome) -> BTreeMap<String, Vec<u8>> {
 
 #[tokio::test]
 async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2125,7 +2124,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
 
 #[tokio::test]
 async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2200,7 +2199,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
 
 #[tokio::test]
 async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
@@ -2268,7 +2267,7 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
 
 #[tokio::test]
 async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
@@ -2335,7 +2334,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
 
 #[tokio::test]
 async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mutation() {
-    use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
+    use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
@@ -2467,7 +2466,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         ));
         let (_store_temp, store_dir) = temp_store_dir();
         db.set_protocol_state(
-            crate::protocol::objects::ROTATION_GATE_STATE_KEY,
+            coven_protocol::objects::ROTATION_GATE_STATE_KEY,
             "invalid rotation gate",
         )
         .await
@@ -2501,7 +2500,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
             "the in-memory pending-rotation marker is not restored",
         );
         assert_eq!(
-            db.get_protocol_state(crate::protocol::objects::ROTATION_GATE_STATE_KEY)
+            db.get_protocol_state(coven_protocol::objects::ROTATION_GATE_STATE_KEY)
                 .await
                 .unwrap(),
             Some("invalid rotation gate".to_string()),
@@ -2516,7 +2515,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
-use crate::protocol::objects::StorageError;
+use coven_protocol::objects::StorageError;
 
 /// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
 /// moment the cycle fetches an incoming changeset to apply — by running a host
@@ -2552,7 +2551,7 @@ enum CycleStorageInterception {
         allocate_calls: AtomicUsize,
         prepare_calls: AtomicUsize,
         create_calls: AtomicUsize,
-        attempted: std::sync::Mutex<Vec<crate::protocol::blob::locator::StoredBlobRef>>,
+        attempted: std::sync::Mutex<Vec<coven_protocol::blob::locator::StoredBlobRef>>,
         protocol_read_calls: AtomicUsize,
     },
 }
@@ -2630,7 +2629,7 @@ impl CycleStorageInterceptor {
         }
     }
 
-    fn rejected_blobs(&self) -> Vec<crate::protocol::blob::locator::StoredBlobRef> {
+    fn rejected_blobs(&self) -> Vec<coven_protocol::blob::locator::StoredBlobRef> {
         self.interceptor.rejected_blobs()
     }
 
@@ -2687,7 +2686,7 @@ impl CycleStorageInterception {
         }
     }
 
-    fn rejected_blobs(&self) -> Vec<crate::protocol::blob::locator::StoredBlobRef> {
+    fn rejected_blobs(&self) -> Vec<coven_protocol::blob::locator::StoredBlobRef> {
         let Self::RejectBlobCreate { attempted, .. } = self else {
             panic!("storage interception does not reject blob creates");
         };
@@ -2719,7 +2718,7 @@ impl CycleStorageInterception {
 impl crate::sync::test_helpers::StorageInterceptor for CycleStorageInterception {
     async fn before_protocol_create(
         &self,
-        prepared: &crate::protocol::objects::PreparedExactObject,
+        prepared: &coven_protocol::objects::PreparedExactObject,
     ) -> Result<(), StorageError> {
         if matches!(self, Self::RejectAckCreate { .. })
             && prepared
@@ -2786,7 +2785,7 @@ impl crate::sync::test_helpers::StorageInterceptor for CycleStorageInterception 
 
     async fn before_blob_create(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         if let Self::RejectBlobCreate {
             reject_create_call,
@@ -3042,7 +3041,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
@@ -3140,7 +3139,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
          VALUES ('photo', 'n1', 'cover', 5, '{}', 'blob-a', \
                  '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"first"),
+        coven_protocol::blob::content_hash(b"first"),
     ))
     .await;
     db.execute_test_host_write(&format!(
@@ -3148,7 +3147,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
              SET blob_id = 'blob-b', size = 6, hash = '{}', \
                  _updated_at = '0000000002000-0000-M' \
              WHERE id = 'photo'",
-        crate::protocol::blob::content_hash(b"second"),
+        coven_protocol::blob::content_hash(b"second"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "blob-a", b"first")
@@ -3192,7 +3191,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
             .await
             .expect("load exact Store package")
             .expect("commit has a package");
-        let package = crate::protocol::audience_package::AudiencePackage::parse(&package.value)
+        let package = coven_protocol::audience_package::AudiencePackage::parse(&package.value)
             .expect("parse exact audience package");
         for binding in package.blob_bindings() {
             storage
@@ -3233,7 +3232,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
@@ -3379,7 +3378,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "hponly", b"cover")
@@ -3467,7 +3466,7 @@ async fn ready_make_remote_provider_transport_is_offline() {
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('transport-blob', 'transport-root', 'cover', 5, '{}', \
                      '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"cover"),
+        coven_protocol::blob::content_hash(b"cover"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -3522,8 +3521,8 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
              VALUES ('firstblob', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('secondblob', 'n1', 'cover', 6, '{}', '0000000001001-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"first"),
-        crate::protocol::blob::content_hash(b"second"),
+        coven_protocol::blob::content_hash(b"first"),
+        coven_protocol::blob::content_hash(b"second"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "firstblob", b"first")
@@ -3636,7 +3635,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('remoteonly', 'n1', 'cover', 15, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"already durable"),
+        coven_protocol::blob::content_hash(b"already durable"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -3732,7 +3731,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     db.execute_test_host_write(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('lazyblob', 'n1', 'cover', 4, '{}', '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"lazy"),
+        coven_protocol::blob::content_hash(b"lazy"),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "lazyblob", b"lazy")
@@ -3972,7 +3971,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                     db_image: b"cadence-snapshot".to_vec(),
                     blobs: Vec::new(),
                 },
-                crate::protocol::store_commit::CommitFrontier(BTreeMap::from([
+                coven_protocol::store_commit::CommitFrontier(BTreeMap::from([
                     (local_stream, local_at_snapshot),
                     (peer_stream, peer_at_snapshot),
                 ])),
@@ -4009,7 +4008,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 &owner,
                 &pubkey_hex(&unregistered_member),
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &EncryptionService::from_key([42; 32]),
                 "Test Store",
             )
@@ -4079,7 +4078,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
                     db_image: b"time-cadence-snapshot".to_vec(),
                     blobs: Vec::new(),
                 },
-                crate::protocol::store_commit::CommitFrontier(BTreeMap::from([(
+                coven_protocol::store_commit::CommitFrontier(BTreeMap::from([(
                     at_snapshot.coord.stream_id,
                     at_snapshot,
                 )])),
@@ -4203,7 +4202,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
              (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('audio1', 'n1', 'audio', 5, '{}', \
                      '0000000001000-0000-M', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"AUDIO"),
+        coven_protocol::blob::content_hash(b"AUDIO"),
     ))
     .await;
 
@@ -4458,7 +4457,7 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .expect("the reclamation cycle publishes a covering snapshot");
     assert!(matches!(
         &snapshot.coverage,
-        crate::protocol::store_commit::CommitFrontier(frontier)
+        coven_protocol::store_commit::CommitFrontier(frontier)
             if frontier.get(&published_stream) == Some(&published)
     ));
     let ack_ref = store_database(&db_m)
@@ -4491,7 +4490,7 @@ async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
         .expect("load exact reclamation acknowledgement");
     assert!(matches!(
         &acknowledgement.store_cut,
-        crate::protocol::store_commit::StoreHistoryCut(frontier)
+        coven_protocol::store_commit::StoreHistoryCut(frontier)
             if frontier.get(&published_stream) == Some(&published)
     ));
     assert!(
@@ -4538,7 +4537,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
                 &owner,
                 &pubkey_hex(&behind),
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &EncryptionService::from_key([42; 32]),
                 "Test Store",
             )
@@ -4554,7 +4553,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
             .await
             .expect("pull initial behind Member Store state");
 
-        let behind_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+        let behind_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             crate::database::StoreDatabase::new(&behind_db)
                 .materialized_frontier()
                 .await
@@ -4695,7 +4694,7 @@ async fn member_device_does_not_create_a_snapshot() {
 
 #[tokio::test]
 async fn pull_refreshes_snapshot_authority_before_publication() {
-    use crate::protocol::membership::MemberRole;
+    use coven_protocol::membership::MemberRole;
 
     let founder = UserKeypair::generate();
     let founder_db = open_test_db();
@@ -4811,7 +4810,7 @@ struct SamePrincipalApprovalFixture<'storage> {
     _pending_dir: tempfile::TempDir,
     pending_join: crate::sync::store::PendingDeviceJoinAuthority<'storage>,
     owner: TestDevice,
-    approval: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+    approval: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
 }
 
 impl<'storage> SamePrincipalApprovalFixture<'storage> {
@@ -5082,12 +5081,12 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
             offer.owner_grant.clone(),
         )
         .expect("Owner signs the attempt envelope");
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         offer.store_root.store_root_hash,
-        crate::protocol::objects::ProtocolObjectDomain::DeviceJoinAttempt,
+        coven_protocol::objects::ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let prefix =
-        crate::protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
+        coven_protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
     let prepared = storage
         .storage()
         .prepare_protocol_object(
@@ -5102,7 +5101,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .create_protocol_object(&prepared)
         .await
         .expect("publish exact attempt object");
-    let attempt_ref = crate::protocol::store_commit::DeviceJoinAttemptRef {
+    let attempt_ref = coven_protocol::store_commit::DeviceJoinAttemptRef {
         attempt_id: offer.attempt_id,
         attempt_hash: attempt.attempt_hash(),
         object: prepared.reference().clone(),
@@ -5131,7 +5130,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
         .expect("prepare exact registration request");
     let mut invalid_access = valid_request.approval.access_grant.clone();
     invalid_access.activation.commit_hash =
-        crate::protocol::store_commit::ObjectHash::digest(b"absent provider-access activation");
+        coven_protocol::store_commit::ObjectHash::digest(b"absent provider-access activation");
     let owner_authority = storage
         .founder_device_authority()
         .await
@@ -5143,7 +5142,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
             valid_request.approval.admission.clone(),
         );
     let malformed_request =
-        crate::protocol::store_commit::device_join_exchange::DeviceRegistrationRequest::signed(
+        coven_protocol::store_commit::device_join_exchange::DeviceRegistrationRequest::signed(
             malformed_approval,
             valid_request.expected_registration.clone(),
             valid_request.registration_slot.clone(),
@@ -5182,7 +5181,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
                 &founder,
                 &pubkey_hex(&excluding_owner),
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &encryption,
                 "Test Store",
             )
@@ -5232,7 +5231,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             SamePrincipalApprovalFixture::prepare(&founder_db, &storage, &founder, &joining_member)
                 .await;
 
-        let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+        let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             crate::database::StoreDatabase::new(&excluding_db)
                 .materialized_frontier()
                 .await
@@ -5320,11 +5319,11 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .sequence()
         .checked_add(1)
         .expect("next sequence exists");
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::protocol::objects::ProtocolObjectDomain::StoreHead,
+        coven_protocol::objects::ProtocolObjectDomain::StoreHead,
     );
-    let prefix = crate::protocol::store_commit::head_slot_prefix(
+    let prefix = coven_protocol::store_commit::head_slot_prefix(
         &owner_authority.registration().device_id.to_string(),
         next_sequence,
     );
@@ -5385,7 +5384,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .expect("next sequence exists");
     let stream_id = activation.coord.stream_id;
     let mut next_commit = activation;
-    next_commit.coord = crate::protocol::store_commit::StoreCommitCoord {
+    next_commit.coord = coven_protocol::store_commit::StoreCommitCoord {
         stream_id,
         sequence: next_sequence,
     };
@@ -5399,18 +5398,18 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
             storage.root.store_root_hash,
             next_commit,
             accepted_head.history_summary,
-            crate::protocol::store_commit::SuccessorLink {
+            coven_protocol::store_commit::SuccessorLink {
                 activation: stream_activation,
                 predecessor: None,
                 next_slot: next_slot.clone(),
             },
         )
         .expect("sign malformed successor chain");
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::protocol::objects::ProtocolObjectDomain::StoreHead,
+        coven_protocol::objects::ProtocolObjectDomain::StoreHead,
     );
-    let prefix = crate::protocol::store_commit::head_slot_prefix(
+    let prefix = coven_protocol::store_commit::head_slot_prefix(
         &owner_authority.registration().device_id.to_string(),
         next_sequence,
     );
@@ -5664,7 +5663,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
 
 #[tokio::test]
 async fn cross_principal_device_join_completes_on_the_runtime_stack() {
-    use crate::protocol::objects::{
+    use coven_protocol::objects::{
         ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
     };
 
@@ -5747,8 +5746,8 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
         crate::database::Database::open(
             &path,
             test_synced_tables(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "pending-rotation-reopen-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
@@ -5789,7 +5788,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
         .expect("read pending-rotation Store root")
         .expect("pending-rotation Store root exists");
     db.set_protocol_state(
-        crate::protocol::objects::ROTATION_GATE_STATE_KEY,
+        coven_protocol::objects::ROTATION_GATE_STATE_KEY,
         "not-a-rotation-gate",
     )
     .await

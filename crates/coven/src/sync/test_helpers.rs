@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
-use crate::protocol::store_commit::ObjectHash;
 use crate::storage::SyncStorage;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
+use coven_protocol::store_commit::ObjectHash;
 
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
@@ -112,17 +112,17 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
         &self,
         _member_pubkey: &str,
         _provider_account_email: Option<&str>,
-        peer: &crate::protocol::objects::ProviderDeviceBinding,
-    ) -> Result<crate::protocol::provider::ProviderAccessLocator, crate::sync::store::DeviceJoinError>
+        peer: &coven_protocol::objects::ProviderDeviceBinding,
+    ) -> Result<coven_protocol::provider::ProviderAccessLocator, crate::sync::store::DeviceJoinError>
     {
-        let crate::protocol::objects::ProviderPrincipalId::Dropbox { account_id } = &peer.principal
+        let coven_protocol::objects::ProviderPrincipalId::Dropbox { account_id } = &peer.principal
         else {
             return Err(crate::sync::store::DeviceJoinError::Provider(
                 "test Dropbox access administrator received a non-Dropbox peer".to_string(),
             ));
         };
         Ok(
-            crate::protocol::provider::ProviderAccessLocator::DropboxSharedFolderMember {
+            coven_protocol::provider::ProviderAccessLocator::DropboxSharedFolderMember {
                 namespace_id: self.namespace_id.clone(),
                 account_id: account_id.clone(),
             },
@@ -133,7 +133,7 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
 pub(crate) struct TestStore {
     home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
     storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
-    pub root: crate::protocol::store_commit::StoreRootRef,
+    pub root: coven_protocol::store_commit::StoreRootRef,
     signer: UserKeypair,
     founder: TestDevice,
     producers: Arc<tokio::sync::Mutex<TestStoreProducers>>,
@@ -156,49 +156,49 @@ mod test_device {
     use super::*;
 
     pub(crate) struct TestDeviceSigningAuthority {
-        registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
+        registration: coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
         device_signer: UserKeypair,
     }
 
     impl TestDeviceSigningAuthority {
         pub(crate) fn registration_ref(
             &self,
-        ) -> &crate::protocol::store_commit::StoreDeviceRegistrationRef {
+        ) -> &coven_protocol::store_commit::StoreDeviceRegistrationRef {
             self.registration.reference()
         }
 
         pub(crate) fn registration(
             &self,
-        ) -> &crate::protocol::store_commit::StoreDeviceRegistration {
+        ) -> &coven_protocol::store_commit::StoreDeviceRegistration {
             self.registration.value()
         }
 
         pub(crate) fn referenced_registration(
             &self,
-        ) -> &crate::protocol::store_commit::ReferencedStoreDeviceRegistration {
+        ) -> &coven_protocol::store_commit::ReferencedStoreDeviceRegistration {
             &self.registration
         }
 
         #[allow(clippy::too_many_arguments)]
         pub(crate) fn sign_device_join_attempt_for_test(
             &self,
-            store_root: crate::protocol::store_commit::StoreRootRef,
-            attempt_id: crate::protocol::store_commit::DeviceJoinAttemptId,
-            attempt_slot: crate::protocol::objects::ObjectSlot,
-            expected_registration: crate::protocol::store_commit::StoreDeviceRegistration,
-            registration_slot: crate::protocol::objects::ObjectSlot,
-            outcome_slot: crate::protocol::objects::ObjectSlot,
-            bootstrap_cut: crate::protocol::store_commit::StoreHistoryCut,
-            membership: crate::protocol::circle_control::StoreMembershipStateRef,
-            provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
-            provider_approval: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-            provider_response: crate::protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
-            owner_grant: crate::protocol::membership::MembershipGrantId,
+            store_root: coven_protocol::store_commit::StoreRootRef,
+            attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
+            attempt_slot: coven_protocol::objects::ObjectSlot,
+            expected_registration: coven_protocol::store_commit::StoreDeviceRegistration,
+            registration_slot: coven_protocol::objects::ObjectSlot,
+            outcome_slot: coven_protocol::objects::ObjectSlot,
+            bootstrap_cut: coven_protocol::store_commit::StoreHistoryCut,
+            membership: coven_protocol::circle_control::StoreMembershipStateRef,
+            provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
+            provider_approval: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+            provider_response: coven_protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation,
+            owner_grant: coven_protocol::membership::MembershipGrantId,
         ) -> Result<
-            crate::protocol::store_commit::DeviceJoinAttempt,
-            crate::protocol::store_commit::StoreProtocolError,
+            coven_protocol::store_commit::DeviceJoinAttempt,
+            coven_protocol::store_commit::StoreProtocolError,
         > {
-            crate::protocol::store_commit::DeviceJoinAttempt::signed(
+            coven_protocol::store_commit::DeviceJoinAttempt::signed(
                 store_root,
                 attempt_id,
                 attempt_slot,
@@ -219,12 +219,12 @@ mod test_device {
 
         pub(crate) fn sign_provider_admission_approval_without_shape_validation_for_test(
             &self,
-            request: crate::protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
-            access_grant: crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-            admission: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge,
-        ) -> crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval
+            request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
+            access_grant: coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
+            admission: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge,
+        ) -> coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval
         {
-            crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
+            coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
                 request,
                 access_grant,
                 admission,
@@ -234,15 +234,15 @@ mod test_device {
 
         pub(crate) fn sign_device_head_for_test(
             &self,
-            store_root_hash: crate::protocol::store_commit::ObjectHash,
-            commit: crate::protocol::store_commit::StoreBatchCommitRef,
-            history_summary: crate::protocol::store_commit::ObjectHash,
-            successor: crate::protocol::store_commit::SuccessorLink,
+            store_root_hash: coven_protocol::store_commit::ObjectHash,
+            commit: coven_protocol::store_commit::StoreBatchCommitRef,
+            history_summary: coven_protocol::store_commit::ObjectHash,
+            successor: coven_protocol::store_commit::SuccessorLink,
         ) -> Result<
-            crate::protocol::store_commit::StoreDeviceHead,
-            crate::protocol::store_commit::StoreProtocolError,
+            coven_protocol::store_commit::StoreDeviceHead,
+            coven_protocol::store_commit::StoreProtocolError,
         > {
-            crate::protocol::store_commit::StoreDeviceHead::signed(
+            coven_protocol::store_commit::StoreDeviceHead::signed(
                 store_root_hash,
                 self.registration.reference().clone(),
                 commit,
@@ -254,15 +254,15 @@ mod test_device {
 
         pub(crate) fn sign_reclaim_receipt_for_test(
             &self,
-            store_root_hash: crate::protocol::store_commit::ObjectHash,
-            authorization: crate::protocol::reclaim::ReclaimAuthorizationRef,
-            provider_admin_state: crate::protocol::circle_control::StoreMembershipStateRef,
-            provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
+            store_root_hash: coven_protocol::store_commit::ObjectHash,
+            authorization: coven_protocol::reclaim::ReclaimAuthorizationRef,
+            provider_admin_state: coven_protocol::circle_control::StoreMembershipStateRef,
+            provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
         ) -> Result<
-            crate::protocol::reclaim::ReclaimReceipt,
-            crate::protocol::store_commit::StoreProtocolError,
+            coven_protocol::reclaim::ReclaimReceipt,
+            coven_protocol::store_commit::StoreProtocolError,
         > {
-            crate::protocol::reclaim::ReclaimReceipt::signed(
+            coven_protocol::reclaim::ReclaimReceipt::signed(
                 store_root_hash,
                 authorization,
                 provider_admin_state,
@@ -329,7 +329,7 @@ mod test_device {
         pub(crate) async fn open_with_database(
             database: crate::database::StoreDatabase,
             storage: std::sync::Arc<crate::storage::CloudSyncStorage>,
-            root: &crate::protocol::store_commit::StoreRootRef,
+            root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, String> {
             let (store_dir_temp, store_dir) = temp_store_dir();
@@ -399,7 +399,7 @@ mod test_device {
                 .adopt_key_rotation_for_test(encryption, custody)
         }
 
-        pub(crate) fn store_root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+        pub(crate) fn store_root(&self) -> &coven_protocol::store_commit::StoreRootRef {
             self.store.store_root()
         }
 
@@ -415,7 +415,7 @@ mod test_device {
 
         pub(crate) async fn membership_for_test(
             &self,
-        ) -> Result<crate::protocol::membership::MembershipChain, crate::sync::store::StoreError>
+        ) -> Result<coven_protocol::membership::MembershipChain, crate::sync::store::StoreError>
         {
             self.store.membership_for_test().await
         }
@@ -423,7 +423,7 @@ mod test_device {
         pub(crate) async fn latest_local_store_position(
             &self,
         ) -> Result<
-            Option<crate::protocol::store_commit::StoreBatchCommitRef>,
+            Option<coven_protocol::store_commit::StoreBatchCommitRef>,
             crate::sync::store::StoreError,
         > {
             self.store.latest_local_store_position().await
@@ -431,9 +431,9 @@ mod test_device {
 
         pub(crate) async fn load_commit_for_test(
             &self,
-            reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+            reference: &coven_protocol::store_commit::StoreBatchCommitRef,
         ) -> Result<
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
             crate::sync::store::StoreError,
         > {
             self.store.load_commit_for_test(reference).await
@@ -441,8 +441,8 @@ mod test_device {
 
         pub(crate) async fn load_membership_head_for_test(
             &self,
-            reference: &crate::protocol::membership::MembershipHeadRef,
-        ) -> Result<crate::protocol::membership::AuthorHead, crate::sync::store::StoreError>
+            reference: &coven_protocol::membership::MembershipHeadRef,
+        ) -> Result<coven_protocol::membership::AuthorHead, crate::sync::store::StoreError>
         {
             self.store.load_membership_head_for_test(reference).await
         }
@@ -453,8 +453,8 @@ mod test_device {
             sequence: u64,
         ) -> Result<
             Option<(
-                crate::protocol::store_commit::StoreBatchCommitRef,
-                crate::protocol::store_commit::VerifiedStoreBatchCommit,
+                coven_protocol::store_commit::StoreBatchCommitRef,
+                coven_protocol::store_commit::VerifiedStoreBatchCommit,
             )>,
             String,
         > {
@@ -476,10 +476,10 @@ mod test_device {
 
         pub(crate) async fn circle_epoch_access(
             &self,
-            circle_id: crate::protocol::circle::CircleId,
-            expected_control: crate::protocol::circle::CircleControlCoord,
+            circle_id: coven_protocol::circle::CircleId,
+            expected_control: coven_protocol::circle::CircleControlCoord,
         ) -> Result<
-            Option<crate::protocol::circle_activation::CircleEpochAccess>,
+            Option<coven_protocol::circle_activation::CircleEpochAccess>,
             crate::database::DbError,
         > {
             self.store
@@ -520,7 +520,7 @@ mod test_device {
             &self,
             device_id: crate::StoreDeviceId,
         ) -> Result<
-            crate::protocol::store_commit::OwnerPromotionRequest,
+            coven_protocol::store_commit::OwnerPromotionRequest,
             crate::sync::store::OwnerPromotionError,
         > {
             self.store.begin_owner_promotion_for_device(device_id).await
@@ -528,9 +528,9 @@ mod test_device {
 
         pub(crate) async fn begin_owner_promotion(
             &self,
-            member_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         ) -> Result<
-            crate::protocol::store_commit::OwnerPromotionRequest,
+            coven_protocol::store_commit::OwnerPromotionRequest,
             crate::sync::store::OwnerPromotionError,
         > {
             self.store.begin_owner_promotion(member_registration).await
@@ -538,9 +538,9 @@ mod test_device {
 
         pub(crate) async fn accept_owner_promotion(
             &self,
-            request: crate::protocol::store_commit::OwnerPromotionRequest,
+            request: coven_protocol::store_commit::OwnerPromotionRequest,
         ) -> Result<
-            crate::protocol::store_commit::OwnerPromotionAcceptance,
+            coven_protocol::store_commit::OwnerPromotionAcceptance,
             crate::sync::store::OwnerPromotionError,
         > {
             self.store.accept_owner_promotion(request).await
@@ -549,9 +549,9 @@ mod test_device {
         pub(crate) async fn finalize_owner_promotion(
             &self,
             encryption: &coven_keys::encryption::EncryptionService,
-            acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+            acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
         ) -> Result<
-            crate::protocol::circle_control::StoreMembershipStateRef,
+            coven_protocol::circle_control::StoreMembershipStateRef,
             crate::sync::store::OwnerPromotionError,
         > {
             self.store
@@ -561,25 +561,25 @@ mod test_device {
 
         pub(crate) async fn blob_protection_for_test(
             &self,
-            authority: &crate::protocol::blob::RowBlobAuthority,
-            stored: &crate::protocol::blob::locator::StoredBlobRef,
-        ) -> Result<crate::protocol::objects::BlobSpoolProtection, String> {
+            authority: &coven_protocol::blob::RowBlobAuthority,
+            stored: &coven_protocol::blob::locator::StoredBlobRef,
+        ) -> Result<coven_protocol::objects::BlobSpoolProtection, String> {
             self.store.blob_protection_for_test(authority, stored).await
         }
 
         pub(crate) async fn announcement_stream_id_for_test(
             &self,
-        ) -> Result<crate::protocol::membership::AuthorStreamId, crate::sync::store::StoreError>
+        ) -> Result<coven_protocol::membership::AuthorStreamId, crate::sync::store::StoreError>
         {
             self.store.announcement_stream_id_for_test().await
         }
 
         pub(crate) async fn sign_device_head_for_test(
             &self,
-            commit: crate::protocol::store_commit::StoreBatchCommitRef,
-            history_summary: crate::protocol::store_commit::ObjectHash,
-            successor: crate::protocol::store_commit::SuccessorLink,
-        ) -> Result<crate::protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
+            commit: coven_protocol::store_commit::StoreBatchCommitRef,
+            history_summary: coven_protocol::store_commit::ObjectHash,
+            successor: coven_protocol::store_commit::SuccessorLink,
+        ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
         {
             self.store
                 .sign_device_head_for_test(commit, history_summary, successor)
@@ -589,7 +589,7 @@ mod test_device {
         pub(crate) async fn owner_promotion_target_for_test(
             &self,
         ) -> Result<
-            crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            coven_protocol::store_commit::StoreDeviceRegistrationRef,
             crate::sync::store::StoreError,
         > {
             self.store.owner_promotion_target_for_test().await
@@ -597,9 +597,9 @@ mod test_device {
 
         pub(crate) async fn observe_excluded_candidate_head_for_test(
             &self,
-            candidate: &crate::protocol::store_commit::StoreDeviceHead,
-            candidate_commit: &crate::protocol::store_commit::StoreBatchCommit,
-            candidate_object: &crate::protocol::objects::ExactObjectRef,
+            candidate: &coven_protocol::store_commit::StoreDeviceHead,
+            candidate_commit: &coven_protocol::store_commit::StoreBatchCommit,
+            candidate_object: &coven_protocol::objects::ExactObjectRef,
         ) -> Result<
             crate::sync::store::ExcludedCandidateHeadObservation,
             crate::sync::store::StoreError,
@@ -622,8 +622,8 @@ mod test_device {
 
         pub(crate) async fn resign_snapshot_meta_for_test(
             &self,
-            meta: crate::protocol::store_commit::SnapshotMeta,
-        ) -> Result<crate::protocol::store_commit::SnapshotMeta, crate::sync::store::StoreError>
+            meta: coven_protocol::store_commit::SnapshotMeta,
+        ) -> Result<coven_protocol::store_commit::SnapshotMeta, crate::sync::store::StoreError>
         {
             self.store.resign_snapshot_meta_for_test(meta).await
         }
@@ -631,8 +631,8 @@ mod test_device {
         pub(crate) async fn parse_local_snapshot_meta_for_test(
             &self,
             bytes: &[u8],
-            reference: &crate::protocol::store_commit::StoreSnapshotRef,
-        ) -> Result<crate::protocol::store_commit::SnapshotMeta, crate::sync::store::StoreError>
+            reference: &coven_protocol::store_commit::StoreSnapshotRef,
+        ) -> Result<coven_protocol::store_commit::SnapshotMeta, crate::sync::store::StoreError>
         {
             self.store
                 .parse_local_snapshot_meta_for_test(bytes, reference)
@@ -648,8 +648,8 @@ mod test_device {
 
         pub(crate) async fn authorize_retained_outbound_for_test(
             &self,
-            order: &crate::protocol::store_commit::StoreCommitOrder,
-            candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
+            order: &coven_protocol::store_commit::StoreCommitOrder,
+            candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
         ) -> Result<crate::sync::store::MergeOutboundAuthorization, crate::sync::store::StoreError>
         {
             self.store
@@ -676,8 +676,8 @@ mod test_device {
 
         pub(crate) async fn resolved_store_device_state_for_test(
             &self,
-            reference: &crate::protocol::store_commit::StoreDeviceStateRef,
-        ) -> Result<crate::protocol::store_commit::ResolvedStoreDeviceState, crate::database::DbError>
+            reference: &coven_protocol::store_commit::StoreDeviceStateRef,
+        ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, crate::database::DbError>
         {
             self.store
                 .resolved_store_device_state_for_test(reference)
@@ -686,7 +686,7 @@ mod test_device {
 
         pub(crate) async fn retained_merge_materialization_for_test(
             &self,
-            reference: crate::protocol::store_commit::StoreBatchCommitRef,
+            reference: coven_protocol::store_commit::StoreBatchCommitRef,
         ) -> Result<crate::database::OwnedVerifiedMergeMaterialization, crate::database::DbError>
         {
             self.store
@@ -696,7 +696,7 @@ mod test_device {
 
         pub(crate) async fn prepare_conflict_resolution_plan_for_test(
             &self,
-            candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
+            candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
         ) -> Result<(), crate::sync::store::StoreError> {
             self.store
                 .prepare_conflict_resolution_plan_for_test(candidate_membership_heads)
@@ -705,9 +705,9 @@ mod test_device {
 
         pub(crate) async fn load_membership_at_exact_heads_for_test(
             &self,
-            heads: &[crate::protocol::membership::MembershipHeadRef],
-            resolutions: &[crate::protocol::membership::StoreMembershipConflictResolutionRef],
-        ) -> Result<crate::protocol::membership::MembershipChain, crate::sync::store::StoreError>
+            heads: &[coven_protocol::membership::MembershipHeadRef],
+            resolutions: &[coven_protocol::membership::StoreMembershipConflictResolutionRef],
+        ) -> Result<coven_protocol::membership::MembershipChain, crate::sync::store::StoreError>
         {
             self.store
                 .load_membership_at_exact_heads_for_test(heads, resolutions)
@@ -716,8 +716,8 @@ mod test_device {
 
         pub(crate) async fn project_membership_for_test(
             &self,
-            candidate_heads: &[crate::protocol::membership::MembershipHeadRef],
-        ) -> Result<crate::protocol::membership::MembershipChain, crate::sync::store::StoreError>
+            candidate_heads: &[coven_protocol::membership::MembershipHeadRef],
+        ) -> Result<coven_protocol::membership::MembershipChain, crate::sync::store::StoreError>
         {
             self.store
                 .project_membership_for_test(candidate_heads)
@@ -726,7 +726,7 @@ mod test_device {
 
         pub(crate) async fn assert_deep_membership_projection_for_test(
             &self,
-            heads: &[crate::protocol::membership::MembershipHeadRef],
+            heads: &[coven_protocol::membership::MembershipHeadRef],
         ) -> Result<(), crate::sync::store::StoreError> {
             self.store
                 .assert_deep_membership_projection_for_test(heads)
@@ -735,8 +735,8 @@ mod test_device {
 
         pub(crate) async fn verify_device_join_attempt_for_test(
             &self,
-            reference: &crate::protocol::store_commit::DeviceJoinAttemptRef,
-            owner: &crate::protocol::store_commit::StoreDeviceRegistration,
+            reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
+            owner: &coven_protocol::store_commit::StoreDeviceRegistration,
         ) -> Result<(), crate::sync::store::StoreError> {
             self.store
                 .verify_device_join_attempt_for_test(reference, owner)
@@ -745,13 +745,13 @@ mod test_device {
 
         pub(crate) async fn exact_next_announcement_slot_for_test(
             &self,
-            registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-            registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-            previous: Option<&crate::protocol::store_commit::StoreBatchCommitRef>,
+            registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+            registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+            previous: Option<&coven_protocol::store_commit::StoreBatchCommitRef>,
         ) -> Result<
             (
-                crate::protocol::objects::ObjectSlot,
-                Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
+                coven_protocol::objects::ObjectSlot,
+                Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
             ),
             crate::sync::store::StoreError,
         > {
@@ -762,9 +762,9 @@ mod test_device {
 
         pub(crate) async fn load_registration_for_test(
             &self,
-            reference: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
         ) -> Result<
-            crate::protocol::store_commit::StoreDeviceRegistration,
+            coven_protocol::store_commit::StoreDeviceRegistration,
             crate::sync::store::StoreError,
         > {
             self.store.load_registration_for_test(reference).await
@@ -781,9 +781,9 @@ mod test_device {
 
         pub(crate) async fn open_circle_package_for_test(
             &self,
-            access: &crate::protocol::circle_activation::CircleEpochAccess,
-            commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-            reference: &crate::protocol::store_commit::CirclePackageRef,
+            access: &coven_protocol::circle_activation::CircleEpochAccess,
+            commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+            reference: &coven_protocol::store_commit::CirclePackageRef,
         ) -> Result<Vec<u8>, crate::sync::store::StoreError> {
             self.store
                 .open_circle_package_for_test(access, commit, reference)
@@ -793,15 +793,15 @@ mod test_device {
         #[allow(clippy::too_many_arguments)]
         pub(crate) async fn pull_readiness_for_test(
             &self,
-            coverage: &crate::protocol::store_commit::CommitFrontier,
+            coverage: &coven_protocol::store_commit::CommitFrontier,
             frontier: &std::collections::BTreeMap<
                 String,
-                crate::protocol::store_commit::StoreBatchCommitRef,
+                coven_protocol::store_commit::StoreBatchCommitRef,
             >,
-            device_state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
-            exclusion_freezes: &[crate::protocol::store_commit::StoreDeviceProposalAck],
-            commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
-            commit: &crate::protocol::store_commit::StoreBatchCommit,
+            device_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+            exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
+            commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
+            commit: &coven_protocol::store_commit::StoreBatchCommit,
         ) -> Result<crate::sync::store::Readiness, crate::sync::store::StorePullError> {
             self.store
                 .pull_readiness_for_test(
@@ -817,8 +817,8 @@ mod test_device {
 
         pub(crate) async fn verified_merge_membership_prefix_for_test(
             &self,
-            references: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
-            predecessors: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
+            references: impl IntoIterator<Item = coven_protocol::store_commit::StoreBatchCommitRef>,
+            predecessors: impl IntoIterator<Item = coven_protocol::store_commit::StoreBatchCommitRef>,
         ) -> Result<
             crate::sync::store::VerifiedMergeMembershipPrefix,
             crate::sync::store::StorePullError,
@@ -830,9 +830,9 @@ mod test_device {
 
         pub(crate) async fn retained_merge_history_frontier_for_test(
             &self,
-            references: Vec<crate::protocol::store_commit::StoreBatchCommitRef>,
+            references: Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
         ) -> Result<
-            Vec<crate::protocol::store_commit::OpenedRetainedMergeHistorySummary>,
+            Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
             crate::database::DbError,
         > {
             self.store
@@ -842,10 +842,10 @@ mod test_device {
 
         pub(crate) async fn verified_circle_activation_for_test(
             &self,
-            circle_id: crate::protocol::circle::CircleId,
-            control: crate::protocol::circle::CircleControlCoord,
+            circle_id: coven_protocol::circle::CircleId,
+            control: coven_protocol::circle::CircleControlCoord,
         ) -> Result<
-            Option<crate::protocol::circle_activation::VerifiedCircleReference>,
+            Option<coven_protocol::circle_activation::VerifiedCircleReference>,
             crate::database::DbError,
         > {
             self.store
@@ -855,9 +855,9 @@ mod test_device {
 
         pub(crate) async fn finalized_circle_close_outcome_for_test(
             &self,
-            circle_id: crate::protocol::circle::CircleId,
+            circle_id: coven_protocol::circle::CircleId,
         ) -> Result<
-            crate::protocol::circle::CircleEpochCloseOutcome,
+            coven_protocol::circle::CircleEpochCloseOutcome,
             crate::sync::store::CircleOperationError,
         > {
             self.store
@@ -867,8 +867,8 @@ mod test_device {
 
         pub(crate) async fn circle_package_is_retained_for_replay_for_test(
             &self,
-            target: crate::protocol::store_commit::CirclePackageRef,
-            activation: crate::protocol::store_commit::StoreBatchCommitRef,
+            target: coven_protocol::store_commit::CirclePackageRef,
+            activation: coven_protocol::store_commit::StoreBatchCommitRef,
         ) -> Result<bool, crate::database::DbError> {
             self.store
                 .circle_package_is_retained_for_replay_for_test(target, activation)
@@ -877,8 +877,8 @@ mod test_device {
 
         pub(crate) async fn load_circle_acknowledgement_for_test(
             &self,
-            reference: &crate::protocol::store_commit::CircleAckRef,
-        ) -> Result<crate::protocol::store_commit::CircleAck, crate::sync::store::StoreAckError>
+            reference: &coven_protocol::store_commit::CircleAckRef,
+        ) -> Result<coven_protocol::store_commit::CircleAck, crate::sync::store::StoreAckError>
         {
             self.store
                 .load_circle_acknowledgement_for_test(reference)
@@ -887,10 +887,10 @@ mod test_device {
 
         pub(crate) async fn load_applicable_circle_packages_for_test(
             &self,
-            verified: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-            activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
-            author: &crate::protocol::store_commit::StoreDeviceRegistration,
-            local_store_membership: crate::protocol::membership::LocalStoreMembership,
+            verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+            activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+            author: &coven_protocol::store_commit::StoreDeviceRegistration,
+            local_store_membership: coven_protocol::membership::LocalStoreMembership,
         ) -> Result<
             Vec<crate::sync::store::LoadedCirclePackage>,
             crate::sync::store::CirclePackageReadError,
@@ -907,14 +907,14 @@ mod test_device {
 
         pub(crate) fn protocol_root_for_test(
             &self,
-        ) -> &crate::protocol::store_commit::StoreProtocolRoot {
+        ) -> &coven_protocol::store_commit::StoreProtocolRoot {
             self.store.protocol_root_for_test()
         }
 
         pub(crate) async fn prepare_acknowledgement_activation_for_test(
             &self,
-            acknowledgement: crate::protocol::store_commit::StoreAckRef,
-            candidate: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
+            acknowledgement: coven_protocol::store_commit::StoreAckRef,
+            candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
         ) -> Result<(), crate::database::DbError> {
             self.store
                 .prepare_acknowledgement_activation_for_test(acknowledgement, candidate)
@@ -923,8 +923,8 @@ mod test_device {
 
         pub(crate) async fn prepare_merge_history_successor_for_test(
             &self,
-            verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-            recovery_author: Option<&crate::protocol::store_commit::StoreDeviceRegistrationRef>,
+            verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+            recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
             evidence: crate::sync::store::MergeHistorySuccessorEvidence,
         ) -> Result<crate::sync::store::PreparedMergeHistorySuccessor, crate::sync::store::StoreError>
         {
@@ -939,9 +939,9 @@ mod test_device {
 
         pub(crate) async fn prepare_device_join_bootstrap_for_test(
             &self,
-            coverage: &crate::protocol::store_commit::StoreHistoryCut,
-            attempt_activation: &crate::protocol::store_commit::StoreBatchCommitRef,
-            membership_state: &crate::protocol::circle_control::StoreMembershipStateRef,
+            coverage: &coven_protocol::store_commit::StoreHistoryCut,
+            attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
+            membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
         ) -> Result<crate::database::DeviceJoinBootstrapPlan, crate::sync::store::StoreError>
         {
             self.store
@@ -955,9 +955,9 @@ mod test_device {
 
         pub(crate) async fn load_store_package_for_test(
             &self,
-            reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+            reference: &coven_protocol::store_commit::StoreBatchCommitRef,
         ) -> Result<
-            Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>,
+            Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>,
             crate::sync::store::StoreError,
         > {
             self.store.load_store_package_for_test(reference).await
@@ -965,9 +965,9 @@ mod test_device {
 
         pub(crate) async fn load_store_ack_for_test(
             &self,
-            reference: &crate::protocol::store_commit::StoreAckRef,
-            registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        ) -> Result<crate::protocol::store_commit::StoreAck, crate::sync::store::StoreError>
+            reference: &coven_protocol::store_commit::StoreAckRef,
+            registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        ) -> Result<coven_protocol::store_commit::StoreAck, crate::sync::store::StoreError>
         {
             self.store
                 .load_store_ack_for_test(reference, registration)
@@ -976,10 +976,10 @@ mod test_device {
 
         pub(crate) async fn load_head_for_test(
             &self,
-            reference: &crate::protocol::store_commit::StoreDeviceHeadRef,
-            registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-            commit: &crate::protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<crate::protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
+            reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
+            registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+            commit: &coven_protocol::store_commit::StoreBatchCommitRef,
+        ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
         {
             self.store
                 .load_head_for_test(reference, registration, commit)
@@ -1008,12 +1008,12 @@ mod test_device {
 
         pub(crate) async fn authorize_device_provider_access(
             &self,
-            request: crate::protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
+            request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
             access_administrator: Option<
                 &dyn crate::sync::store::DeviceProviderAccessAdministrator,
             >,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+            coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1023,9 +1023,9 @@ mod test_device {
 
         pub(crate) async fn publish_device_provider_challenge(
             &self,
-            bootstrap: crate::protocol::store_commit::device_join_exchange::ProvisionalDeviceBootstrap,
+            bootstrap: coven_protocol::store_commit::device_join_exchange::ProvisionalDeviceBootstrap,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::ProviderReadyDeviceBootstrap,
+            coven_protocol::store_commit::device_join_exchange::ProviderReadyDeviceBootstrap,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1035,9 +1035,9 @@ mod test_device {
 
         pub(crate) async fn complete_device_provider_admission(
             &self,
-            readiness: crate::protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
+            readiness: coven_protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
+            coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1047,9 +1047,9 @@ mod test_device {
 
         pub(crate) async fn close_device_provider_admission(
             &self,
-            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+            coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1059,10 +1059,10 @@ mod test_device {
 
         pub(crate) async fn revoke_device_provider_admission_writes(
             &self,
-            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
             revocation_executor: &dyn crate::sync::store::DeviceJoinWriteRevocationExecutor,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+            coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1072,9 +1072,9 @@ mod test_device {
 
         pub(crate) async fn abandon_device_join(
             &self,
-            offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+            offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceJoinAbandonment,
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinAbandonment,
             crate::DeviceJoinError,
         > {
             self.store.abandon_device_join(offer).await
@@ -1082,9 +1082,9 @@ mod test_device {
 
         pub(crate) async fn accept_device_registration_request(
             &self,
-            request: crate::protocol::store_commit::device_join_exchange::DeviceRegistrationRequest,
+            request: coven_protocol::store_commit::device_join_exchange::DeviceRegistrationRequest,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::ProvisionalDeviceBootstrap,
+            coven_protocol::store_commit::device_join_exchange::ProvisionalDeviceBootstrap,
             crate::DeviceJoinError,
         > {
             self.store.accept_device_registration_request(request).await
@@ -1092,9 +1092,9 @@ mod test_device {
 
         pub(crate) async fn cancel_device_join(
             &self,
-            attempt: crate::protocol::store_commit::DeviceJoinAttemptRef,
+            attempt: coven_protocol::store_commit::DeviceJoinAttemptRef,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
             crate::DeviceJoinError,
         > {
             self.store.cancel_device_join(attempt).await
@@ -1102,9 +1102,9 @@ mod test_device {
 
         pub(crate) async fn finalize_device_join(
             &self,
-            completion: crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
+            completion: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceJoinActivation,
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinActivation,
             crate::DeviceJoinError,
         > {
             self.store.finalize_device_join(completion).await
@@ -1112,9 +1112,9 @@ mod test_device {
 
         pub(crate) async fn complete_owner_device_join_cleanup(
             &self,
-            activation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
+            activation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1124,10 +1124,10 @@ mod test_device {
 
         pub(crate) async fn revoke_joining_device_writes(
             &self,
-            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
             revocation_executor: &dyn crate::sync::store::DeviceJoinWriteRevocationExecutor,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
+            coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1137,11 +1137,11 @@ mod test_device {
 
         pub(crate) async fn prepare_device_join_cleanup(
             &self,
-            cancellation: crate::protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
-            administrator_terminal: crate::protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
-            joiner_terminal: crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
+            cancellation: coven_protocol::store_commit::device_join_exchange::DeviceJoinCancellation,
+            administrator_terminal: coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinTerminal,
+            joiner_terminal: coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
             crate::DeviceJoinError,
         > {
             self.store
@@ -1151,9 +1151,9 @@ mod test_device {
 
         pub(crate) async fn activate_device_join_cleanup(
             &self,
-            receipt: crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
+            receipt: coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceipt,
         ) -> Result<
-            crate::protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupActivation,
             crate::DeviceJoinError,
         > {
             self.store.activate_device_join_cleanup(receipt).await
@@ -1171,7 +1171,7 @@ mod test_device {
         pub(crate) async fn stage_uploaded_device_exclusion_proposal_for_test(
             &self,
         ) -> Result<
-            crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+            coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
             crate::sync::store::StoreDeviceExclusionError,
         > {
             self.store
@@ -1181,7 +1181,7 @@ mod test_device {
 
         pub(crate) async fn propose_device_exclusion(
             &self,
-            target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
         ) -> Result<
             crate::sync::store::StoreDeviceExclusionResult,
             crate::sync::store::StoreDeviceExclusionError,
@@ -1191,7 +1191,7 @@ mod test_device {
 
         pub(crate) async fn cancel_device_exclusion(
             &self,
-            proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
         ) -> Result<
             crate::sync::store::StoreDeviceExclusionResult,
             crate::sync::store::StoreDeviceExclusionError,
@@ -1201,7 +1201,7 @@ mod test_device {
 
         pub(crate) async fn finalize_device_exclusion(
             &self,
-            proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
         ) -> Result<
             crate::sync::store::StoreDeviceExclusionResult,
             crate::sync::store::StoreDeviceExclusionError,
@@ -1212,7 +1212,7 @@ mod test_device {
         pub(crate) async fn pending_device_join_observation_for_test(
             &self,
             pending: &crate::sync::store::DeviceJoinJournalDatabase,
-            offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+            offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, String> {
             self.store
                 .pending_device_join_observation_for_test(pending, offer)
@@ -1224,7 +1224,7 @@ mod test_device {
             &self,
             pending: &crate::sync::store::DeviceJoinJournalDatabase,
             identity: &UserKeypair,
-            offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+            offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, String> {
             self.store
                 .open_pending_device_join_for_test(pending, identity, offer)
@@ -1234,7 +1234,7 @@ mod test_device {
 
         pub(crate) async fn prepare_snapshot_bootstrap_for_test(
             &self,
-            membership_floor: &crate::protocol::membership::MembershipFloor,
+            membership_floor: &coven_protocol::membership::MembershipFloor,
             binary_schema_version: u32,
             target_path: &std::path::Path,
             restorer_identity: &UserKeypair,
@@ -1257,7 +1257,7 @@ mod test_device {
             &self,
             member_pubkey: &str,
             invitee_email: Option<&str>,
-            role: crate::protocol::membership::MemberRole,
+            role: coven_protocol::membership::MemberRole,
             encryption: &coven_keys::encryption::EncryptionService,
             store_id: &str,
             store_name: &str,
@@ -1279,8 +1279,8 @@ mod test_device {
             store_dir: &StoreDir,
             clock: &dyn coven_foundation::clock::Clock,
             routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
-        ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
+            observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
+        ) -> Result<coven_protocol::blob::DrainOutcome, crate::database::DbError> {
             self.store
                 .with_test_store_dir(store_dir.clone())
                 .authorize_writer()
@@ -1349,7 +1349,7 @@ mod test_device {
             root_id: &str,
             row_id: &str,
             bytes: &[u8],
-        ) -> crate::protocol::blob::locator::StoredBlobRef {
+        ) -> coven_protocol::blob::locator::StoredBlobRef {
             let local = self
                 .db
                 .row_blob_ref("note_photos", row_id)
@@ -1390,9 +1390,9 @@ mod test_device {
 
         pub(crate) async fn activated_store_device_registration_for_test(
             &self,
-            reference: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+            reference: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         ) -> Result<
-            crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
+            coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
             crate::database::DbError,
         > {
             self.db.activated_store_device_registration(reference).await
@@ -1425,8 +1425,8 @@ mod test_device {
 
         pub(crate) async fn retained_merge_history_summary_for_test(
             &self,
-            reference: crate::protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary, String>
+            reference: coven_protocol::store_commit::StoreBatchCommitRef,
+        ) -> Result<coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary, String>
         {
             Ok(self
                 .db
@@ -1442,7 +1442,7 @@ mod test_device {
             sequence: u64,
             changeset: Vec<u8>,
             schema_version: u32,
-        ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+        ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, String> {
             if schema_version != self.db.schema_version() {
                 return Err(format!(
                     "test changeset schema version {schema_version} differs from producer schema {}",
@@ -1488,7 +1488,7 @@ mod test_device {
             store_dir: &StoreDir,
             changeset: Vec<u8>,
             previous_sequence: u64,
-        ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+        ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, String> {
             let before = self
                 .latest_local_store_position()
                 .await
@@ -1533,23 +1533,23 @@ mod test_device {
             namespace: &str,
             id: &str,
             bytes: &[u8],
-        ) -> crate::protocol::blob::locator::StoredBlobRef {
+        ) -> coven_protocol::blob::locator::StoredBlobRef {
             let registration = self
                 .db
                 .local_blob_write_authority()
                 .await
                 .expect("load exact blob write authority");
-            let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
+            let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
             let protection = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-            let locator = crate::protocol::blob::locator::BlobLocator::opaque(
+            let locator = coven_protocol::blob::locator::BlobLocator::opaque(
                 namespace,
                 id,
                 authority.reference.clone(),
-                crate::protocol::blob::locator::RemoteAudience::Store,
-                crate::protocol::blob::BlobScope::Master,
+                coven_protocol::blob::locator::RemoteAudience::Store,
+                coven_protocol::blob::BlobScope::Master,
                 protection.seal_key_fingerprint(),
                 bytes.len() as u64,
-                crate::protocol::store_commit::ObjectHash::digest(bytes),
+                coven_protocol::store_commit::ObjectHash::digest(bytes),
             )
             .expect("build exact blob locator");
             let temp = tempfile::tempdir().expect("create exact blob spool directory");
@@ -1567,7 +1567,7 @@ mod test_device {
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
-                    crate::protocol::objects::BlobSpoolProtection::Opaque(protection),
+                    coven_protocol::objects::BlobSpoolProtection::Opaque(protection),
                     &plaintext,
                     &spool,
                 )
@@ -1596,20 +1596,20 @@ mod test_device {
             id: &str,
             cloud_path: &str,
             bytes: &[u8],
-        ) -> crate::protocol::blob::locator::StoredBlobRef {
+        ) -> coven_protocol::blob::locator::StoredBlobRef {
             let registration = self
                 .db
                 .local_blob_write_authority()
                 .await
                 .expect("load browsable blob write authority");
-            let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
-            let locator = crate::protocol::blob::locator::BlobLocator::browsable(
+            let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
+            let locator = coven_protocol::blob::locator::BlobLocator::browsable(
                 namespace,
                 id,
                 authority.reference.clone(),
                 cloud_path,
                 bytes.len() as u64,
-                crate::protocol::store_commit::ObjectHash::digest(bytes),
+                coven_protocol::store_commit::ObjectHash::digest(bytes),
             )
             .expect("build browsable blob locator");
             let temp = tempfile::tempdir().expect("create browsable blob spool directory");
@@ -1627,7 +1627,7 @@ mod test_device {
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
-                    crate::protocol::objects::BlobSpoolProtection::Browsable,
+                    coven_protocol::objects::BlobSpoolProtection::Browsable,
                     &plaintext,
                     &spool,
                 )
@@ -1653,7 +1653,7 @@ mod test_device {
         pub(crate) async fn run_cycle(
             &self,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+            observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
             self.run_cycle_with(
@@ -1670,7 +1670,7 @@ mod test_device {
             clock: &dyn coven_foundation::clock::Clock,
             master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+            observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
             self.run_cycle_with_storage(
@@ -1689,7 +1689,7 @@ mod test_device {
             clock: &dyn coven_foundation::clock::Clock,
             master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+            observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
             interceptor: I,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         where
@@ -1712,7 +1712,7 @@ mod test_device {
             clock: &dyn coven_foundation::clock::Clock,
             master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
             store_dir: &StoreDir,
-            observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+            observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         where
             S: crate::sync::cycle::SyncCycleStorage + 'static,
@@ -1783,7 +1783,7 @@ mod test_device {
             metadata_stamp: &str,
             name: &str,
         ) -> Result<
-            crate::protocol::circle_journal::CircleOperationJournal,
+            coven_protocol::circle_journal::CircleOperationJournal,
             crate::sync::store::CircleOperationError,
         > {
             self.circle_writer()
@@ -1805,9 +1805,9 @@ mod test_device {
 
         pub(crate) async fn publish_circle_operation(
             &self,
-            operation_id: &crate::protocol::circle::CircleOperationId,
+            operation_id: &coven_protocol::circle::CircleOperationId,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
-            let routing_key = crate::protocol::circle::derive_row_routing_key(
+            let routing_key = coven_protocol::circle::derive_row_routing_key(
                 &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 self.store.store_root().store_root_hash,
             )
@@ -1822,7 +1822,7 @@ mod test_device {
         pub(crate) async fn resume_circle_operations(
             &self,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
-            let routing_key = crate::protocol::circle::derive_row_routing_key(
+            let routing_key = coven_protocol::circle::derive_row_routing_key(
                 &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 self.store.store_root().store_root_hash,
             )
@@ -1836,7 +1836,7 @@ mod test_device {
 
         pub(crate) async fn retry_circle_operation(
             &self,
-            operation_id: &crate::protocol::circle::CircleOperationId,
+            operation_id: &coven_protocol::circle::CircleOperationId,
         ) -> Result<(), crate::sync::store::CircleOperationError> {
             self.store
                 .circles()
@@ -1972,8 +1972,8 @@ mod test_device {
 
         pub(crate) async fn prepare_peer_exclusion(
             &self,
-            target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        ) -> crate::protocol::store_commit::StoreDeviceExclusionProposalRef {
+            target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        ) -> coven_protocol::store_commit::StoreDeviceExclusionProposalRef {
             let proposal = match self
                 .propose_device_exclusion(target)
                 .await
@@ -1993,7 +1993,7 @@ mod test_device {
             assert_eq!(freezes.len(), 1);
             assert_eq!(freezes[0].proposal, proposal);
             assert_eq!(&freezes[0].proposal.target, target);
-            let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+            let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
                 self.db
                     .materialized_frontier()
                     .await
@@ -2004,7 +2004,7 @@ mod test_device {
                 .stage_acknowledgement(frontier, "2026-07-18T00:01:00Z".to_string())
                 .await
                 .expect("stage owner exclusion acknowledgement");
-            let crate::protocol::store_commit::StoreAckExclusionState { proposal_freezes } =
+            let coven_protocol::store_commit::StoreAckExclusionState { proposal_freezes } =
                 acknowledgement.exclusions.clone();
             assert_eq!(proposal_freezes, freezes);
             assert_eq!(
@@ -2018,15 +2018,15 @@ mod test_device {
 
         pub(crate) async fn activate_peer_exclusion(
             &self,
-            proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
-        ) -> crate::protocol::store_commit::StoreDeviceExclusionRef {
+            proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        ) -> coven_protocol::store_commit::StoreDeviceExclusionRef {
             let result = self
                 .finalize_device_exclusion(proposal)
                 .await
                 .expect("finalize peer exclusion");
             let crate::sync::store::StoreDeviceExclusionResult::OutcomeActivated {
                 outcome:
-                    crate::protocol::store_commit::StoreDeviceExclusionOutcomeRef::Excluded(exclusion),
+                    coven_protocol::store_commit::StoreDeviceExclusionOutcomeRef::Excluded(exclusion),
                 ..
             } = result
             else {
@@ -2043,20 +2043,20 @@ mod test_device {
 
         pub(crate) async fn finalize_peer_exclusion(
             &self,
-            target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        ) -> crate::protocol::store_commit::StoreDeviceExclusionRef {
+            target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        ) -> coven_protocol::store_commit::StoreDeviceExclusionRef {
             let proposal = self.prepare_peer_exclusion(target).await;
             self.activate_peer_exclusion(&proposal).await
         }
 
         pub(crate) async fn prepare_circle_object(
             &self,
-            context: &crate::protocol::objects::ProtocolObjectContext,
+            context: &coven_protocol::objects::ProtocolObjectContext,
             semantic_prefix: &str,
             extension: &str,
             bytes: Vec<u8>,
         ) -> Result<
-            crate::protocol::objects::PreparedExactObject,
+            coven_protocol::objects::PreparedExactObject,
             crate::sync::store::CircleOperationError,
         > {
             self.circle_writer()
@@ -2068,12 +2068,12 @@ mod test_device {
 
         pub(crate) async fn prepare_circle_object_at(
             &self,
-            context: &crate::protocol::objects::ProtocolObjectContext,
-            slot: crate::protocol::objects::ObjectSlot,
+            context: &coven_protocol::objects::ProtocolObjectContext,
+            slot: coven_protocol::objects::ObjectSlot,
             semantic_prefix: &str,
             bytes: Vec<u8>,
         ) -> Result<
-            crate::protocol::objects::PreparedExactObject,
+            coven_protocol::objects::PreparedExactObject,
             crate::sync::store::CircleOperationError,
         > {
             self.circle_writer()
@@ -2084,16 +2084,16 @@ mod test_device {
 
         pub(crate) async fn prepare_circle_activation_objects(
             &self,
-            draft: crate::protocol::circle::CircleTransitionDraft,
+            draft: coven_protocol::circle::CircleTransitionDraft,
             history: &crate::sync::store::CircleTransitionHistory,
-            candidate_family: crate::protocol::store_commit::CandidateFamilyId,
+            candidate_family: coven_protocol::store_commit::CandidateFamilyId,
         ) -> Result<
             (
-                crate::protocol::circle::PreparedCircleTransition,
-                crate::protocol::store_commit::CircleActivationObjects,
-                std::collections::BTreeMap<String, crate::protocol::objects::PreparedExactObject>,
-                Option<crate::protocol::objects::ExactObjectRef>,
-                Vec<crate::protocol::store_commit::StreamActivation>,
+                coven_protocol::circle::PreparedCircleTransition,
+                coven_protocol::store_commit::CircleActivationObjects,
+                std::collections::BTreeMap<String, coven_protocol::objects::PreparedExactObject>,
+                Option<coven_protocol::objects::ExactObjectRef>,
+                Vec<coven_protocol::store_commit::StreamActivation>,
             ),
             crate::sync::store::CircleOperationError,
         > {
@@ -2106,12 +2106,12 @@ mod test_device {
 
         pub(crate) async fn sign_circle_commit(
             &self,
-            old_commit: &crate::protocol::store_commit::StoreBatchCommit,
-            coord: crate::protocol::store_commit::StoreCommitCoord,
-            reference: crate::protocol::store_commit::CircleControlRef,
-            stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
+            old_commit: &coven_protocol::store_commit::StoreBatchCommit,
+            coord: coven_protocol::store_commit::StoreCommitCoord,
+            reference: coven_protocol::store_commit::CircleControlRef,
+            stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
         ) -> Result<
-            crate::protocol::store_commit::StoreBatchCommit,
+            coven_protocol::store_commit::StoreBatchCommit,
             crate::sync::store::CircleOperationError,
         > {
             self.circle_writer()
@@ -2141,14 +2141,14 @@ mod test_device {
 
         pub(crate) async fn load_circle_activations(
             &self,
-            commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
-            commit: &crate::protocol::store_commit::StoreBatchCommit,
-            author: &crate::protocol::store_commit::StoreDeviceRegistration,
+            commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
+            commit: &coven_protocol::store_commit::StoreBatchCommit,
+            author: &coven_protocol::store_commit::StoreDeviceRegistration,
         ) -> Result<
-            crate::protocol::circle_activation::VerifiedCircleActivations,
+            coven_protocol::circle_activation::VerifiedCircleActivations,
             crate::sync::store::CircleOperationError,
         > {
-            let routing_key = crate::protocol::circle::derive_row_routing_key(
+            let routing_key = coven_protocol::circle::derive_row_routing_key(
                 &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 commit.store_root_hash,
             )
@@ -2160,8 +2160,8 @@ mod test_device {
 
         pub(crate) async fn circle_blob_opening_error(
             &self,
-            authority: &crate::protocol::blob::RowBlobAuthority,
-            stored: &crate::protocol::blob::locator::StoredBlobRef,
+            authority: &coven_protocol::blob::RowBlobAuthority,
+            stored: &coven_protocol::blob::locator::StoredBlobRef,
         ) -> String {
             match self.store.blob_protection_for_test(authority, stored).await {
                 Ok(_) => panic!("invalid Circle blob authority must fail"),
@@ -2172,11 +2172,11 @@ mod test_device {
         pub(crate) async fn load_circle_snapshot_refs(
             &self,
             circle_id: crate::CircleId,
-            access: &crate::protocol::circle_activation::CircleEpochAccess,
+            access: &coven_protocol::circle_activation::CircleEpochAccess,
         ) -> Result<
             Vec<(
-                crate::protocol::store_commit::CircleSnapshotRef,
-                crate::protocol::store_commit::CircleSnapshotMeta,
+                coven_protocol::store_commit::CircleSnapshotRef,
+                coven_protocol::store_commit::CircleSnapshotMeta,
             )>,
             String,
         > {
@@ -2193,14 +2193,14 @@ mod test_device {
 
         pub(crate) async fn membership(
             &self,
-        ) -> Result<crate::protocol::membership::MembershipChain, String> {
+        ) -> Result<coven_protocol::membership::MembershipChain, String> {
             self.store
                 .membership_for_test()
                 .await
                 .map_err(|error| error.to_string())
         }
 
-        pub(crate) fn protocol_root(&self) -> &crate::protocol::store_commit::StoreProtocolRoot {
+        pub(crate) fn protocol_root(&self) -> &coven_protocol::store_commit::StoreProtocolRoot {
             self.store.protocol_root_for_test()
         }
 
@@ -2208,8 +2208,8 @@ mod test_device {
         pub(crate) async fn prepare_wrapped_key(
             &self,
             recipient: &str,
-            value: crate::protocol::wrapped_store_key::WrappedStoreKey,
-        ) -> Result<crate::protocol::wrapped_store_key::PreparedWrappedStoreKey, String> {
+            value: coven_protocol::wrapped_store_key::WrappedStoreKey,
+        ) -> Result<coven_protocol::wrapped_store_key::PreparedWrappedStoreKey, String> {
             self.store
                 .prepare_wrapped_key_for_test(recipient, value)
                 .await
@@ -2225,8 +2225,8 @@ mod test_device {
         pub(crate) async fn publish_snapshot(
             &self,
             db_image: Vec<u8>,
-            coverage: crate::protocol::store_commit::CommitFrontier,
-        ) -> Result<crate::protocol::store_commit::SnapshotMeta, String> {
+            coverage: coven_protocol::store_commit::CommitFrontier,
+        ) -> Result<coven_protocol::store_commit::SnapshotMeta, String> {
             self.publish_snapshot_at(db_image, coverage, "2026-07-16T00:00:00Z")
                 .await
                 .map_err(|error| error.to_string())
@@ -2235,9 +2235,9 @@ mod test_device {
         pub(crate) async fn publish_snapshot_at(
             &self,
             db_image: Vec<u8>,
-            coverage: crate::protocol::store_commit::CommitFrontier,
+            coverage: coven_protocol::store_commit::CommitFrontier,
             created_at: &str,
-        ) -> Result<crate::protocol::store_commit::SnapshotMeta, crate::sync::store::SnapshotError>
+        ) -> Result<coven_protocol::store_commit::SnapshotMeta, crate::sync::store::SnapshotError>
         {
             self.store
                 .publish_snapshot_for_test(
@@ -2254,7 +2254,7 @@ mod test_device {
         pub(crate) async fn resume_snapshot_publication(
             &self,
         ) -> Result<
-            Option<crate::protocol::store_commit::SnapshotMeta>,
+            Option<coven_protocol::store_commit::SnapshotMeta>,
             crate::sync::store::SnapshotError,
         > {
             self.store
@@ -2269,7 +2269,7 @@ mod test_device {
 
         pub(crate) async fn publish_acknowledgement(
             &self,
-            frontier: crate::protocol::store_commit::CommitFrontier,
+            frontier: coven_protocol::store_commit::CommitFrontier,
         ) -> Result<(), String> {
             self.store
                 .stage_acknowledgement_for_test(frontier, "2026-07-16T00:00:01Z".to_string())
@@ -2290,9 +2290,9 @@ mod test_device {
 
         pub(crate) async fn stage_acknowledgement(
             &self,
-            frontier: crate::protocol::store_commit::CommitFrontier,
+            frontier: coven_protocol::store_commit::CommitFrontier,
             sync_time: String,
-        ) -> Result<crate::protocol::store_commit::StoreAck, String> {
+        ) -> Result<coven_protocol::store_commit::StoreAck, String> {
             self.store
                 .stage_acknowledgement_for_test(frontier, sync_time)
                 .await
@@ -2302,7 +2302,7 @@ mod test_device {
         pub(crate) async fn materialized_frontier(
             &self,
         ) -> Result<
-            std::collections::BTreeMap<String, crate::protocol::store_commit::StoreBatchCommitRef>,
+            std::collections::BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
             String,
         > {
             self.db
@@ -2321,9 +2321,9 @@ mod test_device {
         #[cfg(test)]
         pub(crate) async fn stage_acknowledgement_exact(
             &self,
-            frontier: crate::protocol::store_commit::CommitFrontier,
+            frontier: coven_protocol::store_commit::CommitFrontier,
             sync_time: String,
-        ) -> Result<crate::protocol::store_commit::StoreAck, crate::sync::store::StoreAckError>
+        ) -> Result<coven_protocol::store_commit::StoreAck, crate::sync::store::StoreAckError>
         {
             self.store
                 .stage_acknowledgement_for_test(frontier, sync_time)
@@ -2333,9 +2333,9 @@ mod test_device {
         #[cfg(test)]
         pub(crate) async fn acknowledgement_frontier(
             &self,
-        ) -> Result<crate::protocol::store_commit::CommitFrontier, crate::sync::store::StoreAckError>
+        ) -> Result<coven_protocol::store_commit::CommitFrontier, crate::sync::store::StoreAckError>
         {
-            crate::protocol::store_commit::CommitFrontier::from_refs(
+            coven_protocol::store_commit::CommitFrontier::from_refs(
                 self.db.materialized_frontier().await?,
             )
             .map_err(crate::sync::store::StoreAckError::Protocol)
@@ -2345,7 +2345,7 @@ mod test_device {
         pub(crate) async fn stage_current_acknowledgement(
             &self,
             sync_time: &str,
-        ) -> Result<crate::protocol::store_commit::StoreAck, crate::sync::store::StoreAckError>
+        ) -> Result<coven_protocol::store_commit::StoreAck, crate::sync::store::StoreAckError>
         {
             let frontier = self.acknowledgement_frontier().await?;
             self.stage_acknowledgement_exact(frontier, sync_time.to_string())
@@ -2353,7 +2353,7 @@ mod test_device {
         }
 
         #[cfg(test)]
-        pub(crate) fn typed_device_id(&self) -> crate::protocol::store_commit::StoreDeviceId {
+        pub(crate) fn typed_device_id(&self) -> coven_protocol::store_commit::StoreDeviceId {
             self.device_id
                 .parse()
                 .expect("TestDevice retains a valid Store device id")
@@ -2363,7 +2363,7 @@ mod test_device {
         pub(crate) async fn prepare_acknowledgement_candidate_for_test(
             &self,
             outbound: &crate::database::OutboundStoreAck,
-        ) -> crate::protocol::prepared_commit::PreparedStoreOperationCommit {
+        ) -> coven_protocol::prepared_commit::PreparedStoreOperationCommit {
             let mut writer = self
                 .authorize_writer()
                 .await
@@ -2405,7 +2405,7 @@ mod test_device {
         #[cfg(test)]
         pub(crate) async fn stage_circle_acknowledgements(
             &self,
-            frontier: &crate::protocol::store_commit::CommitFrontier,
+            frontier: &coven_protocol::store_commit::CommitFrontier,
             sync_time: &str,
         ) -> Result<(), crate::sync::store::StoreAckError> {
             self.store
@@ -2415,12 +2415,12 @@ mod test_device {
 
         pub(crate) async fn load_commit_ancestry_until(
             &self,
-            start: crate::protocol::store_commit::StoreBatchCommitRef,
-            coverage: &crate::protocol::store_commit::CommitFrontier,
+            start: coven_protocol::store_commit::StoreBatchCommitRef,
+            coverage: &coven_protocol::store_commit::CommitFrontier,
         ) -> Result<
             Vec<(
-                crate::protocol::store_commit::StoreBatchCommitRef,
-                crate::protocol::store_commit::VerifiedStoreBatchCommit,
+                coven_protocol::store_commit::StoreBatchCommitRef,
+                coven_protocol::store_commit::VerifiedStoreBatchCommit,
             )>,
             String,
         > {
@@ -2432,7 +2432,7 @@ mod test_device {
 
         pub(crate) async fn export_activated_device_continuation(
             &self,
-        ) -> Result<crate::protocol::recovery::ActivatedContinuation, String> {
+        ) -> Result<coven_protocol::recovery::ActivatedContinuation, String> {
             self.store
                 .export_activated_device_continuation_for_test()
                 .await
@@ -2441,7 +2441,7 @@ mod test_device {
 
         pub(crate) async fn latest_store_position(
             &self,
-        ) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, String> {
+        ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, String> {
             self.store
                 .latest_local_store_position()
                 .await
@@ -2552,7 +2552,7 @@ impl TestStore {
         &self,
         key: &str,
         bytes: Vec<u8>,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage().write_provider_object(key, bytes).await
     }
 
@@ -2573,7 +2573,7 @@ impl TestStore {
 
     pub(crate) fn fail_nth_exact_delete_of(
         &self,
-        slots: &[&crate::protocol::objects::ObjectSlot],
+        slots: &[&coven_protocol::objects::ObjectSlot],
         call: usize,
     ) {
         self.home.fail_nth_exact_delete_of(slots, call);
@@ -2634,23 +2634,23 @@ impl TestStore {
 
     pub(crate) async fn founder_recovery_authority(
         &self,
-    ) -> crate::protocol::recovery::OwnerRecoveryAuthority {
+    ) -> coven_protocol::recovery::OwnerRecoveryAuthority {
         let device = self.founder_device().await.expect("load founder Store");
         let protocol_root = device.protocol_root_for_test();
         let owner_grant = protocol_root.descriptor.founder_grant.clone();
-        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+        let activation = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
             &self.root,
             &coven_keys::keys::public_key_hex(&self.signer),
             &owner_grant,
             &protocol_root.descriptor.founder_recovery,
         )
         .expect("derive founder recovery activation");
-        crate::protocol::recovery::OwnerRecoveryAuthority {
+        coven_protocol::recovery::OwnerRecoveryAuthority {
             owner_identity_secret: hex::encode(self.signer.to_keypair_bytes()),
             owner_grant: owner_grant.clone(),
-            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+            recovery: coven_protocol::store_commit::OwnerRecoveryCursor {
                 owner_grant,
-                position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                position: coven_protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                     activation,
                 },
             },
@@ -2661,7 +2661,7 @@ impl TestStore {
     pub(crate) async fn run_founder_cycle(
         &self,
         store_dir: &StoreDir,
-        observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
+        observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
     ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure> {
         self.founder.run_cycle(store_dir, observer).await
     }
@@ -2681,7 +2681,7 @@ impl TestStore {
         namespace: &str,
         id: &str,
         bytes: &[u8],
-    ) -> crate::protocol::blob::locator::StoredBlobRef {
+    ) -> coven_protocol::blob::locator::StoredBlobRef {
         self.founder
             .create_exact_opaque_blob(namespace, id, bytes)
             .await
@@ -2693,7 +2693,7 @@ impl TestStore {
         id: &str,
         cloud_path: &str,
         bytes: &[u8],
-    ) -> crate::protocol::blob::locator::StoredBlobRef {
+    ) -> coven_protocol::blob::locator::StoredBlobRef {
         self.founder
             .create_exact_browsable_blob(namespace, id, cloud_path, bytes)
             .await
@@ -2705,7 +2705,7 @@ impl TestStore {
         root_id: &str,
         row_id: &str,
         bytes: &[u8],
-    ) -> crate::protocol::blob::locator::StoredBlobRef {
+    ) -> coven_protocol::blob::locator::StoredBlobRef {
         self.founder
             .publish_exact_remote_blob_binding(store_dir, root_id, row_id, bytes)
             .await
@@ -2748,7 +2748,7 @@ impl TestStore {
         owner: &UserKeypair,
         member: &UserKeypair,
         encryption: &coven_keys::encryption::EncryptionService,
-    ) -> Result<crate::protocol::circle_control::StoreMembershipStateRef, String> {
+    ) -> Result<coven_protocol::circle_control::StoreMembershipStateRef, String> {
         let owner_device = self.bind_device(owner_db, owner).await?;
         let member_device = self.bind_device(member_db, member).await?;
         let request = owner_device
@@ -2937,11 +2937,11 @@ impl TestStore {
 
     pub(crate) async fn create_exact_protocol_object(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
+        context: &coven_protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         bytes: &[u8],
-    ) -> Result<crate::protocol::objects::ExactObjectRef, String> {
+    ) -> Result<coven_protocol::objects::ExactObjectRef, String> {
         let slot = self
             .storage
             .allocate_protocol_slot(context, semantic_prefix, extension)
@@ -2960,17 +2960,17 @@ impl TestStore {
 
     pub(crate) async fn publish_prepared_protocol_object(
         &self,
-        prepared: &crate::protocol::objects::PreparedExactObject,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        prepared: &coven_protocol::objects::PreparedExactObject,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.create_protocol_object(prepared).await
     }
 
     pub(crate) async fn read_exact_protocol_object(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
-        object: &crate::protocol::objects::ExactObjectRef,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        object: &coven_protocol::objects::ExactObjectRef,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
         self.storage
             .read_protocol_object(context, object, semantic_prefix)
             .await
@@ -2978,7 +2978,7 @@ impl TestStore {
 
     pub(crate) async fn contains_blob_object(
         &self,
-        reference: &crate::protocol::blob::RowBlobRef,
+        reference: &coven_protocol::blob::RowBlobRef,
     ) -> bool {
         match reference.stored() {
             Some(stored) => self
@@ -2991,18 +2991,18 @@ impl TestStore {
 
     pub(crate) async fn contains_stored_blob_object(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<bool, crate::protocol::objects::StorageError> {
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, coven_protocol::objects::StorageError> {
         match self.storage.verify_blob_object(stored).await {
             Ok(()) => Ok(true),
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => Ok(false),
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
     }
 
     pub(crate) async fn contains_blob_tombstone(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, crate::storage::cloud::CloudHomeError> {
         let key =
             crate::blob::delete::tombstone_key_for_test(stored, &self.storage.cipher_snapshot());
@@ -3011,8 +3011,8 @@ impl TestStore {
 
     pub(crate) async fn contains_circle_snapshot_image(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        meta: &crate::protocol::store_commit::CircleSnapshotMeta,
+        circle_id: coven_protocol::circle::CircleId,
+        meta: &coven_protocol::store_commit::CircleSnapshotMeta,
     ) -> Result<bool, String> {
         let access = self
             .founder
@@ -3022,11 +3022,11 @@ impl TestStore {
             .ok_or_else(|| "the Circle snapshot control has no retained access".to_string())?;
         let context = access.protocol_context(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
+            coven_protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
         );
-        let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
+        let prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
             &meta.bootstrap.image.object,
-            crate::protocol::objects::ProtectedObjectDomain::CircleSnapshotImage.extension(),
+            coven_protocol::objects::ProtectedObjectDomain::CircleSnapshotImage.extension(),
         )
         .map_err(|error| error.to_string())?;
         match self
@@ -3035,15 +3035,15 @@ impl TestStore {
             .await
         {
             Ok(_) => Ok(true),
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => Ok(false),
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(error.to_string()),
         }
     }
 
     pub(crate) async fn circle_package_in(
         &self,
-        commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> crate::protocol::store_commit::CirclePackageRef {
+        commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> coven_protocol::store_commit::CirclePackageRef {
         let commit = self
             .founder
             .load_commit_for_test(commit_ref)
@@ -3057,8 +3057,8 @@ impl TestStore {
 
     pub(crate) async fn circle_package_object_present(
         &self,
-        package: &crate::protocol::store_commit::CirclePackageRef,
-        activation: &crate::protocol::store_commit::StoreBatchCommitRef,
+        package: &coven_protocol::store_commit::CirclePackageRef,
+        activation: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> bool {
         let access = self
             .founder
@@ -3068,9 +3068,9 @@ impl TestStore {
             .expect("the package's control stays retained after its epoch closed");
         let context = access.protocol_context(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CirclePackage,
+            coven_protocol::objects::ProtocolObjectDomain::CirclePackage,
         );
-        let prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
+        let prefix = coven_protocol::store_commit::circle_package_semantic_prefix(
             package.circle_id,
             package.package.candidate_family,
             &activation.coord.stream_id.to_string(),
@@ -3083,17 +3083,17 @@ impl TestStore {
             .await
         {
             Ok(_) => true,
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => false,
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => false,
             Err(error) => panic!("read the exact Circle package object: {error}"),
         }
     }
 
     pub(crate) async fn publish_competing_store_head(
         &self,
-        journal: &crate::protocol::circle_journal::CircleOperationJournal,
+        journal: &coven_protocol::circle_journal::CircleOperationJournal,
     ) -> (
-        crate::protocol::objects::ExactObjectRef,
-        crate::protocol::objects::ExactObjectRef,
+        coven_protocol::objects::ExactObjectRef,
+        coven_protocol::objects::ExactObjectRef,
     ) {
         let candidate = journal.commit().expect("parse candidate Store commit");
         let coord = journal.operation().commit_ref.coord.clone();
@@ -3108,7 +3108,7 @@ impl TestStore {
             .device_signer(&self.signer)
             .expect("derive candidate device signer");
         let schema_version = self.founder.schema_version();
-        let package = crate::protocol::audience_package::AudiencePackage::store(
+        let package = coven_protocol::audience_package::AudiencePackage::store(
             self.root.store_root_hash,
             candidate.candidate_family(),
             candidate.write_id.clone(),
@@ -3119,15 +3119,15 @@ impl TestStore {
         )
         .expect("construct competing package");
         let package_bytes = package.to_bytes();
-        let package_prefix = crate::protocol::store_commit::package_semantic_prefix(
+        let package_prefix = coven_protocol::store_commit::package_semantic_prefix(
             candidate.candidate_family(),
             &coord.stream_id.to_string(),
             candidate.seq(),
-            crate::protocol::store_commit::ObjectHash::digest(&package_bytes),
+            coven_protocol::store_commit::ObjectHash::digest(&package_bytes),
         );
-        let package_context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
+        let package_context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StorePackage,
+            coven_protocol::objects::ProtocolObjectDomain::StorePackage,
         );
         let package_slot = self
             .storage
@@ -3155,7 +3155,7 @@ impl TestStore {
         let predecessor = membership
             .write_grant_authority(&registration.value().author_pubkey)
             .expect("competing author has an active write grant");
-        let winner = crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+        let winner = coven_protocol::store_commit::StoreBatchCommit::signed_operations(
             self.root.store_root_hash,
             candidate.write_id.clone(),
             coord.clone(),
@@ -3164,28 +3164,28 @@ impl TestStore {
             candidate.order.clone(),
             candidate.membership_state.clone(),
             candidate.device_state.clone(),
-            crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
-            crate::protocol::store_commit::StoreCommitOperationsInput {
-                store_package: Some(crate::protocol::store_commit::StorePackageInput {
+            coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
+            coven_protocol::store_commit::StoreCommitOperationsInput {
+                store_package: Some(coven_protocol::store_commit::StorePackageInput {
                     candidate_family: candidate.candidate_family(),
                     schema_version,
                     bytes: &package_bytes,
                     object: package_prepared.reference().clone(),
                 }),
-                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
+                ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
             },
             &device_signer,
         )
         .expect("sign competing commit");
-        let commit_prefix = crate::protocol::store_commit::commit_semantic_prefix(
+        let commit_prefix = coven_protocol::store_commit::commit_semantic_prefix(
             winner.candidate_family(),
             &coord.stream_id.to_string(),
             winner.seq(),
             winner.commit_hash(),
         );
-        let commit_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let commit_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
+            coven_protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
         let commit_slot = self
             .storage
@@ -3205,14 +3205,14 @@ impl TestStore {
             .create_protocol_object(&commit_prepared)
             .await
             .expect("publish competing commit");
-        let winner_ref = crate::protocol::store_commit::StoreBatchCommitRef::from_commit(
+        let winner_ref = coven_protocol::store_commit::StoreBatchCommitRef::from_commit(
             &winner,
             coord,
             commit_prepared.reference().clone(),
         )
         .expect("reference competing commit");
         assert_ne!(winner_ref, journal.operation().commit_ref);
-        let winner_head = crate::protocol::store_commit::StoreDeviceHead::signed(
+        let winner_head = coven_protocol::store_commit::StoreDeviceHead::signed(
             self.root.store_root_hash,
             candidate.author_registration.clone(),
             winner_ref,
@@ -3221,9 +3221,9 @@ impl TestStore {
             &device_signer,
         )
         .expect("sign competing head");
-        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
+            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let head_slot = journal
             .operation()
@@ -3233,7 +3233,7 @@ impl TestStore {
             .reference()
             .slot()
             .clone();
-        let head_prefix = crate::protocol::store_commit::head_slot_prefix(
+        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
             &candidate.author_registration.device_id.to_string(),
             candidate.seq(),
         );
@@ -3271,7 +3271,7 @@ impl TestStore {
             .expect("derive third-winner device signer");
         let coord = candidate.head.value.commit.coord.clone();
         let candidate_family = candidate.commit.value.candidate_family();
-        let package = crate::protocol::audience_package::AudiencePackage::store(
+        let package = coven_protocol::audience_package::AudiencePackage::store(
             self.root.store_root_hash,
             candidate_family,
             candidate.commit.value.write_id.clone(),
@@ -3281,20 +3281,20 @@ impl TestStore {
             Vec::new(),
         )
         .expect("construct third winner package");
-        let crate::protocol::store_commit::StoreCommitCoord {
+        let coven_protocol::store_commit::StoreCommitCoord {
             stream_id,
             sequence,
         } = coord.clone();
         let package_bytes = package.to_bytes();
-        let package_context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
+        let package_context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StorePackage,
+            coven_protocol::objects::ProtocolObjectDomain::StorePackage,
         );
-        let package_prefix = crate::protocol::store_commit::package_semantic_prefix(
+        let package_prefix = coven_protocol::store_commit::package_semantic_prefix(
             candidate_family,
             &stream_id.to_string(),
             sequence,
-            crate::protocol::store_commit::ObjectHash::digest(&package_bytes),
+            coven_protocol::store_commit::ObjectHash::digest(&package_bytes),
         );
         let package_slot = self
             .storage
@@ -3310,7 +3310,7 @@ impl TestStore {
                 package_bytes.clone(),
             )
             .expect("prepare third winner package");
-        let third = crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+        let third = coven_protocol::store_commit::StoreBatchCommit::signed_operations(
             self.root.store_root_hash,
             candidate.commit.value.write_id.clone(),
             coord.clone(),
@@ -3324,23 +3324,23 @@ impl TestStore {
                 .value
                 .operations_membership_authority()
                 .expect("load third winner membership authority"),
-            crate::protocol::store_commit::StoreCommitOperationsInput {
-                store_package: Some(crate::protocol::store_commit::StorePackageInput {
+            coven_protocol::store_commit::StoreCommitOperationsInput {
+                store_package: Some(coven_protocol::store_commit::StorePackageInput {
                     candidate_family,
                     schema_version: peer_db.schema_version(),
                     bytes: &package_bytes,
                     object: package_prepared.reference().clone(),
                 }),
-                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
+                ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
             },
             &device_signer,
         )
         .expect("sign third ordinary winner");
-        let commit_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let commit_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
+            coven_protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
-        let commit_prefix = crate::protocol::store_commit::commit_semantic_prefix(
+        let commit_prefix = coven_protocol::store_commit::commit_semantic_prefix(
             third.candidate_family(),
             &stream_id.to_string(),
             sequence,
@@ -3364,13 +3364,13 @@ impl TestStore {
             .create_protocol_object(&third_prepared)
             .await
             .expect("publish third winner commit");
-        let third_ref = crate::protocol::store_commit::StoreBatchCommitRef::from_commit(
+        let third_ref = coven_protocol::store_commit::StoreBatchCommitRef::from_commit(
             &third,
             coord,
             third_prepared.reference().clone(),
         )
         .expect("reference third winner commit");
-        let third_head = crate::protocol::store_commit::StoreDeviceHead::signed(
+        let third_head = coven_protocol::store_commit::StoreDeviceHead::signed(
             self.root.store_root_hash,
             candidate.commit.value.author_registration.clone(),
             third_ref,
@@ -3379,11 +3379,11 @@ impl TestStore {
             &device_signer,
         )
         .expect("sign third winner head");
-        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
+            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
         );
-        let head_prefix = crate::protocol::store_commit::head_slot_prefix(
+        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
             &candidate
                 .commit
                 .value
@@ -3409,18 +3409,18 @@ impl TestStore {
 
     pub(crate) async fn overwrite_membership_head(
         &self,
-        reference: &crate::protocol::membership::MembershipHeadRef,
-        head: &crate::protocol::membership::AuthorHead,
+        reference: &coven_protocol::membership::MembershipHeadRef,
+        head: &coven_protocol::membership::AuthorHead,
     ) {
         self.storage
             .delete_protocol_object(&reference.object)
             .await
             .expect("delete exact head before replacement");
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
+            coven_protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
         );
-        let prefix = crate::protocol::store_commit::membership_head_slot_prefix(
+        let prefix = coven_protocol::store_commit::membership_head_slot_prefix(
             &reference.coord.author_pubkey,
             &reference.coord.author_owner_grant,
             reference.coord.stream_id,
@@ -3443,15 +3443,15 @@ impl TestStore {
 
     pub(crate) async fn delete_membership_head_for_test(
         &self,
-        reference: &crate::protocol::membership::MembershipHeadRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        reference: &coven_protocol::membership::MembershipHeadRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.delete_protocol_object(&reference.object).await
     }
 
     pub(crate) async fn pending_device_join_observation(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
-        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, String> {
         self.founder
             .pending_device_join_observation_for_test(pending, offer)
@@ -3462,7 +3462,7 @@ impl TestStore {
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
         identity: &UserKeypair,
-        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, String> {
         self.founder
             .open_pending_device_join_for_test(pending, identity, offer)
@@ -3471,7 +3471,7 @@ impl TestStore {
 
     pub(crate) async fn prepare_snapshot_bootstrap<'a>(
         &'a self,
-        membership_floor: &crate::protocol::membership::MembershipFloor,
+        membership_floor: &coven_protocol::membership::MembershipFloor,
         binary_schema_version: u32,
         target_path: &std::path::Path,
         restorer_identity: &UserKeypair,
@@ -3502,8 +3502,8 @@ impl TestStore {
         store_dir: &coven_foundation::store_dir::StoreDir,
         clock: &dyn coven_foundation::clock::Clock,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        observer: Option<&dyn crate::protocol::blob::BlobTransitionObserver>,
-    ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
+        observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
+    ) -> Result<coven_protocol::blob::DrainOutcome, crate::database::DbError> {
         let store = self
             .bind_store_device(database, &self.signer)
             .await
@@ -3633,7 +3633,7 @@ impl TestStore {
         identity: &UserKeypair,
         member_pubkey: &str,
         invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
+        role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
@@ -3665,7 +3665,7 @@ impl TestStore {
             &self.signer,
             &pubkey_hex(peer),
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             "Test Store",
         )
@@ -3827,16 +3827,16 @@ impl TestStore {
             let provider_binding = crate::storage::SyncStorage::provider_binding(&*self.storage)
                 .await
                 .map_err(|error| error.to_string())?;
-            let crate::protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
+            let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
                 &provider_binding.store
             else {
                 return Err("cross-principal test Store is not Dropbox".to_string());
             };
             let namespace_id = namespace_id.clone();
-            let peer_binding = crate::protocol::objects::ResolvedProviderBinding {
+            let peer_binding = coven_protocol::objects::ResolvedProviderBinding {
                 store: provider_binding.store.clone(),
-                device: crate::protocol::objects::ProviderDeviceBinding {
-                    principal: crate::protocol::objects::ProviderPrincipalId::Dropbox {
+                device: coven_protocol::objects::ProviderDeviceBinding {
+                    principal: coven_protocol::objects::ProviderPrincipalId::Dropbox {
                         account_id: peer_account_id.to_string(),
                     },
                 },
@@ -3894,7 +3894,7 @@ impl TestStore {
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 approval.admission,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
             ) {
                 return Err(
                     "distinct provider principals produced same-principal admission".into(),
@@ -3923,7 +3923,7 @@ impl TestStore {
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 readiness.provider,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderReadiness::CrossPrincipal(_)
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderReadiness::CrossPrincipal(_)
             ) {
                 return Err(
                     "distinct provider principals produced same-principal readiness".into(),
@@ -3935,7 +3935,7 @@ impl TestStore {
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 completion.admission,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal(_)
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal(_)
             ) {
                 return Err(
                     "distinct provider principals produced same-principal completion".into(),
@@ -3961,7 +3961,7 @@ impl TestStore {
         schema_version: u32,
         created_at: &str,
         store_routing: &coven_keys::encryption::EncryptionService,
-    ) -> Result<crate::protocol::store_commit::CircleSnapshotMeta, crate::sync::store::SnapshotError>
+    ) -> Result<coven_protocol::store_commit::CircleSnapshotMeta, crate::sync::store::SnapshotError>
     {
         self.bind_device(db, &self.signer)
             .await
@@ -3986,10 +3986,10 @@ impl TestStore {
     pub(crate) async fn load_circle_snapshot_metas(
         &self,
         db: &Database,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        circle_id: coven_protocol::circle::CircleId,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
-        Vec<crate::protocol::store_commit::CircleSnapshotMeta>,
+        Vec<coven_protocol::store_commit::CircleSnapshotMeta>,
         crate::sync::store::SnapshotError,
     > {
         self.bind_device(db, &self.signer)
@@ -4010,8 +4010,8 @@ impl TestStore {
     pub(crate) async fn verify_standalone_circle_snapshot_image(
         &self,
         db: &Database,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        circle_id: coven_protocol::circle::CircleId,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
         store_routing: &coven_keys::encryption::EncryptionService,
     ) -> Result<(), crate::sync::store::SnapshotError> {
         self.bind_device(db, &self.signer)
@@ -4032,8 +4032,8 @@ impl TestStore {
     pub(crate) async fn circle_snapshot_is_stable(
         &self,
         db: &Database,
-        circle_id: crate::protocol::circle::CircleId,
-        snapshot_cut: &crate::protocol::store_commit::CommitFrontier,
+        circle_id: coven_protocol::circle::CircleId,
+        snapshot_cut: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<bool, crate::sync::store::SnapshotError> {
         self.bind_device(db, &self.signer)
             .await
@@ -4053,8 +4053,8 @@ impl TestStore {
     pub(crate) async fn load_circle_acknowledgement(
         &self,
         db: &Database,
-        reference: &crate::protocol::store_commit::CircleAckRef,
-    ) -> Result<crate::protocol::store_commit::CircleAck, crate::sync::store::StoreAckError> {
+        reference: &coven_protocol::store_commit::CircleAckRef,
+    ) -> Result<coven_protocol::store_commit::CircleAck, crate::sync::store::StoreAckError> {
         self.bind_device(db, &self.signer)
             .await
             .map_err(crate::sync::store::StoreAckError::InvalidOutbound)?
@@ -4065,18 +4065,18 @@ impl TestStore {
     #[cfg(test)]
     pub(crate) async fn read_circle_snapshot_image(
         &self,
-        selected: &crate::protocol::store_commit::CircleSnapshotMeta,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
+        selected: &coven_protocol::store_commit::CircleSnapshotMeta,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
         let context = access.protocol_context(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
+            coven_protocol::objects::ProtocolObjectDomain::CircleSnapshotImage,
         );
         self.storage
             .read_protocol_object(
                 &context,
                 &selected.bootstrap.image.object,
-                &crate::protocol::store_commit::circle_snapshot_image_semantic_prefix(
+                &coven_protocol::store_commit::circle_snapshot_image_semantic_prefix(
                     selected.circle_id,
                     &selected.author_registration.device_id.to_string(),
                     selected.bootstrap.image.image_hash,
@@ -4088,20 +4088,20 @@ impl TestStore {
     #[cfg(test)]
     pub(crate) async fn circle_snapshot_meta_is_unreadable(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         encryption: coven_keys::encryption::EncryptionService,
     ) -> bool {
-        let context = crate::protocol::objects::ProtocolObjectContext::circle(
+        let context = coven_protocol::objects::ProtocolObjectContext::circle(
             self.root.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CircleSnapshotMeta,
+            coven_protocol::objects::ProtocolObjectDomain::CircleSnapshotMeta,
             encryption,
         );
-        let prefix = crate::protocol::store_commit::circle_snapshot_slot_prefix(
+        let prefix = coven_protocol::store_commit::circle_snapshot_slot_prefix(
             circle_id,
             &self.founder.device_id,
             0,
         );
-        let slot = crate::protocol::objects::ObjectSlot::logical(format!("{prefix}.json"))
+        let slot = coven_protocol::objects::ObjectSlot::logical(format!("{prefix}.json"))
             .expect("valid generation-zero Circle snapshot slot");
         self.storage
             .read_protocol_slot(&context, &slot, &prefix)
@@ -4110,16 +4110,16 @@ impl TestStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn store_root_hash(&self) -> crate::protocol::store_commit::ObjectHash {
+    pub(crate) fn store_root_hash(&self) -> coven_protocol::store_commit::ObjectHash {
         self.root.store_root_hash
     }
 
     #[cfg(test)]
     pub(crate) async fn retained_merge_history_summary(
         &self,
-        device_id: &crate::protocol::store_commit::StoreDeviceId,
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary, String> {
+        device_id: &coven_protocol::store_commit::StoreDeviceId,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary, String> {
         let device = {
             let producers = self.producers.lock().await;
             producers
@@ -4142,7 +4142,7 @@ impl TestStore {
         sequence: u64,
         changeset: &[u8],
         schema_version: u32,
-    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+    ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, String> {
         let device = self.ensure_producer(name).await?;
         device
             .publish_changeset_for_test(sequence, changeset.to_vec(), schema_version)
@@ -4155,7 +4155,7 @@ impl TestStore {
         store_dir: &StoreDir,
         changeset: Vec<u8>,
         previous_sequence: u64,
-    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, String> {
+    ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, String> {
         self.founder
             .publish_changeset_after_for_test(store_dir, changeset, previous_sequence)
             .await
@@ -4171,9 +4171,7 @@ pub(crate) fn plaintext_cipher() -> std::sync::RwLock<crate::storage::CloudCiphe
 
 /// The cloud key a tombstone for `stored` is written under.
 #[cfg(test)]
-pub(crate) fn exact_tombstone_key(
-    stored: &crate::protocol::blob::locator::StoredBlobRef,
-) -> String {
+pub(crate) fn exact_tombstone_key(stored: &coven_protocol::blob::locator::StoredBlobRef) -> String {
     crate::blob::delete::tombstone_key_for_test(stored, &crate::storage::CloudCipher::Plaintext)
 }
 
@@ -4204,8 +4202,8 @@ pub(crate) enum ProviderObjectExistsInterception {
 pub(crate) trait StorageInterceptor: Send + Sync {
     async fn before_protocol_create(
         &self,
-        _prepared: &crate::protocol::objects::PreparedExactObject,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        _prepared: &coven_protocol::objects::PreparedExactObject,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
@@ -4213,54 +4211,54 @@ pub(crate) trait StorageInterceptor: Send + Sync {
         &self,
         _read: ProtocolRead,
         _semantic_prefix: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_allocate(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_allocate(&self) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_prepare(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_prepare(&self) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_blob_create(
         &self,
-        _blob: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        _blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
-    async fn before_blob_stage(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_stage(&self) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_provider_object_read(
         &self,
         _key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_provider_object_write(
         &self,
         _key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 
     async fn before_provider_object_exists(
         &self,
         _key: &str,
-    ) -> Result<ProviderObjectExistsInterception, crate::protocol::objects::StorageError> {
+    ) -> Result<ProviderObjectExistsInterception, coven_protocol::objects::StorageError> {
         Ok(ProviderObjectExistsInterception::Proceed)
     }
 
     async fn before_provider_object_delete(
         &self,
         _key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         Ok(())
     }
 }
@@ -4273,8 +4271,8 @@ where
 {
     async fn before_protocol_create(
         &self,
-        prepared: &crate::protocol::objects::PreparedExactObject,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        prepared: &coven_protocol::objects::PreparedExactObject,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_protocol_create(prepared).await
     }
 
@@ -4282,54 +4280,54 @@ where
         &self,
         read: ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_protocol_read(read, semantic_prefix).await
     }
 
-    async fn before_blob_allocate(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_allocate(&self) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_blob_allocate().await
     }
 
-    async fn before_blob_prepare(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_prepare(&self) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_blob_prepare().await
     }
 
     async fn before_blob_create(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_blob_create(blob).await
     }
 
-    async fn before_blob_stage(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_stage(&self) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_blob_stage().await
     }
 
     async fn before_provider_object_read(
         &self,
         key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_provider_object_read(key).await
     }
 
     async fn before_provider_object_write(
         &self,
         key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_provider_object_write(key).await
     }
 
     async fn before_provider_object_exists(
         &self,
         key: &str,
-    ) -> Result<ProviderObjectExistsInterception, crate::protocol::objects::StorageError> {
+    ) -> Result<ProviderObjectExistsInterception, coven_protocol::objects::StorageError> {
         (**self).before_provider_object_exists(key).await
     }
 
     async fn before_provider_object_delete(
         &self,
         key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         (**self).before_provider_object_delete(key).await
     }
 }
@@ -4375,7 +4373,7 @@ where
     fn mark_candidate(
         &self,
         generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
+        mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         self.inner.mark_candidate(generation, mutation)
     }
@@ -4383,7 +4381,7 @@ where
     fn mark_committed_mutation(
         &self,
         generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
+        mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         self.inner.mark_committed_mutation(generation, mutation)
     }
@@ -4391,7 +4389,7 @@ where
     fn remove_candidate(
         &self,
         generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
+        mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         self.inner.remove_candidate(generation, mutation)
     }
@@ -4399,25 +4397,25 @@ where
     fn replace_candidate_mutation(
         &self,
         generation: u64,
-        previous: crate::protocol::store_commit::ObjectHash,
-        replacement: crate::protocol::store_commit::ObjectHash,
+        previous: coven_protocol::store_commit::ObjectHash,
+        replacement: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         self.inner
             .replace_candidate_mutation(generation, previous, replacement)
     }
 
-    fn gate(&self) -> Option<crate::protocol::objects::RotationGate> {
+    fn gate(&self) -> Option<coven_protocol::objects::RotationGate> {
         self.inner.gate()
     }
 
-    fn install_durable_gate(&self, gate: Option<crate::protocol::objects::RotationGate>) {
+    fn install_durable_gate(&self, gate: Option<coven_protocol::objects::RotationGate>) {
         self.inner.install_durable_gate(gate);
     }
 
     fn check(
         &self,
         cipher: &crate::storage::CloudCipher,
-    ) -> Result<(), crate::protocol::objects::RotationPending> {
+    ) -> Result<(), coven_protocol::objects::RotationPending> {
         self.inner.check(cipher)
     }
 }
@@ -4457,14 +4455,14 @@ where
         self.inner.blob_path_scheme()
     }
 
-    async fn probe_provider(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn probe_provider(&self) -> Result<(), coven_protocol::objects::StorageError> {
         self.inner.probe_provider().await
     }
 
     async fn set_member_access(
         &self,
         state: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::protocol::objects::StorageError>
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, coven_protocol::objects::StorageError>
     {
         self.inner.set_member_access(state).await
     }
@@ -4472,7 +4470,7 @@ where
     async fn read_provider_object(
         &self,
         key: &str,
-    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
         self.interceptor.before_provider_object_read(key).await?;
         self.inner.read_provider_object(key).await
     }
@@ -4481,7 +4479,7 @@ where
         &self,
         key: &str,
         stored_bytes: Vec<u8>,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_provider_object_write(key).await?;
         self.inner.write_provider_object(key, stored_bytes).await
     }
@@ -4489,14 +4487,14 @@ where
     async fn list_provider_objects(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
+    ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
         self.inner.list_provider_objects(prefix).await
     }
 
     async fn provider_object_exists(
         &self,
         key: &str,
-    ) -> Result<bool, crate::protocol::objects::StorageError> {
+    ) -> Result<bool, coven_protocol::objects::StorageError> {
         match self.interceptor.before_provider_object_exists(key).await? {
             ProviderObjectExistsInterception::Proceed => {
                 self.inner.provider_object_exists(key).await
@@ -4511,7 +4509,7 @@ where
     async fn delete_provider_object(
         &self,
         key: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_provider_object_delete(key).await?;
         self.inner.delete_provider_object(key).await
     }
@@ -4522,24 +4520,24 @@ where
 
     async fn observe_exact_slot(
         &self,
-        slot: &crate::protocol::objects::ObjectSlot,
+        slot: &coven_protocol::objects::ObjectSlot,
     ) -> Result<
-        Option<crate::protocol::objects::ExactObjectRef>,
-        crate::protocol::objects::StorageError,
+        Option<coven_protocol::objects::ExactObjectRef>,
+        coven_protocol::objects::StorageError,
     > {
         self.inner.observe_exact_slot(slot).await
     }
 
     async fn delete_exact_slot_and_verify_absent(
         &self,
-        slot: &crate::protocol::objects::ObjectSlot,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        slot: &coven_protocol::objects::ObjectSlot,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.inner.delete_exact_slot_and_verify_absent(slot).await
     }
 
     fn store_blob_protection(
         &self,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
     {
         self.inner.store_blob_protection()
     }
@@ -4547,18 +4545,18 @@ where
     async fn provider_binding(
         &self,
     ) -> Result<
-        crate::protocol::objects::ResolvedProviderBinding,
-        crate::protocol::objects::StorageError,
+        coven_protocol::objects::ResolvedProviderBinding,
+        coven_protocol::objects::StorageError,
     > {
         self.inner.provider_binding().await
     }
 
     async fn allocate_protocol_slot(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
+        context: &coven_protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
-    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
+    ) -> Result<coven_protocol::objects::ObjectSlot, coven_protocol::objects::StorageError> {
         self.inner
             .allocate_protocol_slot(context, semantic_prefix, extension)
             .await
@@ -4566,11 +4564,11 @@ where
 
     fn prepare_protocol_object(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
-        slot: crate::protocol::objects::ObjectSlot,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        slot: coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         data: Vec<u8>,
-    ) -> Result<crate::protocol::objects::PreparedExactObject, crate::protocol::objects::StorageError>
+    ) -> Result<coven_protocol::objects::PreparedExactObject, coven_protocol::objects::StorageError>
     {
         self.inner
             .prepare_protocol_object(context, slot, semantic_prefix, data)
@@ -4578,18 +4576,18 @@ where
 
     async fn create_protocol_object(
         &self,
-        prepared: &crate::protocol::objects::PreparedExactObject,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        prepared: &coven_protocol::objects::PreparedExactObject,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_protocol_create(prepared).await?;
         self.inner.create_protocol_object(prepared).await
     }
 
     async fn read_protocol_object(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
-        object: &crate::protocol::objects::ExactObjectRef,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        object: &coven_protocol::objects::ExactObjectRef,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, crate::protocol::objects::StorageError> {
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
         self.interceptor
             .before_protocol_read(ProtocolRead::Object, semantic_prefix)
             .await?;
@@ -4600,12 +4598,12 @@ where
 
     async fn read_protocol_slot(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
-        slot: &crate::protocol::objects::ObjectSlot,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        slot: &coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<
-        (Vec<u8>, crate::protocol::objects::ExactObjectRef),
-        crate::protocol::objects::StorageError,
+        (Vec<u8>, coven_protocol::objects::ExactObjectRef),
+        coven_protocol::objects::StorageError,
     > {
         self.interceptor
             .before_protocol_read(ProtocolRead::Slot, semantic_prefix)
@@ -4617,12 +4615,12 @@ where
 
     async fn read_prepared_protocol_slot(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
-        slot: &crate::protocol::objects::ObjectSlot,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        slot: &coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<
-        (Vec<u8>, crate::protocol::objects::PreparedExactObject),
-        crate::protocol::objects::StorageError,
+        (Vec<u8>, coven_protocol::objects::PreparedExactObject),
+        coven_protocol::objects::StorageError,
     > {
         self.interceptor
             .before_protocol_read(ProtocolRead::PreparedSlot, semantic_prefix)
@@ -4634,28 +4632,28 @@ where
 
     async fn delete_protocol_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.inner.delete_protocol_object(object).await
     }
 
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
-    ) -> Result<crate::protocol::objects::ObjectSlot, crate::protocol::objects::StorageError> {
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+    ) -> Result<coven_protocol::objects::ObjectSlot, coven_protocol::objects::StorageError> {
         self.interceptor.before_blob_allocate().await?;
         self.inner.allocate_blob_slot(locator, authority).await
     }
 
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+        protection: coven_protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
         spool_file: &std::path::Path,
-    ) -> Result<crate::protocol::objects::BlobSpoolWrite, crate::protocol::objects::StorageError>
+    ) -> Result<coven_protocol::objects::BlobSpoolWrite, coven_protocol::objects::StorageError>
     {
         self.inner
             .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
@@ -4664,11 +4662,11 @@ where
 
     async fn prepare_blob_object(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
-        slot: crate::protocol::objects::ObjectSlot,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+        slot: coven_protocol::objects::ObjectSlot,
         stored_file: &std::path::Path,
-    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, crate::protocol::objects::StorageError>
+    ) -> Result<coven_protocol::blob::locator::StoredBlobRef, coven_protocol::objects::StorageError>
     {
         self.interceptor.before_blob_prepare().await?;
         self.inner
@@ -4678,11 +4676,11 @@ where
 
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_blob_create(blob).await?;
         self.inner
             .create_blob_object_from_file(blob, authority, stored_file, progress)
@@ -4691,20 +4689,18 @@ where
 
     async fn verify_blob_object(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.inner.verify_blob_object(blob).await
     }
 
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        protection: coven_protocol::objects::BlobSpoolProtection,
         dest: &std::path::Path,
-    ) -> Result<
-        coven_foundation::local_file::AtomicStagedFile,
-        crate::protocol::objects::StorageError,
-    > {
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, coven_protocol::objects::StorageError>
+    {
         self.interceptor.before_blob_stage().await?;
         self.inner
             .stage_verified_blob_plaintext(blob, protection, dest)
@@ -4713,16 +4709,16 @@ where
 
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        protection: crate::protocol::objects::BlobSpoolProtection,
-    ) -> Result<crate::storage::BlobRangeReader, crate::protocol::objects::StorageError> {
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        protection: coven_protocol::objects::BlobSpoolProtection,
+    ) -> Result<crate::storage::BlobRangeReader, coven_protocol::objects::StorageError> {
         self.inner.open_blob_range_reader(blob, protection).await
     }
 
     async fn delete_blob_object(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.inner.delete_blob_object(blob).await
     }
 }

@@ -1,5 +1,5 @@
 use crate::database::*;
-use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
+use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
 
 #[tokio::test]
 async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
@@ -7,7 +7,7 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],

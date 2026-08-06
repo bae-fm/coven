@@ -2,18 +2,18 @@ use super::*;
 
 pub(super) enum RecoveryProtocolObject<T, R> {
     Existing {
-        exact: crate::protocol::objects::ExactProtocolObject<T>,
+        exact: coven_protocol::objects::ExactProtocolObject<T>,
         reference: R,
     },
     Prepared {
-        exact: crate::protocol::objects::ExactProtocolObject<T>,
+        exact: coven_protocol::objects::ExactProtocolObject<T>,
         reference: R,
     },
 }
 
 impl<T, R> RecoveryProtocolObject<T, R> {
     pub(super) fn from_remote_state(
-        exact: crate::protocol::objects::ExactProtocolObject<T>,
+        exact: coven_protocol::objects::ExactProtocolObject<T>,
         reference: R,
         exists: bool,
     ) -> Self {
@@ -24,7 +24,7 @@ impl<T, R> RecoveryProtocolObject<T, R> {
         }
     }
 
-    pub(super) fn exact(&self) -> &crate::protocol::objects::ExactProtocolObject<T> {
+    pub(super) fn exact(&self) -> &coven_protocol::objects::ExactProtocolObject<T> {
         match self {
             Self::Existing { exact, .. } | Self::Prepared { exact, .. } => exact,
         }
@@ -43,7 +43,7 @@ impl<T, R> RecoveryProtocolObject<T, R> {
         }
     }
 
-    pub(super) fn into_exact(self) -> crate::protocol::objects::ExactProtocolObject<T> {
+    pub(super) fn into_exact(self) -> coven_protocol::objects::ExactProtocolObject<T> {
         match self {
             Self::Existing { exact, .. } | Self::Prepared { exact, .. } => exact,
         }
@@ -60,14 +60,14 @@ impl<'storage> RestoringStore<'storage> {
     pub(super) async fn prepare_or_load_recovery_registration(
         &self,
         expected: StoreDeviceRegistration,
-        slot: crate::protocol::objects::ObjectSlot,
+        slot: coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<
         RecoveryProtocolObject<StoreDeviceRegistration, StoreDeviceRegistrationRef>,
         StoreRegistrationError,
     > {
         let root = &self.root;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
         );
@@ -92,7 +92,7 @@ impl<'storage> RestoringStore<'storage> {
                 );
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
-                    exact: crate::protocol::objects::ExactProtocolObject {
+                    exact: coven_protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes,
                         object,
@@ -101,7 +101,7 @@ impl<'storage> RestoringStore<'storage> {
                     reference,
                 })
             }
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => {
                 let bytes = expected.to_bytes();
                 let prepared = self
                     .storage
@@ -113,7 +113,7 @@ impl<'storage> RestoringStore<'storage> {
                 );
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
-                    exact: crate::protocol::objects::ExactProtocolObject {
+                    exact: coven_protocol::objects::ExactProtocolObject {
                         value: expected,
                         bytes,
                         object,
@@ -128,7 +128,7 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(super) async fn prepared_protocol_object_exists(
         &self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
+        context: &coven_protocol::objects::ProtocolObjectContext,
         prepared: &PreparedExactObject,
         semantic_prefix: &str,
         expected_bytes: &[u8],
@@ -146,7 +146,7 @@ impl<'storage> RestoringStore<'storage> {
             Ok(_) => Err(StoreRegistrationError::Invalid(format!(
                 "exact object {semantic_prefix:?} differs from its staged Owner recovery bytes"
             ))),
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => Ok(false),
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => Ok(false),
             Err(error) => Err(StoreObjectError::from(error).into()),
         }
     }
@@ -155,7 +155,7 @@ impl<'storage> RestoringStore<'storage> {
         &self,
         registration: &StoreDeviceRegistration,
         registration_ref: &StoreDeviceRegistrationRef,
-        first_slot: crate::protocol::objects::ObjectSlot,
+        first_slot: coven_protocol::objects::ObjectSlot,
         store_cut: StoreHistoryCut,
         device_state: StoreDeviceStateRef,
         published_at: &str,
@@ -163,7 +163,7 @@ impl<'storage> RestoringStore<'storage> {
     ) -> Result<RecoveryProtocolObject<StoreAck, StoreAckRef>, StoreRegistrationError> {
         let root = &self.root;
         let storage = self.storage;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -204,7 +204,7 @@ impl<'storage> RestoringStore<'storage> {
                 }
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
-                    exact: crate::protocol::objects::ExactProtocolObject {
+                    exact: coven_protocol::objects::ExactProtocolObject {
                         value: ack,
                         bytes,
                         object,
@@ -213,7 +213,7 @@ impl<'storage> RestoringStore<'storage> {
                     reference,
                 })
             }
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => {
                 let next_slot = storage
                     .allocate_protocol_slot(
                         &context,
@@ -256,7 +256,7 @@ impl<'storage> RestoringStore<'storage> {
                 };
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
-                    exact: crate::protocol::objects::ExactProtocolObject {
+                    exact: coven_protocol::objects::ExactProtocolObject {
                         value: ack,
                         bytes,
                         object,
@@ -272,12 +272,12 @@ impl<'storage> RestoringStore<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_or_load_owner_recovery_node(
         &self,
-        recovery_slot: crate::protocol::objects::ObjectSlot,
+        recovery_slot: coven_protocol::objects::ObjectSlot,
         owner_pubkey: &str,
-        owner_grant: &crate::protocol::membership::MembershipGrantId,
+        owner_grant: &coven_protocol::membership::MembershipGrantId,
         sequence: u64,
         recovery_id: DeviceRecoveryId,
-        membership: &crate::protocol::circle_control::StoreMembershipStateRef,
+        membership: &coven_protocol::circle_control::StoreMembershipStateRef,
         predecessor: &Option<OwnerRecoveryNodeRef>,
         readiness: &DeviceRecoveryReadiness,
         identity_signer: &UserKeypair,
@@ -287,7 +287,7 @@ impl<'storage> RestoringStore<'storage> {
     > {
         let root = &self.root;
         let storage = self.storage;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::OwnerRecoveryNode,
         );
@@ -324,7 +324,7 @@ impl<'storage> RestoringStore<'storage> {
                 }
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
-                    exact: crate::protocol::objects::ExactProtocolObject {
+                    exact: coven_protocol::objects::ExactProtocolObject {
                         value: node,
                         bytes,
                         object,
@@ -333,7 +333,7 @@ impl<'storage> RestoringStore<'storage> {
                     reference,
                 })
             }
-            Err(crate::protocol::objects::StorageError::NotFound(_)) => {
+            Err(coven_protocol::objects::StorageError::NotFound(_)) => {
                 let next_sequence = sequence.checked_add(1).ok_or_else(|| {
                     StoreRegistrationError::Invalid("Owner recovery sequence overflow".into())
                 })?;
@@ -374,7 +374,7 @@ impl<'storage> RestoringStore<'storage> {
                 };
                 let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
-                    exact: crate::protocol::objects::ExactProtocolObject {
+                    exact: coven_protocol::objects::ExactProtocolObject {
                         value: node,
                         bytes,
                         object,
@@ -391,11 +391,11 @@ impl<'storage> RestoringStore<'storage> {
     pub(super) async fn install_activated_owner_recovery(
         &self,
         origin: &StoreDeviceRegistrationOrigin,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
         recovery_id: DeviceRecoveryId,
-        recovery_slot: &crate::protocol::objects::ObjectSlot,
+        recovery_slot: &coven_protocol::objects::ObjectSlot,
         owner_pubkey: &str,
-        owner_grant: &crate::protocol::membership::MembershipGrantId,
+        owner_grant: &coven_protocol::membership::MembershipGrantId,
         sequence: u64,
         predecessor: &Option<OwnerRecoveryNodeRef>,
     ) -> Result<Option<StoreDeviceRegistrationRef>, StoreRegistrationError> {
@@ -462,11 +462,10 @@ impl<'storage> RestoringStore<'storage> {
             ));
         }
 
-        let registration_context =
-            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
-                root.store_root_hash,
-                ProtocolObjectDomain::StoreDeviceRegistration,
-            );
+        let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
         let (registration_bytes, registration_prepared) = storage
             .read_prepared_protocol_slot(
                 &registration_context,
@@ -483,7 +482,7 @@ impl<'storage> RestoringStore<'storage> {
                     .into(),
             ));
         }
-        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -508,14 +507,14 @@ impl<'storage> RestoringStore<'storage> {
         }
         let already_activated = database
             .stage_owner_recovery_registration(
-                crate::protocol::objects::ExactProtocolObject {
+                coven_protocol::objects::ExactProtocolObject {
                     value: registration.value().clone(),
                     bytes: registration_bytes,
                     object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 initial_ack_ref,
-                crate::protocol::objects::ExactProtocolObject {
+                coven_protocol::objects::ExactProtocolObject {
                     value: initial_ack.value,
                     bytes: initial_ack_bytes,
                     object: initial_ack_prepared.reference().clone(),

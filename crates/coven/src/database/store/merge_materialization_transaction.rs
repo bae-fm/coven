@@ -47,25 +47,25 @@ use crate::database::{
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
 };
 use crate::database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
-use crate::protocol::audience_package::{AudiencePackage, PackageAudience};
-use crate::protocol::blob::locator::RemoteAudience;
-use crate::protocol::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
-use crate::protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
-use crate::protocol::store_commit::{
+use coven_foundation::changeset::RowChange;
+use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
+use coven_protocol::blob::locator::RemoteAudience;
+use coven_protocol::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
+use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
+use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef,
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
     StoreDeviceProposalState, StoreDeviceRegistrationRef, StoreHistoryCut,
     VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
-use crate::protocol::synced_schema::SyncedTable;
-use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
-use coven_foundation::changeset::RowChange;
+use coven_protocol::synced_schema::SyncedTable;
+use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 
 pub(crate) struct AppliedMergeMaterialization {
     pub(crate) outcome: ApplyOutcome,
-    pub(crate) max_updated_at: Option<crate::protocol::hlc::Timestamp>,
+    pub(crate) max_updated_at: Option<coven_protocol::hlc::Timestamp>,
     pub(crate) write_status_notifications: Vec<(crate::WriteId, crate::WriteStatus)>,
     pub(crate) retained: Option<crate::database::OwnedVerifiedMergeMaterialization>,
 }
@@ -91,7 +91,7 @@ impl MergeSubsetOutcome {
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
-/// as an HLC [`crate::protocol::hlc::Timestamp`]. A row whose `_updated_at` fails to
+/// as an HLC [`coven_protocol::hlc::Timestamp`]. A row whose `_updated_at` fails to
 /// parse is logged and skipped — it must not panic the pull or silently default
 /// the clock.
 ///
@@ -99,13 +99,13 @@ impl MergeSubsetOutcome {
 /// advance is deliberately uncapped (it trusts a value already written to disk).
 /// So the bound lives here, at the point a stamp is *collected*: a grossly-future
 /// stamp — beyond `receiver_wall_ms` +
-/// [`crate::protocol::hlc::MAX_FUTURE_SKEW_MS`] — is logged and skipped, so it can
+/// [`coven_protocol::hlc::MAX_FUTURE_SKEW_MS`] — is logged and skipped, so it can
 /// never ratchet the clock. A conflicting row with such a stamp was already
 /// refused by the apply, but a *non-conflicting* INSERT (no local row to conflict
 /// with) reaches here as an applied row, so this is the gate that stops it from
 /// dragging the clock forward.
 fn advance_max_updated_at(
-    max: &mut Option<crate::protocol::hlc::Timestamp>,
+    max: &mut Option<coven_protocol::hlc::Timestamp>,
     changes: &[RowChange],
     schema: &TableSchema,
     receiver_wall_ms: u64,
@@ -133,7 +133,7 @@ fn advance_max_updated_at(
             );
             continue;
         };
-        match crate::protocol::hlc::Timestamp::parse(raw) {
+        match coven_protocol::hlc::Timestamp::parse(raw) {
             Some(ts) if !ts.is_within_future_bound(receiver_wall_ms) => warn!(
                 table = %change.table,
                 value = raw,
@@ -165,7 +165,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 
     pub(super) fn circle_current_state_is_deleted(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
         Ok(
             StoreDatabase::circle_current_state_on(self.transaction, circle_id)?
@@ -298,7 +298,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let locator = binding.blob().locator();
             let locator_hash = locator.locator_hash();
             let object_id =
-                crate::protocol::remote_object::remote_object_id(binding.blob().object());
+                coven_protocol::remote_object::remote_object_id(binding.blob().object());
             let remote = load_remote_object_on(conn, object_id)?;
             if !remote.is_activated_stored_blob() {
                 return Err(DbError::Message(format!(

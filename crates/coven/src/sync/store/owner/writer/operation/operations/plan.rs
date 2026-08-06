@@ -9,16 +9,16 @@ pub(crate) enum StoreOperationBatch {
 
     ProviderAccessGrant(super::provider::StoreMemberProviderAccessGrantRef),
     Attempt(DeviceJoinAttemptRef),
-    Abandonment(crate::protocol::store_commit::DeviceJoinAbandonmentRef),
+    Abandonment(coven_protocol::store_commit::DeviceJoinAbandonmentRef),
     Outcome {
         outcome: DeviceJoinOutcomeRef,
         registration: Option<Box<ActivatedStoreDeviceRegistration>>,
     },
-    CleanupReceipt(crate::protocol::store_commit::DeviceJoinCleanupReceiptRef),
+    CleanupReceipt(coven_protocol::store_commit::DeviceJoinCleanupReceiptRef),
     DeviceExclusionProposal(super::store_commit::RetainedStoreDeviceExclusionProposal),
     DeviceExclusionOutcome(super::store_commit::RetainedStoreDeviceExclusionOutcome),
-    ReclaimAuthorization(Box<crate::protocol::reclaim::ReclaimAuthorizationRef>),
-    ReclaimReceipt(Box<crate::protocol::reclaim::ReclaimReceiptRef>),
+    ReclaimAuthorization(Box<coven_protocol::reclaim::ReclaimAuthorizationRef>),
+    ReclaimReceipt(Box<coven_protocol::reclaim::ReclaimReceiptRef>),
     OwnerPromotionRequest(super::store_commit::OwnerPromotionRequest),
     MergeMembershipActivation {
         transition: super::membership::MergeMembershipHeadTransition,
@@ -253,7 +253,7 @@ impl StoreOperationCommitPlan {
     pub(crate) fn verify_prepared_commit(
         &self,
         bytes: &[u8],
-        object: crate::protocol::objects::ExactObjectRef,
+        object: coven_protocol::objects::ExactObjectRef,
     ) -> Result<super::store_commit::VerifiedStoreBatchCommit, StoreError> {
         self.writer
             .verify_prepared_commit(bytes, self.root.store_root_hash, self.coord.clone(), object)
@@ -285,15 +285,15 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn effective_provider_admin_grant(
         &self,
-        state: &crate::protocol::provider::ProviderAdminState,
-    ) -> Option<crate::protocol::provider::ProviderAdminGrantId> {
+        state: &coven_protocol::provider::ProviderAdminState,
+    ) -> Option<coven_protocol::provider::ProviderAdminGrantId> {
         self.writer.effective_provider_admin_grant(state)
     }
 
     pub(crate) fn sign_reclaim_evidence(
         &self,
-        claim: crate::protocol::reclaim::ReclaimClaim,
-    ) -> Result<crate::protocol::reclaim::ReclaimEvidence, StoreError> {
+        claim: coven_protocol::reclaim::ReclaimClaim,
+    ) -> Result<coven_protocol::reclaim::ReclaimEvidence, StoreError> {
         self.writer
             .sign_reclaim_evidence(self.root.store_root_hash, claim)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
@@ -301,10 +301,10 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn sign_reclaim_authorization(
         &self,
-        target: crate::protocol::reclaim::ReclaimTarget,
-        evidence: crate::protocol::reclaim::ReclaimEvidenceRef,
-        authority: crate::protocol::reclaim::StoreReclaimAuthority,
-    ) -> crate::protocol::reclaim::ReclaimAuthorization {
+        target: coven_protocol::reclaim::ReclaimTarget,
+        evidence: coven_protocol::reclaim::ReclaimEvidenceRef,
+        authority: coven_protocol::reclaim::StoreReclaimAuthority,
+    ) -> coven_protocol::reclaim::ReclaimAuthorization {
         self.writer.sign_reclaim_authorization(
             self.root.store_root_hash,
             target,
@@ -319,7 +319,7 @@ impl StoreOperationCommitPlan {
         proposal_id: super::store_commit::StoreDeviceExclusionProposalId,
         target: super::store_commit::StoreDeviceRegistrationRef,
         target_registration: &super::store_commit::StoreDeviceRegistration,
-        outcome_slot: crate::protocol::objects::ObjectSlot,
+        outcome_slot: coven_protocol::objects::ObjectSlot,
         owner_grant: super::membership::MembershipGrantId,
     ) -> Result<super::store_commit::StoreDeviceExclusionProposal, StoreError> {
         self.writer.sign_device_exclusion_proposal(
@@ -379,9 +379,9 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn sign_reclaim_receipt(
         &self,
-        authorization: crate::protocol::reclaim::ReclaimAuthorizationRef,
-        provider_admin_grant: crate::protocol::provider::ProviderAdminGrantId,
-    ) -> Result<crate::protocol::reclaim::ReclaimReceipt, StoreError> {
+        authorization: coven_protocol::reclaim::ReclaimAuthorizationRef,
+        provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
+    ) -> Result<coven_protocol::reclaim::ReclaimReceipt, StoreError> {
         self.writer.sign_reclaim_receipt(
             self.root.store_root_hash,
             authorization,

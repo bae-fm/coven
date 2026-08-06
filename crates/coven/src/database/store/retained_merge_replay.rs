@@ -11,24 +11,24 @@ use crate::database::{
     PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
 };
 use crate::database::{RetainedReplayAuthority, RetainedReplayBaseline};
-use crate::protocol::audience_package::AudiencePackage;
-use crate::protocol::blob::locator::{RemoteAudience, StoredBlobRef};
-use crate::protocol::circle_activation::VerifiedCircleActivations;
-use crate::protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
-use crate::protocol::membership::{AuthorHead, MembershipEntry};
-use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
-use crate::protocol::remote_object::{
+pub(crate) use cache::{
+    CircleReplayEpochIndex, CircleRestoreSelectionIndex, RetainedMergeMaterializationCache,
+};
+use coven_protocol::audience_package::AudiencePackage;
+use coven_protocol::blob::locator::{RemoteAudience, StoredBlobRef};
+use coven_protocol::circle_activation::VerifiedCircleActivations;
+use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
+use coven_protocol::membership::{AuthorHead, MembershipEntry};
+use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::remote_object::{
     remote_object_id, RemoteObjectRecord, RetainedReplayOwner, SharedLiveSetObjectDomain,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     CommitFrontier, ObjectHash, RetainedStoreDeviceRegistrationActivations, StoreBatchCommit,
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
     StoreRootRef,
 };
-use crate::write::{WriteId, WriteStatus};
-pub(crate) use cache::{
-    CircleReplayEpochIndex, CircleRestoreSelectionIndex, RetainedMergeMaterializationCache,
-};
+use coven_protocol::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

@@ -11,18 +11,18 @@
 use tracing::{debug, info, warn};
 
 use crate::database::DbError;
-use crate::protocol::blob::BlobTransitionObserver;
-use crate::protocol::blob::DrainOutcome;
 use coven_foundation::changeset::RowChange;
 use coven_foundation::store_dir::StoreDir;
+use coven_protocol::blob::BlobTransitionObserver;
+use coven_protocol::blob::DrainOutcome;
 
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
 use super::store::{AuthorizedWriterOperation, Store};
-use crate::protocol::objects::RotationPending;
 use crate::storage::{
     BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, SyncStorage,
 };
+use coven_protocol::objects::RotationPending;
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
@@ -110,8 +110,8 @@ fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> 
     let mut current = Some(error);
     while let Some(source) = current {
         if source
-            .downcast_ref::<crate::protocol::objects::StorageError>()
-            .is_some_and(crate::protocol::objects::StorageError::is_transport)
+            .downcast_ref::<coven_protocol::objects::StorageError>()
+            .is_some_and(coven_protocol::objects::StorageError::is_transport)
             || source
                 .downcast_ref::<crate::storage::cloud::CloudHomeError>()
                 .is_some_and(|error| {
@@ -136,18 +136,18 @@ mod sync_cycle_failure_tests {
     #[test]
     fn registration_transport_source_is_offline() {
         let error = crate::sync::store::StoreRegistrationError::Object(
-            crate::protocol::objects::StoreObjectError::Storage(
-                crate::protocol::objects::StorageError::Storage("provider unavailable".to_string()),
+            coven_protocol::objects::StoreObjectError::Storage(
+                coven_protocol::objects::StorageError::Storage("provider unavailable".to_string()),
             ),
         );
 
         let object = std::error::Error::source(&error).expect("object source");
         assert!(object
-            .downcast_ref::<crate::protocol::objects::StoreObjectError>()
+            .downcast_ref::<coven_protocol::objects::StoreObjectError>()
             .is_some());
         let storage = object.source().expect("storage source");
         assert!(storage
-            .downcast_ref::<crate::protocol::objects::StorageError>()
+            .downcast_ref::<coven_protocol::objects::StorageError>()
             .is_some());
 
         assert!(SyncCycleFailure::operation("register", error).is_offline());
@@ -156,8 +156,8 @@ mod sync_cycle_failure_tests {
     #[test]
     fn registration_configuration_source_is_failed() {
         let error = crate::sync::store::StoreRegistrationError::Object(
-            crate::protocol::objects::StoreObjectError::Storage(
-                crate::protocol::objects::StorageError::Configuration("missing bucket".to_string()),
+            coven_protocol::objects::StoreObjectError::Storage(
+                coven_protocol::objects::StorageError::Configuration("missing bucket".to_string()),
             ),
         );
 
@@ -457,7 +457,7 @@ pub enum InitSyncError {
 pub(crate) enum StoreInitialization {
     CreateStore,
     OpenStore {
-        expected_store_root: crate::protocol::store_commit::StoreRootRef,
+        expected_store_root: coven_protocol::store_commit::StoreRootRef,
     },
 }
 
@@ -611,7 +611,7 @@ pub(crate) struct SyncComponents {
 }
 
 impl SyncComponents {
-    pub(crate) async fn probe_storage(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    pub(crate) async fn probe_storage(&self) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.probe_provider().await
     }
 
@@ -636,8 +636,7 @@ impl SyncComponents {
 
     pub(crate) async fn members(
         &self,
-    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, super::store::MembershipOpsError>
-    {
+    ) -> Result<Vec<coven_protocol::membership::MemberInfo>, super::store::MembershipOpsError> {
         self.store.members().await
     }
 
@@ -663,7 +662,7 @@ impl SyncComponents {
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
+    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
         self.store
             .propose_device_exclusion_for_device(device_id)
             .await
@@ -672,7 +671,7 @@ impl SyncComponents {
 
     pub(crate) async fn cancel_device_exclusion(
         &self,
-        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), String> {
         self.store
             .cancel_device_exclusion_proposal(proposal)
@@ -682,7 +681,7 @@ impl SyncComponents {
 
     pub(crate) async fn finalize_device_exclusion(
         &self,
-        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), String> {
         self.store
             .finalize_device_exclusion_proposal(proposal)
@@ -693,7 +692,7 @@ impl SyncComponents {
     pub(crate) async fn begin_owner_promotion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, String> {
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, String> {
         self.store
             .begin_owner_promotion_for_device(device_id)
             .await
@@ -702,8 +701,8 @@ impl SyncComponents {
 
     pub(crate) async fn accept_owner_promotion(
         &self,
-        request: crate::protocol::store_commit::OwnerPromotionRequest,
-    ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, String> {
+        request: coven_protocol::store_commit::OwnerPromotionRequest,
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionAcceptance, String> {
         self.store
             .accept_owner_promotion(request)
             .await
@@ -712,7 +711,7 @@ impl SyncComponents {
 
     pub(crate) async fn finalize_owner_promotion(
         &self,
-        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+        acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<(), String> {
         let encryption = self
             .current_encryption()
@@ -889,7 +888,7 @@ impl SyncComponents {
         &self,
         clock: &dyn coven_foundation::clock::Clock,
         observer: Option<&dyn BlobTransitionObserver>,
-    ) -> Result<crate::protocol::blob::DrainOutcome, DbError> {
+    ) -> Result<coven_protocol::blob::DrainOutcome, DbError> {
         self.store
             .authorize_writer()
             .await
@@ -902,7 +901,7 @@ impl SyncComponents {
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
+        role: coven_protocol::membership::MemberRole,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
         let encryption = self
@@ -941,7 +940,7 @@ impl SyncComponents {
 
     pub(crate) async fn resolve_membership_conflict(
         &self,
-        choice: &crate::protocol::membership::MembershipConflictChoice,
+        choice: &coven_protocol::membership::MembershipConflictChoice,
     ) -> Result<(), super::store::MembershipOpsError> {
         self.store
             .resolve_membership_conflict(choice, &self.database.stamp())
@@ -952,7 +951,7 @@ impl SyncComponents {
     pub(crate) async fn create_circle(
         &self,
         name: &str,
-    ) -> Result<crate::protocol::circle::CircleId, super::store::CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleId, super::store::CircleOperationError> {
         self.store
             .circles()
             .create_circle(&self.database.stamp(), name)
@@ -961,7 +960,7 @@ impl SyncComponents {
 
     pub(crate) async fn rename_circle(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         name: &str,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
@@ -972,8 +971,8 @@ impl SyncComponents {
 
     pub(crate) async fn resolve_circle_control(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        chosen: crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        chosen: coven_protocol::circle::CircleControlCoord,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
             .circles()
@@ -983,16 +982,16 @@ impl SyncComponents {
 
     pub(crate) async fn delete_circle(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store.circles().delete_circle(circle_id).await
     }
 
     pub(crate) async fn add_circle_member(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         member_pubkey: String,
-        role: crate::protocol::circle::CircleRole,
+        role: coven_protocol::circle::CircleRole,
     ) -> Result<(), super::store::CircleOperationError> {
         use super::store::CircleOperationError;
         // A member addition captures a bootstrap over the scoped routing graph, so
@@ -1015,7 +1014,7 @@ impl SyncComponents {
             .snapshots()
             .capture_circle_snapshot_cut(&routing_encryption, circle_id)
             .await?;
-        let routing_key = crate::protocol::circle::derive_row_routing_key(
+        let routing_key = coven_protocol::circle::derive_row_routing_key(
             &routing_encryption,
             self.store.store_root().store_root_hash,
         )
@@ -1028,10 +1027,9 @@ impl SyncComponents {
 
     pub(crate) async fn remove_circle_member(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         member_pubkey: String,
-    ) -> Result<crate::protocol::circle::CircleOperationId, super::store::CircleOperationError>
-    {
+    ) -> Result<coven_protocol::circle::CircleOperationId, super::store::CircleOperationError> {
         self.store
             .circles()
             .remove_circle_member(circle_id, member_pubkey)
@@ -1040,9 +1038,8 @@ impl SyncComponents {
 
     pub(crate) async fn cancel_circle_epoch_close(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<crate::protocol::circle::CircleOperationId, super::store::CircleOperationError>
-    {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<coven_protocol::circle::CircleOperationId, super::store::CircleOperationError> {
         self.store
             .circles()
             .cancel_circle_epoch_close(circle_id)
@@ -1051,8 +1048,8 @@ impl SyncComponents {
 
     pub(crate) async fn exclude_circle_close_device(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
+        circle_id: coven_protocol::circle::CircleId,
+        excluded_device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
             .circles()
@@ -1062,7 +1059,7 @@ impl SyncComponents {
 
     pub(crate) async fn retry_circle_operation(
         &self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
             .circles()
@@ -1072,7 +1069,7 @@ impl SyncComponents {
 
     pub(crate) async fn discard_circle_operation(
         &self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), super::store::CircleOperationError> {
         self.store
             .circles()
@@ -1082,9 +1079,8 @@ impl SyncComponents {
 
     pub(crate) async fn circle_close_status(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<crate::protocol::circle::CircleCloseStatus, super::store::CircleOperationError>
-    {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<coven_protocol::circle::CircleCloseStatus, super::store::CircleOperationError> {
         self.store.circles().circle_close_status(circle_id).await
     }
 
@@ -1141,7 +1137,7 @@ impl SyncComponents {
     pub(crate) async fn list_storage_objects_for_test(
         &self,
         prefix: &str,
-    ) -> Result<Vec<String>, crate::protocol::objects::StorageError> {
+    ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
         self.storage.list_provider_objects(prefix).await
     }
 

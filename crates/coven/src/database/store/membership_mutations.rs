@@ -3,16 +3,16 @@ use super::candidate_records::{
 };
 use super::*;
 use crate::database::*;
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::remote_object::RemoteObjectRecord;
-use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::remote_object::RemoteObjectRecord;
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 impl StoreDatabase {
     pub(crate) async fn load_rotation_gate(
         &self,
-    ) -> Result<Option<crate::protocol::objects::RotationGate>, DbError> {
+    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
             .call(|connection| {
                 Self::load_rotation_gate_on(connection).map(|gate| gate.map(|(_, gate)| gate))
@@ -62,9 +62,9 @@ impl StoreDatabase {
     pub(crate) async fn select_membership_author_stream(
         &self,
         author_pubkey: &str,
-        author_owner_grant: &crate::protocol::membership::MembershipGrantId,
-        reusable: std::collections::BTreeSet<crate::protocol::membership::AuthorStreamId>,
-    ) -> Result<crate::protocol::membership::AuthorStreamId, DbError> {
+        author_owner_grant: &coven_protocol::membership::MembershipGrantId,
+        reusable: std::collections::BTreeSet<coven_protocol::membership::AuthorStreamId>,
+    ) -> Result<coven_protocol::membership::AuthorStreamId, DbError> {
         self.select_causal_author_stream(
             format!("membership_author_stream/{author_pubkey}/{author_owner_grant}"),
             reusable,
@@ -75,9 +75,9 @@ impl StoreDatabase {
     pub(crate) async fn select_causal_author_stream(
         &self,
         key: String,
-        reusable: std::collections::BTreeSet<crate::protocol::membership::AuthorStreamId>,
-    ) -> Result<crate::protocol::membership::AuthorStreamId, DbError> {
-        let candidate = crate::protocol::membership::AuthorStreamId::from_digest(
+        reusable: std::collections::BTreeSet<coven_protocol::membership::AuthorStreamId>,
+    ) -> Result<coven_protocol::membership::AuthorStreamId, DbError> {
+        let candidate = coven_protocol::membership::AuthorStreamId::from_digest(
             ObjectHash::digest(self.ids.new_id().as_bytes()),
         );
         self.connection
@@ -226,7 +226,7 @@ impl StoreDatabase {
             return Ok(());
         };
         let existing = Self::load_rotation_gate_on(tx)?;
-        let gate = crate::protocol::objects::RotationGate::with_candidate(
+        let gate = coven_protocol::objects::RotationGate::with_candidate(
             existing.as_ref().map(|(_, gate)| gate.clone()),
             generation,
             mutation,
@@ -237,11 +237,11 @@ impl StoreDatabase {
 
     fn load_rotation_gate_on(
         connection: &rusqlite::Connection,
-    ) -> Result<Option<(String, crate::protocol::objects::RotationGate)>, DbError> {
-        let key = crate::protocol::objects::ROTATION_GATE_STATE_KEY;
+    ) -> Result<Option<(String, coven_protocol::objects::RotationGate)>, DbError> {
+        let key = coven_protocol::objects::ROTATION_GATE_STATE_KEY;
         crate::database::get_protocol_state_on(connection, key)?
             .map(|encoded| {
-                let gate = serde_json::from_str::<crate::protocol::objects::RotationGate>(&encoded)
+                let gate = serde_json::from_str::<coven_protocol::objects::RotationGate>(&encoded)
                     .map_err(|error| DbError::context("parse rotation gate", error))?;
                 Ok((encoded, gate))
             })
@@ -250,11 +250,11 @@ impl StoreDatabase {
 
     fn replace_rotation_gate_on(
         tx: &rusqlite::Transaction<'_>,
-        expected: Option<&(String, crate::protocol::objects::RotationGate)>,
-        next: Option<crate::protocol::objects::RotationGate>,
+        expected: Option<&(String, coven_protocol::objects::RotationGate)>,
+        next: Option<coven_protocol::objects::RotationGate>,
         operation: &'static str,
     ) -> Result<(), DbError> {
-        let key = crate::protocol::objects::ROTATION_GATE_STATE_KEY;
+        let key = coven_protocol::objects::ROTATION_GATE_STATE_KEY;
         let changed = match (expected, next) {
             (Some((expected, _)), Some(next)) => {
                 let encoded = serde_json::to_string(&next).map_err(|error| {
@@ -295,12 +295,12 @@ impl StoreDatabase {
     pub(crate) async fn record_peer_rotation(
         &self,
         generation: u64,
-    ) -> Result<crate::protocol::objects::RotationGate, DbError> {
+    ) -> Result<coven_protocol::objects::RotationGate, DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = Self::load_rotation_gate_on(&tx)?;
-                let next = crate::protocol::objects::RotationGate::merge_peer_commit(
+                let next = coven_protocol::objects::RotationGate::merge_peer_commit(
                     existing.as_ref().map(|(_, gate)| gate.clone()),
                     generation,
                 )
@@ -320,7 +320,7 @@ impl StoreDatabase {
     pub(crate) async fn complete_peer_rotation_adoption(
         &self,
         adopted_generation: u64,
-    ) -> Result<Option<crate::protocol::objects::RotationGate>, DbError> {
+    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -350,7 +350,7 @@ impl StoreDatabase {
         &self,
         intent_hash: ObjectHash,
         generation: u64,
-    ) -> Result<Option<crate::protocol::objects::RotationGate>, DbError> {
+    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -432,10 +432,10 @@ impl StoreDatabase {
             ));
         };
         let (
-            crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+            coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                 reference: previous_ref,
             },
-            crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+            coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                 reference: replacement_ref,
             },
         ) = (
@@ -545,7 +545,7 @@ impl StoreDatabase {
         candidate_objects: Vec<ExactObjectRef>,
         retained_authorities: Vec<ExactObjectRef>,
         progress_bytes: Vec<u8>,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         if nonactivation
             .candidate_reference()
@@ -697,8 +697,8 @@ impl StoreDatabase {
                         matches!(
                             remote,
                             RemoteObjectRecord::RetainedAuthority(
-                                crate::protocol::remote_object::RetainedAuthorityRecord {
-                                    state: crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
+                                coven_protocol::remote_object::RetainedAuthorityRecord {
+                                    state: coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
                                     ..
                                 }
                             )
@@ -813,7 +813,7 @@ impl StoreDatabase {
         let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
             DbError::Message("rotation gate is absent during candidate activation".to_string())
         })?;
-        let gate = crate::protocol::objects::RotationGate::commit_candidate(
+        let gate = coven_protocol::objects::RotationGate::commit_candidate(
             Some(existing.1.clone()),
             generation,
             intent_hash,

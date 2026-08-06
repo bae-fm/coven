@@ -21,7 +21,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
             &owner,
             &writer_pubkey,
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "Operation predecessor membership",
         )
@@ -102,7 +102,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
             &owner,
             &writer_pubkey,
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "Direct removal predecessor membership",
         )
@@ -160,8 +160,8 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .bind_device(&writer_db, &writer)
         .await
         .expect("bind removed writer");
-    let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
-    let order = crate::protocol::store_commit::StoreCommitOrder {
+    let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
+    let order = coven_protocol::store_commit::StoreCommitOrder {
         seq: 1,
         predecessor: None,
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
@@ -224,7 +224,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
             &owner,
             &new_member_pubkey,
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "New Direct membership",
         )
@@ -236,8 +236,8 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .expect("load candidate with new Direct membership");
     assert!(candidate.can_write_now(&new_member_pubkey));
 
-    let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
-    let order = crate::protocol::store_commit::StoreCommitOrder {
+    let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
+    let order = coven_protocol::store_commit::StoreCommitOrder {
         seq: predecessor.coord.sequence() + 1,
         predecessor: Some(predecessor.clone()),
         dependencies: std::collections::BTreeMap::from([(stream_id, predecessor)]),
@@ -282,10 +282,10 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
         .await
         .expect("publish exact predecessor commit");
-    let forged_device_id = crate::protocol::store_commit::StoreDeviceId::derive(
+    let forged_device_id = coven_protocol::store_commit::StoreDeviceId::derive(
         &store.root,
-        &crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
-            creation_id: crate::protocol::store_commit::StoreCreationId::from_nonce(
+        &coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
+            creation_id: coven_protocol::store_commit::StoreCreationId::from_nonce(
                 "forged-local-projection",
             ),
         },

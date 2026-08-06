@@ -4,7 +4,7 @@ use crate::database::{ExternalBlob, ExternalBlobRecords};
 impl StoreDatabase {
     pub(crate) async fn eager_row_blob_refs(
         &self,
-    ) -> Result<Vec<crate::protocol::blob::RowBlobRef>, DbError> {
+    ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
         let tables = self.synced_tables().to_vec();
         let gates = self.gates();
         self.connection
@@ -14,7 +14,7 @@ impl StoreDatabase {
                     let Some(declaration) = table.blob() else {
                         continue;
                     };
-                    if declaration.fill != crate::protocol::blob::CacheFill::CacheEager {
+                    if declaration.fill != coven_protocol::blob::CacheFill::CacheEager {
                         continue;
                     }
                     let sql = format!(
@@ -42,7 +42,7 @@ impl StoreDatabase {
 
     pub(crate) async fn stored_blob_reference_state(
         &self,
-        stored: crate::protocol::blob::locator::StoredBlobRef,
+        stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::database::StoredBlobReferenceState, DbError> {
         let gates = self.gates();
         let tables = self.synced_tables().to_vec();
@@ -58,7 +58,7 @@ impl StoreDatabase {
         &self,
         table: &str,
         row_id: &str,
-    ) -> Result<crate::protocol::blob::RowBlobRef, DbError> {
+    ) -> Result<coven_protocol::blob::RowBlobRef, DbError> {
         let table = self
             .synced_tables()
             .iter()
@@ -82,7 +82,7 @@ impl StoreDatabase {
         &self,
         root_table: &str,
         root_id: &str,
-    ) -> Result<Vec<crate::protocol::blob::RowBlobRef>, DbError> {
+    ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
         let gates = self.gates();
@@ -102,7 +102,7 @@ impl StoreDatabase {
 
     pub(crate) async fn validate_row_blob_ref(
         &self,
-        reference: &crate::protocol::blob::RowBlobRef,
+        reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<(), DbError> {
         let current = self
             .row_blob_ref(reference.table(), reference.row_id())
@@ -121,7 +121,7 @@ impl StoreDatabase {
 
     pub(crate) async fn external_blob_for_row(
         &self,
-        reference: &crate::protocol::blob::RowBlobRef,
+        reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<Option<ExternalBlob>, DbError> {
         let reference = reference.clone();
         self.connection

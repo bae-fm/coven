@@ -1,20 +1,20 @@
 //! Durable append-only Store device registration and recovery.
 
-use crate::protocol::objects::StoreObjectError;
+use coven_protocol::objects::StoreObjectError;
 
 #[cfg(test)]
 use super::RegistrationOutbox;
 #[cfg(test)]
 use crate::database::Database;
 #[cfg(test)]
-use crate::protocol::objects::ProtocolObjectDomain;
+use coven_keys::keys::UserKeypair;
 #[cfg(test)]
-use crate::protocol::store_commit::{
+use coven_protocol::objects::ProtocolObjectDomain;
+#[cfg(test)]
+use coven_protocol::store_commit::{
     owner_recovery_semantic_prefix, StoreCommitCoord, StoreDeviceRegistration,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
 };
-#[cfg(test)]
-use coven_keys::keys::UserKeypair;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreRegistrationError {
@@ -35,9 +35,9 @@ pub enum StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::store_commit::StoreBatchCommitRef;
     use crate::storage::SyncStorage;
     use crate::sync::test_helpers::{open_test_db, TestStore};
+    use coven_protocol::store_commit::StoreBatchCommitRef;
 
     async fn initialized() -> (std::sync::Arc<TestStore>, Database, UserKeypair) {
         let signer = UserKeypair::generate();
@@ -275,7 +275,7 @@ mod tests {
                 else {
                     panic!("interrupted registration is not a Recovery registration");
                 };
-                let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
@@ -343,7 +343,7 @@ mod tests {
                 else {
                     panic!("completed registration is not a Recovery registration");
                 };
-                let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );

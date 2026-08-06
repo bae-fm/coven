@@ -1,8 +1,8 @@
 //! Audience-package and blob preparation for Store commits.
 
 use crate::database::CirclePartitionControl;
-use crate::protocol::circle;
-use crate::protocol::objects::PreparedExactObject;
+use coven_protocol::circle;
+use coven_protocol::objects::PreparedExactObject;
 
 pub(crate) struct PreparedPartitionPackage {
     pub(crate) audience: circle::Audience,
@@ -14,8 +14,8 @@ pub(crate) struct PreparedPartitionPackage {
 }
 
 pub(crate) struct PreparedPartitionBlob {
-    pub(crate) audience: crate::protocol::blob::locator::RemoteAudience,
-    pub(crate) stored: crate::protocol::blob::locator::StoredBlobRef,
+    pub(crate) audience: coven_protocol::blob::locator::RemoteAudience,
+    pub(crate) stored: coven_protocol::blob::locator::StoredBlobRef,
     pub(crate) spool_path: Option<std::path::PathBuf>,
     pub(crate) uploaded_verified: bool,
 }
@@ -28,14 +28,14 @@ impl PreparedPartitionBlob {
         if self.audience != duplicate.audience || self.stored != duplicate.stored {
             return Err(super::StoreError::InvalidOutbound(format!(
                 "prepared blob object {} has conflicting exact references",
-                crate::protocol::remote_object::remote_object_id(self.stored.object())
+                coven_protocol::remote_object::remote_object_id(self.stored.object())
             )));
         }
         self.spool_path = match (&self.spool_path, duplicate.spool_path) {
             (Some(left), Some(right)) if left != &right => {
                 return Err(super::StoreError::InvalidOutbound(format!(
                     "prepared blob object {} has conflicting spool paths",
-                    crate::protocol::remote_object::remote_object_id(self.stored.object())
+                    coven_protocol::remote_object::remote_object_id(self.stored.object())
                 )));
             }
             (Some(left), _) => Some(left.clone()),
@@ -45,7 +45,7 @@ impl PreparedPartitionBlob {
         if !self.uploaded_verified && self.spool_path.is_none() {
             return Err(super::StoreError::InvalidOutbound(format!(
                 "prepared blob object {} awaiting upload has no local spool",
-                crate::protocol::remote_object::remote_object_id(self.stored.object())
+                coven_protocol::remote_object::remote_object_id(self.stored.object())
             )));
         }
         Ok(())

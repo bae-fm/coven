@@ -6,12 +6,12 @@ use crate::database::{
     load_prepared_audience_objects_on, required_store_root_authority_on, DbError,
     ExactProtocolObject, PreparedStoreWriteCommit, StoreWriteBase,
 };
-use crate::protocol::membership::AuthorStreamId;
-use crate::protocol::store_commit::{
+use coven_protocol::membership::AuthorStreamId;
+use coven_protocol::store_commit::{
     CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
 };
-use crate::write::WriteId;
+use coven_protocol::write::WriteId;
 use rusqlite::OptionalExtension;
 use std::collections::BTreeMap;
 
@@ -57,9 +57,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?;
                 row.map(|(write_id, stored_changeset, base, prepared)| {
                     let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                        .map_err(|error| {
-                            DbError::context("prepared Store write", error)
-                        })?;
+                        .map_err(|error| DbError::context("prepared Store write", error))?;
                     let (commit, head, graph_commit) = match &prepared {
                         PreparedStoreWriteState::Publication { commit, head, .. } => {
                             (commit, head, None)
@@ -73,9 +71,8 @@ impl StoreDatabase {
                     };
                     let write_id = WriteId::from_generated(write_id);
                     let unverified_commit: StoreBatchCommit =
-                        serde_json::from_slice(commit.semantic_bytes()).map_err(|error| {
-                            DbError::context("prepared Store commit", error)
-                        })?;
+                        serde_json::from_slice(commit.semantic_bytes())
+                            .map_err(|error| DbError::context("prepared Store commit", error))?;
                     if unverified_commit.write_id != write_id {
                         return Err(DbError::Message(
                             "prepared write id differs from signed commit".to_string(),
@@ -109,14 +106,12 @@ impl StoreDatabase {
                         &root,
                         registration_ref.device_id,
                     )
-                    .map_err(|error| {
-                        DbError::context("prepared write registration", error)
-                    })?;
+                    .map_err(|error| DbError::context("prepared write registration", error))?;
                     let stream_id =
-                        crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+                        coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                             root.store_root_hash,
                             registration_ref,
-                            crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
                         );
                     let coord = StoreCommitCoord {
                         stream_id,
@@ -129,9 +124,7 @@ impl StoreDatabase {
                         commit.prepared().reference().clone(),
                         &registration,
                     )
-                    .map_err(|error| {
-                        DbError::context("verify prepared Store commit", error)
-                    })?;
+                    .map_err(|error| DbError::context("verify prepared Store commit", error))?;
                     let commit_ref = commit_value.reference().clone();
                     let head_value = StoreDeviceHead::parse_at(
                         head.semantic_bytes(),
@@ -139,16 +132,11 @@ impl StoreDatabase {
                         &registration,
                         &commit_ref,
                     )
-                    .map_err(|error| {
-                        DbError::context("verify prepared Store head", error)
-                    })?;
-                    let base: StoreWriteBase = serde_json::from_str(&base).map_err(|error| {
-                        DbError::context("prepared write base", error)
-                    })?;
-                    let dependencies =
-                        CommitFrontier::from_refs(base.dependencies).map_err(|error| {
-                            DbError::context("prepared dependency frontier", error)
-                        })?;
+                    .map_err(|error| DbError::context("verify prepared Store head", error))?;
+                    let base: StoreWriteBase = serde_json::from_str(&base)
+                        .map_err(|error| DbError::context("prepared write base", error))?;
+                    let dependencies = CommitFrontier::from_refs(base.dependencies)
+                        .map_err(|error| DbError::context("prepared dependency frontier", error))?;
                     if dependencies.commits() != commit_value.merge_dependencies() {
                         return Err(DbError::Message(
                             "prepared commit differs from its write dependency frontier"
@@ -205,7 +193,7 @@ impl StoreDatabase {
                             ));
                         }
                         let expected_object = match value.audience() {
-                            crate::protocol::audience_package::PackageAudience::Store => {
+                            coven_protocol::audience_package::PackageAudience::Store => {
                                 graph_commit
                                     .verify_store_package(package.semantic_bytes())
                                     .map_err(|error| DbError::Message(error.to_string()))?;
@@ -215,7 +203,7 @@ impl StoreDatabase {
                                     .expect("verified present")
                                     .object
                             }
-                            crate::protocol::audience_package::PackageAudience::Circle {
+                            coven_protocol::audience_package::PackageAudience::Circle {
                                 circle_id,
                                 ..
                             } => {
@@ -298,7 +286,7 @@ impl StoreDatabase {
                             .verify_stored_facts(
                                 spool_path,
                                 size,
-                                crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                                coven_protocol::store_commit::ObjectHash::from_digest(digest),
                             )
                             .map_err(|error| DbError::context("prepared blob spool", error))?;
                     }

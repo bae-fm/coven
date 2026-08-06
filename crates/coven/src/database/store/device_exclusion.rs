@@ -5,14 +5,14 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::*;
 use crate::database::{mark_remote_object_uploaded_on, update_remote_object_on};
-use crate::protocol::device_exclusion_journal::{
+use coven_protocol::device_exclusion_journal::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
-use crate::protocol::remote_object::{
+use coven_protocol::remote_object::{
     remote_object_id, RemoteObjectRecord, RetainedAuthorityObjectState,
 };
-use crate::protocol::store_commit::ObjectHash;
+use coven_protocol::store_commit::ObjectHash;
 
 pub(super) fn store_device_exclusion_journal_error(
     error: StoreDeviceExclusionJournalError,
@@ -244,7 +244,7 @@ impl StoreDatabase {
     pub(crate) async fn replace_outbound_store_device_exclusion_candidate(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
+        replacement: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let DurableStoreDeviceExclusionOperation::CandidatePrepared { object, candidate } =
             expected.clone()
@@ -368,13 +368,13 @@ impl StoreDatabase {
                 let unuploaded = matches!(
                     &current,
                     RemoteObjectRecord::CandidateCommit(record)
-                        if matches!(record.state, crate::protocol::remote_object::CandidateCommitState::Prepared)
+                        if matches!(record.state, coven_protocol::remote_object::CandidateCommitState::Prepared)
                 ) || matches!(
                     &current,
                     RemoteObjectRecord::RetainedAuthority(record)
                         if matches!(
                             record.state,
-                            crate::protocol::remote_object::RetainedAuthorityObjectState::Prepared { .. }
+                            coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { .. }
                         )
                 );
                 if current != *remote || !unuploaded {
@@ -405,7 +405,7 @@ impl StoreDatabase {
     pub(crate) async fn begin_outbound_store_device_exclusion_nonactivation(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store-device exclusion has no losing candidate".to_string())
@@ -473,8 +473,8 @@ impl StoreDatabase {
     pub(crate) async fn begin_outbound_store_device_exclusion_replacement(
         &self,
         expected: DurableStoreDeviceExclusionOperation,
-        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        replacement: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
         let expected_candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store-device exclusion has no losing candidate".to_string())

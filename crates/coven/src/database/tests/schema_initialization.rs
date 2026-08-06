@@ -19,8 +19,8 @@ fn ordinary_open_rejects_coven_schema_without_initialization_marker() {
     let error = match Database::open(
         &path,
         vec![SyncedTable::new("things", RowIdentity::SharedKey)],
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "unmarked-schema-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(

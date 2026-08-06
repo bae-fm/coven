@@ -62,7 +62,7 @@ pub(crate) struct LocalBlobCleanupIntent {
 pub(crate) enum LocalBlobCleanupIdentity {
     Local,
     Row { table: String, row_id: String },
-    Exact(crate::protocol::store_commit::ObjectHash),
+    Exact(coven_protocol::store_commit::ObjectHash),
 }
 
 impl LocalBlobCleanupIntent {
@@ -93,7 +93,7 @@ impl LocalBlobCleanupIntent {
     pub(crate) fn exact(
         namespace: impl Into<String>,
         blob_id: impl Into<String>,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Self {
         Self {
             namespace: namespace.into(),

@@ -1,13 +1,13 @@
 use tracing::debug;
 
 use crate::database::{DbError, StoreDatabase};
-use crate::protocol::objects::VerifiedObject;
-use crate::protocol::store_commit::{
-    CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,
-};
 use crate::storage::run_blocking_object_verification;
 use crate::sync::store::owner::pull::{LoadedCirclePackage, LocalStoreMembership};
 use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+use coven_protocol::objects::VerifiedObject;
+use coven_protocol::store_commit::{
+    CirclePackageRef, StoreDeviceRegistration, StoreProtocolError, VerifiedStoreBatchCommit,
+};
 
 pub(crate) enum CirclePackageReadError {
     Database(DbError),
@@ -16,7 +16,7 @@ pub(crate) enum CirclePackageReadError {
 
 pub(crate) struct OpenedCirclePackage {
     pub(crate) object: VerifiedObject<Vec<u8>>,
-    pub(crate) blob_protection: crate::protocol::objects::BlobSpoolProtection,
+    pub(crate) blob_protection: coven_protocol::objects::BlobSpoolProtection,
 }
 
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
@@ -38,7 +38,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
         }
     }
 
-    fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+    fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
         self.history.verified_root().reference()
     }
 
@@ -62,7 +62,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                 StoreProtocolError::MissingCirclePackage(reference.circle_id).to_string(),
             ));
         }
-        let semantic_prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
+        let semantic_prefix = coven_protocol::store_commit::circle_package_semantic_prefix(
             reference.circle_id,
             commit.candidate_family(),
             &verified.reference().coord.stream_id.to_string(),
@@ -71,7 +71,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
         );
         let context = access.protocol_context(
             commit.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CirclePackage,
+            coven_protocol::objects::ProtocolObjectDomain::CirclePackage,
         );
         let bytes = self
             .storage

@@ -3,7 +3,7 @@ use rusqlite::hooks::Action;
 use rusqlite::session::{ChangesetItem, ChangesetIter};
 use rusqlite::types::ValueRef;
 
-use crate::protocol::synced_schema::{RowIdentityError, SyncedTable};
+use coven_protocol::synced_schema::{RowIdentityError, SyncedTable};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChangesetIdentityError {

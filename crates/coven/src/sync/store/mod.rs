@@ -3,9 +3,9 @@ use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
 
 use super::cycle::SyncCycleFailure;
-use crate::protocol::store_commit::{CommitFrontier, StoreProtocolRoot};
 use crate::storage::SyncStorage;
 use crate::storage::{BlobPathScheme, CloudCipherAccess};
+use coven_protocol::store_commit::{CommitFrontier, StoreProtocolRoot};
 
 #[doc(hidden)]
 pub(crate) mod blob;

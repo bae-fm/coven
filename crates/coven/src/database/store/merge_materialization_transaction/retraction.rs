@@ -47,12 +47,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             sequence,
         } = &retained.commit_ref().coord;
         let input = crate::database::store::materialization_models::MergeRetractionCleanupInput {
-            commit: crate::protocol::objects::PreparedExactObject::new(
+            commit: coven_protocol::objects::PreparedExactObject::new(
                 retained.commit_ref().object.clone(),
                 retained.commit().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
-            activation_head: crate::protocol::objects::PreparedExactObject::new(
+            activation_head: coven_protocol::objects::PreparedExactObject::new(
                 retained.activation_head_object().clone(),
                 retained.activation_head().to_bytes(),
             )
@@ -100,9 +100,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 
     pub(crate) fn retract_verified_merge_materializations(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         retained_merge_materializations: &mut RetainedMergeMaterializationCache,
-        retractions: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
+        retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
         let conn = self.transaction;
         let provided = retractions
@@ -130,7 +130,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         for retraction in &retractions {
             if matches!(
                 retraction.proof(),
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
             ) {
                 required.insert(
                     retraction
@@ -167,7 +167,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .map_err(|error| DbError::Message(error.to_string()))?;
             validate_terminal_nonactivation_authority_on(conn, root, &nonactivation)?;
             match nonactivation.proof() {
-                crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                     exclusion,
                     accepted_cut,
                     activation_head,
@@ -183,9 +183,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         ));
                     }
                 }
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {}
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {}
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {}
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {}
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
                     return Err(DbError::Message(
                         "terminal Merge retraction carries nonterminal evidence".to_string(),
                     ));

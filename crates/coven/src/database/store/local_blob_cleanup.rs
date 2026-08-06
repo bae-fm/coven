@@ -50,7 +50,7 @@ pub(super) fn record_obsolete_copy_intents_on(
                         .iter()
                         .next()
                         .expect("one exact locator hash")
-                        .parse::<crate::protocol::store_commit::ObjectHash>()
+                        .parse::<coven_protocol::store_commit::ObjectHash>()
                         .map_err(|error| {
                             DbError::context("parse local cleanup locator hash", error)
                         })?;
@@ -247,9 +247,9 @@ impl<'operation> LocalBlobCleanup<'operation> {
 mod tests {
     use super::*;
     use crate::database::synthetic_store::open_test_db_with_blob;
-    use crate::protocol::blob::{CacheFill, Provenance};
-    use crate::protocol::store_commit::ObjectHash;
-    use crate::protocol::synced_schema::BlobDecl;
+    use coven_protocol::blob::{CacheFill, Provenance};
+    use coven_protocol::store_commit::ObjectHash;
+    use coven_protocol::synced_schema::BlobDecl;
 
     #[tokio::test]
     async fn a_live_same_id_row_with_another_locator_does_not_suppress_exact_cleanup() {
@@ -274,7 +274,7 @@ mod tests {
                      '0000000001000-0000-test', '2026-01-01'),
                     ('live-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
                      '0000000001001-0000-test', '2026-01-01');",
-                hash = crate::protocol::blob::content_hash(b"bytes"),
+                hash = coven_protocol::blob::content_hash(b"bytes"),
             ))
             .map_err(DbError::from)?;
             for (object, locator) in [

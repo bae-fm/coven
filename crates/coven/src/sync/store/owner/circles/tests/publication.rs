@@ -2,13 +2,13 @@ use super::*;
 use std::collections::BTreeSet;
 
 fn circle_routing_test_schema() -> (
-    Vec<crate::protocol::synced_schema::SyncedTable>,
+    Vec<coven_protocol::synced_schema::SyncedTable>,
     Vec<crate::Migration>,
 ) {
     (
-        vec![crate::protocol::synced_schema::SyncedTable::new(
+        vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
         vec![crate::Migration::sql(
@@ -33,8 +33,8 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
     Database::open(
         path,
         tables,
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -48,8 +48,8 @@ fn open_persistent_circle_test_db(path: &std::path::Path) -> Database {
     Database::open(
         path,
         test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "creator".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
@@ -60,15 +60,15 @@ fn open_persistent_circle_test_db(path: &std::path::Path) -> Database {
 /// A Circle-scoped `documents` table whose rows carry a blob.
 fn open_circle_blob_test_db() -> Database {
     crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::protocol::synced_schema::SyncedTable::new(
+        vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")
-        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
+        .carries_blob(coven_protocol::synced_schema::BlobDecl::new(
             "files",
-            crate::protocol::blob::Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheEager,
+            coven_protocol::blob::Provenance::HostProvided,
+            coven_protocol::blob::CacheFill::CacheEager,
         ))],
         vec![crate::Migration::sql(
             1,
@@ -115,9 +115,9 @@ async fn installed_document_row(
 /// Either read failure is fatal to the caller, reported under `purpose`.
 async fn applicable_circle_packages(
     device: &crate::sync::test_helpers::TestDevice,
-    verified: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+    verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
     activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
-    author: &crate::protocol::store_commit::StoreDeviceRegistration,
+    author: &coven_protocol::store_commit::StoreDeviceRegistration,
     purpose: &str,
 ) -> Vec<crate::sync::store::owner::pull::LoadedCirclePackage> {
     match device
@@ -178,11 +178,11 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         .get_circle_operations()
                         .await
                         .expect("read pending circle operations"),
-                    vec![crate::protocol::circle::CircleOperationInfo {
+                    vec![coven_protocol::circle::CircleOperationInfo {
                         operation_id: expected.operation_id.clone(),
                         circle_id: expected.circle_id(),
-                        kind: crate::protocol::circle::CircleOperationKind::Create,
-                        state: crate::protocol::circle::CircleOperationState::Pending,
+                        kind: coven_protocol::circle::CircleOperationKind::Create,
+                        state: coven_protocol::circle::CircleOperationState::Pending,
                     }]
                 );
                 if after_visible_write {
@@ -246,10 +246,10 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         )
                         .await
                         .expect("read activated circle"),
-                    vec![crate::protocol::circle::CircleInfo::Active {
+                    vec![coven_protocol::circle::CircleInfo::Active {
                         id: expected.circle_id(),
                         name: "Household".to_string(),
-                        role: crate::protocol::circle::CircleRole::Owner,
+                        role: coven_protocol::circle::CircleRole::Owner,
                         rotation_required: false,
                     }]
                 );
@@ -407,10 +407,10 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
             )
             .await
             .expect("read renamed circle"),
-        vec![crate::protocol::circle::CircleInfo::Active {
+        vec![coven_protocol::circle::CircleInfo::Active {
             id: circle_id,
             name: "Household money".to_string(),
-            role: crate::protocol::circle::CircleRole::Owner,
+            role: coven_protocol::circle::CircleRole::Owner,
             rotation_required: false,
         }]
     );
@@ -502,7 +502,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
             )
             .await
             .expect("read deleted circle"),
-        vec![crate::protocol::circle::CircleInfo::Deleted { id: circle_id }]
+        vec![coven_protocol::circle::CircleInfo::Deleted { id: circle_id }]
     );
     assert!(StoreDatabase::new(&reopened)
         .get_circle_operations()
@@ -585,7 +585,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
                 .await
                 .expect("list circles after rejecting the forged deletion")
                 .as_slice(),
-            [crate::protocol::circle::CircleInfo::Active { id, .. }] if *id == circle_id
+            [coven_protocol::circle::CircleInfo::Active { id, .. }] if *id == circle_id
         ),
         "the forged deletion never took effect; the Circle remains active"
     );
@@ -630,7 +630,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "INSERT INTO documents (id, audience, size, hash, _updated_at)
          VALUES ('{blob_id}', '{circle_id}', {}, '{}', '0000000001500-0000-owner')",
         blob_bytes.len(),
-        crate::protocol::blob::content_hash(blob_bytes),
+        coven_protocol::blob::content_hash(blob_bytes),
     );
     let routing = EncryptionService::from_key([42; 32]);
     let write_id = crate::database::StoreDatabase::new(&db)
@@ -722,7 +722,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "INSERT INTO documents (id, audience, size, hash, _updated_at)
          VALUES ('{late_id}', '{circle_id}', {}, '{}', '0000000001600-0000-concurrent')",
         late_bytes.len(),
-        crate::protocol::blob::content_hash(late_bytes),
+        coven_protocol::blob::content_hash(late_bytes),
     );
     let late_write_id = crate::database::StoreDatabase::new(&concurrent_db)
         .run_host_store_write_for_test(
@@ -803,7 +803,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .coord;
     let encoded_target_control =
         serde_json::to_string(&target_control).expect("serialize target Circle bootstrap control");
-    let target_blob_object = crate::protocol::remote_object::remote_object_id(
+    let target_blob_object = coven_protocol::remote_object::remote_object_id(
         historical_blob
             .stored()
             .expect("published historical blob has an exact stored reference")
@@ -873,7 +873,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         (
             circle_id.to_string(),
             blob_bytes.len() as i64,
-            crate::protocol::blob::content_hash(blob_bytes),
+            coven_protocol::blob::content_hash(blob_bytes),
             "0000000001500-0000-owner".to_string(),
         )
     );
@@ -885,7 +885,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         (
             circle_id.to_string(),
             late_bytes.len() as i64,
-            crate::protocol::blob::content_hash(late_bytes),
+            coven_protocol::blob::content_hash(late_bytes),
             "0000000001600-0000-concurrent".to_string(),
         )
     );
@@ -894,7 +894,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("recipient bootstrap installs the exact row blob graph");
     assert_eq!(installed_blob, historical_blob);
-    let replay_routing_key = crate::protocol::circle::derive_row_routing_key(
+    let replay_routing_key = coven_protocol::circle::derive_row_routing_key(
         &EncryptionService::from_key([42; 32]),
         store.root.store_root_hash,
     )
@@ -977,7 +977,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("read opened founder blob"),
         blob_bytes,
     );
-    let substituted = crate::protocol::blob::RowBlobRef::new(
+    let substituted = coven_protocol::blob::RowBlobRef::new(
         historical_blob.table().to_string(),
         historical_blob.row_id().to_string(),
         historical_blob.row_stamp().to_string(),
@@ -985,8 +985,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         historical_blob.blob().clone(),
         historical_blob.plaintext_size(),
         historical_blob.plaintext_hash(),
-        crate::protocol::blob::RowBlobAuthority::Remote(
-            crate::protocol::audience_package::PackageAudience::Circle {
+        coven_protocol::blob::RowBlobAuthority::Remote(
+            coven_protocol::audience_package::PackageAudience::Circle {
                 circle_id,
                 control: current.control.coord.clone(),
                 key_fingerprint: current.control.value.key_fingerprint(),
@@ -1024,7 +1024,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("Circle bootstrap row blob has an exact locator")
             .locator()
             .audience(),
-        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id)
+        coven_protocol::blob::locator::RemoteAudience::Circle(circle_id)
     );
     let blob = blob.clone();
     assert_eq!(
@@ -1045,10 +1045,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .expect("load bootstrap image ownership");
     assert!(matches!(
         record,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(ref shared)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(ref shared)
             if matches!(
                 shared.identity.domain,
-                crate::protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
+                coven_protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
             )
     ));
     let blob_object = blob
@@ -1060,12 +1060,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .remote_object_for_test(blob_object)
         .await
         .expect("read bootstrap blob ownership");
-    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(blob_record) =
-        blob_record
+    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(blob_record) = blob_record
     else {
         panic!("Circle bootstrap blob must remain shared");
     };
-    let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
         blob_record.state
     else {
         panic!("Circle bootstrap blob must remain verified");
@@ -1074,7 +1073,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .activated
         .iter()
         .filter_map(|owner| match owner {
-            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(commit) => {
+            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(commit) => {
                 Some(commit.clone())
             }
             _ => None,
@@ -1210,29 +1209,29 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("load pre-close Circle package commit");
     let package_author = package_commit.author().clone();
     assert_eq!(package_commit.circle_packages().len(), 1);
-    let historical_locator = crate::protocol::blob::locator::BlobLocator::opaque(
+    let historical_locator = coven_protocol::blob::locator::BlobLocator::opaque(
         "files",
         "old-epoch-blob",
         package_commit.author_registration.clone(),
-        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id),
-        crate::protocol::blob::BlobScope::Master,
+        coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
+        coven_protocol::blob::BlobScope::Master,
         prior_fingerprint,
         1,
         ObjectHash::digest(b"x"),
     )
     .expect("construct old-epoch Circle blob locator");
-    let historical_stored = crate::protocol::blob::locator::StoredBlobRef::new(
+    let historical_stored = coven_protocol::blob::locator::StoredBlobRef::new(
         historical_locator.clone(),
         ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(historical_locator.semantic_key())
+            coven_protocol::objects::ObjectSlot::logical(historical_locator.semantic_key())
                 .expect("old-epoch blob locator has a valid logical key"),
             b"ciphertext".len() as u64,
             ObjectHash::digest(b"ciphertext"),
         ),
     )
     .expect("construct exact old-epoch stored blob");
-    let historical_authority = crate::protocol::blob::RowBlobAuthority::Remote(
-        crate::protocol::audience_package::PackageAudience::Circle {
+    let historical_authority = coven_protocol::blob::RowBlobAuthority::Remote(
+        coven_protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: prior_control.clone(),
             key_fingerprint: prior_fingerprint,
@@ -1304,14 +1303,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let [control] = controls.as_slice() else {
         panic!("member removal must leave one closing Circle");
     };
-    let crate::protocol::circle::CircleControlState::EpochClose(close) = control.value.state()
+    let coven_protocol::circle::CircleControlState::EpochClose(close) = control.value.state()
     else {
         panic!("closing Circle must contain an epoch close");
     };
     let [participant] = close.participants.as_slice() else {
         panic!("removed member must leave the owner device as the sole participant");
     };
-    let prefix = crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
+    let prefix = coven_protocol::circle::circle_epoch_close_response_semantic_prefix(
         circle_id,
         close.close_id,
         participant.registration.device_id,
@@ -1342,8 +1341,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .read_protocol_slot(&response_context, &participant.response_slot, &prefix)
         .await
         .expect("read exact Circle epoch-close response");
-    let crate::protocol::circle::CircleEpochCloseResponseSlotValue::Response(response) =
-        crate::protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
+    let coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response) =
+        coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
             .expect("parse Circle epoch-close response slot value")
     else {
         panic!("participant slot must hold the device response");
@@ -1352,16 +1351,16 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         response.verify_for(control, registration.value()),
         "signed Circle epoch-close response verifies"
     );
-    let response_ref = crate::protocol::circle::CircleEpochCloseResponseRef::from_response(
+    let response_ref = coven_protocol::circle::CircleEpochCloseResponseRef::from_response(
         &response,
         response_object,
     )
     .expect("bind exact Circle epoch-close response");
     let response_storage_key = match participant.response_slot.physical() {
-        crate::protocol::objects::PhysicalObjectLocator::LogicalKey => {
+        coven_protocol::objects::PhysicalObjectLocator::LogicalKey => {
             participant.response_slot.logical_key().to_string()
         }
-        crate::protocol::objects::PhysicalObjectLocator::Opaque(provider_id) => format!(
+        coven_protocol::objects::PhysicalObjectLocator::Opaque(provider_id) => format!(
             "{}#exact#{provider_id}",
             participant.response_slot.logical_key()
         ),
@@ -1425,7 +1424,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .blob_protection_for_test(&historical_authority, &historical_stored)
         .await
         .expect("resolve old-epoch blob protection through retained Circle authority");
-    let crate::protocol::objects::BlobSpoolProtection::Opaque(historical_encryption) =
+    let coven_protocol::objects::BlobSpoolProtection::Opaque(historical_encryption) =
         historical_protection
     else {
         panic!("Circle blob protection must be opaque");
@@ -1434,8 +1433,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         historical_encryption.seal_key_fingerprint(),
         prior_fingerprint
     );
-    let successor_substitution = crate::protocol::blob::RowBlobAuthority::Remote(
-        crate::protocol::audience_package::PackageAudience::Circle {
+    let successor_substitution = coven_protocol::blob::RowBlobAuthority::Remote(
+        coven_protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: successor.control.coord.clone(),
             key_fingerprint: successor.control.value.key_fingerprint(),
@@ -1452,8 +1451,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     );
     let mut absent_control = prior_control.clone();
     absent_control.control_hash = ObjectHash::digest(b"absent Circle control");
-    let absent_authority = crate::protocol::blob::RowBlobAuthority::Remote(
-        crate::protocol::audience_package::PackageAudience::Circle {
+    let absent_authority = coven_protocol::blob::RowBlobAuthority::Remote(
+        coven_protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: absent_control,
             key_fingerprint: prior_fingerprint,
@@ -1468,8 +1467,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .contains("has no retained authority"),
         "{absent_error}"
     );
-    let wrong_circle_authority = crate::protocol::blob::RowBlobAuthority::Remote(
-        crate::protocol::audience_package::PackageAudience::Circle {
+    let wrong_circle_authority = coven_protocol::blob::RowBlobAuthority::Remote(
+        coven_protocol::audience_package::PackageAudience::Circle {
             circle_id: CircleId::from_bytes([0x77; 16]),
             control: successor.control.coord.clone(),
             key_fingerprint: successor.control.value.key_fingerprint(),
@@ -1484,8 +1483,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .contains("key differs from its exact activated authority"),
         "{wrong_circle_error}"
     );
-    let wrong_fingerprint_authority = crate::protocol::blob::RowBlobAuthority::Remote(
-        crate::protocol::audience_package::PackageAudience::Circle {
+    let wrong_fingerprint_authority = coven_protocol::blob::RowBlobAuthority::Remote(
+        coven_protocol::audience_package::PackageAudience::Circle {
             circle_id,
             control: successor.control.coord.clone(),
             key_fingerprint: crate::KeyFingerprint::from_bytes([0x55; 32]),
@@ -1500,12 +1499,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .contains("key differs from its exact activated authority"),
         "{wrong_fingerprint_error}"
     );
-    let crate::protocol::circle::CircleControlState::ActiveEpoch(active) =
+    let coven_protocol::circle::CircleControlState::ActiveEpoch(active) =
         successor.control.value.state()
     else {
         panic!("finalized Circle control must be active");
     };
-    let crate::protocol::circle::CircleEpochOrigin::Closed {
+    let coven_protocol::circle::CircleEpochOrigin::Closed {
         closed_epoch_id,
         close_control,
         close_id,
@@ -1554,15 +1553,15 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
                 ProtocolObjectDomain::CircleEpochCloseOutcome,
             ),
             &outcome_ref.object,
-            &crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+            &coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                 circle_id,
                 close.close_id,
             ),
         )
         .await
         .expect("read exact Circle epoch-close outcome");
-    let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
-        crate::protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes)
+    let coven_protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
+        coven_protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes)
             .expect("parse Circle epoch-close outcome slot value")
     else {
         panic!("finalized close slot must hold a final outcome");
@@ -1576,8 +1575,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             .as_ref()
             .expect("Circle removal retains its signed close intent"),
         &[(
-            crate::protocol::circle::CircleEpochCloseSettlement::Response(response_ref),
-            crate::protocol::circle::CircleEpochCloseResponseSlotValue::Response(response),
+            coven_protocol::circle::CircleEpochCloseSettlement::Response(response_ref),
+            coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response),
         )],
     ));
     assert!(db
@@ -1627,9 +1626,9 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let candidate_family = successor_commit.candidate_family();
     let candidate_write_id = successor_commit.write_id.clone();
     let original_package =
-        crate::protocol::audience_package::AudiencePackage::parse(&loaded_packages[0].bytes)
+        coven_protocol::audience_package::AudiencePackage::parse(&loaded_packages[0].bytes)
             .expect("parse accepted pre-close Circle package");
-    let candidate_package = crate::protocol::audience_package::AudiencePackage::circle(
+    let candidate_package = coven_protocol::audience_package::AudiencePackage::circle(
         successor_commit.store_root_hash,
         candidate_family,
         candidate_write_id.clone(),
@@ -1643,7 +1642,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     )
     .expect("build exact old-control package for combined Circle candidate");
     let candidate_package_bytes = candidate_package.to_bytes();
-    let candidate_package_prefix = crate::protocol::store_commit::circle_package_semantic_prefix(
+    let candidate_package_prefix = coven_protocol::store_commit::circle_package_semantic_prefix(
         circle_id,
         candidate_family,
         &candidate_coord.stream_id.to_string(),
@@ -1677,11 +1676,11 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .create_protocol_object(&candidate_package_object)
         .await
         .expect("publish exact old-control package");
-    let circle_packages = [crate::protocol::store_commit::CirclePackageInput {
+    let circle_packages = [coven_protocol::store_commit::CirclePackageInput {
         circle_id,
         control: prior_control,
         key_fingerprint: prior_fingerprint,
-        package: crate::protocol::store_commit::StorePackageInput {
+        package: coven_protocol::store_commit::StorePackageInput {
             candidate_family,
             schema_version: db.schema_version(),
             bytes: &candidate_package_bytes,
@@ -1697,17 +1696,17 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_commit.order.clone(),
         successor_commit.membership_state.clone(),
         successor_commit.device_state.clone(),
-        crate::protocol::store_commit::StoreOperationMembershipAuthority {
+        coven_protocol::store_commit::StoreOperationMembershipAuthority {
             predecessor: successor_commit
                 .membership_authority
                 .clone()
                 .expect("successor Circle commit carries membership authority"),
         },
-        crate::protocol::store_commit::StoreCommitOperationsInput {
+        coven_protocol::store_commit::StoreCommitOperationsInput {
             stream_activations: successor_commit.stream_activations().to_vec(),
             circle_controls: successor_commit.circle_controls().to_vec(),
             circle_packages: &circle_packages,
-            ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
+            ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
         },
         &device_signer,
     )
@@ -1742,7 +1741,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         candidate_commit_object.reference().clone(),
     )
     .expect("bind combined Circle candidate reference");
-    let verified_candidate = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+    let verified_candidate = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
         &candidate_commit.to_bytes(),
         store.root.store_root_hash,
         &candidate_commit_ref,
@@ -1778,7 +1777,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     // cutoff. Its recorded coverage equals the close cutoff, its recorded image
     // hash equals its exact bytes, and installing it converges on the accepted
     // pre-cutoff Circle state.
-    let crate::protocol::circle::CircleAccessDisposition::Active {
+    let coven_protocol::circle::CircleAccessDisposition::Active {
         bootstrap: Some(successor_bootstrap),
         ..
     } = &successor.access.disposition
@@ -1804,7 +1803,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .expect("read retained successor bootstrap replay input")
         .expect("the device retains its successor bootstrap image");
     assert_eq!(
-        crate::protocol::store_commit::ObjectHash::digest(retained_bootstrap.image_bytes()),
+        coven_protocol::store_commit::ObjectHash::digest(retained_bootstrap.image_bytes()),
         successor_bootstrap.image.image_hash,
         "the retained bootstrap image hashes to its recorded image hash"
     );
@@ -2003,7 +2002,7 @@ struct ClosingFounderCircle {
     member_pubkey: String,
     remaining_member_pubkey: String,
     operation_id: CircleOperationId,
-    prior_epoch: crate::protocol::circle::CircleEpochId,
+    prior_epoch: coven_protocol::circle::CircleEpochId,
     prior_fingerprint: crate::KeyFingerprint,
 }
 
@@ -2322,14 +2321,14 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         .roster
         .members()
         .contains_key(&fixture.remaining_member_pubkey));
-    let crate::protocol::circle::CircleControlState::ActiveEpoch(active) =
+    let coven_protocol::circle::CircleControlState::ActiveEpoch(active) =
         reopened.control.value.state()
     else {
         panic!("reopened Circle control must be active");
     };
     assert_eq!(
         active.common.origin,
-        crate::protocol::circle::CircleEpochOrigin::Founder
+        coven_protocol::circle::CircleEpochOrigin::Founder
     );
     assert_eq!(
         reopened.control.value.previous_control_hash(),
@@ -2355,7 +2354,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     assert!(activation.reference.objects().close_outcome.is_none());
     assert_eq!(
         cancellation_ref.close_id,
-        crate::protocol::circle::CircleEpochCloseId::from_operation_id(&fixture.operation_id)
+        coven_protocol::circle::CircleEpochCloseId::from_operation_id(&fixture.operation_id)
     );
 
     // Liveness: the frozen member device pulls the reopened control and its
@@ -2476,7 +2475,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
         .roster
         .members()
         .contains_key(&fixture.member_pubkey));
-    let crate::protocol::circle::CircleControlState::ActiveEpoch(active) =
+    let coven_protocol::circle::CircleControlState::ActiveEpoch(active) =
         successor.control.value.state()
     else {
         panic!("closed-origin successor must be active");
@@ -2484,7 +2483,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     assert!(
         matches!(
             active.common.origin,
-            crate::protocol::circle::CircleEpochOrigin::Closed { .. }
+            coven_protocol::circle::CircleEpochOrigin::Closed { .. }
         ),
         "successor epoch carries a closed origin"
     );
@@ -2581,7 +2580,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     assert!(
         matches!(
             member_current.access.disposition,
-            crate::protocol::circle::CircleAccessDisposition::Active {
+            coven_protocol::circle::CircleAccessDisposition::Active {
                 bootstrap: Some(_),
                 ..
             }
@@ -2908,8 +2907,8 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
         "the recorded payload resumes as a finalization, not a cancellation"
     );
     // Nothing reached storage: the successor control object is absent.
-    let control_prefix = crate::protocol::circle::circle_semantic_prefix(
-        crate::protocol::circle::CircleSemanticSlot::Control {
+    let control_prefix = coven_protocol::circle::circle_semantic_prefix(
+        coven_protocol::circle::CircleSemanticSlot::Control {
             circle_id: fixture.circle_id,
             control: &recorded_control,
         },
@@ -2932,7 +2931,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
                 .storage()
                 .read_protocol_slot(&control_context, control_object.slot(), &control_prefix)
                 .await,
-            Err(crate::protocol::objects::StorageError::NotFound(_))
+            Err(coven_protocol::objects::StorageError::NotFound(_))
         ),
         "no finalization object reached storage before the payload was recorded"
     );
@@ -2977,10 +2976,10 @@ struct SilentParticipantCircle {
     circle_id: CircleId,
     removed_pubkey: String,
     silent: UserKeypair,
-    silent_device_id: crate::protocol::store_commit::StoreDeviceId,
+    silent_device_id: coven_protocol::store_commit::StoreDeviceId,
     silent_db: Database,
     silent_storage: Arc<crate::storage::CloudSyncStorage>,
-    prior_epoch: crate::protocol::circle::CircleEpochId,
+    prior_epoch: coven_protocol::circle::CircleEpochId,
 }
 
 struct SilentParticipantClose {
@@ -2993,10 +2992,10 @@ struct SilentParticipantClose {
     circle_id: CircleId,
     removed_pubkey: String,
     silent: UserKeypair,
-    silent_device_id: crate::protocol::store_commit::StoreDeviceId,
+    silent_device_id: coven_protocol::store_commit::StoreDeviceId,
     silent_db: Database,
     operation_id: CircleOperationId,
-    prior_epoch: crate::protocol::circle::CircleEpochId,
+    prior_epoch: coven_protocol::circle::CircleEpochId,
 }
 
 impl SilentParticipantCircle {
@@ -3134,7 +3133,7 @@ impl SilentParticipantCircle {
     }
 
     /// The finalized successor control coordinate, read from the Owner.
-    async fn successor_control_coord(&self) -> crate::protocol::circle::CircleControlCoord {
+    async fn successor_control_coord(&self) -> coven_protocol::circle::CircleControlCoord {
         StoreDatabase::new(&self.db)
             .circle_authoring_context(self.circle_id, &keys::public_key_hex(&self.signer))
             .await
@@ -3234,7 +3233,7 @@ impl SilentParticipantClose {
             .expect("silent participant publishes its close response");
     }
 
-    async fn finalized_close_outcome(&self) -> crate::protocol::circle::CircleEpochCloseOutcome {
+    async fn finalized_close_outcome(&self) -> coven_protocol::circle::CircleEpochCloseOutcome {
         self.store
             .bind_device(&self.db, &self.signer)
             .await
@@ -3369,7 +3368,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .filter(|settlement| {
             matches!(
                 settlement,
-                crate::protocol::circle::CircleEpochCloseSettlement::Exclusion(_)
+                coven_protocol::circle::CircleEpochCloseSettlement::Exclusion(_)
             )
         })
         .count();
@@ -3379,7 +3378,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .filter(|settlement| {
             matches!(
                 settlement,
-                crate::protocol::circle::CircleEpochCloseSettlement::Response(_)
+                coven_protocol::circle::CircleEpochCloseSettlement::Response(_)
             )
         })
         .count();
@@ -3391,7 +3390,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
     let responder_frontier = outcome
         .responses
         .iter()
-        .filter_map(crate::protocol::circle::CircleEpochCloseSettlement::response_frontier)
+        .filter_map(coven_protocol::circle::CircleEpochCloseSettlement::response_frontier)
         .next()
         .expect("the responder's frontier")
         .clone();
@@ -3426,7 +3425,7 @@ async fn close_status_reports_a_response_and_an_exclusion() {
         .await
         .expect("read the close status after the Owner responds");
     assert_eq!(status.circle_id, fixture.circle_id);
-    let settlement_of = |device_id: crate::protocol::store_commit::StoreDeviceId| {
+    let settlement_of = |device_id: coven_protocol::store_commit::StoreDeviceId| {
         status
             .participants
             .iter()
@@ -3436,7 +3435,7 @@ async fn close_status_reports_a_response_and_an_exclusion() {
     };
     assert_eq!(
         settlement_of(silent_device_id),
-        crate::protocol::circle::CircleCloseSettlement::Pending,
+        coven_protocol::circle::CircleCloseSettlement::Pending,
         "the silent participant's slot is still empty"
     );
     let owner_device_id = fixture
@@ -3451,7 +3450,7 @@ async fn close_status_reports_a_response_and_an_exclusion() {
         .expect("the Owner participant device id");
     assert_eq!(
         settlement_of(owner_device_id),
-        crate::protocol::circle::CircleCloseSettlement::Responded,
+        coven_protocol::circle::CircleCloseSettlement::Responded,
         "the Owner has responded"
     );
 
@@ -3468,20 +3467,20 @@ async fn close_status_reports_a_response_and_an_exclusion() {
         .expect("read the close status after the exclusion");
     assert_eq!(
         settlement_of_in(&status, silent_device_id),
-        crate::protocol::circle::CircleCloseSettlement::Excluded,
+        coven_protocol::circle::CircleCloseSettlement::Excluded,
         "the excluded participant's slot holds its exclusion"
     );
     assert_eq!(
         settlement_of_in(&status, owner_device_id),
-        crate::protocol::circle::CircleCloseSettlement::Responded,
+        coven_protocol::circle::CircleCloseSettlement::Responded,
         "the Owner's response is unchanged"
     );
 }
 
 fn settlement_of_in(
-    status: &crate::protocol::circle::CircleCloseStatus,
-    device_id: crate::protocol::store_commit::StoreDeviceId,
-) -> crate::protocol::circle::CircleCloseSettlement {
+    status: &coven_protocol::circle::CircleCloseStatus,
+    device_id: coven_protocol::store_commit::StoreDeviceId,
+) -> coven_protocol::circle::CircleCloseSettlement {
     status
         .participants
         .iter()
@@ -3860,7 +3859,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         .await
         .expect("read the finalized successor activation")
         .expect("the successor activation is retained");
-    let image_slots: Vec<crate::protocol::objects::ObjectSlot> = activation
+    let image_slots: Vec<coven_protocol::objects::ObjectSlot> = activation
         .reference
         .objects()
         .access
@@ -3876,7 +3875,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         !image_slots.is_empty(),
         "the finalized successor names a bootstrap image"
     );
-    let saved: Vec<(crate::protocol::objects::ObjectSlot, Vec<u8>)> = image_slots
+    let saved: Vec<(coven_protocol::objects::ObjectSlot, Vec<u8>)> = image_slots
         .iter()
         .map(|slot| {
             (
@@ -4122,7 +4121,7 @@ async fn slot_race_response_first_adopts_the_response() {
     assert!(
         outcome.responses.iter().all(|settlement| matches!(
             settlement,
-            crate::protocol::circle::CircleEpochCloseSettlement::Response(_)
+            coven_protocol::circle::CircleEpochCloseSettlement::Response(_)
         )),
         "a response that won its slot is adopted, not excluded"
     );
@@ -4180,7 +4179,7 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
         .filter(|settlement| {
             matches!(
                 settlement,
-                crate::protocol::circle::CircleEpochCloseSettlement::Exclusion(_)
+                coven_protocol::circle::CircleEpochCloseSettlement::Exclusion(_)
             )
         })
         .count();
@@ -4248,7 +4247,7 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
             .iter()
             .filter(|settlement| matches!(
                 settlement,
-                crate::protocol::circle::CircleEpochCloseSettlement::Exclusion(_)
+                coven_protocol::circle::CircleEpochCloseSettlement::Exclusion(_)
             ))
             .count(),
         1,
@@ -4303,7 +4302,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
     assert!(
         settlements.iter().all(|(settlement, _)| matches!(
             settlement,
-            crate::protocol::circle::CircleEpochCloseSettlement::Response(_)
+            coven_protocol::circle::CircleEpochCloseSettlement::Response(_)
         )),
         "every slot holds a device response"
     );
@@ -4324,12 +4323,12 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
     // slot actually holds a device response. Re-signed by the Owner, it is a
     // structurally valid outcome, but it must fail verification against the real
     // slot contents.
-    let crate::protocol::circle::CircleEpochCloseSettlement::Response(first) = &settlements[0].0
+    let coven_protocol::circle::CircleEpochCloseSettlement::Response(first) = &settlements[0].0
     else {
         panic!("participant slots hold responses");
     };
-    let forged_settlement = crate::protocol::circle::CircleEpochCloseSettlement::Exclusion(
-        crate::protocol::circle::CircleEpochCloseExclusionRef {
+    let forged_settlement = coven_protocol::circle::CircleEpochCloseSettlement::Exclusion(
+        coven_protocol::circle::CircleEpochCloseExclusionRef {
             registration: first.registration.clone(),
             exclusion_hash: ObjectHash::digest(b"forged exclusion"),
             object: first.object.clone(),
@@ -4342,7 +4341,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
             .skip(1)
             .map(|(settlement, _)| settlement.clone()),
     );
-    let forged = crate::protocol::circle::CircleEpochCloseOutcome::signed(
+    let forged = coven_protocol::circle::CircleEpochCloseOutcome::signed(
         &close_control,
         &intent,
         forged_settlements,
@@ -4383,7 +4382,7 @@ async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
             .get_circles(&owner_pubkey, BTreeSet::from([owner_pubkey.clone()]))
             .await
             .expect("list Circles after deleting the closing Circle"),
-        vec![crate::protocol::circle::CircleInfo::Deleted {
+        vec![coven_protocol::circle::CircleInfo::Deleted {
             id: fixture.circle_id
         }]
     );

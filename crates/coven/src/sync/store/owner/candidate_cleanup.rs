@@ -10,13 +10,13 @@ pub(crate) async fn delete_candidate_cleanup_targets<E>(
     targets: impl IntoIterator<Item = crate::database::CandidateCleanupObject>,
 ) -> Result<(), E>
 where
-    E: From<crate::protocol::objects::StoreObjectError> + From<crate::database::DbError>,
+    E: From<coven_protocol::objects::StoreObjectError> + From<crate::database::DbError>,
 {
     for target in targets {
         storage
             .delete_protocol_object(&target.object)
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         database
             .mark_candidate_cleanup_absent(target.object)
             .await?;

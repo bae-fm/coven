@@ -4,9 +4,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn blob_protection_for_test(
         &self,
-        authority: &crate::protocol::blob::RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::sync::BlobCacheError> {
+        authority: &coven_protocol::blob::RowBlobAuthority,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, crate::sync::BlobCacheError> {
         self.blob_source
             .protection_for_test(authority, stored)
             .await
@@ -28,10 +28,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn prepare_wrapped_key(
         &self,
         recipient: &str,
-        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
+        value: coven_protocol::wrapped_store_key::WrappedStoreKey,
     ) -> Result<
-        crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::protocol::objects::StorageError,
+        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
+        coven_protocol::objects::StorageError,
     > {
         self.keyrings.prepare(recipient, value).await
     }
@@ -41,7 +41,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         reference: &MembershipHeadRef,
     ) -> Result<
-        crate::protocol::membership::AuthorHead,
+        coven_protocol::membership::AuthorHead,
         crate::sync::store::membership::AnchoredChainError,
     > {
         self.history_verifier
@@ -53,7 +53,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn load_membership_at_exact_heads_for_test(
         &mut self,
         heads: &[MembershipHeadRef],
-        resolutions: &[crate::protocol::membership::StoreMembershipConflictResolutionRef],
+        resolutions: &[coven_protocol::membership::StoreMembershipConflictResolutionRef],
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         self.history_verifier
             .load_membership_at_exact_heads(heads, resolutions)
@@ -87,8 +87,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn verify_device_join_attempt_for_test(
         &mut self,
-        reference: &crate::protocol::store_commit::DeviceJoinAttemptRef,
-        owner: &crate::protocol::store_commit::StoreDeviceRegistration,
+        reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
+        owner: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), StoreError> {
         self.history_verifier
             .load_verified_device_join_attempt(reference, owner)
@@ -99,13 +99,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn exact_next_announcement_slot_for_test(
         &mut self,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        previous: Option<&crate::protocol::store_commit::StoreBatchCommitRef>,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        previous: Option<&coven_protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<
         (
-            crate::protocol::objects::ObjectSlot,
-            Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
+            coven_protocol::objects::ObjectSlot,
+            Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
         ),
         StoreError,
     > {
@@ -125,12 +125,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn load_commit_ancestry_until_for_test(
         &mut self,
-        start: crate::protocol::store_commit::StoreBatchCommitRef,
-        coverage: &crate::protocol::store_commit::CommitFrontier,
+        start: coven_protocol::store_commit::StoreBatchCommitRef,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<
         Vec<(
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
         )>,
         StoreError,
     > {
@@ -156,8 +156,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn open_circle_package_for_test(
         &mut self,
         access: &crate::sync::store::circle_controls::CircleEpochAccess,
-        commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        reference: &crate::protocol::store_commit::CirclePackageRef,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        reference: &coven_protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
         let reader = crate::sync::store::owner::circles::packages::CirclePackageReader::new(
             &self.database,
@@ -182,15 +182,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn pull_readiness_for_test(
         &mut self,
-        coverage: &crate::protocol::store_commit::CommitFrontier,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
         frontier: &std::collections::BTreeMap<
             String,
-            crate::protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::StoreBatchCommitRef,
         >,
-        device_state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
-        exclusion_freezes: &[crate::protocol::store_commit::StoreDeviceProposalAck],
-        commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
-        commit: &crate::protocol::store_commit::StoreBatchCommit,
+        device_state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+        exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
+        commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
         self.pull_readiness(
             coverage,
@@ -206,8 +206,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn verified_merge_membership_prefix_for_test(
         &mut self,
-        references: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
-        predecessors: impl IntoIterator<Item = crate::protocol::store_commit::StoreBatchCommitRef>,
+        references: impl IntoIterator<Item = coven_protocol::store_commit::StoreBatchCommitRef>,
+        predecessors: impl IntoIterator<Item = coven_protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<VerifiedMergeMembershipPrefix, pull::StorePullError> {
         self.history_verifier.verify_refs(references).await?;
         self.history_verifier
@@ -218,8 +218,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn load_founder_registration_for_test(
         &mut self,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<
-            crate::protocol::store_commit::StoreDeviceRegistration,
+        coven_protocol::objects::VerifiedObject<
+            coven_protocol::store_commit::StoreDeviceRegistration,
         >,
         StoreError,
     > {
@@ -229,9 +229,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn prepare_merge_history_successor_for_test(
         &mut self,
-        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         membership: &MembershipChain,
-        recovery_author: Option<&crate::protocol::store_commit::StoreDeviceRegistrationRef>,
+        recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
         evidence: MergeHistorySuccessorEvidence,
     ) -> Result<PreparedMergeHistorySuccessor, StoreError> {
         let (_, state_after) = self
@@ -252,9 +252,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn prepare_device_join_bootstrap_for_test(
         &mut self,
-        coverage: &crate::protocol::store_commit::StoreHistoryCut,
-        attempt_activation: &crate::protocol::store_commit::StoreBatchCommitRef,
-        membership_state: &crate::protocol::circle_control::StoreMembershipStateRef,
+        coverage: &coven_protocol::store_commit::StoreHistoryCut,
+        attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
+        membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
     ) -> Result<crate::database::DeviceJoinBootstrapPlan, StoreError> {
         self.history_verifier
             .prepare_device_join_bootstrap(coverage, attempt_activation, membership_state)
@@ -265,17 +265,17 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn load_store_package_for_test(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>, StoreError> {
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>, StoreError> {
         Ok(self.history_verifier.load_store_package(reference).await?)
     }
 
     #[cfg(test)]
     pub(crate) async fn load_store_ack_for_test(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreAckRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<crate::protocol::store_commit::StoreAck, StoreError> {
+        reference: &coven_protocol::store_commit::StoreAckRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+    ) -> Result<coven_protocol::store_commit::StoreAck, StoreError> {
         Ok(self
             .history_verifier
             .load_store_ack(reference, registration)
@@ -286,10 +286,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(test)]
     pub(crate) async fn load_head_for_test(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreDeviceHeadRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        commit: &crate::protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceHead, StoreError> {
+        reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        commit: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
         Ok(self
             .history_verifier
             .load_head(reference, registration, commit)

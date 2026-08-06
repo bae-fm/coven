@@ -11,7 +11,7 @@ impl StoreDatabase {
     /// share this one derivation.
     pub(crate) fn snapshot_required_retained_refs(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<BTreeSet<String>, DbError> {
         let references = query_mapped_rows(
             conn,
@@ -37,7 +37,7 @@ impl StoreDatabase {
         )?;
         let mut bootstrap_cuts = BTreeMap::new();
         for (circle_id, activation_commit, exact_cut) in bootstrap_rows {
-            let circle_id: crate::protocol::circle::CircleId = circle_id
+            let circle_id: coven_protocol::circle::CircleId = circle_id
                 .parse()
                 .map_err(|error| DbError::context("snapshot Circle bootstrap id", error))?;
             let cut: CommitFrontier = serde_json::from_str(&exact_cut)
@@ -61,9 +61,8 @@ impl StoreDatabase {
             let materialization =
                 Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
             let has_uncovered_circle_package = materialization.packages().iter().any(|package| {
-                let crate::protocol::audience_package::PackageAudience::Circle {
-                    circle_id, ..
-                } = package.audience()
+                let coven_protocol::audience_package::PackageAudience::Circle { circle_id, .. } =
+                    package.audience()
                 else {
                     return false;
                 };
@@ -80,7 +79,7 @@ impl StoreDatabase {
 
     pub(crate) fn retain_snapshot_replay_inputs_on(
         conn: &rusqlite::Transaction<'_>,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
         let required = Self::snapshot_required_retained_refs(conn, root)?;
         let mut retained = Vec::with_capacity(required.len());
@@ -161,7 +160,7 @@ impl StoreDatabase {
 
     pub(crate) fn retain_snapshot_device_states_on(
         conn: &rusqlite::Transaction<'_>,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         coverage: BTreeMap<String, StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
         let mut required = coverage.into_values().collect::<BTreeSet<_>>();
@@ -255,7 +254,7 @@ impl StoreDatabase {
 
     pub(crate) fn validate_snapshot_retained_inputs_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
         // Each recorded author-exclusion activation must still match its
         // exclusion locator, so the image's exclusion table is internally exact.

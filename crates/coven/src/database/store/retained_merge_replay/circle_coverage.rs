@@ -4,7 +4,7 @@ use crate::database::query_mapped_rows;
 impl StoreDatabase {
     pub(crate) async fn prepare_circle_restore_selection(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
         self.connection
             .call(move |conn| {
@@ -18,14 +18,14 @@ impl StoreDatabase {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )?;
                 let mut circles: Vec<(
-                    crate::protocol::circle::CircleId,
-                    Vec<crate::protocol::circle::CircleControlCoord>,
+                    coven_protocol::circle::CircleId,
+                    Vec<coven_protocol::circle::CircleControlCoord>,
                 )> = Vec::new();
                 for (circle_id, control_coord) in rows {
-                    let circle_id: crate::protocol::circle::CircleId = circle_id
+                    let circle_id: coven_protocol::circle::CircleId = circle_id
                         .parse()
                         .map_err(|error| DbError::context("parse retained Circle id", error))?;
-                    let control: crate::protocol::circle::CircleControlCoord =
+                    let control: coven_protocol::circle::CircleControlCoord =
                         serde_json::from_str(&control_coord).map_err(|error| {
                             DbError::context("parse retained Circle control coordinate", error)
                         })?;
@@ -48,7 +48,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_materialization_by_ref(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.connection
@@ -60,7 +60,7 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_replay_epoch_index(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
         self.with_retained_merge_materializations(move |conn, cache| {
             cache.replay_inputs_on(conn, &root)?;
@@ -71,7 +71,7 @@ impl StoreDatabase {
 
     pub(crate) fn record_circle_bootstrap_coverage_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
         activations: &VerifiedCircleActivations,
     ) -> Result<(), DbError> {
@@ -109,10 +109,10 @@ impl StoreDatabase {
     /// just-installed control indexes.
     pub(crate) fn record_one_circle_bootstrap_coverage_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
-        bootstrap: &crate::protocol::circle_activation::VerifiedCircleImage,
-        activation_control: &crate::protocol::circle::PreparedCircleControl,
+        bootstrap: &coven_protocol::circle_activation::VerifiedCircleImage,
+        activation_control: &coven_protocol::circle::PreparedCircleControl,
     ) -> Result<(), DbError> {
         {
             let circle_id = bootstrap.circle_id().to_string();
@@ -155,7 +155,7 @@ impl StoreDatabase {
             if let Some((prior_control, prior_commit, prior_cut, prior_image_hash, prior_ref)) =
                 existing
             {
-                let prior_reference: crate::protocol::circle::CircleBootstrapRef =
+                let prior_reference: coven_protocol::circle::CircleBootstrapRef =
                     serde_json::from_slice(&prior_ref).map_err(|error| {
                         DbError::context("parse prior Circle bootstrap reference", error)
                     })?;
@@ -188,7 +188,7 @@ impl StoreDatabase {
                     // Row already records this exact image — idempotent no-op.
                     return Ok(());
                 }
-                let prior_control: crate::protocol::circle::CircleControlCoord =
+                let prior_control: coven_protocol::circle::CircleControlCoord =
                     serde_json::from_str(&prior_control).map_err(|error| {
                         DbError::context("parse prior Circle bootstrap control", error)
                     })?;
@@ -256,7 +256,7 @@ impl StoreDatabase {
     /// absent is not an error — the identity simply had no coverage to clear.
     pub(crate) fn clear_circle_bootstrap_coverage_on(
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(), DbError> {
         conn.execute(
             "DELETE FROM circle_bootstrap_coverage WHERE circle_id = ?1",
@@ -274,7 +274,7 @@ impl StoreDatabase {
     /// recorder re-verifies each activation against any existing row.
     pub(crate) fn seed_stream_activation_index_from_retained_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
         let encoded_refs = query_mapped_rows(
             conn,
@@ -300,8 +300,8 @@ impl StoreDatabase {
 
     pub(crate) fn circle_bootstrap_coverage_ref_on(
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle::CircleBootstrapCoverageRef>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
         let row: Option<(String, String, Vec<u8>)> = conn
             .query_row(
                 "SELECT control_coord, activation_commit, bootstrap_ref
@@ -314,15 +314,14 @@ impl StoreDatabase {
         let Some((control, activation_commit, bootstrap_ref)) = row else {
             return Ok(None);
         };
-        let control: crate::protocol::circle::CircleControlCoord =
-            serde_json::from_str(&control)
-                .map_err(|error| DbError::context("parse Circle coverage control", error))?;
+        let control: coven_protocol::circle::CircleControlCoord = serde_json::from_str(&control)
+            .map_err(|error| DbError::context("parse Circle coverage control", error))?;
         let activation_commit: StoreBatchCommitRef = serde_json::from_str(&activation_commit)
             .map_err(|error| DbError::context("parse Circle coverage activation", error))?;
-        let bootstrap: crate::protocol::circle::CircleBootstrapRef =
+        let bootstrap: coven_protocol::circle::CircleBootstrapRef =
             serde_json::from_slice(&bootstrap_ref)
                 .map_err(|error| DbError::context("parse Circle coverage bootstrap", error))?;
-        Ok(Some(crate::protocol::circle::CircleBootstrapCoverageRef {
+        Ok(Some(coven_protocol::circle::CircleBootstrapCoverageRef {
             circle_id,
             control,
             activation_commit,
@@ -335,7 +334,7 @@ impl StoreDatabase {
     ) -> Result<
         Vec<(
             StoreBatchCommitRef,
-            crate::protocol::circle_activation::VerifiedCircleImage,
+            coven_protocol::circle_activation::VerifiedCircleImage,
         )>,
         DbError,
     > {
@@ -368,7 +367,7 @@ impl StoreDatabase {
             encoded_reference,
         ) in rows
         {
-            let circle_id: crate::protocol::circle::CircleId = circle_id
+            let circle_id: coven_protocol::circle::CircleId = circle_id
                 .parse()
                 .map_err(|error| DbError::context("parse retained Circle bootstrap id", error))?;
             let control = serde_json::from_str(&control).map_err(|error| {
@@ -381,7 +380,7 @@ impl StoreDatabase {
             let exact_cut: CommitFrontier = serde_json::from_str(&exact_cut).map_err(|error| {
                 DbError::context("parse retained Circle bootstrap coverage", error)
             })?;
-            let reference: crate::protocol::circle::CircleBootstrapRef =
+            let reference: coven_protocol::circle::CircleBootstrapRef =
                 serde_json::from_slice(&encoded_reference).map_err(|error| {
                     DbError::context("parse retained Circle bootstrap reference", error)
                 })?;
@@ -402,7 +401,7 @@ impl StoreDatabase {
             // replay loop runs the full image verification against the retained
             // control and routing key.
             let bootstrap =
-                crate::protocol::circle_activation::VerifiedCircleImage::from_stored_image(
+                coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
                     circle_id,
                     control,
                     reference,

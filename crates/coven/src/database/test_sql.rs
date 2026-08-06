@@ -165,9 +165,9 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-    ) -> Result<crate::protocol::remote_object::RemoteObjectRecord, DbError> {
-        let object_id = crate::protocol::remote_object::remote_object_id(object);
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
+        let object_id = coven_protocol::remote_object::remote_object_id(object);
         let state: String = self
             .connection
             .query_row(
@@ -181,7 +181,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn remote_objects(
         &self,
-    ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, DbError> {
+    ) -> Result<Vec<coven_protocol::remote_object::RemoteObjectRecord>, DbError> {
         self.query(
             "SELECT state FROM remote_objects ORDER BY object_id",
             [],
@@ -197,10 +197,10 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn replace_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-        remote: &crate::protocol::remote_object::RemoteObjectRecord,
+        object: &coven_protocol::objects::ExactObjectRef,
+        remote: &coven_protocol::remote_object::RemoteObjectRecord,
     ) -> Result<(), DbError> {
-        let object_id = crate::protocol::remote_object::remote_object_id(object);
+        let object_id = coven_protocol::remote_object::remote_object_id(object);
         let state = serde_json::to_string(remote)
             .map_err(|error| DbError::context("serialize test remote object", error))?;
         let updated = self
@@ -220,9 +220,9 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn remote_object_exists(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
+        object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<bool, DbError> {
-        let object_id = crate::protocol::remote_object::remote_object_id(object);
+        let object_id = coven_protocol::remote_object::remote_object_id(object);
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
@@ -234,7 +234,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn remote_object_id_exists(
         &self,
-        object_id: crate::protocol::store_commit::ObjectHash,
+        object_id: coven_protocol::store_commit::ObjectHash,
     ) -> Result<bool, DbError> {
         self.connection
             .query_row(
@@ -247,9 +247,9 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn delete_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
+        object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
-        let object_id = crate::protocol::remote_object::remote_object_id(object);
+        let object_id = coven_protocol::remote_object::remote_object_id(object);
         let deleted = self
             .connection
             .execute(
@@ -322,7 +322,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn circle_control_activation_count(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
         self.connection
             .query_row(
@@ -365,7 +365,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn replace_circle_operation_payload(
         &self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
         payload: &[u8],
     ) -> Result<(), DbError> {
         self.connection
@@ -380,7 +380,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn circle_bootstrap_failure_state(
         &self,
         blob_id: &str,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         control_coord: &str,
         remote_object_id: String,
     ) -> Result<(bool, bool, bool, bool), DbError> {
@@ -407,7 +407,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn forge_circle_close_exclusion(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(), DbError> {
         self.connection
             .execute(
@@ -491,19 +491,19 @@ impl DatabaseTestSql<'_> {
         generation_one_key: [u8; 32],
         table: &str,
         row_id: &str,
-    ) -> Result<crate::protocol::circle::RowRoutingId, DbError> {
+    ) -> Result<coven_protocol::circle::RowRoutingId, DbError> {
         let root_hash = self.store_root_hash()?;
         let encryption = coven_keys::encryption::EncryptionService::from_key(generation_one_key);
-        let key = crate::protocol::circle::derive_row_routing_key(&encryption, root_hash)
+        let key = coven_protocol::circle::derive_row_routing_key(&encryption, root_hash)
             .map_err(|error| DbError::Message(error.to_string()))?;
-        Ok(crate::protocol::circle::row_routing_id(&key, table, row_id))
+        Ok(coven_protocol::circle::row_routing_id(&key, table, row_id))
     }
 
     pub(crate) fn retained_merge_input(
         &self,
         stream_id: &str,
         sequence: u64,
-    ) -> Result<(crate::protocol::store_commit::ObjectHash, Vec<u8>), DbError> {
+    ) -> Result<(coven_protocol::store_commit::ObjectHash, Vec<u8>), DbError> {
         let sequence = i64::try_from(sequence).map_err(|error| {
             DbError::context(
                 format!("retained Merge sequence {sequence} is invalid"),
@@ -529,7 +529,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn tamper_retained_recovery_registration(
         &self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
         tamper: RetainedRegistrationTamper,
     ) -> Result<(), DbError> {
         let stream_id = reference.coord.stream_id.to_string();
@@ -579,7 +579,7 @@ impl DatabaseTestSql<'_> {
             let canonical_input =
                 serde_json::to_vec(&input).map_err(|error| DbError::Message(error.to_string()))?;
             let input_hash =
-                crate::protocol::store_commit::ObjectHash::digest(&canonical_input).to_string();
+                coven_protocol::store_commit::ObjectHash::digest(&canonical_input).to_string();
             transaction
                 .execute(
                     "DELETE FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
@@ -624,7 +624,7 @@ impl DatabaseTestSql<'_> {
             let old_hash = stored_hash
                 .parse()
                 .map_err(|error| DbError::context("stored retained input hash", error))?;
-            let new_hash = crate::protocol::store_commit::ObjectHash::digest(canonical_input);
+            let new_hash = coven_protocol::store_commit::ObjectHash::digest(canonical_input);
             let rows = transaction
                 .query(
                     "SELECT indexed.object_id, remote.state
@@ -642,18 +642,18 @@ impl DatabaseTestSql<'_> {
                 ));
             }
             for (object_id, state) in rows {
-                let mut remote: crate::protocol::remote_object::RemoteObjectRecord =
+                let mut remote: coven_protocol::remote_object::RemoteObjectRecord =
                     serde_json::from_str(&state).map_err(|error| {
                         DbError::context(format!("parse retained replay object {object_id}"), error)
                     })?;
-                let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
+                let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) =
                     &mut remote
                 else {
                     return Err(DbError::Message(format!(
                         "retained replay object {object_id} is not shared"
                     )));
                 };
-                let crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                let coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                     ownership,
                 } = &mut record.state
                 else {
@@ -665,8 +665,8 @@ impl DatabaseTestSql<'_> {
                     .activated
                     .iter()
                     .find_map(|owner| match owner {
-                        crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                            crate::protocol::remote_object::RetainedReplayOwner::Commit {
+                        coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
+                            coven_protocol::remote_object::RetainedReplayOwner::Commit {
                                 commit,
                                 input_hash,
                             },
@@ -680,8 +680,8 @@ impl DatabaseTestSql<'_> {
                     })?;
                 ownership.activated.remove(&old_owner.0);
                 ownership.activated.insert(
-                    crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                        crate::protocol::remote_object::RetainedReplayOwner::Commit {
+                    coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
+                        coven_protocol::remote_object::RetainedReplayOwner::Commit {
                             commit: old_owner.1,
                             input_hash: new_hash,
                         },
@@ -727,7 +727,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn corrupt_store_device_registration_bytes(
         &self,
-        reference: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<(), DbError> {
         self.connection
             .execute(
@@ -791,10 +791,10 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn insert_retained_replay_object(
         &self,
-        owner: &crate::protocol::remote_object::RetainedReplayOwner,
-        object: &crate::protocol::objects::ExactObjectRef,
+        owner: &coven_protocol::remote_object::RetainedReplayOwner,
+        object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
-        let crate::protocol::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
+        let coven_protocol::remote_object::RetainedReplayOwner::Commit { commit, input_hash } =
             owner;
         let sequence = i64::try_from(commit.coord.sequence())
             .map_err(|error| DbError::context("invalid sequence", error))?;
@@ -809,7 +809,7 @@ impl DatabaseTestSql<'_> {
                     serde_json::to_string(commit)
                         .map_err(|error| DbError::Message(error.to_string()))?,
                     input_hash.to_string(),
-                    crate::protocol::remote_object::remote_object_id(object).to_string(),
+                    coven_protocol::remote_object::remote_object_id(object).to_string(),
                 ],
             )
             .map(|_| ())
@@ -836,7 +836,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn scoped_routing_counts(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(i64, i64), DbError> {
         let routes = table_row_count(
             self.connection,
@@ -915,7 +915,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn install_indexed_shared_blobs(
         &self,
         write_id: &crate::WriteId,
-        records: Vec<crate::protocol::remote_object::RemoteObjectRecord>,
+        records: Vec<coven_protocol::remote_object::RemoteObjectRecord>,
     ) -> Result<(), DbError> {
         self.transaction(|transaction| {
             for (index, record) in records.into_iter().enumerate() {
@@ -937,7 +937,7 @@ impl DatabaseTestSql<'_> {
                          VALUES (?1, 'store', ?2, ?3, NULL)",
                         rusqlite::params![
                             write_id.as_str(),
-                            crate::protocol::store_commit::ObjectHash::digest(
+                            coven_protocol::store_commit::ObjectHash::digest(
                                 format!("indexed shared blob {index}").as_bytes()
                             )
                             .to_string(),
@@ -952,7 +952,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn staged_circle_acknowledgement_object(
         &self,
-    ) -> Result<crate::protocol::objects::PreparedExactObject, DbError> {
+    ) -> Result<coven_protocol::objects::PreparedExactObject, DbError> {
         let encoded: String = self
             .connection
             .query_row(
@@ -966,7 +966,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn forge_device_in_state_snapshots(
         &self,
-        forged_device_id: crate::protocol::store_commit::StoreDeviceId,
+        forged_device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<(), DbError> {
         let rows = self.query(
             "SELECT commit_ref, state FROM store_device_state_snapshots",
@@ -974,7 +974,7 @@ impl DatabaseTestSql<'_> {
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         for (commit, encoded) in rows {
-            let state: crate::protocol::store_commit::ResolvedStoreDeviceState =
+            let state: coven_protocol::store_commit::ResolvedStoreDeviceState =
                 serde_json::from_str(&encoded)
                     .map_err(|error| DbError::Message(error.to_string()))?;
             let mut forged_registration = state
@@ -1060,7 +1060,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn delete_exact_materialized_commit(
         &self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let sequence = i64::try_from(reference.coord.sequence())
             .map_err(|error| DbError::context("invalid sequence", error))?;
@@ -1084,7 +1084,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn delete_retained_materialization_without_foreign_keys(
         &self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let sequence = i64::try_from(reference.coord.sequence())
             .map_err(|error| DbError::context("invalid sequence", error))?;
@@ -1120,7 +1120,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn replace_device_state_snapshot(
         &self,
         commit_ref: &str,
-        state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
+        state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
     ) -> Result<(), DbError> {
         let encoded =
             serde_json::to_string(state).map_err(|error| DbError::Message(error.to_string()))?;
@@ -1141,7 +1141,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn register_external_blob(
         &self,
-        reference: &crate::protocol::blob::RowBlobRef,
+        reference: &coven_protocol::blob::RowBlobRef,
         path: &std::path::Path,
     ) -> Result<(), DbError> {
         ExternalBlobRecords::new(self.connection).register(reference, path)
@@ -1149,7 +1149,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn clear_external_blob(
         &self,
-        reference: &crate::protocol::blob::RowBlobRef,
+        reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<(), DbError> {
         ExternalBlobRecords::new(self.connection).clear(reference)
     }
@@ -1175,7 +1175,7 @@ impl DatabaseTestSql<'_> {
         &self,
         root_table: &str,
         root_id: &str,
-        row: &crate::protocol::blob::RowBlobRef,
+        row: &coven_protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         retain_pinned: bool,
         created_at: &str,
@@ -1192,7 +1192,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn enqueue_blob_delete(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         created_at: &str,
     ) -> Result<(), DbError> {
         crate::database::CloudOutboxRecords::new(self.connection).enqueue_delete(stored, created_at)
@@ -1277,7 +1277,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn insert_published_blob_drop_intent(
         &self,
         seq: u64,
-        drop: &crate::protocol::blob::DeferredLocalBlobDrop,
+        drop: &coven_protocol::blob::DeferredLocalBlobDrop,
     ) -> Result<(), DbError> {
         self.connection
             .execute(
@@ -1318,7 +1318,7 @@ impl DatabaseTestSql<'_> {
                 rusqlite::params![
                     row_id,
                     size,
-                    crate::protocol::store_commit::ObjectHash::digest(bytes).to_string(),
+                    coven_protocol::store_commit::ObjectHash::digest(bytes).to_string(),
                     format!("photos/{row_id}.bin"),
                     stamp,
                 ],
@@ -1361,14 +1361,14 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn circle_current_state(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
         crate::database::StoreDatabase::circle_current_state_on(self.connection, circle_id)
     }
 
     pub(crate) fn circle_state_counts(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(i64, i64, i64), DbError> {
         let circle_id = circle_id.to_string();
         let activated = self.connection.query_row(
@@ -1392,7 +1392,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn circle_access_owner(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<String, DbError> {
         self.connection
             .query_row(
@@ -1406,7 +1406,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn store_device_registration_activation(
         &self,
         device_id: &str,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceRegistrationActivation, DbError> {
+    ) -> Result<coven_protocol::store_commit::StoreDeviceRegistrationActivation, DbError> {
         let authority = self
             .connection
             .query_row(
@@ -1456,7 +1456,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn store_device_state_snapshot_refs(
         &self,
-    ) -> Result<Vec<crate::protocol::store_commit::StoreBatchCommitRef>, DbError> {
+    ) -> Result<Vec<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
         let encoded = self.query(
             "SELECT commit_ref FROM store_device_state_snapshots",
             [],
@@ -1475,10 +1475,10 @@ impl DatabaseTestSql<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_circle_current_state(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         control_coord: &str,
         stream_id: &str,
-        commit_hash: crate::protocol::store_commit::ObjectHash,
+        commit_hash: coven_protocol::store_commit::ObjectHash,
         control_bytes: &[u8],
         owner_pubkey: Option<&str>,
         state: &[u8],
@@ -1518,7 +1518,7 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn store_root_hash(
         &self,
-    ) -> Result<crate::protocol::store_commit::ObjectHash, DbError> {
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
         let encoded = self
             .connection
             .query_row(
@@ -1605,10 +1605,10 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn install_test_store_root_authority(
         &self,
         label: &str,
-    ) -> Result<crate::protocol::store_commit::ObjectHash, DbError> {
-        use crate::protocol::objects::ObjectSlot;
-        use crate::protocol::objects::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
-        use crate::protocol::store_commit::{
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
+        use coven_protocol::objects::ObjectSlot;
+        use coven_protocol::objects::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
+        use coven_protocol::store_commit::{
             GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId,
             StoreProtocolRoot,
         };
@@ -1627,7 +1627,7 @@ impl DatabaseTestSql<'_> {
             .parse()
             .map_err(|error| DbError::context("test Store sync-routing hash", error))?;
         let root_slot = ObjectSlot::logical(
-            crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
+            coven_protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
         let descriptor = StoreCreationDescriptor {
@@ -1645,7 +1645,7 @@ impl DatabaseTestSql<'_> {
             schema_version: 1,
             sync_routing_hash,
             founder_pubkey: coven_keys::keys::public_key_hex(&signer),
-            founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
+            founder_grant: coven_protocol::causal_grants::MembershipGrantId::from_test_label(
                 &format!("{label} founder grant"),
             ),
             root_slot: root_slot.clone(),
@@ -1654,7 +1654,7 @@ impl DatabaseTestSql<'_> {
             ))
             .map_err(|error| DbError::Message(error.to_string()))?,
             founder_provider_admin:
-                crate::protocol::provider::FounderProviderAdminGrant::from_test_label(label),
+                coven_protocol::provider::FounderProviderAdminGrant::from_test_label(label),
             founder_membership: GrantStreamAnchor::StoreMembership {
                 first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
                     .map_err(|error| DbError::Message(error.to_string()))?,
@@ -1675,9 +1675,9 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn install_store_root_authority(
         &self,
-        hash: crate::protocol::store_commit::ObjectHash,
+        hash: coven_protocol::store_commit::ObjectHash,
         bytes: &[u8],
-        object: &crate::protocol::objects::ExactObjectRef,
+        object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         self.connection
             .execute(
@@ -1699,8 +1699,8 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn circle_bootstrap_coverage(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle::CircleBootstrapCoverageRef>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
         crate::database::StoreDatabase::circle_bootstrap_coverage_ref_on(self.connection, circle_id)
     }
 
@@ -1708,8 +1708,8 @@ impl DatabaseTestSql<'_> {
         &self,
     ) -> Result<
         Vec<(
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::circle_activation::VerifiedCircleImage,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::circle_activation::VerifiedCircleImage,
         )>,
         DbError,
     > {
@@ -1719,7 +1719,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn materialized_frontier(
         &self,
     ) -> Result<
-        std::collections::BTreeMap<String, crate::protocol::store_commit::StoreBatchCommitRef>,
+        std::collections::BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
         DbError,
     > {
         crate::database::StoreDatabase::materialized_frontier_on(self.connection, None)
@@ -1727,15 +1727,15 @@ impl DatabaseTestSql<'_> {
 
     pub(crate) fn load_retained_merge_replay_inputs(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<crate::database::OwnedVerifiedMergeMaterialization>, DbError> {
         crate::database::StoreDatabase::load_retained_merge_replay_inputs_on(self.connection, root)
     }
 
     pub(crate) fn record_verified_circle_activations(
         &self,
-        commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         let transaction = self
             .connection
@@ -1749,7 +1749,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn apply_changeset(
         &self,
         bytes: &[u8],
-        tables: &[crate::protocol::synced_schema::SyncedTable],
+        tables: &[coven_protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<crate::database::ApplyResult, DbError> {
         crate::database::resolve_and_apply_changeset(
@@ -1763,7 +1763,7 @@ impl DatabaseTestSql<'_> {
     pub(crate) fn apply_changesets_atomically(
         &self,
         changesets: Vec<Vec<u8>>,
-        tables: &[crate::protocol::synced_schema::SyncedTable],
+        tables: &[coven_protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<(Vec<crate::database::ApplyResult>, bool), DbError> {
         let schema = std::sync::Arc::new(crate::database::TableSchema::from_db(

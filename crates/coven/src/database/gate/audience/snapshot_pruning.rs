@@ -140,7 +140,7 @@ pub(crate) fn validate_snapshot_routing_state(
     )?;
     for (routing_id, circle_id, stamp) in mirror_rows {
         routing_id
-            .parse::<crate::protocol::circle::RowRoutingId>()
+            .parse::<coven_protocol::circle::RowRoutingId>()
             .map_err(|error| {
                 GateError::InvalidMaterializedRouting(format!(
                     "Store audience mirror has invalid routing id {routing_id:?}: {error}"

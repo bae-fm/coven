@@ -55,14 +55,14 @@ use crate::database::{
     persist_exact_remote_object_on, replace_prepared_merge_head_remote_on,
     required_store_root_authority_on, Database, DbError, OutboundStoreAckActivation,
 };
-use crate::protocol::objects::PreparedExactObject;
-use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
-use crate::protocol::remote_object::{
+use coven_protocol::objects::PreparedExactObject;
+use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
+use coven_protocol::remote_object::{
     remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
 };
 #[cfg(test)]
-use crate::protocol::store_commit::StoreBatchCommitRef;
-use crate::protocol::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
+use coven_protocol::store_commit::StoreBatchCommitRef;
+use coven_protocol::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
 
 const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
 
@@ -223,14 +223,14 @@ impl StoreDatabaseConnection {
 pub(crate) struct StoreDatabase {
     connection: StoreDatabaseConnection,
     runtime: StoreDatabaseRuntime,
-    hlc: std::sync::Arc<crate::protocol::hlc::Hlc>,
+    hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
     synced_tables: std::sync::Arc<Vec<crate::SyncedTable>>,
     schema_version: u32,
-    sync_routing_hash: crate::protocol::store_commit::ObjectHash,
+    sync_routing_hash: coven_protocol::store_commit::ObjectHash,
     gates: std::sync::Arc<crate::database::Gates>,
     blob_decls: std::sync::Arc<crate::database::BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
-    transfer_limits: crate::protocol::blob::TransferLimits,
+    transfer_limits: coven_protocol::blob::TransferLimits,
     ids: coven_foundation::id_provider::IdRef,
     write_statuses: std::sync::Arc<
         std::sync::Mutex<
@@ -287,7 +287,7 @@ impl StoreDatabase {
         self.schema_version
     }
 
-    pub(crate) fn sync_routing_hash(&self) -> crate::protocol::store_commit::ObjectHash {
+    pub(crate) fn sync_routing_hash(&self) -> coven_protocol::store_commit::ObjectHash {
         self.sync_routing_hash
     }
 
@@ -295,7 +295,7 @@ impl StoreDatabase {
         &self.synced_tables
     }
 
-    pub(crate) fn transfer_limits(&self) -> crate::protocol::blob::TransferLimits {
+    pub(crate) fn transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
         self.transfer_limits
     }
 
@@ -315,7 +315,7 @@ impl StoreDatabase {
         self.blob_decls.clone()
     }
 
-    fn hlc(&self) -> std::sync::Arc<crate::protocol::hlc::Hlc> {
+    fn hlc(&self) -> std::sync::Arc<coven_protocol::hlc::Hlc> {
         self.hlc.clone()
     }
 
@@ -325,7 +325,7 @@ impl StoreDatabase {
 
     pub(crate) async fn persist_hlc_high_water(&self) -> Result<(), DbError> {
         self.set_protocol_state(
-            crate::protocol::hlc::HIGHWATER_STATE_KEY,
+            coven_protocol::hlc::HIGHWATER_STATE_KEY,
             &self.hlc.high_water().to_string(),
         )
         .await
@@ -334,7 +334,7 @@ impl StoreDatabase {
     pub(crate) fn blob_ref_from_change(
         &self,
         change: &coven_foundation::changeset::RowChange,
-    ) -> Result<Option<crate::protocol::blob::BlobRef>, crate::database::BlobDeclError> {
+    ) -> Result<Option<coven_protocol::blob::BlobRef>, crate::database::BlobDeclError> {
         self.blob_decls.ref_from_change(change)
     }
 
@@ -502,8 +502,8 @@ impl StoreDatabase {
 
     pub(crate) async fn begin_store_creation_attempt(
         &self,
-        initialized: crate::protocol::store_creation::StoreCreationAttempt,
-    ) -> Result<crate::protocol::store_creation::StoreCreationAttempt, DbError> {
+        initialized: coven_protocol::store_creation::StoreCreationAttempt,
+    ) -> Result<coven_protocol::store_creation::StoreCreationAttempt, DbError> {
         let value = serde_json::to_string(&initialized)
             .map_err(|error| DbError::context("serialize Store creation attempt", error))?;
         self.connection
@@ -513,14 +513,14 @@ impl StoreDatabase {
                     "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
                      ON CONFLICT(key) DO NOTHING",
                     (
-                        crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                        coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                         &value,
                     ),
                 )
                 .map_err(DbError::from)?;
                 let actual = crate::database::required_protocol_state_on(
                     &tx,
-                    crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                    coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?;
                 tx.commit().map_err(DbError::from)?;
                 serde_json::from_str(&actual)
@@ -531,12 +531,12 @@ impl StoreDatabase {
 
     pub(crate) async fn load_store_creation_attempt(
         &self,
-    ) -> Result<Option<crate::protocol::store_creation::StoreCreationAttempt>, DbError> {
+    ) -> Result<Option<coven_protocol::store_creation::StoreCreationAttempt>, DbError> {
         self.connection
             .call(move |conn| {
                 crate::database::get_protocol_state_on(
                     conn,
-                    crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                    coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                 )?
                 .map(|value| {
                     serde_json::from_str(&value)
@@ -549,8 +549,8 @@ impl StoreDatabase {
 
     pub(crate) async fn advance_store_creation_attempt(
         &self,
-        previous: crate::protocol::store_creation::StoreCreationAttempt,
-        next: crate::protocol::store_creation::StoreCreationAttempt,
+        previous: coven_protocol::store_creation::StoreCreationAttempt,
+        next: coven_protocol::store_creation::StoreCreationAttempt,
     ) -> Result<(), DbError> {
         let previous = serde_json::to_string(&previous)
             .map_err(|error| DbError::context("serialize Store creation predecessor", error))?;
@@ -563,7 +563,7 @@ impl StoreDatabase {
                         "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
                         (
                             &next,
-                            crate::protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                            coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
                             &previous,
                         ),
                     )
@@ -608,7 +608,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn required_store_root_hash(
         &self,
-    ) -> Result<crate::protocol::store_commit::ObjectHash, DbError> {
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
         self.connection
             .call(|connection| Ok(required_store_root_authority_on(connection)?.store_root_hash))
             .await
@@ -683,8 +683,8 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn circle_bootstrap_coverage_ref(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle::CircleBootstrapCoverageRef>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
         self.connection
             .call(move |connection| Self::circle_bootstrap_coverage_ref_on(connection, circle_id))
             .await
@@ -696,7 +696,7 @@ impl StoreDatabase {
     ) -> Result<
         Vec<(
             StoreBatchCommitRef,
-            crate::protocol::circle_activation::VerifiedCircleImage,
+            coven_protocol::circle_activation::VerifiedCircleImage,
         )>,
         DbError,
     > {
@@ -708,7 +708,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn circle_control_activation_count_for_test(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
         self.connection
             .call(move |connection| {

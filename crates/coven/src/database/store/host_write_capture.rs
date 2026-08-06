@@ -61,8 +61,8 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
 
     pub(crate) fn local_activated_registration(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
-    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+        root: &coven_protocol::store_commit::StoreRootRef,
+    ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         let reference =
             local_activated_registration_ref_on(self.transaction)?.ok_or_else(|| {
                 DbError::Message(
@@ -70,7 +70,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
                 )
             })?;
         let registration = load_activated_registration_on(self.transaction, root, &reference)?;
-        crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+        coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
             reference,
             registration,
         )
@@ -79,19 +79,19 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
 
     pub(crate) fn circle_publication_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
         super::circle_publication_context_on(self.transaction, circle_id, expected_control)
     }
 
     pub(crate) fn circle_blob_opening_protection(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: &crate::protocol::circle::CircleControlCoord,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: &coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         super::circle_blob_opening_protection_on(
             self.transaction,
             root,
@@ -363,7 +363,7 @@ impl StoreDatabase {
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let mut facts = BTreeMap::new();
         for partition in partitions {
-            if partition.audience == crate::protocol::circle::Audience::Local {
+            if partition.audience == coven_protocol::circle::Audience::Local {
                 continue;
             }
             for fact in
@@ -419,7 +419,7 @@ impl StoreDatabase {
     ) -> Result<WriteStatus, DbError> {
         let remote_partitions = partitions
             .iter()
-            .filter(|partition| partition.audience != crate::protocol::circle::Audience::Local)
+            .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
             .collect::<Vec<_>>();
         let affected_rows = if remote_partitions.is_empty() {
             // A tripwire, not a routine event. An empty capture from a transaction
@@ -488,7 +488,7 @@ impl StoreDatabase {
             .map_err(|error| DbError::context("serialize Store write blob facts", error))?;
         let store_changeset = remote_partitions
             .iter()
-            .find(|partition| partition.audience == crate::protocol::circle::Audience::Store)
+            .find(|partition| partition.audience == coven_protocol::circle::Audience::Store)
             .map(|partition| partition.changeset.as_slice())
             .unwrap_or_default();
         tx.execute(
@@ -508,9 +508,9 @@ impl StoreDatabase {
         .map_err(DbError::from)?;
         for partition in partitions {
             let audience = match partition.audience {
-                crate::protocol::circle::Audience::Store => "store".to_string(),
-                crate::protocol::circle::Audience::Local => "local".to_string(),
-                crate::protocol::circle::Audience::Circle(circle_id) => circle_id.to_string(),
+                coven_protocol::circle::Audience::Store => "store".to_string(),
+                coven_protocol::circle::Audience::Local => "local".to_string(),
+                coven_protocol::circle::Audience::Circle(circle_id) => circle_id.to_string(),
             };
             let control = partition
                 .control
@@ -629,7 +629,7 @@ impl StoreDatabase {
                     )));
                 }
                 store = Some(AudiencePartition {
-                    audience: crate::protocol::circle::Audience::Store,
+                    audience: coven_protocol::circle::Audience::Store,
                     control: None,
                     changeset,
                 });
@@ -647,14 +647,14 @@ impl StoreDatabase {
                     )));
                 }
                 local = Some(AudiencePartition {
-                    audience: crate::protocol::circle::Audience::Local,
+                    audience: coven_protocol::circle::Audience::Local,
                     control: None,
                     changeset,
                 });
                 continue;
             }
             let circle_id = audience
-                .parse::<crate::protocol::circle::CircleId>()
+                .parse::<coven_protocol::circle::CircleId>()
                 .map_err(|error| {
                     DbError::context(
                         format!("pending write {write_id} has invalid audience {audience:?}"),
@@ -673,7 +673,7 @@ impl StoreDatabase {
                     ))
                 })?;
             circles.push(AudiencePartition {
-                audience: crate::protocol::circle::Audience::Circle(circle_id),
+                audience: coven_protocol::circle::Audience::Circle(circle_id),
                 control: Some(control),
                 changeset,
             });
@@ -820,11 +820,11 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     let store_root_hash = required_store_root_authority_on(&tx)
                         .map_err(E::from)?
                         .store_root_hash;
-                    let key = crate::protocol::circle::derive_row_routing_key(
-                        encryption,
-                        store_root_hash,
-                    )
-                    .map_err(|error| E::from(DbError::context("derive row routing key", error)))?;
+                    let key =
+                        coven_protocol::circle::derive_row_routing_key(encryption, store_root_hash)
+                            .map_err(|error| {
+                                E::from(DbError::context("derive row routing key", error))
+                            })?;
                     let routing_changeset = capture_routing_changes(&tx, &captured, gates, &key)
                         .map_err(|error| {
                             E::from(DbError::context("capture scoped routing changes", error))
@@ -946,7 +946,7 @@ pub(crate) fn record_prepared_transition_local_blob_moves(
         let Some(audience_move) = moved_rows.get(&(fact.table.clone(), fact.row_id.clone())) else {
             continue;
         };
-        if audience_move.destination == crate::protocol::circle::Audience::Local {
+        if audience_move.destination == coven_protocol::circle::Audience::Local {
             fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
         }
     }

@@ -4,17 +4,13 @@
 //! pulls and applies them through a real [`crate::database::Database`], exercising
 //! the real `pull_changes` + blob plumbing.
 
-use crate::protocol::membership::HeldStorePositionReason;
+use coven_protocol::membership::HeldStorePositionReason;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::database::Database;
-use crate::protocol::blob::{CacheFill, Provenance};
-use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
-use crate::protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
-use crate::protocol::store_commit::StoreDeviceHead;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -22,18 +18,22 @@ use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 use crate::Migration;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::blob::{CacheFill, Provenance};
+use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
+use coven_protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
+use coven_protocol::store_commit::StoreDeviceHead;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
-use crate::protocol::objects::ProtocolObjectDomain;
-use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::*;
+use coven_protocol::objects::ProtocolObjectDomain;
+use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 
 fn exact_cache_path(
     store_dir: &coven_foundation::store_dir::StoreDir,
-    reference: &crate::protocol::blob::RowBlobRef,
+    reference: &coven_protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
     store_dir
@@ -46,7 +46,7 @@ fn exact_cache_path(
 
 fn exact_pinned_path(
     store_dir: &coven_foundation::store_dir::StoreDir,
-    reference: &crate::protocol::blob::RowBlobRef,
+    reference: &coven_protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
     store_dir
@@ -62,21 +62,20 @@ trait PullTestDatabaseOps {
         &self,
         table: &str,
         row_id: &str,
-    ) -> crate::protocol::blob::RowBlobRef;
+    ) -> coven_protocol::blob::RowBlobRef;
     async fn stored_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-    ) -> crate::protocol::remote_object::RemoteObjectRecord;
-    async fn stored_remote_objects(
-        &self,
-    ) -> Vec<crate::protocol::remote_object::RemoteObjectRecord>;
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> coven_protocol::remote_object::RemoteObjectRecord;
+    async fn stored_remote_objects(&self)
+        -> Vec<coven_protocol::remote_object::RemoteObjectRecord>;
     async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>);
     async fn replace_stored_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-        remote: &crate::protocol::remote_object::RemoteObjectRecord,
+        object: &coven_protocol::objects::ExactObjectRef,
+        remote: &coven_protocol::remote_object::RemoteObjectRecord,
     );
-    async fn local_announcement_stream(&self) -> crate::protocol::membership::AuthorStreamId;
+    async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId;
     async fn pull_exact_store_into(
         &self,
         source: &crate::database::Database,
@@ -96,7 +95,7 @@ impl PullTestDatabaseOps for crate::database::Database {
         &self,
         table: &str,
         row_id: &str,
-    ) -> crate::protocol::blob::RowBlobRef {
+    ) -> coven_protocol::blob::RowBlobRef {
         self.row_blob_ref(table, row_id)
             .await
             .expect("load exact row blob reference")
@@ -104,8 +103,8 @@ impl PullTestDatabaseOps for crate::database::Database {
 
     async fn stored_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-    ) -> crate::protocol::remote_object::RemoteObjectRecord {
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> coven_protocol::remote_object::RemoteObjectRecord {
         self.remote_object_for_test(object.clone())
             .await
             .expect("load exact remote object")
@@ -113,7 +112,7 @@ impl PullTestDatabaseOps for crate::database::Database {
 
     async fn stored_remote_objects(
         &self,
-    ) -> Vec<crate::protocol::remote_object::RemoteObjectRecord> {
+    ) -> Vec<coven_protocol::remote_object::RemoteObjectRecord> {
         self.remote_objects_for_test()
             .await
             .expect("load remote objects")
@@ -129,15 +128,15 @@ impl PullTestDatabaseOps for crate::database::Database {
 
     async fn replace_stored_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-        remote: &crate::protocol::remote_object::RemoteObjectRecord,
+        object: &coven_protocol::objects::ExactObjectRef,
+        remote: &coven_protocol::remote_object::RemoteObjectRecord,
     ) {
         self.replace_remote_object_for_test(object.clone(), remote.clone())
             .await
             .expect("replace test remote object");
     }
 
-    async fn local_announcement_stream(&self) -> crate::protocol::membership::AuthorStreamId {
+    async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId {
         let registration = store_database(self)
             .local_blob_write_authority()
             .await
@@ -225,22 +224,22 @@ impl PullTestStoreDirOps for coven_foundation::store_dir::StoreDir {
 }
 
 fn is_external_circle_package(
-    remote: &crate::protocol::remote_object::RemoteObjectRecord,
+    remote: &coven_protocol::remote_object::RemoteObjectRecord,
     retained_for_replay: bool,
 ) -> bool {
-    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = remote else {
+    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = remote else {
         return false;
     };
     if !matches!(
         record.identity.domain,
-        crate::protocol::remote_object::SharedLiveSetObjectDomain::CirclePackage { .. }
+        coven_protocol::remote_object::SharedLiveSetObjectDomain::CirclePackage { .. }
     ) || !matches!(
         record.bytes.stored(),
-        crate::protocol::remote_object::RemoteStoredRepresentation::ExternalExact { .. }
+        coven_protocol::remote_object::RemoteStoredRepresentation::ExternalExact { .. }
     ) {
         return false;
     }
-    let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
         &record.state
     else {
         return false;
@@ -248,19 +247,19 @@ fn is_external_circle_package(
     let has_commit = ownership.activated.iter().any(|owner| {
         matches!(
             owner,
-            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(_)
         )
     });
     let has_replay = ownership.activated.iter().any(|owner| {
         matches!(
             owner,
-            crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(_)
+            coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(_)
         )
     });
     has_commit && has_replay == retained_for_replay
 }
 
-fn commit_stream_id(reference: &crate::protocol::store_commit::StoreBatchCommitRef) -> String {
+fn commit_stream_id(reference: &coven_protocol::store_commit::StoreBatchCommitRef) -> String {
     reference.coord.stream_id.to_string()
 }
 
@@ -282,7 +281,7 @@ trait TestStoreStorage: Sync {
         message: &str,
         keypair: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
-    ) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, String> {
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, String> {
         let configured_tables: Vec<_> = db.synced_tables().iter().map(SyncedTable::name).collect();
         let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
         assert_eq!(configured_tables, supplied_tables);
@@ -404,10 +403,8 @@ trait PullTestStoreOps {
         root_id: &str,
     );
 
-    async fn read_exact_blob(
-        &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Vec<u8>;
+    async fn read_exact_blob(&self, blob: &coven_protocol::blob::locator::StoredBlobRef)
+        -> Vec<u8>;
 
     async fn author_scoped_write(&self, db: &crate::database::Database, sql: String);
 
@@ -422,8 +419,8 @@ trait PullTestStoreOps {
         name: &str,
         sequence: u64,
         changeset: &[u8],
-        authority: Option<crate::protocol::membership::MembershipCoord>,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef;
+        authority: Option<coven_protocol::membership::MembershipCoord>,
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef;
 }
 
 impl PullTestStoreOps for TestStore {
@@ -457,7 +454,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn read_exact_blob(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Vec<u8> {
         let temp = tempfile::tempdir().expect("create exact blob read directory");
         let staged = self
@@ -465,13 +462,13 @@ impl PullTestStoreOps for TestStore {
             .stage_verified_blob_plaintext(
                 blob,
                 match blob.locator() {
-                    crate::protocol::blob::locator::BlobLocator::Opaque { .. } => {
-                        crate::protocol::objects::BlobSpoolProtection::Opaque(
+                    coven_protocol::blob::locator::BlobLocator::Opaque { .. } => {
+                        coven_protocol::objects::BlobSpoolProtection::Opaque(
                             EncryptionService::from_key([42; 32]),
                         )
                     }
-                    crate::protocol::blob::locator::BlobLocator::Browsable { .. } => {
-                        crate::protocol::objects::BlobSpoolProtection::Browsable
+                    coven_protocol::blob::locator::BlobLocator::Browsable { .. } => {
+                        coven_protocol::objects::BlobSpoolProtection::Browsable
                     }
                 },
                 &temp.path().join("plaintext"),
@@ -526,8 +523,8 @@ impl PullTestStoreOps for TestStore {
         name: &str,
         sequence: u64,
         changeset: &[u8],
-        authority: Option<crate::protocol::membership::MembershipCoord>,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+        authority: Option<coven_protocol::membership::MembershipCoord>,
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         let reference = self
             .publish_changeset(name, sequence, changeset, SCHEMA_VERSION)
             .await
@@ -536,7 +533,7 @@ impl PullTestStoreOps for TestStore {
         let commit = graph
             .resign_commit(
                 SCHEMA_VERSION,
-                authority.map(crate::protocol::membership::MembershipGrantCreationAuthority::Entry),
+                authority.map(coven_protocol::membership::MembershipGrantCreationAuthority::Entry),
             )
             .await;
         graph
@@ -575,7 +572,7 @@ fn unique_note_db() -> crate::database::Database {
     open_test_db_schema(
         vec![SyncedTable::new(
             "unique_notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         vec![Migration::run(1, "unique-note-schema", |conn| {
             conn.execute_batch(
@@ -596,7 +593,7 @@ fn uuid_note_db() -> crate::database::Database {
     open_test_db_schema(
         vec![SyncedTable::new(
             "uuid_notes",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )],
         vec![Migration::run(1, "uuid-note-schema", |conn| {
             conn.execute_batch(
@@ -616,11 +613,11 @@ fn mixed_constraint_db() -> crate::database::Database {
         vec![
             SyncedTable::new(
                 "constraint_parents",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
             SyncedTable::new(
                 "constraint_items",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
         ],
         vec![Migration::run(1, "mixed-constraint-schema", |conn| {
@@ -646,8 +643,8 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
     crate::database::Database::open(
         path,
         test_synced_tables_with_blob(decl),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "restart-test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
@@ -741,7 +738,7 @@ fn plain_cloud_test_store() -> (
 fn membership_author_stream(
     chain: &MembershipChain,
     signer: &UserKeypair,
-) -> crate::protocol::membership::AuthorStreamId {
+) -> coven_protocol::membership::AuthorStreamId {
     let author = pubkey_hex(signer);
     let owner_grant = chain
         .active_owner_grant(&author)
@@ -762,7 +759,7 @@ fn signed_member_grant(
     chain: &MembershipChain,
     owner: &UserKeypair,
     member: &UserKeypair,
-) -> crate::protocol::membership::MembershipEntry {
+) -> coven_protocol::membership::MembershipEntry {
     chain
         .signed_set_member_in_stream(
             owner,
@@ -817,12 +814,12 @@ impl<'storage> ExactMembershipChain<'storage> {
 
     async fn publish_entry(
         &mut self,
-        entry: crate::protocol::membership::MembershipEntry,
+        entry: coven_protocol::membership::MembershipEntry,
         signer: &UserKeypair,
     ) {
-        use crate::protocol::membership::{AuthorHead, MembershipHeadRef};
-        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-        use crate::protocol::store_commit::{
+        use coven_protocol::membership::{AuthorHead, MembershipHeadRef};
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        use coven_protocol::store_commit::{
             membership_head_slot_prefix, StreamActivation, SuccessorLink,
         };
 
@@ -856,15 +853,15 @@ impl<'storage> ExactMembershipChain<'storage> {
                 device_signer,
             )
         } else {
-            use crate::protocol::store_commit::{
+            use coven_protocol::store_commit::{
                 DeviceRecoveryId, DeviceStreamAnchor, StoreDeviceRegistration,
                 StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
             };
 
             let recovery_id = DeviceRecoveryId::from_hash(
-                crate::protocol::store_commit::ObjectHash::digest(entry.author_pubkey.as_bytes()),
+                coven_protocol::store_commit::ObjectHash::digest(entry.author_pubkey.as_bytes()),
             );
-            let recovery_prefix = crate::protocol::store_commit::owner_recovery_semantic_prefix(
+            let recovery_prefix = coven_protocol::store_commit::owner_recovery_semantic_prefix(
                 &entry.author_pubkey,
                 entry.author_owner_grant.clone(),
                 1,
@@ -887,7 +884,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 owner_grant: entry.author_owner_grant.clone(),
             };
             let device_id =
-                crate::protocol::store_commit::StoreDeviceId::derive(&storage.root, &origin);
+                coven_protocol::store_commit::StoreDeviceId::derive(&storage.root, &origin);
             let announcement_slot = storage
                 .storage()
                 .allocate_protocol_slot(
@@ -895,7 +892,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                         storage.root.store_root_hash,
                         ProtocolObjectDomain::StoreHead,
                     ),
-                    &crate::protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
+                    &coven_protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
                     ".json",
                 )
                 .await
@@ -907,7 +904,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                         storage.root.store_root_hash,
                         ProtocolObjectDomain::StoreAck,
                     ),
-                    &crate::protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
+                    &coven_protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
                     ".json",
                 )
                 .await
@@ -919,7 +916,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                         storage.root.store_root_hash,
                         ProtocolObjectDomain::StoreSnapshotMeta,
                     ),
-                    &crate::protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
+                    &coven_protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
                     ".json",
                 )
                 .await
@@ -944,7 +941,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 signer,
             )
             .expect("sign exact membership author registration");
-            let semantic_prefix = crate::protocol::store_commit::registration_semantic_prefix(
+            let semantic_prefix = coven_protocol::store_commit::registration_semantic_prefix(
                 &registration.device_id.to_string(),
             );
             let context = ProtocolObjectContext::signed_plaintext(
@@ -993,15 +990,15 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .next_slot
                 .clone(),
             None => match &anchor {
-                crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
-                    first_slot,
-                } => first_slot.clone(),
-                crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery { .. } => {
+                coven_protocol::store_commit::GrantStreamAnchor::StoreMembership { first_slot } => {
+                    first_slot.clone()
+                }
+                coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { .. } => {
                     panic!("test membership author has a recovery stream anchor")
                 }
-                crate::protocol::store_commit::GrantStreamAnchor::CircleControl { .. }
-                | crate::protocol::store_commit::GrantStreamAnchor::CircleRoster { .. }
-                | crate::protocol::store_commit::GrantStreamAnchor::CircleMetadata { .. } => {
+                coven_protocol::store_commit::GrantStreamAnchor::CircleControl { .. }
+                | coven_protocol::store_commit::GrantStreamAnchor::CircleRoster { .. }
+                | coven_protocol::store_commit::GrantStreamAnchor::CircleMetadata { .. } => {
                     panic!("test membership author has a Circle stream anchor")
                 }
             },
@@ -1039,7 +1036,7 @@ impl<'storage> ExactMembershipChain<'storage> {
             .expect("allocate exact membership successor slot");
         let head = AuthorHead::signed(
             entry.store_id.clone(),
-            crate::protocol::membership::MembershipHeadBody {
+            coven_protocol::membership::MembershipHeadBody {
                 author_registration: registration_ref.clone(),
                 entry: entry_ref,
                 predecessor: predecessor.clone(),
@@ -1058,7 +1055,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                     next_slot,
                 },
             },
-            crate::protocol::membership::MembershipHeadActivation::Direct,
+            coven_protocol::membership::MembershipHeadActivation::Direct,
             &device_signer,
         );
         assert!(head.verify(&registration));
@@ -1098,23 +1095,23 @@ impl<'storage> ExactMembershipChain<'storage> {
 
 struct ExactPublishedCommit<'storage> {
     storage: &'storage TestStore,
-    reference: crate::protocol::store_commit::StoreBatchCommitRef,
-    commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
-    registration: crate::protocol::store_commit::StoreDeviceRegistration,
+    reference: coven_protocol::store_commit::StoreBatchCommitRef,
+    commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    registration: coven_protocol::store_commit::StoreDeviceRegistration,
     device_signer: UserKeypair,
     head: StoreDeviceHead,
-    head_object: crate::protocol::objects::ExactObjectRef,
+    head_object: coven_protocol::objects::ExactObjectRef,
 }
 
 impl<'storage> ExactPublishedCommit<'storage> {
     fn sign_commit_with_package(
         &self,
         schema_version: u32,
-        membership_authority: crate::protocol::store_commit::StoreOperationMembershipAuthority,
+        membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
         package_bytes: &[u8],
-        package_object: crate::protocol::objects::ExactObjectRef,
-    ) -> crate::protocol::store_commit::StoreBatchCommit {
-        crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+        package_object: coven_protocol::objects::ExactObjectRef,
+    ) -> coven_protocol::store_commit::StoreBatchCommit {
+        coven_protocol::store_commit::StoreBatchCommit::signed_operations(
             self.commit.store_root_hash,
             self.commit.write_id.clone(),
             self.reference.coord.clone(),
@@ -1124,7 +1121,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             self.commit.membership_state.clone(),
             self.commit.device_state.clone(),
             membership_authority,
-            crate::protocol::store_commit::StoreCommitOperationsInput {
+            coven_protocol::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
                 circle_acknowledgements: Vec::new(),
                 control: self.commit.control().cloned(),
@@ -1137,7 +1134,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
                 device_exclusion_outcomes: self.commit.device_exclusion_outcomes().to_vec(),
                 stream_activations: self.commit.stream_activations().to_vec(),
                 circle_controls: self.commit.circle_controls().to_vec(),
-                store_package: Some(crate::protocol::store_commit::StorePackageInput {
+                store_package: Some(coven_protocol::store_commit::StorePackageInput {
                     candidate_family: self.commit.candidate_family(),
                     schema_version,
                     bytes: package_bytes,
@@ -1152,7 +1149,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
 
     async fn load(
         storage: &'storage TestStore,
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
         identity: &UserKeypair,
     ) -> Self {
         Self::load_as(storage, reference, identity).await
@@ -1160,11 +1157,11 @@ impl<'storage> ExactPublishedCommit<'storage> {
 
     async fn load_as(
         storage: &'storage TestStore,
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
         identity: &UserKeypair,
     ) -> Self {
-        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-        use crate::protocol::store_commit::{
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        use coven_protocol::store_commit::{
             head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration,
         };
 
@@ -1179,7 +1176,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         let device_signer = registration
             .device_signer(identity)
             .expect("derive exact published Store device signer");
-        let crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
+        let coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot } =
             &registration.store_commits
         else {
             panic!("pull test registration has a Store announcement anchor")
@@ -1226,11 +1223,11 @@ impl<'storage> ExactPublishedCommit<'storage> {
     async fn replace_commit_bytes(
         &self,
         commit_bytes: Vec<u8>,
-        commit_hash: crate::protocol::store_commit::ObjectHash,
-        head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        commit_hash: coven_protocol::store_commit::ObjectHash,
+        head_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         head_signer: &UserKeypair,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
-        let replacement_commit: crate::protocol::store_commit::StoreBatchCommit =
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
+        let replacement_commit: coven_protocol::store_commit::StoreBatchCommit =
             serde_json::from_slice(&commit_bytes).expect("parse replacement exact Store commit");
         let candidate_summary = self
             .storage
@@ -1240,14 +1237,14 @@ impl<'storage> ExactPublishedCommit<'storage> {
         let reference = self
             .publish_replacement_commit(commit_bytes, commit_hash)
             .await;
-        let candidate = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+        let candidate = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
             &self.commit.to_bytes(),
             self.commit.store_root_hash,
             &self.reference,
             &self.registration,
         )
         .expect("authenticate replacement candidate");
-        let replacement_commit = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+        let replacement_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
             &replacement_commit.to_bytes(),
             replacement_commit.store_root_hash,
             &reference,
@@ -1273,16 +1270,16 @@ impl<'storage> ExactPublishedCommit<'storage> {
     async fn publish_replacement_commit(
         &self,
         commit_bytes: Vec<u8>,
-        commit_hash: crate::protocol::store_commit::ObjectHash,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
-        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        commit_hash: coven_protocol::store_commit::ObjectHash,
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let stream_id = commit_stream_id(&self.reference);
         let commit_context = ProtocolObjectContext::signed_plaintext(
             self.storage.root.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
         );
-        let semantic_prefix = crate::protocol::store_commit::commit_semantic_prefix(
+        let semantic_prefix = coven_protocol::store_commit::commit_semantic_prefix(
             self.commit.candidate_family(),
             &stream_id,
             self.reference.coord.sequence(),
@@ -1305,7 +1302,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             .await
             .expect("publish replacement exact Store commit");
         let commit_object = commit_prepared.reference().clone();
-        crate::protocol::store_commit::StoreBatchCommitRef {
+        coven_protocol::store_commit::StoreBatchCommitRef {
             coord: self.reference.coord.clone(),
             commit_hash,
             object: commit_object,
@@ -1314,12 +1311,12 @@ impl<'storage> ExactPublishedCommit<'storage> {
 
     async fn replace_commit_head(
         &self,
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
-        history_summary: crate::protocol::store_commit::ObjectHash,
-        head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
+        history_summary: coven_protocol::store_commit::ObjectHash,
+        head_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         head_signer: &UserKeypair,
     ) {
-        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let head_context = ProtocolObjectContext::signed_plaintext(
             self.storage.root.store_root_hash,
@@ -1339,7 +1336,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             head_signer,
         )
         .expect("sign replacement exact Store head");
-        let prefix = crate::protocol::store_commit::head_slot_prefix(
+        let prefix = coven_protocol::store_commit::head_slot_prefix(
             &self.registration.device_id.to_string(),
             reference.coord.sequence(),
         );
@@ -1363,10 +1360,10 @@ impl<'storage> ExactPublishedCommit<'storage> {
     async fn replace_commit_bytes_before_validation(
         &self,
         commit_bytes: Vec<u8>,
-        commit_hash: crate::protocol::store_commit::ObjectHash,
-        head_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        commit_hash: coven_protocol::store_commit::ObjectHash,
+        head_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         head_signer: &UserKeypair,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         let reference = self
             .publish_replacement_commit(commit_bytes, commit_hash)
             .await;
@@ -1382,11 +1379,11 @@ impl<'storage> ExactPublishedCommit<'storage> {
 
     async fn replace_head(
         &self,
-        commit: crate::protocol::store_commit::StoreBatchCommitRef,
-        author_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        commit: coven_protocol::store_commit::StoreBatchCommitRef,
+        author_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         signer: &UserKeypair,
     ) {
-        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let context = ProtocolObjectContext::signed_plaintext(
             self.storage.root.store_root_hash,
@@ -1406,7 +1403,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             signer,
         )
         .expect("sign replacement exact Store head");
-        let prefix = crate::protocol::store_commit::head_slot_prefix(
+        let prefix = coven_protocol::store_commit::head_slot_prefix(
             &self.registration.device_id.to_string(),
             self.reference.coord.sequence(),
         );
@@ -1430,8 +1427,8 @@ impl<'storage> ExactPublishedCommit<'storage> {
     async fn resign_commit(
         &self,
         schema_version: u32,
-        membership_authority: Option<crate::protocol::membership::MembershipGrantCreationAuthority>,
-    ) -> crate::protocol::store_commit::StoreBatchCommit {
+        membership_authority: Option<coven_protocol::membership::MembershipGrantCreationAuthority>,
+    ) -> coven_protocol::store_commit::StoreBatchCommit {
         let package = self
             .commit
             .store_package()
@@ -1456,7 +1453,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
         };
         let mut commit = self.sign_commit_with_package(
             schema_version,
-            crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
+            coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
             &package_bytes,
             package.object.clone(),
         );
@@ -1468,14 +1465,14 @@ impl<'storage> ExactPublishedCommit<'storage> {
     }
 
     async fn replace_package_bytes(&self, bytes: Vec<u8>) {
-        use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+        use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let package = self
             .commit
             .store_package()
             .expect("test Store commit carries a Store package");
         let stream_id = commit_stream_id(&self.reference);
-        let prefix = crate::protocol::store_commit::package_semantic_prefix(
+        let prefix = coven_protocol::store_commit::package_semantic_prefix(
             self.commit.candidate_family(),
             &stream_id,
             self.reference.coord.sequence(),
@@ -1504,21 +1501,21 @@ impl<'storage> ExactPublishedCommit<'storage> {
 
     async fn replace_package_with_malformed_bytes(
         &self,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         let malformed = b"not a SQLite changeset";
         let stream_id = commit_stream_id(&self.reference);
         let package_object = self
             .storage
             .create_exact_protocol_object(
-                &crate::protocol::objects::ProtocolObjectContext::store_encrypted(
+                &coven_protocol::objects::ProtocolObjectContext::store_encrypted(
                     self.storage.root.store_root_hash,
-                    crate::protocol::objects::ProtocolObjectDomain::StorePackage,
+                    coven_protocol::objects::ProtocolObjectDomain::StorePackage,
                 ),
-                &crate::protocol::store_commit::package_semantic_prefix(
+                &coven_protocol::store_commit::package_semantic_prefix(
                     self.commit.candidate_family(),
                     &stream_id,
                     self.reference.coord.sequence(),
-                    crate::protocol::store_commit::ObjectHash::digest(malformed),
+                    coven_protocol::store_commit::ObjectHash::digest(malformed),
                 ),
                 ".pkg",
                 malformed,
@@ -1591,21 +1588,21 @@ impl crate::sync::test_helpers::StorageInterceptor for FaultingStorage {
         &self,
         _read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         if self.fail_membership_read(semantic_prefix) {
-            return Err(crate::protocol::objects::StorageError::Storage(
+            return Err(coven_protocol::objects::StorageError::Storage(
                 "forced exact membership read failure".to_string(),
             ));
         }
         Ok(())
     }
 
-    async fn before_blob_stage(&self) -> Result<(), crate::protocol::objects::StorageError> {
+    async fn before_blob_stage(&self) -> Result<(), coven_protocol::objects::StorageError> {
         if self
             .fail_blob_read
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(crate::protocol::objects::StorageError::Storage(
+            return Err(coven_protocol::objects::StorageError::Storage(
                 "forced exact blob read failure".to_string(),
             ));
         }
@@ -1623,9 +1620,9 @@ impl StorageInterceptor for MissingProtocolSlot {
         &self,
         read: ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         if read == ProtocolRead::Slot && semantic_prefix == self.semantic_prefix {
-            return Err(crate::protocol::objects::StorageError::NotFound(format!(
+            return Err(coven_protocol::objects::StorageError::NotFound(format!(
                 "lagging provider omits {semantic_prefix}"
             )));
         }
@@ -1874,8 +1871,8 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         Database::open(
             &target_path,
             test_synced_tables(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "test-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
@@ -1892,7 +1889,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         .expect("read retained Merge materialization input");
     assert_eq!(
         input_hash,
-        crate::protocol::store_commit::ObjectHash::digest(&canonical_input).to_string()
+        coven_protocol::store_commit::ObjectHash::digest(&canonical_input).to_string()
     );
     assert_eq!(
         retained_ref,
@@ -1924,35 +1921,35 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         .first()
         .and_then(|value| value.get("store"))
         .expect("retained Store package is exact-reference tagged");
-    let package_ref: crate::protocol::store_commit::StorePackageRef =
+    let package_ref: coven_protocol::store_commit::StorePackageRef =
         serde_json::from_value(retained_store["reference"].clone())
             .expect("parse retained Store package ref");
     let package_remote = target.stored_remote_object(&package_ref.object).await;
     let parsed_input_hash = input_hash.parse().expect("parse retained input hash");
     assert!(matches!(
         package_remote,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::SharedLiveSetObjectDomain::StorePackage {
+                coven_protocol::remote_object::SharedLiveSetObjectDomain::StorePackage {
                     reference
                 } if reference == &package_ref
             )
                 && matches!(
                     record.bytes.stored(),
-                    crate::protocol::remote_object::RemoteStoredRepresentation::ExternalExact {
+                    coven_protocol::remote_object::RemoteStoredRepresentation::ExternalExact {
                         object
                     } if object == &package_ref.object
                 )
                 && matches!(
                     &record.state,
-                    crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                    coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                         ownership
                     } if ownership.activated.contains(
-                        &crate::protocol::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
+                        &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
                     ) && ownership.activated.contains(
-                        &crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                            crate::protocol::remote_object::RetainedReplayOwner::Commit {
+                        &coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
+                            coven_protocol::remote_object::RetainedReplayOwner::Commit {
                                 commit: commit.clone(),
                                 input_hash: parsed_input_hash,
                             }
@@ -2100,17 +2097,17 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .expect("load second retained Store package pin");
 
     let mut missing = second_remote.clone();
-    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut missing
+    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut missing
     else {
         unreachable!("retained package is shared")
     };
-    let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
         &mut record.state
     else {
         unreachable!("retained package is activated")
     };
     assert!(ownership.activated.remove(
-        &crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
+        &coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone())
     ));
     target
         .replace_stored_remote_object(&second_package.object, &missing)
@@ -2127,21 +2124,21 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .await;
 
     let mut tampered = missing;
-    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut tampered
+    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut tampered
     else {
         unreachable!("retained package is shared")
     };
-    let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
         &mut record.state
     else {
         unreachable!("retained package is activated")
     };
-    let crate::protocol::remote_object::RetainedReplayOwner::Commit { commit, .. } = &second_owner;
+    let coven_protocol::remote_object::RetainedReplayOwner::Commit { commit, .. } = &second_owner;
     ownership.activated.insert(
-        crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-            crate::protocol::remote_object::RetainedReplayOwner::Commit {
+        coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
+            coven_protocol::remote_object::RetainedReplayOwner::Commit {
                 commit: commit.clone(),
-                input_hash: crate::protocol::store_commit::ObjectHash::digest(b"tampered input"),
+                input_hash: coven_protocol::store_commit::ObjectHash::digest(b"tampered input"),
             },
         ),
     );
@@ -2160,17 +2157,17 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .await;
 
     let mut invented = first_remote;
-    let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut invented
+    let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = &mut invented
     else {
         unreachable!("retained package is shared")
     };
-    let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+    let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
         &mut record.state
     else {
         unreachable!("retained package is activated")
     };
     ownership.activated.insert(
-        crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone()),
+        coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(second_owner.clone()),
     );
     target
         .replace_stored_remote_object(&first_package.object, &invented)
@@ -2228,8 +2225,8 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let target = crate::database::Database::open(
         &target_path,
         test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
@@ -3067,7 +3064,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('ph1', 'n1', 'attach', 11, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-            crate::protocol::blob::content_hash(b"PHOTO-BYTES"),
+            coven_protocol::blob::content_hash(b"PHOTO-BYTES"),
         ),
     ])
     .await;
@@ -3230,19 +3227,19 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         .await
         .expect("publish exact Store changeset");
     let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
-    let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = &graph.reference.coord;
-    let relocated_coord = crate::protocol::store_commit::StoreCommitCoord {
+    let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = &graph.reference.coord;
+    let relocated_coord = coven_protocol::store_commit::StoreCommitCoord {
         stream_id: *stream_id,
         sequence: 2,
     };
     let expected_stream_id = stream_id.to_string();
     let relocated_object = storage
         .create_exact_protocol_object(
-            &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 storage.root.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             ),
-            &crate::protocol::store_commit::commit_semantic_prefix(
+            &coven_protocol::store_commit::commit_semantic_prefix(
                 graph.commit.candidate_family(),
                 &stream_id.to_string(),
                 2,
@@ -3253,7 +3250,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         )
         .await
         .expect("publish relocated exact Store commit");
-    let relocated_ref = crate::protocol::store_commit::StoreBatchCommitRef {
+    let relocated_ref = coven_protocol::store_commit::StoreBatchCommitRef {
         coord: relocated_coord,
         commit_hash: graph.commit.commit_hash(),
         object: relocated_object,
@@ -3311,14 +3308,14 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         .await
         .expect("publish exact Store changeset");
     let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
-    let relocated_stream = crate::protocol::membership::AuthorStreamId::from_bytes([99; 32]);
+    let relocated_stream = coven_protocol::membership::AuthorStreamId::from_bytes([99; 32]);
     let relocated_object = storage
         .create_exact_protocol_object(
-            &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 storage.root.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             ),
-            &crate::protocol::store_commit::commit_semantic_prefix(
+            &coven_protocol::store_commit::commit_semantic_prefix(
                 graph.commit.candidate_family(),
                 &relocated_stream.to_string(),
                 1,
@@ -3329,8 +3326,8 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         )
         .await
         .expect("publish relocated exact Store commit");
-    let relocated_ref = crate::protocol::store_commit::StoreBatchCommitRef {
-        coord: crate::protocol::store_commit::StoreCommitCoord {
+    let relocated_ref = coven_protocol::store_commit::StoreBatchCommitRef {
+        coord: coven_protocol::store_commit::StoreCommitCoord {
             stream_id: relocated_stream,
             sequence: 1,
         },
@@ -3608,7 +3605,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('p1ab', 'n1', 'cover', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::protocol::blob::content_hash(b"PHOTOBYTES"),
+            coven_protocol::blob::content_hash(b"PHOTOBYTES"),
         ),
     ])
     .await;
@@ -3652,16 +3649,16 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         .expect("load retained blob input hash");
     assert!(matches!(
         remote,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 &record.state,
-                crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                     ownership
                 } if ownership.activated.contains(
-                    &crate::protocol::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
+                    &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(commit.clone())
                 ) && ownership.activated.contains(
-                    &crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                        crate::protocol::remote_object::RetainedReplayOwner::Commit {
+                    &coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
+                        coven_protocol::remote_object::RetainedReplayOwner::Commit {
                             commit: commit.clone(),
                             input_hash,
                         }
@@ -3689,7 +3686,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
+                coven_protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
             ),
         ],
     )
@@ -3776,12 +3773,12 @@ fn open_scoped_circle_test_db() -> crate::database::Database {
         vec![
             SyncedTable::new(
                 "notes",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "comments",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .inherits_audience_through("note_id"),
         ],
@@ -3991,17 +3988,17 @@ fn scoped_fk_circle_db() -> crate::database::Database {
         vec![
             SyncedTable::new(
                 "notes",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "categories",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "comments",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .inherits_audience_through("note_id"),
         ],
@@ -4162,7 +4159,7 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
          INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"local audio"),
+        coven_protocol::blob::content_hash(b"local audio"),
     ))
     .await;
     let reference = db
@@ -4210,7 +4207,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
+                coven_protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
             ),
         ],
     )
@@ -4255,7 +4252,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
+                coven_protocol::blob::content_hash(b"AUDIO-PAYLOAD"),
             ),
         ],
     )
@@ -4335,7 +4332,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
          (id, note_id, kind, size, hash, _updated_at, created_at) \
          VALUES ('p1ab', 'n1', 'cover', 7, '{}', \
                  '0000000001000-0000-dev1', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"missing"),
+        coven_protocol::blob::content_hash(b"missing"),
     );
     let outgoing = db1
         .capture_test_changeset(&[
@@ -4406,7 +4403,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
              VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
              '0000000001000-0000-dev1', '2026-01-01')",
             bytes.len(),
-            crate::protocol::blob::content_hash(bytes),
+            coven_protocol::blob::content_hash(bytes),
         ),
     ];
     let outgoing = db.capture_test_changeset(&rows).await;
@@ -4484,7 +4481,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('p1cover', 'n1', 'cover', 8, '{}', 'n1/cover-p1cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(plaintext),
+                coven_protocol::blob::content_hash(plaintext),
             ),
         ],
     )
@@ -4575,7 +4572,7 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 bytes.len(),
-                crate::protocol::blob::content_hash(bytes),
+                coven_protocol::blob::content_hash(bytes),
             ),
         ])
         .await;
@@ -4620,7 +4617,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                     old_bytes.len(),
-                    crate::protocol::blob::content_hash(old_bytes),
+                    coven_protocol::blob::content_hash(old_bytes),
                 ),
             ])
             .await;
@@ -4650,7 +4647,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
                 new_bytes.len(),
-                crate::protocol::blob::content_hash(new_bytes),
+                coven_protocol::blob::content_hash(new_bytes),
             )])
             .await;
         storage
@@ -4720,7 +4717,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p0cover.jpg', 'p0cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                     original.len(),
-                    crate::protocol::blob::content_hash(original),
+                    coven_protocol::blob::content_hash(original),
                 ),
             ])
             .await;
@@ -4735,7 +4732,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                 "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
                 from_a.len(),
-                crate::protocol::blob::content_hash(from_a),
+                coven_protocol::blob::content_hash(from_a),
             )])
             .await;
         storage
@@ -4749,7 +4746,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                 "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000003000-0000-dev2' WHERE id = 'ph1'",
                 from_b.len(),
-                crate::protocol::blob::content_hash(from_b),
+                coven_protocol::blob::content_hash(from_b),
             )])
             .await;
         storage
@@ -4836,7 +4833,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
                  VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 old_bytes.len(),
-                crate::protocol::blob::content_hash(old_bytes),
+                coven_protocol::blob::content_hash(old_bytes),
             ),
         ])
         .await;
@@ -4853,7 +4850,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
                  VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover-p2cover.jpg', \
                  '0000000002000-0000-dev1', '2026-01-01')",
             new_bytes.len(),
-            crate::protocol::blob::content_hash(new_bytes),
+            coven_protocol::blob::content_hash(new_bytes),
         )])
         .await;
     storage
@@ -4923,7 +4920,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
                  VALUES ('ph1', 'n1', 'audio', {}, '{}', 'n1/Sonata No. 3.flac', 'f1audio', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 bytes.len(),
-                crate::protocol::blob::content_hash(bytes),
+                coven_protocol::blob::content_hash(bytes),
             ),
         ])
         .await;
@@ -4984,7 +4981,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
                  VALUES ('ph1', 'n1', 'audio', {}, '{}', 'n1/Sonata No. 3.flac', 'f1audio', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 first.len(),
-                crate::protocol::blob::content_hash(first),
+                coven_protocol::blob::content_hash(first),
             ),
         ])
         .await;
@@ -5001,7 +4998,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
             "UPDATE note_photos SET blob_id = 'f2audio', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             second.len(),
-            crate::protocol::blob::content_hash(second),
+            coven_protocol::blob::content_hash(second),
         )])
         .await;
     let err = storage
@@ -5062,7 +5059,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', 'p1cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                     old_bytes.len(),
-                    crate::protocol::blob::content_hash(old_bytes),
+                    coven_protocol::blob::content_hash(old_bytes),
                 ),
             ])
             .await;
@@ -5096,7 +5093,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
                 "UPDATE note_photos SET blob_id = 'p2cover', cloud_path = 'n1/cover-p2cover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
                 new_bytes.len(),
-                crate::protocol::blob::content_hash(new_bytes),
+                coven_protocol::blob::content_hash(new_bytes),
             )])
             .await;
         storage
@@ -5171,7 +5168,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
                  VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p1cover.jpg', 'p1cover', \
                  '0000000001000-0000-dev1', '2026-01-01')",
                 old_bytes.len(),
-                crate::protocol::blob::content_hash(old_bytes),
+                coven_protocol::blob::content_hash(old_bytes),
             ),
         ])
         .await;
@@ -5188,7 +5185,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
             "UPDATE note_photos SET blob_id = 'p2cover', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
             new_bytes.len(),
-            crate::protocol::blob::content_hash(new_bytes),
+            coven_protocol::blob::content_hash(new_bytes),
         )])
         .await;
     let err = storage
@@ -5232,7 +5229,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let plaintext = b"COVER-ART-BYTES";
     let decl = || {
         BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager).with_scope(
-            crate::protocol::blob::BlobScope::Derived("covers".to_string()),
+            coven_protocol::blob::BlobScope::Derived("covers".to_string()),
         )
     };
 
@@ -5246,7 +5243,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('p1cover', 'n1', 'cover', 15, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(plaintext),
+                coven_protocol::blob::content_hash(plaintext),
             ),
         ],
     )
@@ -5361,13 +5358,13 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     db1.execute_test_sql(&format!(
         "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('peager01', 'n1', 'cover', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"EAGER-BYTES"),
+        coven_protocol::blob::content_hash(b"EAGER-BYTES"),
     ))
     .await;
     db1.execute_test_sql(&format!(
         "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
              VALUES ('clazy001', 'n1', 10, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"LAZY-BYTES"),
+        coven_protocol::blob::content_hash(b"LAZY-BYTES"),
     ))
     .await;
     // The host stores both blobs in the local store (their Local home) before the
@@ -5428,7 +5425,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('pdel1234', 'n1', 'cover', {}, '{}', '0000000001000-0000-dev1', '2026-01-01')",
                 b"COVERBYTES".len(),
-                crate::protocol::blob::content_hash(b"COVERBYTES"),
+                coven_protocol::blob::content_hash(b"COVERBYTES"),
             ),
         ],
     )
@@ -5490,7 +5487,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
                  (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('cleanup01', 'n1', 'cover', 7, '{}', \
                          '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"cleanup"),
+                coven_protocol::blob::content_hash(b"cleanup"),
             ),
         ])
         .await;
@@ -5795,12 +5792,12 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('photo-a', 'n1', 'cover', 12, '{h}', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
-                h = crate::protocol::blob::content_hash(b"SHARED-BYTES"),
+                h = coven_protocol::blob::content_hash(b"SHARED-BYTES"),
             ),
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
                  VALUES ('photo-b', 'n1', 'cover', 12, '{h}', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
-                h = crate::protocol::blob::content_hash(b"SHARED-BYTES"),
+                h = coven_protocol::blob::content_hash(b"SHARED-BYTES"),
             ),
         ],
     )
@@ -5830,7 +5827,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
             "UPDATE note_photos \
              SET cloud_path = 'newblob', size = 9, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'photo-a'",
-            crate::protocol::blob::content_hash(b"NEW-BYTES"),
+            coven_protocol::blob::content_hash(b"NEW-BYTES"),
         )])
         .await;
     storage
@@ -6009,7 +6006,7 @@ struct PersistedCycleRemoval {
     storage: std::sync::Arc<TestStore>,
     db: crate::database::Database,
     founder_pubkey: String,
-    second_owner_head: crate::protocol::membership::MembershipHeadRef,
+    second_owner_head: coven_protocol::membership::MembershipHeadRef,
     removed_member_pubkey: String,
 }
 
@@ -7233,16 +7230,16 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let owner_grant = add_member.coord();
     let grant_bytes = serde_json::to_vec(&add_member).expect("serialize exact membership grant");
     chain.publish_entry(add_member, &owner).await;
-    let relocated_prefix = crate::protocol::store_commit::membership_entry_semantic_prefix(
+    let relocated_prefix = coven_protocol::store_commit::membership_entry_semantic_prefix(
         &relocated_author,
         &owner_grant.author_owner_grant,
         owner_grant.stream_id,
         2,
         owner_grant.entry_hash,
     );
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
+        coven_protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
     );
     let slot = storage
         .storage()
@@ -7482,11 +7479,11 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         .expect("load exact founder head");
     let mut bad = founder.clone();
     bad.corrupt_signature_for_test();
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         storage.root.store_root_hash,
-        crate::protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
+        coven_protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
     );
-    let prefix = crate::protocol::store_commit::membership_entry_semantic_prefix(
+    let prefix = coven_protocol::store_commit::membership_entry_semantic_prefix(
         &coord.author_pubkey,
         &coord.author_owner_grant,
         coord.stream_id,
@@ -7608,7 +7605,7 @@ mod blob_path_traversal {
                 &format!(
                     "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('x/../../../PWNED', 'n1', 'cover', 5, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                    crate::protocol::blob::content_hash(b"PWNED"),
+                    coven_protocol::blob::content_hash(b"PWNED"),
                 ),
             ],
         )
@@ -7646,7 +7643,7 @@ mod blob_path_traversal {
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('a', 'n1', 'cover', 1, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"A"),
+                coven_protocol::blob::content_hash(b"A"),
             ),
         ])
         .await;
@@ -7678,7 +7675,7 @@ mod blob_path_traversal {
                 &format!(
                     "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('p1ab', 'n1', 'attach', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-                    crate::protocol::blob::content_hash(b"PHOTOBYTES"),
+                    coven_protocol::blob::content_hash(b"PHOTOBYTES"),
                 ),
             ],
         )

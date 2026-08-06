@@ -1,7 +1,7 @@
 use crate::database::query_mapped_rows;
 use crate::database::*;
-use crate::protocol::store_commit::StoreBatchCommitRef;
 use coven_keys::encryption::EncryptionService;
+use coven_protocol::store_commit::StoreBatchCommitRef;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::*;
@@ -18,7 +18,7 @@ enum CircleActivationCommitLookup {
 impl StoreDatabase {
     pub(crate) async fn get_circle_operations(
         &self,
-    ) -> Result<Vec<crate::protocol::circle::CircleOperationInfo>, DbError> {
+    ) -> Result<Vec<coven_protocol::circle::CircleOperationInfo>, DbError> {
         self.connection
             .call(|conn| {
                 let mut statement = conn
@@ -41,7 +41,7 @@ impl StoreDatabase {
                         let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
                         let journal =
                             parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
-                        Ok(crate::protocol::circle::CircleOperationInfo {
+                        Ok(coven_protocol::circle::CircleOperationInfo {
                             operation_id: journal.operation_id.clone(),
                             circle_id: journal.circle_id(),
                             kind: journal.kind(),
@@ -62,7 +62,7 @@ impl StoreDatabase {
         &self,
         identity_pubkey: &str,
         active_store_members: std::collections::BTreeSet<String>,
-    ) -> Result<Vec<crate::protocol::circle::Circle>, DbError> {
+    ) -> Result<Vec<coven_protocol::circle::Circle>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
@@ -70,7 +70,7 @@ impl StoreDatabase {
                     .into_iter()
                     .map(|state| {
                         let (name, role) = state.display(&identity_pubkey);
-                        crate::protocol::circle::Circle {
+                        coven_protocol::circle::Circle {
                             id: state.circle_id(),
                             name,
                             role,
@@ -84,10 +84,10 @@ impl StoreDatabase {
 
     pub(crate) async fn get_circle_members(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         identity_pubkey: &str,
         store_members: std::collections::BTreeSet<String>,
-    ) -> Result<Vec<crate::protocol::circle::CircleMemberInfo>, DbError> {
+    ) -> Result<Vec<coven_protocol::circle::CircleMemberInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
@@ -108,7 +108,7 @@ impl StoreDatabase {
                     .members()
                     .into_iter()
                     .filter(|(pubkey, _)| store_members.contains(pubkey))
-                    .map(|(pubkey, role)| crate::protocol::circle::CircleMemberInfo {
+                    .map(|(pubkey, role)| coven_protocol::circle::CircleMemberInfo {
                         is_self: pubkey == identity_pubkey,
                         pubkey,
                         role,
@@ -120,11 +120,11 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_authoring_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         identity_pubkey: &str,
     ) -> Result<
         (
-            crate::protocol::circle_activation::CircleAuthoringState,
+            coven_protocol::circle_activation::CircleAuthoringState,
             StoreBatchCommitRef,
         ),
         DbError,
@@ -144,16 +144,16 @@ impl StoreDatabase {
     /// identity, plus the commit that activated the current control.
     async fn circle_signing_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         identity_pubkey: &str,
         authoring: fn(
-            &crate::protocol::circle_activation::CircleCurrentState,
-        ) -> Option<crate::protocol::circle_activation::CircleAuthoringState>,
-        missing_authoring: fn(crate::protocol::circle::CircleId) -> String,
-        foreign_identity: fn(crate::protocol::circle::CircleId) -> String,
+            &coven_protocol::circle_activation::CircleCurrentState,
+        ) -> Option<coven_protocol::circle_activation::CircleAuthoringState>,
+        missing_authoring: fn(coven_protocol::circle::CircleId) -> String,
+        foreign_identity: fn(coven_protocol::circle::CircleId) -> String,
     ) -> Result<
         (
-            crate::protocol::circle_activation::CircleAuthoringState,
+            coven_protocol::circle_activation::CircleAuthoringState,
             StoreBatchCommitRef,
         ),
         DbError,
@@ -191,11 +191,11 @@ impl StoreDatabase {
     /// so it authors equally from a closing control's frozen epoch.
     pub(crate) async fn circle_delete_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         identity_pubkey: &str,
     ) -> Result<
         (
-            crate::protocol::circle_activation::CircleAuthoringState,
+            coven_protocol::circle_activation::CircleAuthoringState,
             StoreBatchCommitRef,
         ),
         DbError,
@@ -215,8 +215,8 @@ impl StoreDatabase {
     /// current state or its control is resolved.
     pub(crate) async fn circle_control_conflict_branches(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<Vec<crate::protocol::circle::CircleControlCoord>>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<Vec<coven_protocol::circle::CircleControlCoord>>, DbError> {
         self.connection
             .call(move |conn| {
                 Ok(Self::circle_current_state_on(conn, circle_id)?
@@ -228,7 +228,7 @@ impl StoreDatabase {
     /// Whether the Circle's control history has terminated in a deletion.
     pub(crate) async fn circle_is_deleted(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {
@@ -243,8 +243,8 @@ impl StoreDatabase {
     /// acknowledgements sealed under rotated-away epochs.
     pub(crate) async fn current_circle_control(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle::CircleControlCoord>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
         self.connection
             .call(move |conn| {
                 Ok(
@@ -265,10 +265,10 @@ impl StoreDatabase {
     /// controls are equal or `covering` is not retained.
     pub(crate) async fn circle_control_covers_strictly(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        covering: &crate::protocol::circle::CircleControlCoord,
-        covered: &crate::protocol::circle::CircleControlCoord,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        covering: &coven_protocol::circle::CircleControlCoord,
+        covered: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         if covering == covered {
             return Ok(false);
@@ -295,7 +295,7 @@ impl StoreDatabase {
 
     pub(crate) async fn closing_circle_controls(
         &self,
-    ) -> Result<Vec<crate::protocol::circle::PreparedCircleControl>, DbError> {
+    ) -> Result<Vec<coven_protocol::circle::PreparedCircleControl>, DbError> {
         self.connection
             .call(|conn| {
                 Ok(Self::circle_current_states_on(conn)?
@@ -308,11 +308,11 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_closing_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         identity_pubkey: &str,
     ) -> Result<
         (
-            crate::protocol::circle_activation::CircleAuthoringState,
+            coven_protocol::circle_activation::CircleAuthoringState,
             StoreBatchCommitRef,
         ),
         DbError,
@@ -329,9 +329,9 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_publication_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: coven_protocol::circle::CircleControlCoord,
+    ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
         self.connection
             .call(move |conn| circle_publication_context_on(conn, circle_id, &expected_control))
             .await
@@ -344,7 +344,7 @@ impl StoreDatabase {
     /// Circle is not currently active.
     pub(crate) async fn current_circle_partition_control(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<crate::database::CirclePartitionControl, DbError> {
         self.connection
             .call(move |conn| {
@@ -361,9 +361,9 @@ impl StoreDatabase {
     /// identities clears it with no stored flag to reset.
     pub(crate) async fn circle_publication_rotation_block(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         active_store_members: std::collections::BTreeSet<String>,
-    ) -> Result<Option<crate::protocol::circle::CirclePublicationBlocked>, DbError> {
+    ) -> Result<Option<coven_protocol::circle::CirclePublicationBlocked>, DbError> {
         self.connection
             .call(move |conn| {
                 let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
@@ -372,7 +372,7 @@ impl StoreDatabase {
                 Ok(state
                     .rotation_required(&active_store_members)
                     .map(|rotation| {
-                        crate::protocol::circle::CirclePublicationBlocked::RotationRequired {
+                        coven_protocol::circle::CirclePublicationBlocked::RotationRequired {
                             circle_id,
                             removed_members: rotation.removed_members,
                         }
@@ -388,7 +388,7 @@ impl StoreDatabase {
     /// coverage records.
     pub(crate) fn record_circle_close_exclusion_on(
         conn: &Connection,
-        exclusion: &crate::protocol::circle_activation::LocalCircleExclusion,
+        exclusion: &coven_protocol::circle_activation::LocalCircleExclusion,
     ) -> Result<(), DbError> {
         let circle_id = exclusion.circle_id.to_string();
         let close_id = serde_json::to_string(&exclusion.close_id)
@@ -422,7 +422,7 @@ impl StoreDatabase {
 
     pub(crate) async fn record_circle_close_exclusions(
         &self,
-        exclusions: Vec<crate::protocol::circle_activation::LocalCircleExclusion>,
+        exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), DbError> {
         self.connection
             .call(move |conn| {
@@ -437,10 +437,10 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_epoch_access(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::protocol::circle_activation::CircleEpochAccess>, DbError> {
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, DbError> {
         self.with_retained_merge_materializations(move |conn, retained| {
             retained.replay_inputs_on(conn, &root)?;
             let Some(activation) =
@@ -457,9 +457,9 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_historical_package_keyring(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: crate::protocol::circle::CircleControlCoord,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
     ) -> Result<Option<String>, DbError> {
         self.connection
@@ -490,7 +490,7 @@ impl StoreDatabase {
                 {
                     return Ok(None);
                 }
-                let crate::protocol::circle::CircleAccessDisposition::Active { keyring, .. } =
+                let coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } =
                     &current.access.disposition
                 else {
                     return Ok(None);
@@ -516,12 +516,12 @@ impl StoreDatabase {
 
     pub(crate) async fn verified_circle_activation_context(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        control: crate::protocol::circle::CircleControlCoord,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<
         Option<(
-            crate::protocol::circle_activation::VerifiedCircleReference,
+            coven_protocol::circle_activation::VerifiedCircleReference,
             StoreBatchCommitRef,
         )>,
         DbError,
@@ -547,11 +547,11 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_blob_opening_protection(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: crate::protocol::circle::CircleControlCoord,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: crate::KeyFingerprint,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         self.connection
             .call(move |conn| {
                 circle_blob_opening_protection_on(
@@ -567,10 +567,10 @@ impl StoreDatabase {
 
     pub(crate) async fn verified_circle_activation(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        control: crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::protocol::circle_activation::VerifiedCircleReference>, DbError> {
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
         self.connection
             .call(move |conn| Self::verified_circle_activation_on(conn, &root, circle_id, &control))
             .await
@@ -578,12 +578,12 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_restore_head(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        controls: Vec<crate::protocol::circle::CircleControlCoord>,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        controls: Vec<coven_protocol::circle::CircleControlCoord>,
     ) -> Result<
         Option<(
-            crate::protocol::circle::CircleControlCoord,
+            coven_protocol::circle::CircleControlCoord,
             StoreBatchCommitRef,
         )>,
         DbError,
@@ -607,8 +607,8 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_circle_activation_commit_ref(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        control: crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         self.connection
             .call(move |conn| {
@@ -619,10 +619,10 @@ impl StoreDatabase {
 
     pub(crate) async fn verified_circle_control_coord_covers(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        covering: crate::protocol::circle::CircleControlCoord,
-        covered: crate::protocol::circle::CircleControlCoord,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        covering: coven_protocol::circle::CircleControlCoord,
+        covered: coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {
@@ -650,15 +650,15 @@ impl StoreDatabase {
     /// with two uncovered controls is a forked lineage and fails loud.
     pub(crate) fn head_circle_control_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        controls: &[crate::protocol::circle::CircleControlCoord],
-    ) -> Result<Option<crate::protocol::circle::CircleControlCoord>, DbError> {
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        controls: &[coven_protocol::circle::CircleControlCoord],
+    ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
         // A control whose activating commit was reclaimed is superseded by a later
         // epoch and cannot be head; keep only controls whose commit is retained.
         let mut retained: Vec<(
-            crate::protocol::circle::CircleControlCoord,
-            crate::protocol::circle::PreparedCircleControl,
+            coven_protocol::circle::CircleControlCoord,
+            coven_protocol::circle::PreparedCircleControl,
         )> = Vec::new();
         for coord in controls {
             let Some(activation_commit) =
@@ -674,7 +674,7 @@ impl StoreDatabase {
             let reference = materialization.circle_activation(circle_id, coord)?;
             retained.push((coord.clone(), reference.control));
         }
-        let mut head: Option<crate::protocol::circle::CircleControlCoord> = None;
+        let mut head: Option<coven_protocol::circle::CircleControlCoord> = None;
         for (index, (candidate, _)) in retained.iter().enumerate() {
             let mut covered = false;
             for (other_index, (_, other_control)) in retained.iter().enumerate() {
@@ -719,8 +719,8 @@ impl StoreDatabase {
     /// reclaimed state as absence.
     pub(crate) fn circle_activation_commit_ref_on(
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         match Self::circle_activation_commit_lookup_on(conn, circle_id, control)? {
             CircleActivationCommitLookup::Absent => Ok(None),
@@ -741,8 +741,8 @@ impl StoreDatabase {
     /// rather than a hard failure.
     pub(crate) fn retained_circle_activation_commit_ref_on(
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         Ok(
             match Self::circle_activation_commit_lookup_on(conn, circle_id, control)? {
@@ -755,8 +755,8 @@ impl StoreDatabase {
 
     fn circle_activation_commit_lookup_on(
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<CircleActivationCommitLookup, DbError> {
         let control_coord = serde_json::to_string(control)
             .map_err(|error| DbError::context("serialize Circle control coordinate", error))?;
@@ -806,10 +806,10 @@ impl StoreDatabase {
 
     pub(crate) fn verified_circle_activation_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::protocol::circle_activation::VerifiedCircleReference>, DbError> {
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
         let Some(activation_commit) =
             Self::circle_activation_commit_ref_on(conn, circle_id, control)?
         else {
@@ -822,10 +822,10 @@ impl StoreDatabase {
 
     pub(crate) async fn verified_circle_control_covers(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        current: crate::protocol::circle::PreparedCircleControl,
-        prior: crate::protocol::circle::CircleControlCoord,
+        root: coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        current: coven_protocol::circle::PreparedCircleControl,
+        prior: coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |connection| {
@@ -838,10 +838,10 @@ impl StoreDatabase {
 
     pub(crate) fn verified_circle_control_covers_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        circle_id: crate::protocol::circle::CircleId,
-        current: &crate::protocol::circle::PreparedCircleControl,
-        prior: &crate::protocol::circle::CircleControlCoord,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        current: &coven_protocol::circle::PreparedCircleControl,
+        prior: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         if current.value.circle_id != circle_id {
             return Err(DbError::Message(
@@ -896,7 +896,7 @@ impl StoreDatabase {
     /// connection while it walks them.
     pub(crate) fn circle_current_states_on(
         conn: &Connection,
-    ) -> Result<Vec<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
+    ) -> Result<Vec<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
         let rows = query_mapped_rows(
             conn,
             "SELECT circle_id, state FROM circle_current_state ORDER BY circle_id",
@@ -912,8 +912,8 @@ impl StoreDatabase {
 
     pub(crate) fn circle_current_state_on(
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle_activation::CircleCurrentState>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
         let stored = conn
             .query_row(
                 "SELECT circle_id, state FROM circle_current_state WHERE circle_id = ?1",
@@ -932,11 +932,11 @@ impl StoreDatabase {
     fn parse_circle_current_state(
         stored_circle_id: &str,
         payload: &[u8],
-    ) -> Result<crate::protocol::circle_activation::CircleCurrentState, DbError> {
-        let circle_id: crate::protocol::circle::CircleId = stored_circle_id
+    ) -> Result<coven_protocol::circle_activation::CircleCurrentState, DbError> {
+        let circle_id: coven_protocol::circle::CircleId = stored_circle_id
             .parse()
             .map_err(|error| DbError::context("parse current Circle id", error))?;
-        let state: crate::protocol::circle_activation::CircleCurrentState =
+        let state: coven_protocol::circle_activation::CircleCurrentState =
             serde_json::from_slice(payload)
                 .map_err(|error| DbError::context("parse Circle current state", error))?;
         if !state.verify() || state.circle_id() != circle_id {
@@ -978,7 +978,7 @@ impl StoreDatabase {
         &self,
         identity_pubkey: &str,
         active_store_members: std::collections::BTreeSet<String>,
-    ) -> Result<Vec<crate::protocol::circle::CircleInfo>, DbError> {
+    ) -> Result<Vec<coven_protocol::circle::CircleInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
         self.connection
             .call(move |conn| {
@@ -988,13 +988,12 @@ impl StoreDatabase {
                     if state.is_deleted() {
                         // A deleted Circle must remain visible to the application
                         // as deleted rather than silently disappear from its UI.
-                        circles
-                            .push(crate::protocol::circle::CircleInfo::Deleted { id: circle_id });
+                        circles.push(coven_protocol::circle::CircleInfo::Deleted { id: circle_id });
                     } else if let Some(branches) = state.conflict_branches() {
                         // A forked Circle must be visible to the application as
                         // conflicted so an Owner can resolve it; omitting it
                         // would make the Circle silently disappear.
-                        circles.push(crate::protocol::circle::CircleInfo::Conflicted {
+                        circles.push(coven_protocol::circle::CircleInfo::Conflicted {
                             id: circle_id,
                             branches,
                         });
@@ -1014,7 +1013,7 @@ impl StoreDatabase {
                                         "activated circle {circle_id} excludes the local identity"
                                     ))
                                 })?;
-                        circles.push(crate::protocol::circle::CircleInfo::Active {
+                        circles.push(coven_protocol::circle::CircleInfo::Active {
                             id: circle_id,
                             name: metadata.name.clone(),
                             role,
@@ -1032,9 +1031,9 @@ impl StoreDatabase {
 
 pub(super) fn circle_publication_context_on(
     conn: &Connection,
-    circle_id: crate::protocol::circle::CircleId,
-    expected_control: &crate::protocol::circle::CircleControlCoord,
-) -> Result<crate::protocol::circle_activation::CircleEpochAccess, DbError> {
+    circle_id: coven_protocol::circle::CircleId,
+    expected_control: &coven_protocol::circle::CircleControlCoord,
+) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
     // An exclusion blocks publication until this device's bootstrap coverage
     // records the exact successor commit that excluded it. The gate derives
     // clear from that coverage; no reset flag is mutated.
@@ -1082,11 +1081,11 @@ pub(super) fn circle_publication_context_on(
 
 pub(super) fn circle_blob_opening_protection_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    circle_id: crate::protocol::circle::CircleId,
-    expected_control: &crate::protocol::circle::CircleControlCoord,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    circle_id: coven_protocol::circle::CircleId,
+    expected_control: &coven_protocol::circle::CircleControlCoord,
     expected_key_fingerprint: crate::KeyFingerprint,
-) -> Result<crate::protocol::objects::BlobSpoolProtection, DbError> {
+) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
     let Some(authority) =
         StoreDatabase::verified_circle_activation_on(conn, root, circle_id, expected_control)?
     else {
@@ -1158,7 +1157,7 @@ pub(super) fn circle_blob_opening_protection_on(
         }
     }
     retained_key
-        .map(crate::protocol::objects::BlobSpoolProtection::Opaque)
+        .map(coven_protocol::objects::BlobSpoolProtection::Opaque)
         .ok_or_else(|| {
             DbError::Message(format!(
                 "Circle {circle_id} retains no local key for fingerprint \
@@ -1171,14 +1170,14 @@ pub(super) fn circle_blob_opening_protection_on(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::protocol::circle::{
+    use coven_protocol::circle::{
         CircleInfo, CircleRole, CircleTransitionDraft, PreparedCircleControl,
     };
-    use crate::protocol::circle_test_fixtures::{
+    use coven_protocol::circle_test_fixtures::{
         exact_logical_object, merge_device_authority, merge_membership_ref,
     };
-    use crate::protocol::store_commit::ObjectHash;
-    use crate::protocol::{membership, store_commit};
+    use coven_protocol::store_commit::ObjectHash;
+    use coven_protocol::{membership, store_commit};
 
     #[tokio::test]
     async fn control_history_caches_the_verified_access_owner_and_rejects_second_genesis() {
@@ -1301,14 +1300,14 @@ mod tests {
             .iter()
             .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
             .expect("author access");
-        let verified = crate::protocol::circle_activation::VerifiedCircleReference {
+        let verified = coven_protocol::circle_activation::VerifiedCircleReference {
             reference,
             circle_id: creation.circle_id,
             control: control.clone(),
-            local_access: Some(crate::protocol::circle_activation::VerifiedCircleAccess {
+            local_access: Some(coven_protocol::circle_activation::VerifiedCircleAccess {
                 envelope: own_access.envelope.clone(),
                 leaf: own_access.leaf.clone(),
-                active: Some(crate::protocol::circle_activation::VerifiedCircleActive {
+                active: Some(coven_protocol::circle_activation::VerifiedCircleActive {
                     roster: creation.roster.clone(),
                     metadata: creation.metadata.clone(),
                 }),
@@ -1436,14 +1435,12 @@ mod tests {
             .test_sql(move |database| {
                 database.record_verified_circle_activations(
                     &second_commit,
-                    &[
-                        crate::protocol::circle_activation::VerifiedCircleReference {
-                            reference: second_reference,
-                            circle_id: creation.circle_id,
-                            control: second_control,
-                            local_access: None,
-                        },
-                    ],
+                    &[coven_protocol::circle_activation::VerifiedCircleReference {
+                        reference: second_reference,
+                        circle_id: creation.circle_id,
+                        control: second_control,
+                        local_access: None,
+                    }],
                 )
             })
             .await

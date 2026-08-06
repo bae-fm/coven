@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::protocol::membership::{MemberInfo, MemberRole};
 use crate::store_sync::{StoreSync, SyncError};
+use coven_protocol::membership::{MemberInfo, MemberRole};
 
 const DEVICE_EXCLUSION_CODE_PREFIX: &str = "coven:device-exclusion:";
 const OWNER_PROMOTION_REQUEST_CODE_PREFIX: &str = "coven:owner-promotion-request:";

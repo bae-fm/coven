@@ -1,12 +1,12 @@
 use super::blob_io::*;
 use super::cipher::*;
 use super::*;
-use crate::protocol::blob::locator::{BlobLocator, RemoteAudience};
-use crate::protocol::blob::BlobScope;
-use crate::protocol::objects::BlobWriteAuthority;
-use crate::protocol::objects::{LocalRotation, RotationPendingState};
-use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use coven_protocol::blob::locator::{BlobLocator, RemoteAudience};
+use coven_protocol::blob::BlobScope;
+use coven_protocol::objects::BlobWriteAuthority;
+use coven_protocol::objects::{LocalRotation, RotationPendingState};
+use coven_protocol::store_commit::ObjectHash;
 use std::num::NonZeroU64;
 
 #[test]
@@ -142,7 +142,7 @@ async fn publish_sealed_blob(
     chunking: BlobChunking,
 ) -> (
     CloudSyncStorage,
-    crate::protocol::blob::locator::StoredBlobRef,
+    coven_protocol::blob::locator::StoredBlobRef,
     EncryptionService,
     tempfile::TempDir,
 ) {
@@ -179,7 +179,7 @@ async fn publish_sealed_blob(
         .seal_blob_to_spool(
             &locator,
             &authority,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
             &spool,
         )
@@ -244,7 +244,7 @@ async fn ranged_reads_transfer_only_the_chunks_they_cover() {
     let reader = storage
         .open_blob_range_reader(
             &blob,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(key),
         )
         .await
         .expect("open a ranged reader");
@@ -332,7 +332,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
         .seal_blob_to_spool(
             &locator,
             &authority,
-            crate::protocol::objects::BlobSpoolProtection::Browsable,
+            coven_protocol::objects::BlobSpoolProtection::Browsable,
             &source,
             &spool,
         )
@@ -360,7 +360,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
         storage
             .open_blob_range_reader(
                 &blob,
-                crate::protocol::objects::BlobSpoolProtection::Browsable,
+                coven_protocol::objects::BlobSpoolProtection::Browsable,
             )
             .await,
         Err(StorageError::Configuration(_))
@@ -370,7 +370,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
     let staged = storage
         .stage_verified_blob_plaintext(
             &blob,
-            crate::protocol::objects::BlobSpoolProtection::Browsable,
+            coven_protocol::objects::BlobSpoolProtection::Browsable,
             &destination,
         )
         .await
@@ -414,7 +414,7 @@ async fn blobs_sealed_at_different_chunk_sizes_coexist() {
         let reader = storage
             .open_blob_range_reader(
                 blob,
-                crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+                coven_protocol::objects::BlobSpoolProtection::Opaque(key),
             )
             .await
             .expect("open a ranged reader");
@@ -457,7 +457,7 @@ async fn a_tampered_chunk_fails_only_the_ranges_that_touch_it() {
     let reader = storage
         .open_blob_range_reader(
             &blob,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(key),
         )
         .await
         .expect("open a ranged reader");
@@ -504,7 +504,7 @@ async fn a_tampered_header_fails_the_first_open() {
             storage
                 .open_blob_range_reader(
                     &blob,
-                    crate::protocol::objects::BlobSpoolProtection::Opaque(key.clone()),
+                    coven_protocol::objects::BlobSpoolProtection::Opaque(key.clone()),
                 )
                 .await,
             Err(StorageError::InvalidContent(_))
@@ -526,7 +526,7 @@ async fn a_tampered_header_fails_the_first_open() {
             storage
                 .open_blob_range_reader(
                     &blob,
-                    crate::protocol::objects::BlobSpoolProtection::Opaque(key.clone()),
+                    coven_protocol::objects::BlobSpoolProtection::Opaque(key.clone()),
                 )
                 .await,
             Err(StorageError::InvalidContent(_))
@@ -569,7 +569,7 @@ async fn a_tampered_header_fails_the_first_open() {
     let reader = storage
         .open_blob_range_reader(
             &blob,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(key),
         )
         .await
         .expect("every length check passes, so the reader opens");
@@ -607,7 +607,7 @@ async fn a_spliced_chunk_refuses_to_open() {
     let reader = storage
         .open_blob_range_reader(
             &victim,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(victim_key.clone()),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(victim_key.clone()),
         )
         .await
         .expect("open a ranged reader");
@@ -628,7 +628,7 @@ async fn a_spliced_chunk_refuses_to_open() {
     let reader = storage
         .open_blob_range_reader(
             &donor,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(victim_key),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(victim_key),
         )
         .await
         .expect("open a ranged reader");
@@ -667,7 +667,7 @@ async fn ranged_reads_sweep_every_boundary() {
     let reader = storage
         .open_blob_range_reader(
             &blob,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(key),
         )
         .await
         .expect("open a ranged reader");
@@ -738,7 +738,7 @@ async fn the_fetch_window_splits_requests_without_changing_the_bytes() {
         let reader = storage
             .open_blob_range_reader(
                 &blob,
-                crate::protocol::objects::BlobSpoolProtection::Opaque(key),
+                coven_protocol::objects::BlobSpoolProtection::Opaque(key),
             )
             .await
             .expect("open a ranged reader");
@@ -786,11 +786,11 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
         "covers",
         "circle-cover",
         registration.reference().clone(),
-        RemoteAudience::Circle(crate::protocol::circle::CircleId::from_bytes([8; 16])),
+        RemoteAudience::Circle(coven_protocol::circle::CircleId::from_bytes([8; 16])),
         BlobScope::Master,
         circle_key.seal_key_fingerprint(),
         plaintext.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(plaintext),
+        coven_protocol::store_commit::ObjectHash::digest(plaintext),
     )
     .expect("build Circle locator");
     let temp = tempfile::tempdir().expect("temporary blob directory");
@@ -804,7 +804,7 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
         .seal_blob_to_spool(
             &locator,
             &authority,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(circle_key.clone()),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(circle_key.clone()),
             &source,
             &spool,
         )
@@ -855,7 +855,7 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
         BlobScope::Master,
         declared_key.seal_key_fingerprint(),
         plaintext.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(plaintext),
+        coven_protocol::store_commit::ObjectHash::digest(plaintext),
     )
     .expect("build locator");
     let temp = tempfile::tempdir().expect("temporary blob directory");
@@ -870,7 +870,7 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
             .seal_blob_to_spool(
                 &locator,
                 &authority,
-                crate::protocol::objects::BlobSpoolProtection::Opaque(EncryptionService::from_key(
+                coven_protocol::objects::BlobSpoolProtection::Opaque(EncryptionService::from_key(
                     [10u8; 32]
                 ),),
                 &source,
@@ -922,7 +922,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
         .seal_blob_to_spool(
             &locator,
             &authority,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
             &spool,
         )
@@ -949,7 +949,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
     let staged = storage
         .stage_verified_blob_plaintext(
             &blob,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
             &destination,
         )
         .await
@@ -1000,7 +1000,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
         .seal_blob_to_spool(
             &locator,
             &authority,
-            crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
+            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
             &spool,
         )
@@ -1029,7 +1029,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
         storage
             .stage_verified_blob_plaintext(
                 &blob,
-                crate::protocol::objects::BlobSpoolProtection::Opaque(audience_key),
+                coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
                 &destination,
             )
             .await,
@@ -1049,9 +1049,9 @@ async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
         UserKeypair::generate(),
     )
     .expect("test cloud storage supports exact slots");
-    let root = crate::protocol::store_commit::ObjectHash::digest(b"reserved slot root");
+    let root = coven_protocol::store_commit::ObjectHash::digest(b"reserved slot root");
     let semantic = "store-v1/heads/device-a/1".to_string();
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
         ProtocolObjectDomain::StoreHead,
     );
@@ -1091,7 +1091,7 @@ fn protocol_object_prepare_rejects_a_path_outside_its_domain() {
         UserKeypair::generate(),
     )
     .expect("test cloud storage supports exact slots");
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"prepare domain root"),
         ProtocolObjectDomain::StoreHead,
     );
@@ -1119,7 +1119,7 @@ async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
     .expect("test cloud storage supports exact slots");
     let root = ObjectHash::digest(b"exact delete root");
     let semantic = "store-v1/heads/device-a/1";
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
         ProtocolObjectDomain::StoreHead,
     );
@@ -1157,8 +1157,8 @@ async fn reserved_protocol_slot_rejects_a_mismatched_semantic_path_before_read()
         UserKeypair::generate(),
     )
     .expect("test cloud storage supports exact slots");
-    let root = crate::protocol::store_commit::ObjectHash::digest(b"reserved slot root");
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let root = coven_protocol::store_commit::ObjectHash::digest(b"reserved slot root");
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
         ProtocolObjectDomain::StoreHead,
     );
@@ -1188,15 +1188,15 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
         UserKeypair::generate(),
     )
     .expect("test cloud storage supports immutable copies");
-    let root = crate::protocol::store_commit::ObjectHash::digest(b"root-a");
-    let other_root = crate::protocol::store_commit::ObjectHash::digest(b"root-b");
-    let commit_hash = crate::protocol::store_commit::ObjectHash::digest(b"commit");
-    let family = crate::protocol::store_commit::CandidateFamilyId::from_hash(
-        crate::protocol::store_commit::ObjectHash::digest(b"cloud test family"),
+    let root = coven_protocol::store_commit::ObjectHash::digest(b"root-a");
+    let other_root = coven_protocol::store_commit::ObjectHash::digest(b"root-b");
+    let commit_hash = coven_protocol::store_commit::ObjectHash::digest(b"commit");
+    let family = coven_protocol::store_commit::CandidateFamilyId::from_hash(
+        coven_protocol::store_commit::ObjectHash::digest(b"cloud test family"),
     );
     let semantic =
-        crate::protocol::store_commit::commit_semantic_prefix(family, "device", 1, commit_hash);
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        coven_protocol::store_commit::commit_semantic_prefix(family, "device", 1, commit_hash);
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
         ProtocolObjectDomain::StoreCommit,
     );
@@ -1220,7 +1220,7 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
             .expect("read with the exact authenticated context"),
         b"signed commit",
     );
-    let other_root_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let other_root_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         other_root,
         ProtocolObjectDomain::StoreCommit,
     );
@@ -1233,15 +1233,15 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
     );
 
     let other_semantic =
-        crate::protocol::store_commit::commit_semantic_prefix(family, "device", 2, commit_hash);
+        coven_protocol::store_commit::commit_semantic_prefix(family, "device", 2, commit_hash);
     assert!(matches!(
         storage
             .read_protocol_object(&context, &object, &other_semantic)
             .await,
-        Err(crate::protocol::objects::StorageError::Parse(_))
+        Err(coven_protocol::objects::StorageError::Parse(_))
     ));
 
-    let other_domain_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let other_domain_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
         ProtocolObjectDomain::StoreHead,
     );
@@ -1249,7 +1249,7 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
         storage
             .read_protocol_object(&other_domain_context, &object, &semantic)
             .await,
-        Err(crate::protocol::objects::StorageError::Parse(_))
+        Err(coven_protocol::objects::StorageError::Parse(_))
     ));
 }
 
@@ -1274,7 +1274,7 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
     .expect("stale reader storage");
     let root = ObjectHash::digest(b"control plane root");
     let head_semantic = "store-v1/heads/device-a/1";
-    let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
         ProtocolObjectDomain::StoreHead,
     );
@@ -1302,7 +1302,7 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
         b"signed control bytes",
     );
 
-    let family = crate::protocol::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+    let family = coven_protocol::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
         b"control plane package family",
     ));
     let package_hash = ObjectHash::digest(b"encrypted package");
@@ -1310,7 +1310,7 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
         "store-v1/candidates/{}/packages/device-a/1/{package_hash}",
         family.as_hash()
     );
-    let package_context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
+    let package_context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
         root,
         ProtocolObjectDomain::StorePackage,
     );

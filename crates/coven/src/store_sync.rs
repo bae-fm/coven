@@ -7,8 +7,6 @@ use tracing::{debug, error, info};
 
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::database::StoreDatabase;
-use crate::protocol::blob::{BlobRef, BlobTransitionObserver};
-use crate::protocol::objects::StorageError;
 use crate::storage::cloud::setup::StorageSetupError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
@@ -25,6 +23,8 @@ use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreOpenGuard;
 use coven_keys::encryption::EncryptionService;
+use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
+use coven_protocol::objects::StorageError;
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 

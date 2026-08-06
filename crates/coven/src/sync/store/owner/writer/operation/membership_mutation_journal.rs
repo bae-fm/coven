@@ -1,20 +1,20 @@
 use crate::database::DurableMembershipMutation;
 use crate::database::StoreDatabase;
-use crate::protocol::membership::{
-    self, MemberRole, MembershipChange, MembershipEntry, StoreMembershipConflictResolution,
-    StoreMembershipConflictResolutionRef,
-};
-use crate::protocol::membership_mutation::{
-    PreparedMembershipPublication, PreparedMembershipTransition,
-};
-use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
-use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
-use crate::protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
-use crate::protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
-use crate::protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
 use crate::storage::SyncStorage;
 use coven_keys::encryption::EncryptionService;
+use coven_protocol::membership::{
+    self, MemberRole, MembershipChange, MembershipEntry, StoreMembershipConflictResolution,
+    StoreMembershipConflictResolutionRef,
+};
+use coven_protocol::membership_mutation::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
+use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
+use coven_protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
+use coven_protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
+use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 
 use crate::sync::store::membership::InviteError;
 
@@ -549,7 +549,7 @@ impl MutationPersistence {
     pub(super) async fn begin_nonactivating_revoke(
         &self,
         plan: &RevokeMutationPlan,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), InviteError> {
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
         let RevokeMembershipPublication::StoreActivated { candidate, .. } = &plan.publication
@@ -644,7 +644,7 @@ impl MutationPersistence {
     pub(super) async fn begin_nonactivating_resolution(
         &self,
         plan: &ResolveMutationPlan,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), InviteError> {
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
         let progress = MembershipMutationProgress::ResolutionCandidateNonactivating {

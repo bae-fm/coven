@@ -3,10 +3,10 @@ use crate::database::store::device_join_journal::{
     require_initial, require_replacement_terminal, validate_successor, DeviceJoinJournalError,
 };
 use crate::database::StoreDatabase;
-use crate::protocol::store_commit::device_join_journal::{
+use coven_protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,
 };
-use crate::protocol::store_commit::{DeviceJoinAttemptId, ObjectHash};
+use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash};
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeviceJoinJournalStore {

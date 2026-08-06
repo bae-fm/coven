@@ -20,7 +20,7 @@ use super::{
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::oauth::OAuthConfig;
-use crate::protocol::objects::ObjectSlot;
+use coven_protocol::objects::ObjectSlot;
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
@@ -557,8 +557,8 @@ impl CloudHome for OneDriveCloudHome {
 impl ExactSlotStorage for OneDriveCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
-        use crate::protocol::objects::{
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use coven_protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };

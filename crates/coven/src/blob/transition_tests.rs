@@ -23,10 +23,6 @@ use tokio::sync::watch;
 use crate::blob::transition::LocalBlobTransitions;
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::protocol::blob::DeferredLocalBlobDisposition;
-use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
-use crate::protocol::store_commit::ObjectHash;
-use crate::protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
@@ -38,6 +34,10 @@ use crate::Migration;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::blob::DeferredLocalBlobDisposition;
+use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlobRef};
+use coven_protocol::store_commit::ObjectHash;
+use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");
@@ -215,7 +215,7 @@ async fn pending_uploads(db: &Database) -> usize {
 async fn created_upload_blob(
     db: &Database,
     blob_id: &str,
-) -> crate::protocol::blob::locator::StoredBlobRef {
+) -> coven_protocol::blob::locator::StoredBlobRef {
     crate::database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
@@ -961,7 +961,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
              VALUES ('photo-user-scoped', 'n-user-scoped', 'image', {}, '{}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/photo-user-scoped.jpg');",
         bytes.len(),
-        crate::protocol::blob::content_hash(bytes),
+        coven_protocol::blob::content_hash(bytes),
     ))
     .await;
     let user_dir = tmp.path().join("user");
@@ -1101,7 +1101,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
              VALUES ('cover-host-scoped', 'n-host-scoped', {}, '{}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/cover-host-scoped.jpg')",
         bytes.len(),
-        crate::protocol::blob::content_hash(bytes),
+        coven_protocol::blob::content_hash(bytes),
     ))
     .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -1256,7 +1256,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
-            crate::protocol::blob::content_hash(&cover),
+            coven_protocol::blob::content_hash(&cover),
         ),
     )
     .await;
@@ -1404,7 +1404,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
-            crate::protocol::blob::content_hash(&cover),
+            coven_protocol::blob::content_hash(&cover),
         ),
     )
     .await;
@@ -1521,7 +1521,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
                 "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
                  VALUES ('{cover}', '{note}', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{path}')",
                 bytes.len(),
-                crate::protocol::blob::content_hash(bytes),
+                coven_protocol::blob::content_hash(bytes),
             ),
         )
         .await;
@@ -1821,7 +1821,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     db_a.execute_test_host_write(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
-            crate::protocol::blob::content_hash(&cover),
+            coven_protocol::blob::content_hash(&cover),
         ),
     )
     .await;
@@ -1899,7 +1899,7 @@ async fn make_remote_rejects_remote_root() {
     db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
-            crate::protocol::blob::content_hash(b"REMOTE-ROOT"),
+            coven_protocol::blob::content_hash(b"REMOTE-ROOT"),
         ),
     )
     .await;
@@ -1941,7 +1941,7 @@ async fn make_local_rejects_remote_root() {
     db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
-            crate::protocol::blob::content_hash(b"REMOTE-ROOT"),
+            coven_protocol::blob::content_hash(b"REMOTE-ROOT"),
         ),
     )
     .await;
@@ -2002,7 +2002,7 @@ async fn make_remote_rejects_already_remote_root() {
     db.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
-            crate::protocol::blob::content_hash(&[0; 15]),
+            coven_protocol::blob::content_hash(&[0; 15]),
         ),
     )
     .await;
@@ -2269,7 +2269,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"same-locator-created-journals";
-    let hash = crate::protocol::blob::content_hash(bytes);
+    let hash = coven_protocol::blob::content_hash(bytes);
 
     db.execute_test_sql(&format!(
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -2306,7 +2306,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .local_blob_write_authority()
         .await
         .expect("load local blob write authority");
-    let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
+    let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
     let entries = crate::database::StoreDatabase::new(&db)
         .pending_blob_uploads()
         .await
@@ -2328,20 +2328,20 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .store_blob_protection()
             .expect("load blob protection");
         let locator = match &protection {
-            crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
-                crate::protocol::blob::locator::BlobLocator::opaque(
+            coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
+                coven_protocol::blob::locator::BlobLocator::opaque(
                     row.blob().namespace.clone(),
                     row.blob().id.clone(),
                     registration.reference().clone(),
-                    crate::protocol::blob::locator::RemoteAudience::Store,
+                    coven_protocol::blob::locator::RemoteAudience::Store,
                     row.blob().scope.clone(),
                     encryption.seal_key_fingerprint(),
                     row.plaintext_size(),
                     row.plaintext_hash(),
                 )
             }
-            crate::protocol::objects::BlobSpoolProtection::Browsable => {
-                crate::protocol::blob::locator::BlobLocator::browsable(
+            coven_protocol::objects::BlobSpoolProtection::Browsable => {
+                coven_protocol::blob::locator::BlobLocator::browsable(
                     row.blob().namespace.clone(),
                     row.blob().id.clone(),
                     registration.reference().clone(),
@@ -2374,7 +2374,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         crate::database::StoreDatabase::new(&db)
             .mark_blob_upload_prepared(
                 &pending,
-                crate::protocol::audience_package::PackageAudience::Store,
+                coven_protocol::audience_package::PackageAudience::Store,
                 stored.clone(),
                 spool.clone(),
             )

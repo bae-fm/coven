@@ -27,7 +27,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn cleanup_circle_operation_candidate(
         &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
         let root = self.history_verifier.verified_root().reference().clone();
         for verification in self
@@ -82,7 +82,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn materialize_device_join_activation(
         &mut self,
         reference: &StoreBatchCommitRef,
-        expected_outcome: &crate::protocol::store_commit::DeviceJoinOutcomeRef,
+        expected_outcome: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
         membership_state: &StoreMembershipStateRef,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
         self.materialize_device_join_activation_inner(reference, expected_outcome, membership_state)
@@ -222,11 +222,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn materialize_device_join_activation_inner(
         &mut self,
         reference: &StoreBatchCommitRef,
-        expected_outcome: &crate::protocol::store_commit::DeviceJoinOutcomeRef,
+        expected_outcome: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
         membership_state: &StoreMembershipStateRef,
     ) -> Result<(), pull::StorePullError> {
         let root = self.history_verifier.verified_root().reference().clone();
-        let crate::protocol::store_commit::StoreCommitCoord {
+        let coven_protocol::store_commit::StoreCommitCoord {
             stream_id,
             sequence,
         } = reference.coord;
@@ -278,7 +278,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .history_verifier
             .load_activation_head(&verified_commit)
             .await?;
-        let head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+        let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: head.value.head_hash(),
             object: head.object.clone(),
         };
@@ -290,7 +290,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .preactivate_recovery_author(&commit, &registrations)
             .map_err(pull::StorePullError::Protocol)?;
         let device_operations =
-            crate::protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
+            coven_protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                 &commit,
             )
             .map_err(pull::StorePullError::Protocol)?;

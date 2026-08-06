@@ -429,8 +429,8 @@ impl CloudHome for GoogleDriveCloudHome {
 impl ExactSlotStorage for GoogleDriveCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
-        use crate::protocol::objects::{
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use coven_protocol::objects::{
             GoogleDriveCorpus, ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };

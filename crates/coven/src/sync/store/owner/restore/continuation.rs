@@ -4,7 +4,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn begin_device_join(
         self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
-        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<crate::sync::store::JoiningStore<'storage>, crate::sync::store::DeviceJoinError>
     {
         crate::sync::store::JoiningStore::begin_from_restored_history(
@@ -23,7 +23,7 @@ impl<'storage> RestoringStore<'storage> {
         storage: &'storage dyn SyncStorage,
         root: StoreRootRef,
         protocol: StoreProtocolRoot,
-        membership: crate::protocol::membership::MembershipChain,
+        membership: coven_protocol::membership::MembershipChain,
         identity: UserKeypair,
     ) -> Self {
         Self {
@@ -51,9 +51,9 @@ impl<'storage> RestoringStore<'storage> {
 
     pub(crate) async fn install_activated_device_continuation(
         &self,
-        continuation: crate::protocol::recovery::ActivatedContinuation,
+        continuation: coven_protocol::recovery::ActivatedContinuation,
     ) -> Result<(), StoreRegistrationError> {
-        let registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
+        let registration = coven_protocol::store_commit::StoreDeviceRegistration::parse_at(
             &continuation.registration_bytes,
             &self.root,
             continuation.registration.device_id,

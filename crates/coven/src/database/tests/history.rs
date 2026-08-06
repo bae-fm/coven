@@ -3,15 +3,15 @@ use crate::database::*;
 
 #[test]
 fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate() {
-    let stream = crate::protocol::causal_grants::AuthorStreamId::from_bytes([7; 32]);
+    let stream = coven_protocol::causal_grants::AuthorStreamId::from_bytes([7; 32]);
     let registration = StoreDeviceRegistrationRef {
         device_id: "07".repeat(32).parse().expect("test device id"),
         registration_hash: ObjectHash::digest(b"test registration"),
         object: reclaim_test_object("store-v1/test/registration.json"),
     };
-    let exclusion = |label: &str| crate::protocol::store_commit::StoreDeviceExclusionRef {
-        proposal: crate::protocol::store_commit::StoreDeviceExclusionProposalRef {
-            proposal_id: crate::protocol::store_commit::StoreDeviceExclusionProposalId::from_hash(
+    let exclusion = |label: &str| coven_protocol::store_commit::StoreDeviceExclusionRef {
+        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef {
+            proposal_id: coven_protocol::store_commit::StoreDeviceExclusionProposalId::from_hash(
                 ObjectHash::digest(format!("{label} proposal id").as_bytes()),
             ),
             target: registration.clone(),
@@ -36,7 +36,7 @@ fn author_exclusion_locator_skips_a_terminal_whose_own_cut_accepts_the_candidate
             exclusion,
             BTreeMap::from([(stream, commit(sequence, label))]),
             commit(sequence + 1, &format!("{label}-activation")),
-            crate::protocol::store_commit::StoreDeviceHeadRef {
+            coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: ObjectHash::digest(format!("{label} head").as_bytes()),
                 object: reclaim_test_object(&format!("store-v1/test/{label}/head.json")),
             },

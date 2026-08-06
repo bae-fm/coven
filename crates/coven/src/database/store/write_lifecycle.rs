@@ -1,6 +1,6 @@
 use crate::database::*;
-use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
-use crate::write::{PendingWrite, WriteId, WriteResolution, WriteStatus};
+use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
+use coven_protocol::write::{PendingWrite, WriteId, WriteResolution, WriteStatus};
 use std::sync::Arc;
 
 use super::candidate_records::{
@@ -207,21 +207,21 @@ impl StoreDatabase {
                 let absent = matches!(
                     remote,
                     RemoteObjectRecord::CandidateCommit(
-                        crate::protocol::remote_object::CandidateCommitRecord {
+                        coven_protocol::remote_object::CandidateCommitRecord {
                             state:
-                                crate::protocol::remote_object::CandidateCommitState::AbsentVerified { .. },
+                                coven_protocol::remote_object::CandidateCommitState::AbsentVerified { .. },
                             ..
                         }
                     ) | RemoteObjectRecord::CandidateExclusive(
-                        crate::protocol::remote_object::CandidateObjectRecord {
+                        coven_protocol::remote_object::CandidateObjectRecord {
                             state:
-                                crate::protocol::remote_object::CandidateObjectState::AbsentVerified { .. },
+                                coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. },
                             ..
                         }
                     ) | RemoteObjectRecord::RetainedAuthority(
-                        crate::protocol::remote_object::RetainedAuthorityRecord {
+                        coven_protocol::remote_object::RetainedAuthorityRecord {
                             state:
-                                crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
+                                coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
                             ..
                         }
                     )
@@ -338,13 +338,13 @@ impl StoreDatabase {
                 if matches!(
                     remote,
                     RemoteObjectRecord::CandidateCommit(
-                        crate::protocol::remote_object::CandidateCommitRecord {
+                        coven_protocol::remote_object::CandidateCommitRecord {
                             state:
-                                crate::protocol::remote_object::CandidateCommitState::CleanupPending {
-                                    proof: crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                                coven_protocol::remote_object::CandidateCommitState::CleanupPending {
+                                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                                 }
-                                | crate::protocol::remote_object::CandidateCommitState::AbsentVerified {
-                                    proof: crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                                | coven_protocol::remote_object::CandidateCommitState::AbsentVerified {
+                                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
                                 },
                             ..
                         }

@@ -67,7 +67,7 @@ impl StoreDatabase {
         let expected_domain = retained.domain();
         let expected_bytes = retained.package().to_bytes();
         let expected_owner =
-            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(owner.clone());
+            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(owner.clone());
         if !matches!(
             remote,
             RemoteObjectRecord::SharedLiveSet(record)
@@ -77,11 +77,11 @@ impl StoreDatabase {
                     && record.bytes.canonical_semantic_bytes() == expected_bytes
                     && !matches!(
                         record.bytes.stored(),
-                        crate::protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
+                        coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
                     )
                     && matches!(
                         &record.state,
-                        crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                        coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                             ownership
                         } if ownership.activated.contains(&expected_owner)
                     )
@@ -101,7 +101,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let locator_bytes = stored.locator().to_bytes();
         let expected_owner =
-            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(owner.clone());
+            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(owner.clone());
         if !matches!(
             remote,
             RemoteObjectRecord::SharedLiveSet(record)
@@ -111,12 +111,12 @@ impl StoreDatabase {
                     && record.bytes.canonical_semantic_bytes() == locator_bytes
                     && matches!(
                         record.bytes.stored(),
-                        crate::protocol::remote_object::RemoteStoredRepresentation::Blob { object }
+                        coven_protocol::remote_object::RemoteStoredRepresentation::Blob { object }
                             if object == stored.object()
                     )
                     && matches!(
                         &record.state,
-                        crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                        coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                             ownership
                         } if ownership.activated.contains(&expected_owner)
                     )

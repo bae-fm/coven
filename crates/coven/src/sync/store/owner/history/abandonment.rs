@@ -1,9 +1,9 @@
-use crate::protocol::objects::PreparedExactObject;
-use crate::protocol::store_commit::{
+use crate::sync::store::StoreError;
+use coven_protocol::objects::PreparedExactObject;
+use coven_protocol::store_commit::{
     ObjectHash, StoreBatchCommitDeletionTarget, StoreDeviceHead, StoreDeviceRegistration,
     VerifiedStoreBatchCommit,
 };
-use crate::sync::store::StoreError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MergeCandidateAbandonment {
@@ -27,7 +27,7 @@ pub(crate) enum MergeCandidateAbandonment {
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedMergeWinner {
     store_root_hash: ObjectHash,
-    expected_slot: crate::protocol::objects::ObjectSlot,
+    expected_slot: coven_protocol::objects::ObjectSlot,
     expected: StoreDeviceHead,
     expected_commit: Box<VerifiedStoreBatchCommit>,
     winner: StoreDeviceHead,
@@ -38,7 +38,7 @@ pub(crate) struct VerifiedMergeWinner {
 impl VerifiedMergeWinner {
     pub(crate) fn from_verified_parts(
         store_root_hash: ObjectHash,
-        expected_slot: crate::protocol::objects::ObjectSlot,
+        expected_slot: coven_protocol::objects::ObjectSlot,
         expected: StoreDeviceHead,
         expected_commit: VerifiedStoreBatchCommit,
         winner: StoreDeviceHead,
@@ -61,13 +61,13 @@ impl VerifiedMergeWinner {
         candidate: StoreBatchCommitDeletionTarget,
         author: &StoreDeviceRegistration,
     ) -> Result<
-        crate::protocol::remote_object::VerifiedCandidateNonactivation,
-        crate::protocol::remote_object::RemoteObjectRecordError,
+        coven_protocol::remote_object::VerifiedCandidateNonactivation,
+        coven_protocol::remote_object::RemoteObjectRecordError,
     > {
         let commit = candidate
             .verify_nonactivation_candidate(self.store_root_hash, author)
             .map_err(|error| {
-                crate::protocol::remote_object::RemoteObjectRecordError::InvalidProof(
+                coven_protocol::remote_object::RemoteObjectRecordError::InvalidProof(
                     error.to_string(),
                 )
             })?;
@@ -88,15 +88,15 @@ impl VerifiedMergeWinner {
             || self.winner.commit != *self.winner_commit.reference()
         {
             return Err(
-                crate::protocol::remote_object::RemoteObjectRecordError::InvalidProof(
+                coven_protocol::remote_object::RemoteObjectRecordError::InvalidProof(
                     "Merge winner observation is not bound to the losing candidate's exact activation point"
                         .to_string(),
                 ),
             );
         }
-        crate::protocol::remote_object::VerifiedCandidateNonactivation::from_verified_merge_winner(
+        coven_protocol::remote_object::VerifiedCandidateNonactivation::from_verified_merge_winner(
             candidate,
-            crate::protocol::store_commit::StoreDeviceHeadRef {
+            coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: self.winner.head_hash(),
                 object: self.winner_prepared.reference().clone(),
             },
@@ -108,7 +108,7 @@ impl VerifiedMergeWinner {
         &self,
         targets: impl IntoIterator<Item = StoreBatchCommitDeletionTarget>,
         author: &StoreDeviceRegistration,
-    ) -> Result<Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
+    ) -> Result<Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let mut nonactivations = Vec::new();
         for target in targets {
@@ -151,7 +151,7 @@ impl VerifiedMergeWinner {
     #[cfg(test)]
     pub(crate) fn set_expected_slot_for_test(
         &mut self,
-        expected_slot: crate::protocol::objects::ObjectSlot,
+        expected_slot: coven_protocol::objects::ObjectSlot,
     ) {
         self.expected_slot = expected_slot;
     }

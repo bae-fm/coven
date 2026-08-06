@@ -20,7 +20,7 @@ use super::{
     CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage,
     RevokeOutcome, UploadProgress,
 };
-use crate::protocol::objects::ObjectSlot;
+use coven_protocol::objects::ObjectSlot;
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const CHUNK_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-chunk-manifest-v1\0";
@@ -159,7 +159,7 @@ pub enum CloudKitScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloudKitProviderIdentity {
     pub container_id: String,
-    pub environment: crate::protocol::objects::CloudKitEnvironment,
+    pub environment: coven_protocol::objects::CloudKitEnvironment,
     pub owner_name: String,
     pub zone_name: String,
     pub current_user_record_name: String,

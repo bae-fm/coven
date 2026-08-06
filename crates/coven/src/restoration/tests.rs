@@ -14,9 +14,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
 use crate::joining::BootstrapError;
-use crate::protocol::blob::{CacheFill, Provenance};
-use crate::protocol::membership::MembershipFloor;
-use crate::protocol::synced_schema::BlobDecl;
 use crate::restoration::restore_from_code;
 use crate::restoration::{
     decode_restore_code, encode_restore_code, OwnerRecoveryAuthority, RestoreAuthority,
@@ -40,6 +37,9 @@ use coven_foundation::id_provider::SequentialIdProvider;
 use coven_foundation::store_dir::StoreLayout;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{StoreKeys, UserKeypair};
+use coven_protocol::blob::{CacheFill, Provenance};
+use coven_protocol::membership::MembershipFloor;
+use coven_protocol::synced_schema::BlobDecl;
 
 struct RestoreCloudKitOps {
     records: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
@@ -300,51 +300,49 @@ impl CloudKitOps for RestoreCloudKitOps {
 }
 
 fn membership_floor(author_pubkey: String) -> MembershipFloor {
-    let coord = crate::protocol::membership::MembershipCoord {
+    let coord = coven_protocol::membership::MembershipCoord {
         author_pubkey,
-        author_owner_grant: crate::protocol::membership::MembershipGrantId(
-            crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
+        author_owner_grant: coven_protocol::membership::MembershipGrantId(
+            coven_protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
         ),
         stream_id: format!("{:064x}", 1)
             .parse()
             .expect("canonical test author stream id"),
         seq: 1,
-        entry_hash: crate::protocol::store_commit::ObjectHash::digest(
-            b"restore test founder entry",
-        ),
+        entry_hash: coven_protocol::store_commit::ObjectHash::digest(b"restore test founder entry"),
     };
     let stored = b"restore test membership head";
-    MembershipFloor(vec![crate::protocol::membership::MembershipHeadRef {
+    MembershipFloor(vec![coven_protocol::membership::MembershipHeadRef {
         coord,
-        head_hash: crate::protocol::store_commit::ObjectHash::digest(
+        head_hash: coven_protocol::store_commit::ObjectHash::digest(
             b"restore test membership head semantic bytes",
         ),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/membership/heads/restore-test/1.json".to_string(),
             )
             .expect("valid test membership-head slot"),
             stored.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(stored),
+            coven_protocol::store_commit::ObjectHash::digest(stored),
         ),
     }])
 }
 
-fn store_root_ref(label: &str) -> crate::protocol::store_commit::StoreRootRef {
+fn store_root_ref(label: &str) -> coven_protocol::store_commit::StoreRootRef {
     let stored = format!("{label} stored root");
-    crate::protocol::store_commit::StoreRootRef {
-        store_root_id: crate::protocol::store_commit::ObjectHash::digest(
+    coven_protocol::store_commit::StoreRootRef {
+        store_root_id: coven_protocol::store_commit::ObjectHash::digest(
             format!("{label} identity").as_bytes(),
         ),
-        store_root_hash: crate::protocol::store_commit::ObjectHash::digest(label.as_bytes()),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(format!(
+        store_root_hash: coven_protocol::store_commit::ObjectHash::digest(label.as_bytes()),
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/protocol/root/{}.json",
-                crate::protocol::store_commit::ObjectHash::digest(label.as_bytes())
+                coven_protocol::store_commit::ObjectHash::digest(label.as_bytes())
             ))
             .expect("valid test Store-root slot"),
             stored.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(stored.as_bytes()),
+            coven_protocol::store_commit::ObjectHash::digest(stored.as_bytes()),
         ),
     }
 }
@@ -357,19 +355,19 @@ fn serialized_keyring(byte: u8) -> String {
 }
 
 fn owner_recovery_authority(
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     owner: &UserKeypair,
 ) -> RestoreAuthority {
-    let owner_grant = crate::protocol::membership::MembershipGrantId(
-        crate::protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
+    let owner_grant = coven_protocol::membership::MembershipGrantId(
+        coven_protocol::store_commit::ObjectHash::digest(b"restore test owner grant"),
     );
-    let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
-        first_slot: crate::protocol::objects::ObjectSlot::logical(
+    let anchor = coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
+        first_slot: coven_protocol::objects::ObjectSlot::logical(
             "store-v1/recovery/restore-tests/first.json".to_string(),
         )
         .expect("valid recovery slot"),
     };
-    let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+    let activation = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
         root,
         &pubkey_hex(owner),
         &owner_grant,
@@ -379,9 +377,9 @@ fn owner_recovery_authority(
     RestoreAuthority::OwnerRecovery(OwnerRecoveryAuthority {
         owner_identity_secret: hex::encode(owner.to_keypair_bytes()),
         owner_grant: owner_grant.clone(),
-        recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+        recovery: coven_protocol::store_commit::OwnerRecoveryCursor {
             owner_grant,
-            position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+            position: coven_protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                 activation,
             },
         },
@@ -398,7 +396,7 @@ impl OwnerRecoveryTestDevice for TestDevice {
         let protocol = self.protocol_root();
         let root = self.store_root();
         let owner_grant = protocol.descriptor.founder_grant.clone();
-        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+        let activation = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
             root,
             &pubkey_hex(owner),
             &owner_grant,
@@ -408,9 +406,9 @@ impl OwnerRecoveryTestDevice for TestDevice {
         RestoreAuthority::OwnerRecovery(OwnerRecoveryAuthority {
             owner_identity_secret: hex::encode(owner.to_keypair_bytes()),
             owner_grant: owner_grant.clone(),
-            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+            recovery: coven_protocol::store_commit::OwnerRecoveryCursor {
                 owner_grant,
-                position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                position: coven_protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                     activation,
                 },
             },
@@ -862,7 +860,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
         .await
         .expect("create owner snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
+    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
     owner_device
         .publish_snapshot(snapshot, snapshot_coverage.clone())
         .await
@@ -1010,7 +1008,7 @@ async fn merge_owner_recovery_restore_code_creates_an_activated_replacement_devi
 struct OwnerRecoveryRestoreFixture {
     code: String,
     owner_pubkey: String,
-    tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
     app: tempfile::TempDir,
@@ -1048,8 +1046,8 @@ impl OwnerRecoveryRestoreFixture {
         let restored = Database::open(
             &config.store_dir.db_path(),
             tables,
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &migrations,
@@ -1062,13 +1060,13 @@ impl OwnerRecoveryRestoreFixture {
             .expect("recovered Store device identity exists");
         assert_eq!(
             restored
-                .get_protocol_state(crate::protocol::membership::OWNER_PUBKEY_STATE_KEY)
+                .get_protocol_state(coven_protocol::membership::OWNER_PUBKEY_STATE_KEY)
                 .await
                 .expect("load recovered Store owner"),
             Some(owner_pubkey),
             "restore pins the verified chain founder as the Store owner",
         );
-        let activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation = restored
+        let activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation = restored
             .test_sql(move |database| {
                 database.store_device_registration_activation(&store_device_id)
             })
@@ -1076,7 +1074,7 @@ impl OwnerRecoveryRestoreFixture {
             .expect("load config device activation");
         assert!(matches!(
             activation,
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation::Recovery { .. }
+            coven_protocol::store_commit::StoreDeviceRegistrationActivation::Recovery { .. }
         ));
     }
 }
@@ -1118,7 +1116,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         .capture_snapshot_image_for_test(root.clone(), snapshot_dir, None)
         .await
         .expect("create recovery snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
+    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
     owner_device
         .publish_snapshot(snapshot, snapshot_coverage.clone())
         .await
@@ -1207,7 +1205,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
             .await
             .expect("owner snapshot");
-        let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
+        let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
         owner_device
             .publish_snapshot(snapshot, snapshot_coverage.clone())
             .await
@@ -1311,8 +1309,8 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         let db_b = Database::open(
             &lib_b.db_path(),
             tables.clone(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id.clone(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),
@@ -1354,7 +1352,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .test_sql(|database| database.latest_published_store_snapshot())
             .await
             .expect("read continued snapshot stream");
-        let successor: crate::protocol::store_commit::SnapshotMeta =
+        let successor: coven_protocol::store_commit::SnapshotMeta =
             serde_json::from_slice(&successor_bytes).expect("parse continued snapshot metadata");
         assert_eq!(
             u64::try_from(successor_generation).expect("non-negative snapshot generation"),
@@ -1399,7 +1397,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
             &owner,
             &pubkey_hex(&member),
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "Test Store",
         )
@@ -1444,7 +1442,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     owner_device
         .publish_snapshot(
             snapshot,
-            crate::protocol::store_commit::CommitFrontier(BTreeMap::new()),
+            coven_protocol::store_commit::CommitFrontier(BTreeMap::new()),
         )
         .await
         .expect("publish post-removal snapshot");
@@ -1534,7 +1532,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"cover-bytes"),
+                coven_protocol::blob::content_hash(b"cover-bytes"),
             ))
             .await;
         let (owner_tmp, owner_dir) = temp_store_dir();
@@ -1602,18 +1600,18 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .test_sql(|database| database.latest_published_store_snapshot_bytes())
             .await
             .expect("read published snapshot metadata");
-        let published_snapshot: crate::protocol::store_commit::SnapshotMeta =
+        let published_snapshot: coven_protocol::store_commit::SnapshotMeta =
             serde_json::from_slice(&published_snapshot_bytes)
                 .expect("parse published snapshot metadata");
         let snapshot_coverage = published_snapshot.coverage.clone().into_refs();
         let snapshot_frontier =
-            crate::protocol::store_commit::CommitFrontier::from_refs(snapshot_coverage.clone())
+            coven_protocol::store_commit::CommitFrontier::from_refs(snapshot_coverage.clone())
                 .expect("snapshot coverage has valid stream ids");
         let latest_position = continuation
             .latest_position
             .as_ref()
             .expect("continuation has a latest Store position");
-        let source_registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
+        let source_registration = coven_protocol::store_commit::StoreDeviceRegistration::parse_at(
             &continuation.registration_bytes,
             &store_root,
             continuation.registration.device_id,
@@ -1684,8 +1682,8 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let restored = Database::open(
             &lib_b.db_path(),
             tables,
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             config.device_id,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &test_migrations(),

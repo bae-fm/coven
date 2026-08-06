@@ -11,7 +11,7 @@
 //!         │            commits · identities · signed operations
 //!         ├──────────► Database
 //!         ├──────────► Storage
-//!         └──────────► coven-keys ───► coven-foundation
+//!         └──────────► coven-protocol ──► coven-keys ──► coven-foundation
 //! ```
 //!
 //! Every top-level module of the coven crate is assigned to a region, and a
@@ -46,17 +46,11 @@ use crate::{is_test_source, RustFile};
 /// regions are equal.
 ///
 /// A region whose every module has become a crate leaves this enum along with
-/// its table rows — `coven-foundation` and `coven-keys` sit below everything
-/// here, and Cargo will not resolve a reference back up into `coven`. What
-/// remains ranks the regions still sharing the `coven` crate.
+/// its table rows — `coven-foundation`, `coven-keys`, and `coven-protocol` sit
+/// below everything here, and Cargo will not resolve a reference back up into
+/// `coven`. What remains ranks the regions still sharing the `coven` crate.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Region {
-    /// The value modules with no coven dependencies of their own that are
-    /// still inside `coven`; the clock, id, staged-file, store-layout, and
-    /// configuration modules are the `coven-foundation` crate.
-    Foundation,
-    /// The deterministic protocol model: signed values, parsing, validation.
-    Protocol,
     /// The SQLite boundary.
     Database,
     /// Cloud providers, local file storage, and the OAuth flow they use.
@@ -73,8 +67,6 @@ pub(crate) enum Region {
 /// Every top-level module must appear here; an unassigned module fails the
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
-    ("write", Region::Foundation),
-    ("protocol", Region::Protocol),
     ("database", Region::Database),
     ("join_code", Region::Storage),
     ("restore_code", Region::Storage),
@@ -99,12 +91,6 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("store_security", Region::Host),
     ("store_sync", Region::Host),
 ];
-
-/// `write` is a value module over protocol shapes; `protocol` sits above it in
-/// the foundation ordering only because `write` consumes protocol values.
-/// Rather than fold that one edge into the region ranks, it is the single
-/// declared same-direction exception.
-const EDGE_EXCEPTIONS: &[(&str, &str)] = &[("write", "protocol")];
 
 /// Database and Storage are siblings: replication composes both, but neither
 /// may reach into the other.
@@ -260,12 +246,6 @@ impl ModuleDependencyVisitor<'_> {
         if to == self.from {
             return;
         }
-        if EDGE_EXCEPTIONS
-            .iter()
-            .any(|(from, allowed)| *from == self.from && *allowed == to)
-        {
-            return;
-        }
         let from_region = self.regions[self.from];
         let to_region = self.regions[to.as_str()];
         if allows(from_region, to_region) {
@@ -401,14 +381,14 @@ mod tests {
             lib(),
             file("crates/coven/src/database/store.rs", ""),
             file(
-                "crates/coven/src/protocol/commit.rs",
+                "crates/coven/src/join_code.rs",
                 "use crate::sync::VerifiedThing;",
             ),
             file("crates/coven/src/sync/mod.rs", ""),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "protocol");
+        assert_eq!(violations[0].from, "join_code");
         assert_eq!(violations[0].to, "sync");
     }
 
@@ -419,9 +399,9 @@ mod tests {
             file("crates/coven/src/database/store.rs", ""),
             file(
                 "crates/coven/src/sync/mod.rs",
-                "use crate::database::StoreDatabase; use crate::protocol::Commit;",
+                "use crate::database::StoreDatabase;",
             ),
-            file("crates/coven/src/protocol/mod.rs", ""),
+            file("crates/coven/src/join_code.rs", ""),
         ];
         assert!(find_module_dependency_violations(&files)
             .expect("check runs")
@@ -454,7 +434,7 @@ mod tests {
             ),
             file("crates/coven/src/sync/mod.rs", ""),
             file(
-                "crates/coven/src/protocol/mod.rs",
+                "crates/coven/src/join_code.rs",
                 "fn open() { let _ = crate::DeviceJoinJournalDatabase::open(\"p\"); }",
             ),
         ];
@@ -495,11 +475,11 @@ mod tests {
             lib(),
             file("crates/coven/src/sync/mod.rs", ""),
             file(
-                "crates/coven/src/protocol/commit_tests.rs",
+                "crates/coven/src/join_code_tests.rs",
                 "use crate::sync::VerifiedThing;",
             ),
             file(
-                "crates/coven/src/protocol/mod.rs",
+                "crates/coven/src/join_code.rs",
                 r#"
                 #[cfg(test)]
                 mod tests { use crate::sync::VerifiedThing; }
@@ -510,7 +490,7 @@ mod tests {
         assert_eq!(violations.len(), 2);
         assert!(violations
             .iter()
-            .all(|violation| violation.from == "protocol" && violation.to == "sync"));
+            .all(|violation| violation.from == "join_code" && violation.to == "sync"));
     }
 
     /// A `<module>_tests` file or directory carries the tests for `<module>`, so

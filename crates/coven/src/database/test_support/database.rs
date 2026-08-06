@@ -10,7 +10,7 @@ impl Database {
 
     pub(crate) async fn tamper_retained_recovery_registration_for_test(
         &self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
         tamper: crate::database::RetainedRegistrationTamper,
     ) {
         let reference = reference.clone();
@@ -50,7 +50,7 @@ impl Database {
         let photo_id = photo_id.to_string();
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::protocol::blob::content_hash(bytes);
+        let hash = coven_protocol::blob::content_hash(bytes);
         self.execute_test_host_write(&format!(
             "INSERT INTO note_photos
              (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
@@ -75,7 +75,7 @@ impl Database {
                 (
                     id.to_string(),
                     i64::try_from(bytes.len()).expect("test blob size fits SQLite"),
-                    crate::protocol::blob::content_hash(bytes),
+                    coven_protocol::blob::content_hash(bytes),
                 )
             })
             .collect::<Vec<_>>();
@@ -107,7 +107,7 @@ impl Database {
         &self,
         created_at: &str,
     ) -> Result<(), DbError> {
-        let hash = crate::protocol::blob::content_hash(b"x");
+        let hash = coven_protocol::blob::content_hash(b"x");
         self.execute_test_sql(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('pending-root', 'Pending', NULL, 0, \
@@ -222,7 +222,7 @@ impl Database {
             blob_id,
             remote,
             bytes.len() as u64,
-            Some(&crate::protocol::blob::content_hash(bytes)),
+            Some(&coven_protocol::blob::content_hash(bytes)),
         )
         .await;
     }
@@ -301,7 +301,7 @@ impl Database {
 
     pub(crate) async fn circle_control_activation_count_for_test(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> i64 {
         self.test_sql(move |database| database.circle_control_activation_count(circle_id))
             .await
@@ -380,14 +380,14 @@ impl Database {
         namespace: &str,
         blob_id: &str,
         bytes: &[u8],
-        locator_hash: crate::protocol::store_commit::ObjectHash,
-        disposition: crate::protocol::blob::DeferredLocalBlobDisposition,
+        locator_hash: coven_protocol::store_commit::ObjectHash,
+        disposition: coven_protocol::blob::DeferredLocalBlobDisposition,
     ) -> Result<(), DbError> {
-        let drop = crate::protocol::blob::DeferredLocalBlobDrop {
+        let drop = coven_protocol::blob::DeferredLocalBlobDrop {
             namespace: namespace.to_string(),
             id: blob_id.to_string(),
             size: bytes.len() as u64,
-            plaintext_hash: crate::protocol::store_commit::ObjectHash::digest(bytes),
+            plaintext_hash: coven_protocol::store_commit::ObjectHash::digest(bytes),
             locator_hash,
             disposition,
         };
@@ -397,20 +397,20 @@ impl Database {
 
     pub(crate) async fn remote_object_for_test(
         &self,
-        object: crate::protocol::objects::ExactObjectRef,
-    ) -> Result<crate::protocol::remote_object::RemoteObjectRecord, DbError> {
+        object: coven_protocol::objects::ExactObjectRef,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
         self.test_sql(move |database| database.remote_object(&object))
             .await
     }
 
     pub(crate) async fn retained_store_package_pin_for_test(
         &self,
-        commit: &crate::protocol::store_commit::StoreBatchCommitRef,
+        commit: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<
         (
-            crate::protocol::remote_object::RetainedReplayOwner,
-            crate::protocol::store_commit::StorePackageRef,
-            crate::protocol::remote_object::RemoteObjectRecord,
+            coven_protocol::remote_object::RetainedReplayOwner,
+            coven_protocol::store_commit::StorePackageRef,
+            coven_protocol::remote_object::RemoteObjectRecord,
         ),
         DbError,
     > {
@@ -421,7 +421,7 @@ impl Database {
             .await?;
         let retained: serde_json::Value = serde_json::from_slice(&canonical_input)
             .map_err(|error| DbError::context("parse retained package input", error))?;
-        let reference: crate::protocol::store_commit::StorePackageRef = serde_json::from_value(
+        let reference: coven_protocol::store_commit::StorePackageRef = serde_json::from_value(
             retained["packages"][0]["store"]["reference"].clone(),
         )
         .map_err(|error| DbError::context("parse retained Store package reference", error))?;
@@ -429,7 +429,7 @@ impl Database {
             .remote_object_for_test(reference.object.clone())
             .await?;
         Ok((
-            crate::protocol::remote_object::RetainedReplayOwner::Commit {
+            coven_protocol::remote_object::RetainedReplayOwner::Commit {
                 commit: commit.clone(),
                 input_hash,
             },
@@ -440,13 +440,13 @@ impl Database {
 
     pub(crate) async fn remote_objects_for_test(
         &self,
-    ) -> Result<Vec<crate::protocol::remote_object::RemoteObjectRecord>, DbError> {
+    ) -> Result<Vec<coven_protocol::remote_object::RemoteObjectRecord>, DbError> {
         self.test_sql(|database| database.remote_objects()).await
     }
 
     pub(crate) async fn remote_object_exists_for_test(
         &self,
-        object: crate::protocol::objects::ExactObjectRef,
+        object: coven_protocol::objects::ExactObjectRef,
     ) -> Result<bool, DbError> {
         self.test_sql(move |database| database.remote_object_exists(&object))
             .await
@@ -454,7 +454,7 @@ impl Database {
 
     pub(crate) async fn remote_object_id_exists_for_test(
         &self,
-        object_id: crate::protocol::store_commit::ObjectHash,
+        object_id: coven_protocol::store_commit::ObjectHash,
     ) -> Result<bool, DbError> {
         self.test_sql(move |database| database.remote_object_id_exists(object_id))
             .await
@@ -462,8 +462,8 @@ impl Database {
 
     pub(crate) async fn replace_remote_object_for_test(
         &self,
-        object: crate::protocol::objects::ExactObjectRef,
-        remote: crate::protocol::remote_object::RemoteObjectRecord,
+        object: coven_protocol::objects::ExactObjectRef,
+        remote: coven_protocol::remote_object::RemoteObjectRecord,
     ) -> Result<(), DbError> {
         self.test_sql(move |database| database.replace_remote_object(&object, &remote))
             .await
@@ -471,7 +471,7 @@ impl Database {
 
     pub(crate) async fn delete_remote_object_for_test(
         &self,
-        object: crate::protocol::objects::ExactObjectRef,
+        object: coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
         self.test_sql(move |database| database.delete_remote_object(&object))
             .await
@@ -479,7 +479,7 @@ impl Database {
 
     pub(crate) async fn enqueue_blob_delete_for_test(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         created_at: &str,
     ) -> Result<(), DbError> {
         let stored = stored.clone();
@@ -509,7 +509,7 @@ impl Database {
         let blob_id = blob_id.to_string();
         let cloud_path = cloud_path.map(str::to_string);
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::protocol::store_commit::ObjectHash::digest(bytes).to_string();
+        let hash = coven_protocol::store_commit::ObjectHash::digest(bytes).to_string();
         crate::database::StoreDatabase::new(self)
             .run_host_store_write_for_test(None, None, move |transaction| {
                 transaction
@@ -538,7 +538,7 @@ impl Database {
     pub(crate) async fn capture_circle_document_for_test(
         &self,
         row_id: &str,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
         let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
@@ -579,7 +579,7 @@ impl Database {
 
     pub(crate) async fn local_store_device_id_for_test(
         &self,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceId, DbError> {
+    ) -> Result<coven_protocol::store_commit::StoreDeviceId, DbError> {
         self.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?
             .ok_or_else(|| DbError::Message("local device id is not installed".to_string()))?
@@ -590,7 +590,7 @@ impl Database {
     pub(crate) async fn capture_document_for_test(
         &self,
         row_id: &str,
-        audience: Option<crate::protocol::circle::CircleId>,
+        audience: Option<coven_protocol::circle::CircleId>,
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
         let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
@@ -616,7 +616,7 @@ impl Database {
         &self,
         document_id: &str,
         file_id: &str,
-        audience: Option<crate::protocol::circle::CircleId>,
+        audience: Option<coven_protocol::circle::CircleId>,
         bytes: &[u8],
         stamp: &str,
     ) -> Result<crate::WriteId, DbError> {
@@ -625,7 +625,7 @@ impl Database {
         let file_id = file_id.to_string();
         let audience = audience.map(|circle_id| circle_id.to_string());
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::protocol::blob::content_hash(bytes);
+        let hash = coven_protocol::blob::content_hash(bytes);
         let stamp = stamp.to_string();
         let receipt = crate::database::StoreDatabase::new(self)
             .run_host_store_write_for_test(Some(routing), None, move |transaction| {
@@ -686,7 +686,7 @@ impl Database {
         let blob_id = blob_id.to_string();
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::protocol::blob::content_hash(bytes);
+        let hash = coven_protocol::blob::content_hash(bytes);
         self.test_sql(move |database| {
             database
                 .execute(
@@ -711,14 +711,14 @@ impl Database {
 
     pub(crate) async fn bind_stored_blob_to_row_for_test(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         table: &str,
         id: &str,
-        owner: crate::protocol::store_commit::StoreBatchCommitRef,
+        owner: coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let locator = stored.locator().clone();
         let record =
-            crate::protocol::remote_object::RemoteObjectRecord::activated_blob(stored, owner)
+            coven_protocol::remote_object::RemoteObjectRecord::activated_blob(stored, owner)
                 .map_err(|error| DbError::Message(error.to_string()))?;
         record
             .validate()
@@ -728,7 +728,7 @@ impl Database {
             serde_json::to_string(&record).map_err(|error| DbError::Message(error.to_string()))?;
         let locator_hash = locator.locator_hash().to_string();
         let authority =
-            serde_json::to_string(&crate::protocol::audience_package::PackageAudience::Store)
+            serde_json::to_string(&coven_protocol::audience_package::PackageAudience::Store)
                 .map_err(|error| DbError::Message(error.to_string()))?;
         let id_for_insert = id.to_string();
         let table_for_insert = table.to_string();
@@ -761,8 +761,8 @@ impl Database {
 
     pub(crate) async fn store_package_is_retained_for_replay_for_test(
         &self,
-        package: crate::protocol::store_commit::StorePackageRef,
-        activation: crate::protocol::store_commit::StoreBatchCommitRef,
+        package: coven_protocol::store_commit::StorePackageRef,
+        activation: coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
         let database = crate::database::StoreDatabase::new(self);
         let root = database

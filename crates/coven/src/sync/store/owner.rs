@@ -1,6 +1,6 @@
 use super::*;
 use crate::database::BlockedWriteDiscard;
-use crate::protocol::store_commit::StoreRootRef;
+use coven_protocol::store_commit::StoreRootRef;
 use std::sync::Arc;
 
 mod authorized_history;
@@ -68,7 +68,7 @@ pub(crate) struct Store {
 pub(crate) struct StoreRestoreMembership {
     pub store_root: StoreRootRef,
     pub founder_pubkey: String,
-    pub membership_floor: crate::protocol::membership::MembershipFloor,
+    pub membership_floor: coven_protocol::membership::MembershipFloor,
 }
 
 pub(crate) struct InitializedStore {
@@ -85,12 +85,12 @@ pub(crate) enum StoreInitializationError {
 }
 
 struct BlobDownload {
-    authority: crate::protocol::blob::RowBlobAuthority,
-    stored: crate::protocol::blob::locator::StoredBlobRef,
+    authority: coven_protocol::blob::RowBlobAuthority,
+    stored: coven_protocol::blob::locator::StoredBlobRef,
 }
 
 impl BlobDownload {
-    fn from_row(reference: crate::protocol::blob::RowBlobRef) -> Result<Self, String> {
+    fn from_row(reference: coven_protocol::blob::RowBlobRef) -> Result<Self, String> {
         let stored = reference
             .stored()
             .cloned()
@@ -111,7 +111,7 @@ impl Store {
 
     async fn allocate_device_join_transport_bundle(
         &self,
-        offer: crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<
         device_join_transport::DeviceJoinOfferBundle,
         device_join_transport::DeviceJoinTransportError,
@@ -131,10 +131,10 @@ impl Store {
             slots.insert(kind, slot);
         }
         Ok(device_join_transport::DeviceJoinOfferBundle {
-            version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
+            version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
             offer,
             transport: device_join_transport::DeviceJoinTransportParams {
-                version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
+                version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
                 attempt_namespace,
                 slots,
                 seal_key: coven_keys::encryption::MasterKeyring::generate(),
@@ -166,7 +166,7 @@ impl Store {
 
     async fn device_join_transport_status(
         &self,
-        attempt_id: crate::protocol::store_commit::DeviceJoinAttemptId,
+        attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         role: crate::sync::store::DeviceJoinRole,
     ) -> Result<
         Option<crate::sync::store::DeviceJoinStatus>,
@@ -177,7 +177,7 @@ impl Store {
 
     async fn device_join_transport_roles(
         &self,
-        offer: &crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<
         device_join_transport::DeviceJoinRoles,
         device_join_transport::DeviceJoinTransportError,
@@ -340,26 +340,26 @@ impl Store {
 
     async fn circle_close_status(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<crate::protocol::circle::CircleCloseStatus, CircleOperationError> {
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<coven_protocol::circle::CircleCloseStatus, CircleOperationError> {
         let (current, _) = self
             .database
             .circle_closing_context(circle_id, &self.local_author_pubkey())
             .await?;
-        let crate::protocol::circle::CircleControlState::EpochClose(close) =
+        let coven_protocol::circle::CircleControlState::EpochClose(close) =
             current.control.value.state()
         else {
             return Err(CircleOperationError::InvalidState(
                 "Circle close-status inspection received an active control".to_string(),
             ));
         };
-        let context = crate::protocol::objects::ProtocolObjectContext::store_encrypted(
+        let context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
             current.control.value.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::CircleEpochCloseResponse,
+            coven_protocol::objects::ProtocolObjectDomain::CircleEpochCloseResponse,
         );
         let mut participants = Vec::with_capacity(close.participants.len());
         for participant in &close.participants {
-            let prefix = crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
+            let prefix = coven_protocol::circle::circle_epoch_close_response_semantic_prefix(
                 current.control.value.circle_id,
                 close.close_id,
                 participant.registration.device_id,
@@ -370,7 +370,7 @@ impl Store {
                 .await
             {
                 Ok((bytes, _)) => {
-                    match crate::protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
+                    match coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
                         .map_err(|error| {
                             CircleOperationError::InvalidState(format!(
                                 "Circle epoch-close response slot for device {} failed to parse: {error}",
@@ -378,25 +378,25 @@ impl Store {
                             ))
                         })?
                     {
-                        crate::protocol::circle::CircleEpochCloseResponseSlotValue::Response(_) => {
-                            crate::protocol::circle::CircleCloseSettlement::Responded
+                        coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(_) => {
+                            coven_protocol::circle::CircleCloseSettlement::Responded
                         }
-                        crate::protocol::circle::CircleEpochCloseResponseSlotValue::Exclusion(_) => {
-                            crate::protocol::circle::CircleCloseSettlement::Excluded
+                        coven_protocol::circle::CircleEpochCloseResponseSlotValue::Exclusion(_) => {
+                            coven_protocol::circle::CircleCloseSettlement::Excluded
                         }
                     }
                 }
-                Err(crate::protocol::objects::StorageError::NotFound(_)) => {
-                    crate::protocol::circle::CircleCloseSettlement::Pending
+                Err(coven_protocol::objects::StorageError::NotFound(_)) => {
+                    coven_protocol::circle::CircleCloseSettlement::Pending
                 }
-                Err(error) => return Err(crate::protocol::objects::StoreObjectError::from(error).into()),
+                Err(error) => return Err(coven_protocol::objects::StoreObjectError::from(error).into()),
             };
-            participants.push(crate::protocol::circle::CircleCloseParticipant {
+            participants.push(coven_protocol::circle::CircleCloseParticipant {
                 device_id: participant.registration.device_id,
                 settlement,
             });
         }
-        Ok(crate::protocol::circle::CircleCloseStatus {
+        Ok(coven_protocol::circle::CircleCloseStatus {
             circle_id,
             close_id: close.close_id,
             participants,
@@ -465,7 +465,7 @@ impl Store {
     #[doc(hidden)]
     pub(crate) async fn members(
         &self,
-    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, membership::MembershipOpsError> {
+    ) -> Result<Vec<coven_protocol::membership::MemberInfo>, membership::MembershipOpsError> {
         let authorization = self.authorize().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
                 error.to_string(),
@@ -478,7 +478,7 @@ impl Store {
     pub(crate) async fn membership_conflict(
         &self,
     ) -> Result<
-        Option<crate::protocol::membership::MembershipConflictInfo>,
+        Option<coven_protocol::membership::MembershipConflictInfo>,
         membership::MembershipOpsError,
     > {
         let authorization = self.authorize().await.map_err(|error| {
@@ -491,10 +491,10 @@ impl Store {
 
     pub(crate) async fn resolve_membership_conflict(
         &self,
-        choice: &crate::protocol::membership::MembershipConflictChoice,
+        choice: &coven_protocol::membership::MembershipConflictChoice,
         created_at: &str,
     ) -> Result<
-        crate::protocol::membership::StoreMembershipConflictResolutionRef,
+        coven_protocol::membership::StoreMembershipConflictResolutionRef,
         membership::MembershipOpsError,
     > {
         let mut authorization = self.authorize_writer().await.map_err(|error| {
@@ -570,7 +570,7 @@ impl Store {
         &self,
         member_pubkey: &str,
     ) -> Result<
-        crate::protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+        coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
         crate::sync::store::DeviceJoinError,
     > {
         let mut writer = self
@@ -597,9 +597,9 @@ impl Store {
 
     pub(crate) async fn begin_owner_promotion_for_device(
         &self,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<
-        crate::protocol::store_commit::OwnerPromotionRequest,
+        coven_protocol::store_commit::OwnerPromotionRequest,
         owner_promotion::OwnerPromotionError,
     > {
         let registration = self
@@ -617,9 +617,9 @@ impl Store {
 
     pub(crate) async fn begin_owner_promotion(
         &self,
-        member_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::protocol::store_commit::OwnerPromotionRequest,
+        coven_protocol::store_commit::OwnerPromotionRequest,
         owner_promotion::OwnerPromotionError,
     > {
         let mut writer = self
@@ -631,9 +631,9 @@ impl Store {
 
     pub(crate) async fn accept_owner_promotion(
         &self,
-        request: crate::protocol::store_commit::OwnerPromotionRequest,
+        request: coven_protocol::store_commit::OwnerPromotionRequest,
     ) -> Result<
-        crate::protocol::store_commit::OwnerPromotionAcceptance,
+        coven_protocol::store_commit::OwnerPromotionAcceptance,
         owner_promotion::OwnerPromotionError,
     > {
         let mut writer = self
@@ -646,9 +646,9 @@ impl Store {
     pub(crate) async fn finalize_owner_promotion(
         &self,
         encryption: &coven_keys::encryption::EncryptionService,
-        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+        acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<
-        crate::protocol::circle_control::StoreMembershipStateRef,
+        coven_protocol::circle_control::StoreMembershipStateRef,
         owner_promotion::OwnerPromotionError,
     > {
         let mut writer = self
@@ -666,7 +666,7 @@ impl Store {
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
+        role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
@@ -717,8 +717,8 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn circle_epoch_access(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        expected_control: crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<
         Option<crate::sync::store::circle_controls::CircleEpochAccess>,
         crate::database::DbError,
@@ -731,7 +731,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn latest_local_store_position(
         &self,
-    ) -> Result<Option<crate::protocol::store_commit::StoreBatchCommitRef>, StoreError> {
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, StoreError> {
         let writer = self
             .authorize_writer()
             .await
@@ -749,8 +749,8 @@ impl Store {
         sequence: u64,
     ) -> Result<
         Option<(
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
         )>,
         String,
     > {

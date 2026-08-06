@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 coven-foundation = { workspace = true }
 coven-keys = { workspace = true }
+coven-protocol = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -57,6 +58,7 @@ ed25519-dalek = { workspace = true }
 # enables no `[features]` of this crate, so they arrive through these edges.
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-keys = { workspace = true, features = ["test-utils"] }
+coven-protocol = { workspace = true, features = ["test-utils"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
 # The Apple keyring integration test asserts against the real store's own
@@ -66,7 +68,11 @@ apple-native-keyring-store = { workspace = true }
 [features]
 # Hosts building test doubles against Coven get the same fakes Coven itself
 # tests with: the foundation clock and id fakes, and the keys test hooks.
-test-utils = ["coven-foundation/test-utils", "coven-keys/test-utils"]
+test-utils = [
+    "coven-foundation/test-utils",
+    "coven-keys/test-utils",
+    "coven-protocol/test-utils",
+]
 oauth-providers = ["dep:open", "coven-keys/oauth-providers"]
 
 [lints]

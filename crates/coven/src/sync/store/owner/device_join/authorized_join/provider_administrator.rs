@@ -69,7 +69,7 @@ impl<'operation, 'storage>
         &mut self,
         authorization: &DeviceJoinChallengePublicationAuthorization,
         challenge: &CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalChallengeContext,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
         store: &StoreProviderBinding,
         attempt_owner: &StoreDeviceRegistration,
     ) -> Result<CrossPrincipalProbeChallenge, DeviceJoinError> {
@@ -193,11 +193,11 @@ impl<'operation, 'storage>
                         &request.offer.provider,
                     )
                     .map_err(provider_error)?;
-                let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                     request.offer.store_root.store_root_hash,
                     ProtocolObjectDomain::ProviderAccessGrant,
                 );
-                let prefix = crate::protocol::store_commit::provider_access_grant_semantic_prefix(
+                let prefix = coven_protocol::store_commit::provider_access_grant_semantic_prefix(
                     &grant.grant_id,
                 );
                 let slot = self
@@ -224,12 +224,12 @@ impl<'operation, 'storage>
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::ProviderAccessGrant,
         );
         let prefix =
-            crate::protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
+            coven_protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
         self.storage
             .create_and_verify(&context, &prepared, &prefix, &grant.to_bytes())
             .await
@@ -255,7 +255,7 @@ impl<'operation, 'storage>
             DeviceProviderAdmissionChallenge::SamePrincipal
         } else {
             let challenge_context = request.cross_challenge_context();
-            let probe_id = crate::protocol::provider::ProviderProbeId::from_bytes(
+            let probe_id = coven_protocol::provider::ProviderProbeId::from_bytes(
                 *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes()).as_bytes(),
             );
             DeviceProviderAdmissionChallenge::CrossPrincipal(
@@ -418,7 +418,7 @@ impl<'operation, 'storage>
                 DeviceProviderResponseReservation::CrossPrincipal { response_slot },
                 DeviceProviderReadiness::CrossPrincipal(response),
             ) => {
-                let context = crate::protocol::provider::CrossPrincipalResponseContext {
+                let context = coven_protocol::provider::CrossPrincipalResponseContext {
                     challenge: bootstrap
                         .bootstrap
                         .request
@@ -500,7 +500,7 @@ impl<'operation, 'storage>
             .value;
         if !matches!(
             outcome.disposition,
-            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
+            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -604,7 +604,7 @@ impl<'operation, 'storage>
             .value;
         if !matches!(
             outcome.disposition,
-            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
+            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -875,5 +875,5 @@ pub trait DeviceProviderAccessAdministrator: Send + Sync {
         member_pubkey: &str,
         provider_account_email: Option<&str>,
         peer: &ProviderDeviceBinding,
-    ) -> Result<crate::protocol::provider::ProviderAccessLocator, DeviceJoinError>;
+    ) -> Result<coven_protocol::provider::ProviderAccessLocator, DeviceJoinError>;
 }

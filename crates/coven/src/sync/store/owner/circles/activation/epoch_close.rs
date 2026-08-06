@@ -7,7 +7,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         control: &PreparedCircleControl,
         objects: &CircleActivationObjects,
         encryption: EncryptionService,
-        roster_chain: &crate::protocol::circle::CircleRosterChain,
+        roster_chain: &coven_protocol::circle::CircleRosterChain,
     ) -> Result<Option<VerifiedCloseOutcome>, CircleOperationError> {
         let CircleControlState::EpochClose(close) = control.value.state() else {
             // The successor is an ActiveEpoch. Dispatch on the settled slot object,
@@ -66,7 +66,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         for record in devices.devices.values() {
             if !matches!(
                 record.status,
-                crate::protocol::store_commit::StoreDeviceStatus::Active
+                coven_protocol::store_commit::StoreDeviceStatus::Active
             ) {
                 continue;
             }
@@ -98,7 +98,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         control: &PreparedCircleControl,
         objects: &CircleActivationObjects,
         encryption: EncryptionService,
-    ) -> Result<crate::protocol::circle::CircleEpochCloseIntent, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleEpochCloseIntent, CircleOperationError> {
         let store_root_hash = self.root().store_root_hash;
         let CircleControlState::EpochClose(close) = control.value.state() else {
             return Err(CircleOperationError::InvalidState(
@@ -127,9 +127,9 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &intent_prefix,
             )
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
-        let intent: crate::protocol::circle::CircleEpochCloseIntent =
-            serde_json::from_slice(&bytes).map_err(|error| {
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
+        let intent: coven_protocol::circle::CircleEpochCloseIntent = serde_json::from_slice(&bytes)
+            .map_err(|error| {
                 CircleOperationError::InvalidState(format!(
                     "parse Circle epoch-close intent: {error}"
                 ))
@@ -182,7 +182,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 CircleControlState::EpochClose(_)
             )
         });
-        let crate::protocol::circle::CircleEpochOrigin::Closed {
+        let coven_protocol::circle::CircleEpochOrigin::Closed {
             closed_epoch_id,
             close_control,
             close_id,
@@ -284,7 +284,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 encryption,
             )
             .await?;
-        let outcome_prefix = crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+        let outcome_prefix = coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
             control.value.circle_id,
             *close_id,
         );
@@ -299,9 +299,9 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &outcome_prefix,
             )
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
-        let crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
-            crate::protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes).map_err(
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
+        let coven_protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
+            coven_protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes).map_err(
                 |error| {
                     CircleOperationError::InvalidState(format!(
                         "parse Circle epoch-close outcome: {error}"
@@ -315,7 +315,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             ));
         };
         if outcome.outcome_hash() != *outcome_hash
-            || crate::protocol::circle::CircleEpochCloseOutcomeRef::from_outcome(
+            || coven_protocol::circle::CircleEpochCloseOutcomeRef::from_outcome(
                 &outcome,
                 outcome_ref.object.clone(),
             )? != *outcome_ref
@@ -335,7 +335,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         .to_string(),
                 ));
             }
-            let prefix = crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
+            let prefix = coven_protocol::circle::circle_epoch_close_response_semantic_prefix(
                 control.value.circle_id,
                 *close_id,
                 participant.registration.device_id,
@@ -351,11 +351,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &prefix,
                 )
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             // Dispatch on the slot's actual settled arm, not the outcome's claim: the
             // outcome's declared settlement must equal the one derived here, which is
             // what refuses an outcome naming an exclusion for a slot holding a response.
-            let slot_value = crate::protocol::circle::CircleEpochCloseResponseSlotValue::parse(
+            let slot_value = coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(
                 &bytes,
             )
             .map_err(|error| {
@@ -364,7 +364,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 ))
             })?;
             let settlement = match &slot_value {
-                crate::protocol::circle::CircleEpochCloseResponseSlotValue::Response(response) => {
+                coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response) => {
                     let registration = self
                         .database
                         .activated_store_device_registration(participant.registration.clone())
@@ -374,16 +374,14 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                             "Circle epoch-close response failed exact verification".to_string(),
                         ));
                     }
-                    crate::protocol::circle::CircleEpochCloseSettlement::Response(
-                        crate::protocol::circle::CircleEpochCloseResponseRef::from_response(
+                    coven_protocol::circle::CircleEpochCloseSettlement::Response(
+                        coven_protocol::circle::CircleEpochCloseResponseRef::from_response(
                             response,
                             settlement_ref.object().clone(),
                         )?,
                     )
                 }
-                crate::protocol::circle::CircleEpochCloseResponseSlotValue::Exclusion(
-                    exclusion,
-                ) => {
+                coven_protocol::circle::CircleEpochCloseResponseSlotValue::Exclusion(exclusion) => {
                     if !exclusion.verify_for(&predecessor.control)
                         || exclusion.excluded != participant.registration
                     {
@@ -391,8 +389,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                             "Circle epoch-close exclusion failed exact verification".to_string(),
                         ));
                     }
-                    crate::protocol::circle::CircleEpochCloseSettlement::Exclusion(
-                        crate::protocol::circle::CircleEpochCloseExclusionRef::from_exclusion(
+                    coven_protocol::circle::CircleEpochCloseSettlement::Exclusion(
+                        coven_protocol::circle::CircleEpochCloseExclusionRef::from_exclusion(
                             exclusion,
                             settlement_ref.object().clone(),
                         )?,
@@ -401,7 +399,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             };
             settlements.push((settlement, slot_value));
         }
-        let successor = crate::protocol::circle::CircleEpochSuccessor {
+        let successor = coven_protocol::circle::CircleEpochSuccessor {
             epoch_id: active.common.epoch_id,
             key_fingerprint: active.common.key_fingerprint,
             owners: active.common.owners.clone(),
@@ -421,10 +419,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let exclusions = settlements
             .into_iter()
             .filter_map(|(settlement, _)| match settlement {
-                crate::protocol::circle::CircleEpochCloseSettlement::Exclusion(reference) => {
+                coven_protocol::circle::CircleEpochCloseSettlement::Exclusion(reference) => {
                     Some(reference.registration)
                 }
-                crate::protocol::circle::CircleEpochCloseSettlement::Response(_) => None,
+                coven_protocol::circle::CircleEpochCloseSettlement::Response(_) => None,
             })
             .collect();
         Ok(Some(VerifiedCloseOutcome {
@@ -438,7 +436,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     /// covered control heads.
     pub(super) fn reopen_predecessor_coord(
         control: &PreparedCircleControl,
-    ) -> Result<crate::protocol::circle::CircleControlCoord, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleControlCoord, CircleOperationError> {
         let active = control.value.active_epoch().ok_or_else(|| {
             CircleOperationError::InvalidState("Circle reopen has no active successor".to_string())
         })?;
@@ -509,7 +507,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             ));
         }
         let cancellation_prefix =
-            crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+            coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                 control.value.circle_id,
                 close.close_id,
             );
@@ -524,21 +522,22 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &cancellation_prefix,
             )
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
-        let crate::protocol::circle::CircleEpochCloseSlotValue::Cancellation(cancellation) =
-            crate::protocol::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes)
-                .map_err(|error| {
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
+        let coven_protocol::circle::CircleEpochCloseSlotValue::Cancellation(cancellation) =
+            coven_protocol::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes).map_err(
+                |error| {
                     CircleOperationError::InvalidState(format!(
                         "parse Circle epoch-close cancellation: {error}"
                     ))
-                })?
+                },
+            )?
         else {
             return Err(CircleOperationError::InvalidState(
                 "Circle reopen outcome slot holds a final outcome, not a cancellation".to_string(),
             ));
         };
         if !cancellation.verify_for(&predecessor.control)
-            || crate::protocol::circle::CircleEpochCloseCancellationRef::from_cancellation(
+            || coven_protocol::circle::CircleEpochCloseCancellationRef::from_cancellation(
                 &cancellation,
                 cancellation_ref.object.clone(),
             )? != *cancellation_ref

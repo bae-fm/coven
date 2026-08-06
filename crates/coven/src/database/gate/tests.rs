@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 use super::model::TableGate;
 use super::outbound::{gate_outbound, with_empty_clone};
-use crate::protocol::synced_schema::SyncedTable;
+use coven_protocol::synced_schema::SyncedTable;
 
 /// A throwaway in-memory connection with `foreign_keys=ON`, for the gate
 /// tests' bespoke schemas. The gate's public API takes `&Connection`.
@@ -35,7 +35,7 @@ impl ConnectionTestSql for Connection {
             self,
             bytes,
             tables,
-            crate::protocol::hlc::now_wall_ms(&coven_foundation::clock::SystemClock),
+            coven_protocol::hlc::now_wall_ms(&coven_foundation::clock::SystemClock),
         )
         .expect("apply test changeset");
     }
@@ -77,12 +77,12 @@ fn scoped_descendant_requires_a_declared_audience_parent() {
     let tables = vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .scoped_by("audience"),
         SyncedTable::new(
             "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
 
@@ -103,12 +103,12 @@ fn scoped_descendant_requires_a_declared_audience_parent() {
         &[
             SyncedTable::new(
                 "notes",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "note_tags",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .inherits_audience_through("note_id"),
         ],
@@ -142,12 +142,12 @@ fn child_gate_follows_the_foreign_keys_named_parent_column() {
     let tables = vec![
         SyncedTable::new(
             "parents",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "children",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
 
@@ -187,16 +187,16 @@ fn test_synced_tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ]
 }
@@ -354,12 +354,12 @@ fn ungated_table_always_passes() {
     let tables = vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "settings",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
     let out = capture_and_gate(
@@ -384,7 +384,7 @@ fn remote_root_table_passes_rows_without_gate_column() {
     create_remote_root_schema(&c);
     let tables = vec![SyncedTable::new(
         "notes",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .remote_root()];
     let out = capture_and_gate(
@@ -415,12 +415,12 @@ fn remote_root_child_resolves_as_remote_and_belongs_to_root_subtree() {
     let tables = vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .remote_root(),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
     let gates = Gates::from_tables(&c, &tables).expect("gates");
@@ -470,12 +470,12 @@ fn ancestor_keep_resolution_surfaces_step_errors() {
     let tables = vec![
         SyncedTable::new(
             "releases",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("managed"),
         SyncedTable::new(
             "albums",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
     ];
@@ -510,7 +510,7 @@ fn empty_clone_surfaces_detach_failure() {
         &c,
         &[SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .remote_root()],
     )
@@ -612,7 +612,7 @@ fn self_referencing_table_reemits_from_empty_clone() {
     );
     let tables = vec![SyncedTable::new(
         "nodes",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .gated_by("shared")];
 
@@ -691,16 +691,16 @@ fn multi_hop_fk_inheritance() {
     let tables = vec![
         SyncedTable::new(
             "albums",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "comments",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
 
@@ -760,20 +760,20 @@ fn delete_gated_false_strips_private_subtrees_in_place() {
     let tables = vec![
         SyncedTable::new(
             "albums",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "comments",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "settings",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
 
@@ -807,26 +807,26 @@ fn album_tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new(
             "releases",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("managed"),
         SyncedTable::new(
             "albums",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
         SyncedTable::new(
             "artists",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
         SyncedTable::new(
             "album_artists",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "tracks",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ]
 }
@@ -934,12 +934,12 @@ fn downward_parent_tie_uses_complete_foreign_key_shape() {
         let tables = vec![
             SyncedTable::new(
                 "roots",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .gated_by("shared"),
             SyncedTable::new(
                 "children",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
         ];
         downward_parent(&Gates::from_tables(&c, &tables).expect("gates"), "children").1
@@ -983,22 +983,22 @@ fn downward_parent_is_most_specific_not_lexicographic() {
     let tables = vec![
         SyncedTable::new(
             "aouter",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
         SyncedTable::new(
             "zinner",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
         SyncedTable::new(
             "zgated",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "joiner",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
     let gates = Gates::from_tables(&c, &tables).expect("gates");
@@ -2024,35 +2024,35 @@ fn album_asset_tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new(
             "releases",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("managed"),
         SyncedTable::new(
             "albums",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
         SyncedTable::new(
             "artists",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by_descendants(),
         SyncedTable::new(
             "album_artists",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "tracks",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "covers",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .asset(),
         SyncedTable::new(
             "artist_images",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .asset(),
     ]
@@ -2318,23 +2318,23 @@ fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
     let base = |asset: bool| {
         let image = SyncedTable::new(
             "artist_images",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         );
         let image = if asset { image.asset() } else { image };
         vec![
             SyncedTable::new(
                 "releases",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .gated_by("managed"),
             SyncedTable::new(
                 "albums",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .gated_by_descendants(),
             SyncedTable::new(
                 "artists",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .gated_by_descendants(),
             image,

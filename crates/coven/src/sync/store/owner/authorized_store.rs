@@ -1,11 +1,11 @@
 use crate::database::StoreDatabase;
-use crate::protocol::membership::MembershipChain;
-use crate::protocol::store_commit::{
+use crate::sync::store::StoreError;
+use coven_keys::keys::UserKeypair;
+use coven_protocol::membership::MembershipChain;
+use coven_protocol::store_commit::{
     ReferencedStoreDeviceRegistration, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
     StoreDeviceRegistrationRef, StoreRootRef,
 };
-use crate::sync::store::StoreError;
-use coven_keys::keys::UserKeypair;
 
 use super::history::AuthorizedStoreHistory;
 
@@ -98,7 +98,7 @@ impl<'storage> AuthorizedStore<'storage> {
 
     pub(super) async fn discard_circle_operation(
         &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
         self.history.discard_circle_operation(operation_id).await
     }
@@ -120,7 +120,7 @@ impl<'storage> AuthorizedStore<'storage> {
         &self,
         user_pubkey: Option<&[u8]>,
     ) -> Result<
-        Vec<crate::protocol::membership::MemberInfo>,
+        Vec<coven_protocol::membership::MemberInfo>,
         crate::sync::store::membership::MembershipOpsError,
     > {
         Ok(member_info(
@@ -132,11 +132,11 @@ impl<'storage> AuthorizedStore<'storage> {
     pub(super) fn membership_conflict(
         &self,
         user_pubkey: Option<&[u8]>,
-    ) -> Option<crate::protocol::membership::MembershipConflictInfo> {
+    ) -> Option<coven_protocol::membership::MembershipConflictInfo> {
         match self.membership.status() {
-            crate::protocol::membership::MembershipStatus::Resolved(_) => None,
-            crate::protocol::membership::MembershipStatus::Conflict(
-                crate::protocol::membership::MembershipConflict::ConcurrentMemberAssignments {
+            coven_protocol::membership::MembershipStatus::Resolved(_) => None,
+            coven_protocol::membership::MembershipStatus::Conflict(
+                coven_protocol::membership::MembershipConflict::ConcurrentMemberAssignments {
                     conflict_hash,
                     member_pubkey,
                     conflicting_grants,
@@ -144,13 +144,13 @@ impl<'storage> AuthorizedStore<'storage> {
                     ..
                 },
             ) => Some(
-                crate::protocol::membership::MembershipConflictInfo::ConcurrentMemberAssignments {
+                coven_protocol::membership::MembershipConflictInfo::ConcurrentMemberAssignments {
                     id: conflict_hash.to_string(),
                     member_pubkey: member_pubkey.clone(),
                     choices: conflicting_grants
                         .iter()
                         .map(|(selected_grant, selected_record)| {
-                            let selection = crate::protocol::membership::MembershipConflictSelection::MemberAssignment {
+                            let selection = coven_protocol::membership::MembershipConflictSelection::MemberAssignment {
                                 grant: selected_grant.clone(),
                             };
                             let members = member_info(
@@ -174,7 +174,7 @@ impl<'storage> AuthorizedStore<'storage> {
                                     .collect(),
                                 user_pubkey,
                             );
-                            crate::protocol::membership::MembershipConflictChoice::new(
+                            coven_protocol::membership::MembershipConflictChoice::new(
                                 membership_conflict_choice_id(&selection),
                                 members,
                                 *conflict_hash,
@@ -184,19 +184,19 @@ impl<'storage> AuthorizedStore<'storage> {
                         .collect(),
                 },
             ),
-            crate::protocol::membership::MembershipStatus::Conflict(
-                crate::protocol::membership::MembershipConflict::RevocationCycle {
+            coven_protocol::membership::MembershipStatus::Conflict(
+                coven_protocol::membership::MembershipConflict::RevocationCycle {
                     conflict_hash,
                     maximal_valid_branches,
                     ..
                 },
             ) => Some(
-                crate::protocol::membership::MembershipConflictInfo::RevocationCycle {
+                coven_protocol::membership::MembershipConflictInfo::RevocationCycle {
                     id: conflict_hash.to_string(),
                     choices: maximal_valid_branches
                         .iter()
                         .map(|branch| {
-                            let selection = crate::protocol::membership::MembershipConflictSelection::RevocationBranch {
+                            let selection = coven_protocol::membership::MembershipConflictSelection::RevocationBranch {
                                 heads: branch.heads.clone(),
                             };
                             let members = member_info(
@@ -208,7 +208,7 @@ impl<'storage> AuthorizedStore<'storage> {
                                     .collect(),
                                 user_pubkey,
                             );
-                            crate::protocol::membership::MembershipConflictChoice::new(
+                            coven_protocol::membership::MembershipConflictChoice::new(
                                 membership_conflict_choice_id(&selection),
                                 members,
                                 *conflict_hash,
@@ -233,7 +233,7 @@ impl<'storage> AuthorizedStore<'storage> {
         Ok(super::StoreRestoreMembership {
             store_root: self.history.root().clone(),
             founder_pubkey,
-            membership_floor: crate::protocol::membership::MembershipFloor(
+            membership_floor: coven_protocol::membership::MembershipFloor(
                 self.membership.head_refs().to_vec(),
             ),
         })
@@ -263,7 +263,7 @@ impl<'storage> AuthorizedStore<'storage> {
         let live_provider = history
             .provider_binding()
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)
+            .map_err(coven_protocol::objects::StoreObjectError::from)
             .map_err(crate::sync::store::StoreError::from)?;
         if live_provider.device != local_device.registration.value().provider {
             return Err(super::StoreRegistrationError::Invalid(
@@ -292,10 +292,10 @@ impl<'storage> AuthorizedStore<'storage> {
     pub(super) async fn prepare_wrapped_key_for_test(
         &self,
         recipient: &str,
-        value: crate::protocol::wrapped_store_key::WrappedStoreKey,
+        value: coven_protocol::wrapped_store_key::WrappedStoreKey,
     ) -> Result<
-        crate::protocol::wrapped_store_key::PreparedWrappedStoreKey,
-        crate::protocol::objects::StorageError,
+        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
+        coven_protocol::objects::StorageError,
     > {
         self.history.prepare_wrapped_key(recipient, value).await
     }
@@ -321,8 +321,8 @@ impl<'storage> AuthorizedStore<'storage> {
     #[cfg(test)]
     pub(super) async fn authorize_retained_outbound_for_test(
         &self,
-        order: &crate::protocol::store_commit::StoreCommitOrder,
-        candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
+        order: &coven_protocol::store_commit::StoreCommitOrder,
+        candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<super::verified_history::MergeOutboundAuthorization, crate::sync::store::StoreError>
     {
         let author_registration = self
@@ -345,7 +345,7 @@ impl<'storage> AuthorizedStore<'storage> {
     #[cfg(test)]
     pub(super) async fn prepare_merge_history_successor_for_test(
         &mut self,
-        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         recovery_author: Option<&StoreDeviceRegistrationRef>,
         evidence: super::verified_history::MergeHistorySuccessorEvidence,
     ) -> Result<
@@ -364,25 +364,25 @@ impl<'storage> AuthorizedStore<'storage> {
 }
 
 fn membership_conflict_choice_id(
-    selection: &crate::protocol::membership::MembershipConflictSelection,
+    selection: &coven_protocol::membership::MembershipConflictSelection,
 ) -> String {
     let selection_bytes =
         serde_json::to_vec(selection).expect("membership conflict selections always serialize");
     let mut bytes = b"coven.membership-conflict-choice.v1\0".to_vec();
     bytes.extend(selection_bytes);
-    crate::protocol::store_commit::ObjectHash::digest(&bytes).to_string()
+    coven_protocol::store_commit::ObjectHash::digest(&bytes).to_string()
 }
 
 fn member_info(
-    current: Vec<(String, crate::protocol::membership::MemberRole)>,
+    current: Vec<(String, coven_protocol::membership::MemberRole)>,
     user_pubkey: Option<&[u8]>,
-) -> Vec<crate::protocol::membership::MemberInfo> {
+) -> Vec<coven_protocol::membership::MemberInfo> {
     let user_pubkey_hex = user_pubkey.map(hex::encode);
     current
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>()
         .into_iter()
-        .map(|(pubkey, role)| crate::protocol::membership::MemberInfo {
+        .map(|(pubkey, role)| coven_protocol::membership::MemberInfo {
             is_self: user_pubkey_hex.as_deref() == Some(&pubkey),
             pubkey,
             role,

@@ -5,8 +5,8 @@ impl DatabaseTestSql<'_> {
         &self,
         label: &str,
     ) -> (
-        crate::protocol::circle::CircleId,
-        crate::protocol::circle::CircleControlCoord,
+        coven_protocol::circle::CircleId,
+        coven_protocol::circle::CircleControlCoord,
     ) {
         self.install_test_circle_current_state(label, true)
     }
@@ -15,8 +15,8 @@ impl DatabaseTestSql<'_> {
         &self,
         label: &str,
     ) -> (
-        crate::protocol::circle::CircleId,
-        crate::protocol::circle::CircleControlCoord,
+        coven_protocol::circle::CircleId,
+        coven_protocol::circle::CircleControlCoord,
     ) {
         self.install_test_circle_current_state(label, false)
     }
@@ -28,11 +28,11 @@ impl DatabaseTestSql<'_> {
         label: &str,
         active: bool,
     ) -> (
-        crate::protocol::circle::CircleId,
-        crate::protocol::circle::CircleControlCoord,
+        coven_protocol::circle::CircleId,
+        coven_protocol::circle::CircleControlCoord,
     ) {
-        use crate::protocol::circle_activation_test_fixtures::test_circle_activation;
-        use crate::protocol::store_commit::ObjectHash;
+        use coven_protocol::circle_activation_test_fixtures::test_circle_activation;
+        use coven_protocol::store_commit::ObjectHash;
 
         let activation = test_circle_activation(label, active);
         let control_coord = serde_json::to_string(&activation.control.coord)

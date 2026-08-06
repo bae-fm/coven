@@ -7,10 +7,6 @@ use async_trait::async_trait;
 
 use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
-use crate::protocol::blob::DrainOutcome;
-use crate::protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::synced_schema::BlobDecl;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
@@ -23,6 +19,10 @@ use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::blob::DrainOutcome;
+use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::synced_schema::BlobDecl;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";
@@ -172,7 +172,7 @@ impl CloudHome for InstrumentedHome {
 impl ExactSlotStorage for InstrumentedHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
         ExactSlotStorage::provider_binding(&self.inner).await
     }
 
@@ -273,7 +273,7 @@ impl UploadFixture {
     }
 
     async fn with_home(uploads: usize, home: Arc<InstrumentedHome>) -> Self {
-        let limits = crate::protocol::blob::TransferLimits {
+        let limits = coven_protocol::blob::TransferLimits {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
         };
@@ -284,7 +284,7 @@ impl UploadFixture {
                 Provenance::UserProvided,
                 CacheFill::CacheLazy,
             )),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             limits,
             "test-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -441,7 +441,7 @@ fn created_slot(entry: &crate::database::OutboxEntry) -> &ObjectSlot {
 
 fn created_stored(
     entry: &crate::database::OutboxEntry,
-) -> &crate::protocol::blob::locator::StoredBlobRef {
+) -> &coven_protocol::blob::locator::StoredBlobRef {
     match &entry.operation {
         crate::database::OutboxOperation::Upload {
             state: crate::database::OutboxUploadState::Created { stored, .. },
@@ -638,7 +638,7 @@ async fn bad_item_does_not_block_good_later_item() {
     assert_eq!(outcome.failures().failures().len(), 1);
     assert!(matches!(
         outcome.failures().failures()[0].cause,
-        crate::protocol::blob::UploadFailureCause::Storage(_)
+        coven_protocol::blob::UploadFailureCause::Storage(_)
     ));
     assert_eq!(fixture.journal_attempt("bad00001").await.0, 1);
     assert!(is_created(&fixture.journal("good0001").await));

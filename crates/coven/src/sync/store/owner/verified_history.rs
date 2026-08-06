@@ -4,13 +4,15 @@ use crate::database::VerifiedStoreSnapshotStability;
 use crate::database::{
     DeviceJoinBootstrapActivation, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
 };
-use crate::protocol::circle_control::StoreMembershipStateRef;
-use crate::protocol::membership::{MembershipChain, MembershipStatus};
-use crate::protocol::objects::{
+use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
+use crate::sync::store::owner::pull::*;
+use coven_protocol::circle_control::StoreMembershipStateRef;
+use coven_protocol::membership::{MembershipChain, MembershipStatus};
+use coven_protocol::objects::{
     ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
 };
-use crate::protocol::objects::{StoreObjectError, VerifiedObject};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::{StoreObjectError, VerifiedObject};
+use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttempt,
     DeviceJoinAttemptDecisionRef, DeviceJoinDisposition, DeviceStreamAnchor, ObjectHash,
     OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
@@ -22,17 +24,15 @@ use crate::protocol::store_commit::{
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     DeviceJoinAttemptRef, DeviceJoinOutcome, DeviceJoinOutcomeRef, SnapshotMeta, StoreAck,
     StoreAckRef, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposalRef,
     StoreDeviceHeadRef, StoreSnapshotRef, VerifiedDeviceExclusionOutcome,
     VerifiedDeviceExclusionProposal,
 };
-use crate::protocol::{
+use coven_protocol::{
     causal_grants, membership as protocol_membership, provider, remote_object, store_commit,
 };
-use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
-use crate::sync::store::owner::pull::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::device_join;
@@ -447,7 +447,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             Ok((_, Some(_))) => {}
             Ok((_, None)) => return Ok(false),
             Err(StoreError::MergeAnnouncementOccupied { .. })
-            | Err(StoreError::Object(crate::protocol::objects::StoreObjectError::Storage(
+            | Err(StoreError::Object(coven_protocol::objects::StoreObjectError::Storage(
                 StorageError::NotFound(_),
             ))) => return Ok(false),
             Err(error) => return Err(error.to_string()),

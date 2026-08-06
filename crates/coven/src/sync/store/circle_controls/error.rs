@@ -1,6 +1,6 @@
-use crate::protocol::circle::{CircleId, CircleTransitionError};
-use crate::protocol::objects::StoreObjectError;
 use crate::sync::store::{StoreError, StoreRegistrationError};
+use coven_protocol::circle::{CircleId, CircleTransitionError};
+use coven_protocol::objects::StoreObjectError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CircleOperationError {
@@ -25,7 +25,7 @@ pub enum CircleOperationError {
     #[error("circle operation {circle_id} is blocked: {block}")]
     Blocked {
         circle_id: CircleId,
-        block: crate::protocol::circle::CircleOperationBlock,
+        block: coven_protocol::circle::CircleOperationBlock,
     },
     #[error("circle {circle_id} requires rotation: its roster names removed Store members {removed_members:?}")]
     RotationRequired {
@@ -35,7 +35,7 @@ pub enum CircleOperationError {
     #[error("device excluded from circle {circle_id} close {close_id} must reset from the successor bootstrap before publishing")]
     ExcludedDeviceMustReset {
         circle_id: CircleId,
-        close_id: crate::protocol::circle::CircleEpochCloseId,
+        close_id: coven_protocol::circle::CircleEpochCloseId,
     },
     #[error("circle {circle_id} has no retained control conflict to resolve")]
     NotConflicted { circle_id: CircleId },
@@ -50,15 +50,15 @@ pub enum CircleOperationError {
     #[error("device {device_id} is not a participant in circle {circle_id}'s epoch close")]
     DeviceNotACloseParticipant {
         circle_id: CircleId,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
     },
     #[error("circle operation {operation_id} is not blocked")]
     NotBlocked {
-        operation_id: crate::protocol::circle::CircleOperationId,
+        operation_id: coven_protocol::circle::CircleOperationId,
     },
     #[error("circle operation {operation_id} discard requires verified permanent nonactivation; it never assumes an unseen candidate failed to activate")]
     DiscardRequiresNonactivation {
-        operation_id: crate::protocol::circle::CircleOperationId,
+        operation_id: coven_protocol::circle::CircleOperationId,
     },
     #[error("circle {circle_id} has an unresolved control conflict")]
     Conflicted { circle_id: CircleId },
@@ -85,14 +85,14 @@ impl From<crate::database::DbError> for CircleOperationError {
     }
 }
 
-impl From<crate::protocol::circle_journal::CircleJournalError> for CircleOperationError {
-    fn from(error: crate::protocol::circle_journal::CircleJournalError) -> Self {
+impl From<coven_protocol::circle_journal::CircleJournalError> for CircleOperationError {
+    fn from(error: coven_protocol::circle_journal::CircleJournalError) -> Self {
         CircleOperationError::Journal(error.to_string())
     }
 }
 
-impl From<crate::protocol::circle_activation::CircleStateError> for CircleOperationError {
-    fn from(error: crate::protocol::circle_activation::CircleStateError) -> Self {
+impl From<coven_protocol::circle_activation::CircleStateError> for CircleOperationError {
+    fn from(error: coven_protocol::circle_activation::CircleStateError) -> Self {
         CircleOperationError::InvalidState(error.to_string())
     }
 }

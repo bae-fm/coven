@@ -4,7 +4,7 @@ pub(crate) fn predecessor_verifies_owner(
     predecessor: &MembershipChain,
     membership: &StoreMembershipStateRef,
     owner_pubkey: &str,
-    owner_grant: &crate::protocol::membership::MembershipGrantId,
+    owner_grant: &coven_protocol::membership::MembershipGrantId,
 ) -> bool {
     let MembershipStatus::Resolved(resolved) = predecessor.status() else {
         return false;
@@ -121,10 +121,10 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     /// Circle does not hold; the Owner re-reads them before authorizing any delete.
     pub(super) fn validate_package_bound_reclaim_target(
         &self,
-        target: &crate::protocol::reclaim::ReclaimTarget,
-        activation: &crate::protocol::reclaim::PackageBlobBindingActivation<'_>,
+        target: &coven_protocol::reclaim::ReclaimTarget,
+        activation: &coven_protocol::reclaim::PackageBlobBindingActivation<'_>,
     ) -> Result<(), RegistrationLoadError> {
-        let crate::protocol::reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
+        let coven_protocol::reclaim::ReclaimTarget::AudienceBlob(blob) = target else {
             return Err(RegistrationLoadError::Invalid(
                 "reclaim target is not published by a package binding".to_string(),
             ));
@@ -140,10 +140,10 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 )
             })?;
         let names_package = match activation.package {
-            crate::protocol::reclaim::AudienceBlobBindingPackage::Store(package) => {
+            coven_protocol::reclaim::AudienceBlobBindingPackage::Store(package) => {
                 activating.verified.value().store_package() == Some(package)
             }
-            crate::protocol::reclaim::AudienceBlobBindingPackage::Circle(package) => activating
+            coven_protocol::reclaim::AudienceBlobBindingPackage::Circle(package) => activating
                 .verified
                 .value()
                 .circle_packages()
@@ -167,7 +167,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
     /// exact object the evidence authorizes deleting.
     pub(super) fn validate_commit_activated_reclaim_target(
         &self,
-        target: &crate::protocol::reclaim::ReclaimTarget,
+        target: &coven_protocol::reclaim::ReclaimTarget,
         activating_commit: &StoreBatchCommitRef,
     ) -> Result<(), RegistrationLoadError> {
         let expected = activating_commit.clone();
@@ -181,15 +181,15 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 )
             })?;
         let names_target = match target {
-            crate::protocol::reclaim::ReclaimTarget::StorePackage(store) => {
+            coven_protocol::reclaim::ReclaimTarget::StorePackage(store) => {
                 activation.verified.value().store_package() == Some(&store.package)
             }
-            crate::protocol::reclaim::ReclaimTarget::CirclePackage(circle) => activation
+            coven_protocol::reclaim::ReclaimTarget::CirclePackage(circle) => activation
                 .verified
                 .value()
                 .circle_packages()
                 .contains(&circle.package),
-            crate::protocol::reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
+            coven_protocol::reclaim::ReclaimTarget::CircleBootstrapImage(bootstrap) => activation
                 .verified
                 .value()
                 .circle_controls()
@@ -198,8 +198,8 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
                 .any(|access| {
                     access.bootstrap.as_ref() == Some(&bootstrap.coverage.bootstrap.image)
                 }),
-            crate::protocol::reclaim::ReclaimTarget::CircleSnapshotImage(_)
-            | crate::protocol::reclaim::ReclaimTarget::AudienceBlob(_) => {
+            coven_protocol::reclaim::ReclaimTarget::CircleSnapshotImage(_)
+            | coven_protocol::reclaim::ReclaimTarget::AudienceBlob(_) => {
                 return Err(RegistrationLoadError::Invalid(
                     "reclaim target claims a Store commit activation it is not published by"
                         .to_string(),

@@ -37,7 +37,7 @@ pub struct DeviceJoinInvite {
 impl DeviceJoinInvite {
     pub(crate) fn new(invite_code: String, bundle: DeviceJoinOfferBundle) -> Self {
         Self {
-            version: crate::protocol::store_commit::STORE_PROTOCOL_VERSION,
+            version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
             invite_code,
             bundle,
         }
@@ -50,7 +50,7 @@ impl DeviceJoinInvite {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BootstrapError> {
         let invite: Self = serde_json::from_slice(bytes)
             .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?;
-        if invite.version != crate::protocol::store_commit::STORE_PROTOCOL_VERSION {
+        if invite.version != coven_protocol::store_commit::STORE_PROTOCOL_VERSION {
             return Err(BootstrapError::InvalidCode(format!(
                 "device join invite version {} is not supported",
                 invite.version
@@ -70,7 +70,7 @@ fn scanned_invite_client(
     invite: &DeviceJoinInvite,
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_custody: coven_keys::custody::KeyCustody,
@@ -104,7 +104,7 @@ pub async fn join_with_scanned_invite(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_custody: coven_keys::custody::KeyCustody,
@@ -143,7 +143,7 @@ pub async fn close_scanned_invite_join(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_custody: coven_keys::custody::KeyCustody,
@@ -183,7 +183,7 @@ fn scanned_invite_test_client(
     invite: &DeviceJoinInvite,
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
@@ -212,7 +212,7 @@ pub async fn join_with_scanned_invite_over_test_home(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,
@@ -241,7 +241,7 @@ pub async fn close_scanned_invite_join_over_test_home(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<crate::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn crate::storage::cloud::CloudHome>,

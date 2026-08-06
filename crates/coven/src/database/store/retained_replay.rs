@@ -10,8 +10,8 @@ use crate::database::{
     DbError, COVEN_INITIALIZED_STATE_KEY, COVEN_SCHEMA_MANIFEST_STATE_KEY,
     STORE_DEVICE_GENESIS_STATE_KEY, SYNC_ROUTING_CONTRACT_STATE_KEY, SYNC_ROUTING_HASH_STATE_KEY,
 };
-use crate::protocol::membership::OWNER_PUBKEY_STATE_KEY;
-use crate::protocol::store_commit::{
+use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
+use coven_protocol::store_commit::{
     CommitFrontier, ObjectHash, ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedActivatedAck, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
@@ -196,9 +196,9 @@ pub(crate) struct RetainedReplaySnapshotAuthority {
     pub(crate) accepted_cut: StoreHistoryCut,
     pub(crate) device_state: ResolvedStoreDeviceState,
     pub(crate) active_registrations:
-        BTreeMap<crate::protocol::store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
+        BTreeMap<coven_protocol::store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
     pub(crate) acknowledgements:
-        BTreeMap<crate::protocol::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
+        BTreeMap<coven_protocol::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,7 +252,7 @@ impl RetainedReplaySnapshotAuthority {
             .filter_map(|(device_id, record)| {
                 matches!(
                     record.status,
-                    crate::protocol::store_commit::StoreDeviceStatus::Active
+                    coven_protocol::store_commit::StoreDeviceStatus::Active
                 )
                 .then_some((*device_id, &record.registration))
             })
@@ -715,9 +715,9 @@ fn founder_membership_cursor_key(connection: &Connection) -> Result<Option<Strin
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    let root = crate::protocol::store_commit::StoreProtocolRoot::parse(&bytes)
+    let root = coven_protocol::store_commit::StoreProtocolRoot::parse(&bytes)
         .map_err(|error| DbError::context("retained replay Store root", error))?;
-    let stream = crate::protocol::membership::derive_founder_stream_id(
+    let stream = coven_protocol::membership::derive_founder_stream_id(
         &root.descriptor.store_root_id().to_string(),
         &root.descriptor.founder_pubkey,
     );

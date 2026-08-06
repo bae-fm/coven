@@ -1,8 +1,8 @@
 use crate::database::remote_object_records::merge_prepared_remote_object;
 
 use crate::database::*;
-use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
-use crate::protocol::store_commit::commit_semantic_prefix;
+use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
+use coven_protocol::store_commit::commit_semantic_prefix;
 
 use super::fixtures::*;
 
@@ -12,7 +12,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "prepared-audience-objects".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
@@ -39,7 +39,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
 
     let binding = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes");
     let second_object = ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::opaque(
+        coven_protocol::objects::ObjectSlot::opaque(
             binding.blob().locator().semantic_key(),
             "database-test-second-physical-object".to_string(),
         )
@@ -70,9 +70,9 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     let semantic = package.to_bytes();
     let stored_package = b"stored package representation".to_vec();
     let StoreCommitCoord { stream_id, .. } = test_commit_coord();
-    let package_slot = crate::protocol::objects::ObjectSlot::logical(format!(
+    let package_slot = coven_protocol::objects::ObjectSlot::logical(format!(
         "{}.pkg",
-        crate::protocol::store_commit::package_semantic_prefix(
+        coven_protocol::store_commit::package_semantic_prefix(
             test_candidate_family(),
             &stream_id.to_string(),
             1,
@@ -87,7 +87,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     );
     let owner_commit_hash = ObjectHash::digest(b"owner commit semantic bytes");
     let owner_object = ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(format!(
+        coven_protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             commit_semantic_prefix(
                 test_candidate_family(),
@@ -105,13 +105,13 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         commit_hash: owner_commit_hash,
         object: owner_object,
     };
-    let package_remote = crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
-        crate::protocol::remote_object::CandidateObjectRecord {
-            identity: crate::protocol::remote_object::CandidateExclusiveTarget {
+    let package_remote = coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
+        coven_protocol::remote_object::CandidateObjectRecord {
+            identity: coven_protocol::remote_object::CandidateExclusiveTarget {
                 family: package.candidate_family(),
                 domain:
-                    crate::protocol::remote_object::CandidateExclusiveObjectDomain::StorePackage {
-                        reference: crate::protocol::store_commit::StorePackageRef {
+                    coven_protocol::remote_object::CandidateExclusiveObjectDomain::StorePackage {
+                        reference: coven_protocol::store_commit::StorePackageRef {
                             candidate_family: package.candidate_family(),
                             content_hash: ObjectHash::digest(&semantic),
                             schema_version: package.schema_version(),
@@ -122,14 +122,14 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
                 semantic_hash: ObjectHash::digest(&semantic),
                 object: package_object.clone(),
             },
-            bytes: crate::protocol::remote_object::RemoteObjectBytes::inline(
+            bytes: coven_protocol::remote_object::RemoteObjectBytes::inline(
                 semantic.clone(),
                 stored_package.clone(),
                 package_object.clone(),
             )
             .expect("package remote bytes"),
-            state: crate::protocol::remote_object::CandidateObjectState::Prepared {
-                ownership: crate::protocol::remote_object::PendingCandidateOwnership {
+            state: coven_protocol::remote_object::CandidateObjectState::Prepared {
+                ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner.clone()]),
                     nonactivated: Vec::new(),
                 },
@@ -146,7 +146,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     let mut sibling = owner.clone();
     sibling.commit_hash = ObjectHash::digest(b"sibling owner commit");
     sibling.object = ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(format!(
+        coven_protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             commit_semantic_prefix(
                 test_candidate_family(),
@@ -160,12 +160,12 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         ObjectHash::digest(b"sibling owner stored commit"),
     );
     let mut sibling_proposal = package_remote.clone();
-    let crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record) =
+    let coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record) =
         &mut sibling_proposal
     else {
         unreachable!("constructed candidate-exclusive package")
     };
-    let crate::protocol::remote_object::CandidateObjectState::Prepared { ownership } =
+    let coven_protocol::remote_object::CandidateObjectState::Prepared { ownership } =
         &mut record.state
     else {
         unreachable!("constructed prepared package")
@@ -176,13 +176,13 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
             .expect("merge sibling package ownership");
     assert!(matches!(
         sibling_owned,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 &record.state,
-                crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership }
+                coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership }
                     if ownership.pending == BTreeSet::from([sibling.clone()])
                         && ownership.activated == BTreeSet::from([
-                            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(
+                            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(
                                 owner.clone()
                             )
                         ])
@@ -205,20 +205,20 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     )
     .await
     .expect("write spool");
-    let blob_remote = crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
-        crate::protocol::remote_object::SharedObjectRecord {
-            identity: crate::protocol::remote_object::SharedLiveSetObjectRef {
-                domain: crate::protocol::remote_object::SharedLiveSetObjectDomain::StoredBlob,
+    let blob_remote = coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
+        coven_protocol::remote_object::SharedObjectRecord {
+            identity: coven_protocol::remote_object::SharedLiveSetObjectRef {
+                domain: coven_protocol::remote_object::SharedLiveSetObjectDomain::StoredBlob,
                 semantic_hash: ObjectHash::digest(&binding.blob().locator().to_bytes()),
                 object: binding.blob().object().clone(),
             },
-            bytes: crate::protocol::remote_object::RemoteObjectBytes::blob(
+            bytes: coven_protocol::remote_object::RemoteObjectBytes::blob(
                 binding.blob().locator().to_bytes(),
                 binding.blob().object().clone(),
             )
             .expect("blob remote bytes"),
-            state: crate::protocol::remote_object::OwnedObjectState::Prepared {
-                ownership: crate::protocol::remote_object::PendingCandidateOwnership {
+            state: coven_protocol::remote_object::OwnedObjectState::Prepared {
+                ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner.clone()]),
                     nonactivated: Vec::new(),
                 },
@@ -233,20 +233,20 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         Some(spool.clone()),
     )
     .expect("prepare blob");
-    let second_blob_remote = crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
-        crate::protocol::remote_object::SharedObjectRecord {
-            identity: crate::protocol::remote_object::SharedLiveSetObjectRef {
-                domain: crate::protocol::remote_object::SharedLiveSetObjectDomain::StoredBlob,
+    let second_blob_remote = coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
+        coven_protocol::remote_object::SharedObjectRecord {
+            identity: coven_protocol::remote_object::SharedLiveSetObjectRef {
+                domain: coven_protocol::remote_object::SharedLiveSetObjectDomain::StoredBlob,
                 semantic_hash: ObjectHash::digest(&second_blob.locator().to_bytes()),
                 object: second_blob.object().clone(),
             },
-            bytes: crate::protocol::remote_object::RemoteObjectBytes::blob(
+            bytes: coven_protocol::remote_object::RemoteObjectBytes::blob(
                 second_blob.locator().to_bytes(),
                 second_blob.object().clone(),
             )
             .expect("second blob remote bytes"),
-            state: crate::protocol::remote_object::OwnedObjectState::Prepared {
-                ownership: crate::protocol::remote_object::PendingCandidateOwnership {
+            state: coven_protocol::remote_object::OwnedObjectState::Prepared {
+                ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner]),
                     nonactivated: Vec::new(),
                 },

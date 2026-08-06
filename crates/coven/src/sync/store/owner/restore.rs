@@ -4,9 +4,9 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use super::*;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{PreparedExactObject, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
     registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
     DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
@@ -32,14 +32,14 @@ pub(crate) struct RestoringStore<'storage> {
     storage: &'storage dyn SyncStorage,
     root: StoreRootRef,
     protocol: StoreProtocolRoot,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
     identity: UserKeypair,
 }
 
 impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn recover_owner_device(
         &mut self,
-        authority: &crate::protocol::recovery::OwnerRecoveryAuthority,
+        authority: &coven_protocol::recovery::OwnerRecoveryAuthority,
     ) -> Result<StoreDeviceRegistrationRef, StoreRegistrationError> {
         let database = self.database.clone();
         let storage = self.storage;
@@ -57,7 +57,7 @@ impl<'storage> RestoringStore<'storage> {
                 "Owner recovery authority differs from the active root founder grant".into(),
             ));
         }
-        let crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot } =
+        let coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot } =
             &protocol.descriptor.founder_recovery
         else {
             return Err(StoreRegistrationError::Invalid(
@@ -66,7 +66,7 @@ impl<'storage> RestoringStore<'storage> {
         };
         let (recovery_slot, predecessor, sequence) = match &authority.recovery.position {
             OwnerRecoveryPosition::BeforeFirst { activation } => {
-                let expected = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+                let expected = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
                     &root,
                     &owner_pubkey,
                     &authority.owner_grant,
@@ -115,7 +115,7 @@ impl<'storage> RestoringStore<'storage> {
             recovery_slot: recovery_slot.clone(),
             owner_grant: authority.owner_grant.clone(),
         };
-        let device_id = crate::protocol::store_commit::StoreDeviceId::derive(&root, &origin);
+        let device_id = coven_protocol::store_commit::StoreDeviceId::derive(&root, &origin);
         if let Some(registration) = self
             .install_activated_owner_recovery(
                 &origin,
@@ -132,7 +132,7 @@ impl<'storage> RestoringStore<'storage> {
             return Ok(registration);
         }
         let context = |domain| {
-            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 root.store_root_hash,
                 domain,
             )
@@ -179,7 +179,7 @@ impl<'storage> RestoringStore<'storage> {
             let registration_exists = self
                 .prepared_protocol_object_exists(
                     &context(
-                        crate::protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration,
+                        coven_protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration,
                     ),
                     &durable.prepared,
                     &registration_semantic_prefix(&device_id.to_string()),
@@ -188,7 +188,7 @@ impl<'storage> RestoringStore<'storage> {
                 .await?;
             let initial_ack_exists = self
                 .prepared_protocol_object_exists(
-                    &context(crate::protocol::objects::ProtocolObjectDomain::StoreAck),
+                    &context(coven_protocol::objects::ProtocolObjectDomain::StoreAck),
                     &durable.initial_ack.prepared,
                     &ack_slot_prefix(&device_id.to_string(), 1),
                     &durable.initial_ack.bytes,
@@ -197,7 +197,7 @@ impl<'storage> RestoringStore<'storage> {
             let registration_object = durable.prepared.reference().clone();
             PreparedRecoveryReadiness {
                 registration: RecoveryProtocolObject::from_remote_state(
-                    crate::protocol::objects::ExactProtocolObject {
+                    coven_protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes: durable.registration_bytes,
                         object: registration_object,
@@ -213,12 +213,12 @@ impl<'storage> RestoringStore<'storage> {
                 ),
             }
         } else {
-            let head_context = context(crate::protocol::objects::ProtocolObjectDomain::StoreHead);
-            let ack_context = context(crate::protocol::objects::ProtocolObjectDomain::StoreAck);
+            let head_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreHead);
+            let ack_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreAck);
             let snapshot_context =
-                context(crate::protocol::objects::ProtocolObjectDomain::StoreSnapshotMeta);
+                context(coven_protocol::objects::ProtocolObjectDomain::StoreSnapshotMeta);
             let registration_context =
-                context(crate::protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration);
+                context(coven_protocol::objects::ProtocolObjectDomain::StoreDeviceRegistration);
             let first_head = storage
                 .allocate_protocol_slot(
                     &head_context,
@@ -328,20 +328,19 @@ impl<'storage> RestoringStore<'storage> {
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let bootstrap_cut = readiness.initial_ack.exact().value.store_cut.clone();
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(StoreRegistrationError::Invalid(
                 "Owner recovery requires resolved membership".into(),
             ));
         };
-        let membership_state =
-            crate::protocol::circle_control::StoreMembershipStateRef::from_parts(
-                membership.head_refs().to_vec(),
-                membership.resolution_refs().to_vec(),
-                vec![authority.recovery.clone()],
-                resolved.state_hash,
-            )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        let membership_state = coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
+            membership.head_refs().to_vec(),
+            membership.resolution_refs().to_vec(),
+            vec![authority.recovery.clone()],
+            resolved.state_hash,
+        )
+        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
         let recovery_readiness = DeviceRecoveryReadiness {
             registration: registration_ref.clone(),
             initial_ack: initial_ack_ref.clone(),
@@ -409,12 +408,11 @@ impl<'storage> RestoringStore<'storage> {
             .await
             .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
 
-        let stream_id =
-            crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
-                root.store_root_hash,
-                &registration_ref,
-                crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
-            );
+        let stream_id = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            root.store_root_hash,
+            &registration_ref,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+        );
         let order = StoreCommitOrder {
             seq: 1,
             predecessor: None,
@@ -455,9 +453,9 @@ impl<'storage> RestoringStore<'storage> {
                     .creation_authority
                     .clone(),
             },
-            crate::protocol::store_commit::StoreCommitOperationsInput {
+            coven_protocol::store_commit::StoreCommitOperationsInput {
                 device_registrations: vec![activation_ref],
-                ..crate::protocol::store_commit::StoreCommitOperationsInput::empty()
+                ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
             },
             &device_signer,
         )
@@ -483,7 +481,7 @@ impl<'storage> RestoringStore<'storage> {
         let commit_ref =
             StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let verified_commit = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+        let verified_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
             &commit.to_bytes(),
             root.store_root_hash,
             &commit_ref,
@@ -493,7 +491,7 @@ impl<'storage> RestoringStore<'storage> {
         let state_after = predecessor_state
             .activate_registration(
                 registration_ref.clone(),
-                Some(crate::protocol::store_commit::OwnerRecoveryCursor {
+                Some(coven_protocol::store_commit::OwnerRecoveryCursor {
                     owner_grant: authority.owner_grant.clone(),
                     position: OwnerRecoveryPosition::At {
                         node: node_ref.clone(),
@@ -510,7 +508,7 @@ impl<'storage> RestoringStore<'storage> {
                 state_after,
                 crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence {
                     registrations: vec![
-                        crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                        coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                             registration_ref.clone(),
                             registration.clone(),
                         )
@@ -522,7 +520,7 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-        let head_context = context(crate::protocol::objects::ProtocolObjectDomain::StoreHead);
+        let head_context = context(coven_protocol::objects::ProtocolObjectDomain::StoreHead);
         let DeviceStreamAnchor::StoreAnnouncements { first_slot: _ } = &registration.store_commits
         else {
             return Err(StoreRegistrationError::Invalid(
@@ -570,12 +568,12 @@ impl<'storage> RestoringStore<'storage> {
             .await
             .map_err(StoreObjectError::from)?;
         let registration =
-            crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+            coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                 registration_ref.clone(),
                 registration,
             )
             .and_then(|registration| {
-                crate::protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
+                coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                     registration,
                     registration_activation,
                 )

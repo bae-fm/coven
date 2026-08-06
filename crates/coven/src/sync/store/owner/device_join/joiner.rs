@@ -1,6 +1,6 @@
 use super::journal::{database_error, provider_error};
 use super::*;
-use crate::protocol::store_commit::device_join_exchange::require_cancelled_outcome;
+use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 
 #[doc(hidden)]
 pub(crate) struct PendingDeviceJoinAuthority<'storage> {
@@ -26,7 +26,7 @@ pub(crate) struct PendingDeviceJoinClosure<'storage> {
 pub(crate) struct JoiningStore<'storage> {
     journal: PendingJoinJournal,
     history: super::AuthorizedStoreHistory<'storage>,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
     identity: UserKeypair,
 }
 
@@ -234,7 +234,7 @@ impl<'storage> JoiningStore<'storage> {
             .load_device_join_outcome(&activation.outcome, &owner.value)
             .await?
             .value;
-        let crate::protocol::store_commit::DeviceJoinDisposition::Activated { readiness } =
+        let coven_protocol::store_commit::DeviceJoinDisposition::Activated { readiness } =
             outcome.disposition.clone()
         else {
             return Err(DeviceJoinError::AttemptMismatch);
@@ -359,7 +359,7 @@ impl<'storage> JoiningStore<'storage> {
                     challenge: published,
                 },
             ) if challenge == published => {
-                let context = crate::protocol::provider::CrossPrincipalResponseContext {
+                let context = coven_protocol::provider::CrossPrincipalResponseContext {
                     challenge: bootstrap
                         .bootstrap
                         .request
@@ -500,7 +500,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     pub(crate) async fn open(
         pending: &DeviceJoinJournalDatabase,
         storage: &'storage std::sync::Arc<dyn SyncStorage>,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         attempt_id: DeviceJoinAttemptId,
     ) -> Result<Self, crate::sync::store::StorePullError> {
         let history_verifier =
@@ -616,14 +616,14 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         {
             return Ok(abandonment);
         }
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.history_verifier
                 .verified_root()
                 .reference()
                 .store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
         );
-        let prefix = crate::protocol::store_commit::device_join_abandonment_semantic_prefix(
+        let prefix = coven_protocol::store_commit::device_join_abandonment_semantic_prefix(
             self.journal.attempt_id,
         );
         let bytes = self
@@ -777,61 +777,58 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                 JoinerJoinProgress::ApprovalReceived(approval.clone()),
             )?
         };
-        let origin = crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
+        let origin = coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
             attempt_id,
             attempt_slot: approval.request.offer.attempt_slot.clone(),
             outcome_slot: approval.request.offer.outcome_slot.clone(),
         };
-        let device_id = crate::protocol::store_commit::StoreDeviceId::derive(
+        let device_id = coven_protocol::store_commit::StoreDeviceId::derive(
             &approval.request.offer.store_root,
             &origin,
         );
-        let registration_context =
-            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
-                approval.request.offer.store_root.store_root_hash,
-                ProtocolObjectDomain::StoreDeviceRegistration,
-            );
+        let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            approval.request.offer.store_root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
         let registration_slot = storage
             .allocate_protocol_slot(
                 &registration_context,
-                &crate::protocol::store_commit::registration_semantic_prefix(
-                    &device_id.to_string(),
-                ),
+                &coven_protocol::store_commit::registration_semantic_prefix(&device_id.to_string()),
                 ".json",
             )
             .await?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
         let first_slot = storage
             .allocate_protocol_slot(
                 &context,
-                &crate::protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
+                &coven_protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
                 ".json",
             )
             .await?;
         let store_commits =
-            crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot };
-        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { first_slot };
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
         let first_ack = storage
             .allocate_protocol_slot(
                 &ack_context,
-                &crate::protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
+                &coven_protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
                 ".json",
             )
             .await?;
-        let snapshot_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let snapshot_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             approval.request.offer.store_root.store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
         );
         let first_snapshot = storage
             .allocate_protocol_slot(
                 &snapshot_context,
-                &crate::protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
+                &coven_protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
                 ".json",
             )
             .await?;
@@ -855,10 +852,10 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             origin,
             live.device,
             store_commits,
-            crate::protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
+            coven_protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
                 first_slot: first_ack,
             },
-            crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
+            coven_protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
                 first_slot: first_snapshot,
             },
             identity,
@@ -922,7 +919,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             .value;
         if !matches!(
             outcome.disposition,
-            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
+            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }

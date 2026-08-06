@@ -524,8 +524,8 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn verify_accepted_provider_access_activation(
         &mut self,
-        access: &crate::protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-        provider_admin: &crate::protocol::provider::ProviderAdminGrantRecord,
+        access: &coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
+        provider_admin: &coven_protocol::provider::ProviderAdminGrantRecord,
         administrator: &StoreDeviceRegistration,
     ) -> Result<(), StorePullError> {
         let grant = self

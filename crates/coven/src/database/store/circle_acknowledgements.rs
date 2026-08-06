@@ -1,10 +1,10 @@
 use crate::database::query_mapped_rows;
 use crate::database::*;
-use crate::protocol::circle::{
+use coven_protocol::circle::{
     CircleBootstrapCoverageRef, CircleControlCoord, CircleEpochId, CircleId,
 };
-use crate::protocol::objects::PreparedExactObject;
-use crate::protocol::store_commit::{
+use coven_protocol::objects::PreparedExactObject;
+use coven_protocol::store_commit::{
     CircleAck, CircleAckRef, CommitFrontier, StoreDeviceId, StoreDeviceStatus, StoreHistoryCut,
 };
 use rusqlite::{Connection, OptionalExtension};
@@ -20,7 +20,7 @@ pub(crate) struct CircleAckPublicationInput {
     pub circle_id: CircleId,
     pub control: CircleControlCoord,
     pub epoch_id: CircleEpochId,
-    pub access: crate::protocol::circle_activation::CircleEpochAccess,
+    pub access: coven_protocol::circle_activation::CircleEpochAccess,
     pub seeded_from: Option<CircleBootstrapCoverageRef>,
 }
 
@@ -29,7 +29,7 @@ pub(crate) struct CircleAckPublicationInput {
 /// coverage it named (used to skip re-staging an unchanged acknowledgement).
 pub(crate) struct PublishedCircleAck {
     pub reference: CircleAckRef,
-    pub successor_slot: crate::protocol::objects::ObjectSlot,
+    pub successor_slot: coven_protocol::objects::ObjectSlot,
     pub store_cut: CommitFrontier,
     pub control: CircleControlCoord,
 }

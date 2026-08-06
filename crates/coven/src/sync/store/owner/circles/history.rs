@@ -27,17 +27,17 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         self.history.circle_acknowledgements()
     }
 
-    pub(crate) fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+    pub(crate) fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
         self.history.root()
     }
 
     pub(crate) async fn authenticate_commit_bytes(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
         bytes: &[u8],
     ) -> Result<
-        crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history
             .authenticate_commit_bytes(reference, bytes)
@@ -46,9 +46,9 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
 
     pub(crate) async fn load_commit(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<
-        crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        coven_protocol::store_commit::VerifiedStoreBatchCommit,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.history.load_commit(reference).await
@@ -56,11 +56,11 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
 
     pub(crate) async fn retained_device_state_for_order(
         &self,
-        order: &crate::protocol::store_commit::StoreCommitOrder,
+        order: &coven_protocol::store_commit::StoreCommitOrder,
     ) -> Result<
         (
-            crate::protocol::store_commit::StoreDeviceStateRef,
-            crate::protocol::store_commit::ResolvedStoreDeviceState,
+            coven_protocol::store_commit::StoreDeviceStateRef,
+            coven_protocol::store_commit::ResolvedStoreDeviceState,
         ),
         crate::sync::store::owner::pull::StorePullError,
     > {
@@ -69,9 +69,9 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
 
     pub(crate) async fn observe_excluded_candidate_head(
         &mut self,
-        candidate: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_object: &crate::protocol::objects::ExactObjectRef,
+        candidate: &coven_protocol::store_commit::StoreDeviceHead,
+        candidate_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        candidate_object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<
         crate::sync::store::owner::history::abandonment::ExcludedCandidateHeadObservation,
         crate::sync::store::StoreError,
@@ -83,7 +83,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
 
     pub(crate) async fn cleanup_operation_candidate(
         &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
         self.history
             .cleanup_circle_operation_candidate(operation_id)
@@ -92,10 +92,10 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
 
     pub(crate) async fn prepare_successor(
         &mut self,
-        commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        membership: &crate::protocol::membership::MembershipChain,
-        recovery_author: Option<&crate::protocol::store_commit::StoreDeviceRegistrationRef>,
-        state_after: crate::protocol::store_commit::ResolvedStoreDeviceState,
+        commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        membership: &coven_protocol::membership::MembershipChain,
+        recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
+        state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
         evidence: crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::owner::verified_history::PreparedMergeHistorySuccessor,

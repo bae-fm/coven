@@ -3,13 +3,13 @@ use super::{
     MembershipMutationProgress, ReplacementWrappedKey, RevokeMembershipPublication,
     RevokeMutationPlan,
 };
-use crate::protocol::membership::{
-    self, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
-};
 use crate::storage as cloud_storage;
 use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState, RevokeOutcome};
 use coven_keys::encryption::{self, EncryptionService};
 use coven_keys::keys;
+use coven_protocol::membership::{
+    self, AuthorStreamId, MemberRole, MembershipChain, MembershipChange,
+};
 
 pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     operation: &'operation mut crate::sync::store::owner::AuthorizedWriterOperation<'storage>,
@@ -514,7 +514,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 // Every publication attempt re-derives this from the candidate it
                 // is about to publish, and a reprepare changes the candidate.
                 let candidate_remotes =
-                    |candidate: &crate::protocol::prepared_commit::PreparedStoreOperationCommit| {
+                    |candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit| {
                         candidate
                             .merge_membership_activation_remote_objects(
                                 &transition,
@@ -542,7 +542,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         &transition,
                         &publication,
                         candidate.clone(),
-                        crate::protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
+                        coven_protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
                         intent_hash: persistence.intent_hash(),
                         progress_bytes: MembershipMutationProgress::RevokeActivated {
                             candidate: Some(candidate.reference.clone()),

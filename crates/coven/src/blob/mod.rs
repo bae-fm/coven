@@ -1,7 +1,7 @@
 //! Blob domain workflows: locality transitions, tombstone lifecycle, retry
 //! policy, and local cleanup. The blob value model — references, locators,
 //! scopes, transfer limits, and the transition observer port — lives in
-//! [`crate::protocol::blob`].
+//! [`coven_protocol::blob`].
 
 pub(crate) mod delete;
 pub(crate) mod retry;

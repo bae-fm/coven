@@ -53,7 +53,7 @@ impl EstablishedStoreIdentity {
     pub(crate) async fn export_activated_device_continuation(
         &self,
         database: &crate::database::StoreDatabase,
-    ) -> Result<crate::protocol::recovery::ActivatedContinuation, crate::database::DbError> {
+    ) -> Result<coven_protocol::recovery::ActivatedContinuation, crate::database::DbError> {
         database
             .export_activated_device_continuation(&self.keypair)
             .await
@@ -214,10 +214,10 @@ impl StoreSecurity {
     pub(crate) fn generate_restore_code(
         &self,
         config: &Config,
-        store_root: crate::protocol::store_commit::StoreRootRef,
+        store_root: coven_protocol::store_commit::StoreRootRef,
         founder_pubkey: String,
-        membership_floor: crate::protocol::membership::MembershipFloor,
-        authority: crate::protocol::recovery::RestoreAuthority,
+        membership_floor: coven_protocol::membership::MembershipFloor,
+        authority: coven_protocol::recovery::RestoreAuthority,
     ) -> Result<String, crate::storage::cloud::setup::SetupError> {
         use crate::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
         use crate::storage::cloud::CloudHomeJoinInfo;

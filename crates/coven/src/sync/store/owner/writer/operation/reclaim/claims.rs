@@ -202,14 +202,14 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         &self,
         package: &AudienceBlobBindingPackage,
         activation: &StoreBatchCommitRef,
-    ) -> Result<crate::protocol::audience_package::AudiencePackage, StoreReclaimError> {
+    ) -> Result<coven_protocol::audience_package::AudiencePackage, StoreReclaimError> {
         let (context, prefix, object) = match package {
             AudienceBlobBindingPackage::Store(package) => (
                 ProtocolObjectContext::store_encrypted(
                     self.root.store_root_hash,
                     ProtocolObjectDomain::StorePackage,
                 ),
-                crate::protocol::store_commit::package_semantic_prefix(
+                coven_protocol::store_commit::package_semantic_prefix(
                     package.candidate_family,
                     &activation.coord.stream_id.to_string(),
                     activation.coord.sequence(),
@@ -236,7 +236,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         self.root.store_root_hash,
                         ProtocolObjectDomain::CirclePackage,
                     ),
-                    crate::protocol::store_commit::circle_package_semantic_prefix(
+                    coven_protocol::store_commit::circle_package_semantic_prefix(
                         package.circle_id,
                         package.package.candidate_family,
                         &activation.coord.stream_id.to_string(),
@@ -251,7 +251,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .storage
             .read_protocol_object(&context, object, &prefix)
             .await?;
-        crate::protocol::audience_package::AudiencePackage::parse(&bytes)
+        coven_protocol::audience_package::AudiencePackage::parse(&bytes)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
     }
 

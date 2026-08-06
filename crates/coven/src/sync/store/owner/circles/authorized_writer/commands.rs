@@ -47,12 +47,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         &mut self,
         circle_id: CircleId,
         member_pubkey: String,
-    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleOperationId, CircleOperationError> {
         let (current, activation_commit, reference) =
             self.current_authoring_context(circle_id).await?;
         let keyring = match &current.access.disposition {
-            crate::protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
-            crate::protocol::circle::CircleAccessDisposition::Inactive => {
+            coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
+            coven_protocol::circle::CircleAccessDisposition::Inactive => {
                 return Err(CircleOperationError::InvalidState(
                     "Circle member removal requires active local access".to_string(),
                 ));
@@ -89,7 +89,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn resolve_circle_control(
         &mut self,
         circle_id: CircleId,
-        chosen: crate::protocol::circle::CircleControlCoord,
+        chosen: coven_protocol::circle::CircleControlCoord,
     ) -> Result<(), CircleOperationError> {
         let branches = self
             .database
@@ -113,9 +113,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn resolution_request(
         &self,
         circle_id: CircleId,
-        chosen: &crate::protocol::circle::CircleControlCoord,
-        retained_branches: &[crate::protocol::circle::CircleControlCoord],
-        conflicting_branches: Vec<crate::protocol::circle::CircleControlCoord>,
+        chosen: &coven_protocol::circle::CircleControlCoord,
+        retained_branches: &[coven_protocol::circle::CircleControlCoord],
+        conflicting_branches: Vec<coven_protocol::circle::CircleControlCoord>,
     ) -> Result<CircleOperationRequest, CircleOperationError> {
         self.ensure_not_deleted(circle_id).await?;
         if !retained_branches.contains(chosen) {
@@ -174,7 +174,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn cancel_circle_epoch_close(
         &mut self,
         circle_id: CircleId,
-    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleOperationId, CircleOperationError> {
         let operation_id = self
             .begin_circle_epoch_close_cancellation(circle_id)
             .await?;
@@ -185,7 +185,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn begin_circle_epoch_close_cancellation(
         &mut self,
         circle_id: CircleId,
-    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleOperationId, CircleOperationError> {
         self.ensure_not_deleted(circle_id).await?;
         let identity_pubkey = self.local_writer.author_pubkey();
         let mut journal = self
@@ -205,7 +205,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             }
         };
         let close_id =
-            crate::protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id);
+            coven_protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id);
         let (current, reference) = match self
             .database
             .circle_control_conflict_branches(circle_id)
@@ -290,7 +290,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             ));
         };
         if close.close_id
-            != crate::protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
+            != coven_protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
         {
             return Err(CircleOperationError::Journal(format!(
                 "Circle operation {} differs from its close id",
@@ -328,7 +328,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn exclude_circle_close_device(
         &mut self,
         circle_id: CircleId,
-        excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
+        excluded_device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<(), CircleOperationError> {
         let identity_pubkey = self.local_writer.author_pubkey();
         let journal = self
@@ -348,7 +348,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             ));
         };
         if close.close_id
-            != crate::protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
+            != coven_protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
         {
             return Err(CircleOperationError::Journal(format!(
                 "Circle operation {} differs from its close id",
@@ -367,7 +367,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             &current.control,
             participant.registration.clone(),
         )?;
-        let prefix = crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
+        let prefix = coven_protocol::circle::circle_epoch_close_response_semantic_prefix(
             circle_id,
             close.close_id,
             excluded_device_id,
@@ -384,18 +384,16 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 &prefix,
                 CircleEpochCloseResponseSlotValue::Exclusion(exclusion).to_bytes(),
             )
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         match self.storage.create_protocol_object(&prepared).await {
             Ok(()) | Err(StorageError::SlotCollision(_)) => {}
-            Err(error) => {
-                return Err(crate::protocol::objects::StoreObjectError::from(error).into())
-            }
+            Err(error) => return Err(coven_protocol::objects::StoreObjectError::from(error).into()),
         }
         let (winner_bytes, _) = self
             .storage
             .read_prepared_protocol_slot(&context, &participant.response_slot, &prefix)
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         match CircleEpochCloseResponseSlotValue::parse(&winner_bytes)? {
             CircleEpochCloseResponseSlotValue::Exclusion(winner) => {
                 if !winner.verify_for(&current.control) {
@@ -428,7 +426,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
 
     pub(crate) async fn retry_circle_operation(
         &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
         let journal = self
@@ -440,7 +438,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             })?;
         if !matches!(
             journal.state(),
-            crate::protocol::circle::CircleOperationState::Blocked { .. }
+            coven_protocol::circle::CircleOperationState::Blocked { .. }
         ) {
             return Err(CircleOperationError::NotBlocked {
                 operation_id: operation_id.clone(),
@@ -449,7 +447,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database.unblock_circle_operation(operation_id).await?;
         let routing_key = routing_encryption
             .map(|encryption| {
-                crate::protocol::circle::derive_row_routing_key(
+                coven_protocol::circle::derive_row_routing_key(
                     encryption,
                     journal.operation().creation.control.value.store_root_hash,
                 )
@@ -518,13 +516,13 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         member_pubkey: String,
         role: CircleRole,
         bootstrap: crate::sync::store::SnapshotCut,
-        routing_key: &crate::protocol::circle::RowRoutingKey,
+        routing_key: &coven_protocol::circle::RowRoutingKey,
     ) -> Result<(), CircleOperationError> {
         let (current, activation_commit, reference) =
             self.current_authoring_context(circle_id).await?;
         let keyring = match &current.access.disposition {
-            crate::protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
-            crate::protocol::circle::CircleAccessDisposition::Inactive => {
+            coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
+            coven_protocol::circle::CircleAccessDisposition::Inactive => {
                 return Err(CircleOperationError::InvalidState(
                     "Circle member addition requires active local access".to_string(),
                 ));
@@ -563,7 +561,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
 
     pub(crate) async fn resume_circle_operations(
         &mut self,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
         let database = self.database.clone();
         for operation_id in database.discarding_circle_operations().await? {

@@ -3,24 +3,24 @@
 use std::collections::BTreeSet;
 
 use crate::database::StoreDatabase;
-use crate::protocol::circle::{
+use crate::storage::SyncStorage;
+use crate::sync::store::circle_controls::CircleOperationError;
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::keys::{self, UserKeypair};
+use coven_protocol::circle::{
     circle_epoch_close_intent_semantic_prefix, circle_semantic_prefix, recipient_slot_with_peer,
     verify_circle_semantic_prefix, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
     CircleControl, CircleControlCoord, CircleControlState, CircleEpochCloseId, CircleId,
     CircleMetadataHeadRef, CircleRosterHeadRef, CircleSemanticSlot, MergeCircleOwnerAuthorityRef,
     PreparedAccessLeaf, PreparedCircleControl, ResolvedCircleRoster,
 };
-use crate::protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     CircleAccessObjectRef, CircleActivationObjects, GrantStreamAnchor, ObjectHash,
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreRootRef, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
-use crate::storage::SyncStorage;
-use crate::sync::store::circle_controls::CircleOperationError;
-use coven_keys::encryption::{EncryptionService, MasterKeyring};
-use coven_keys::keys::{self, UserKeypair};
 
 mod metadata;
 mod roster;
@@ -33,8 +33,6 @@ pub(crate) use access::LocalCircleAccess;
 use heads::{CircleHeadKind, CircleHeadValue};
 
 #[cfg(test)]
-use crate::protocol::circle_activation::CircleCurrentState;
-#[cfg(test)]
 use crate::sync::store::circle_controls::activation::CircleCurrentControl;
 use crate::sync::store::circle_controls::activation::{
     read_exact_circle_object, verify_control_context_for_verified_commit,
@@ -44,6 +42,8 @@ use crate::sync::store::circle_controls::activation::{
     VerifiedCircleImage, VerifiedCircleReference, VerifiedStreamActivationPrefix,
     VerifiedStreamActivations,
 };
+#[cfg(test)]
+use coven_protocol::circle_activation::CircleCurrentState;
 
 pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,
@@ -74,7 +74,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     async fn verify_control_membership(
         &mut self,
         control: &PreparedCircleControl,
-    ) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
+    ) -> Result<Vec<(String, coven_protocol::membership::MemberRole)>, CircleOperationError> {
         let state = &control.value.access_epoch().store_membership;
         let chain = self
             .history
@@ -88,7 +88,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         &self,
         control: &PreparedCircleControl,
         verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
-    ) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
+    ) -> Result<Vec<(String, coven_protocol::membership::MemberRole)>, CircleOperationError> {
         let state = &control.value.access_epoch().store_membership;
         let chain = self
             .history
@@ -106,10 +106,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) async fn load_control_roster_chain(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
-        reference: &crate::protocol::store_commit::CircleControlRef,
+        reference: &coven_protocol::store_commit::CircleControlRef,
         control: &PreparedCircleControl,
         keyring: &str,
-    ) -> Result<crate::protocol::circle::CircleRosterChain, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleRosterChain, CircleOperationError> {
         verify_control_context_for_verified_commit(reference, control, verified)?;
         let commit_ref = verified.reference();
         let commit = verified.value();
@@ -144,8 +144,8 @@ struct VerifiedCloseOutcome {
 
 fn verify_loaded_control_membership(
     control: &PreparedCircleControl,
-    chain: crate::protocol::membership::MembershipChain,
-) -> Result<Vec<(String, crate::protocol::membership::MemberRole)>, CircleOperationError> {
+    chain: coven_protocol::membership::MembershipChain,
+) -> Result<Vec<(String, coven_protocol::membership::MemberRole)>, CircleOperationError> {
     let state = &control.value.access_epoch().store_membership;
     if !chain.authorizes_write_authority(
         &control.value.value.membership_authority,
@@ -156,14 +156,14 @@ fn verify_loaded_control_membership(
         ));
     }
     let membership_state_hash = match chain.status() {
-        crate::protocol::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
-        crate::protocol::membership::MembershipStatus::Conflict(_) => {
+        coven_protocol::membership::MembershipStatus::Resolved(resolved) => resolved.state_hash,
+        coven_protocol::membership::MembershipStatus::Conflict(_) => {
             return Err(CircleOperationError::InvalidState(
                 "Store membership state has an unresolved conflict".to_string(),
             ));
         }
     };
-    let expected_state = crate::protocol::circle::StoreMembershipStateRef::from_parts(
+    let expected_state = coven_protocol::circle::StoreMembershipStateRef::from_parts(
         state.heads.clone(),
         state.resolutions.clone(),
         state.recovery.clone(),
@@ -193,14 +193,14 @@ fn verify_merge_circle_owner_authority(
             conflict_hash,
             resolution_hash,
         } => {
-            let grant_id = crate::protocol::circle_roster::derive_circle_resolution_grant(
+            let grant_id = coven_protocol::circle_roster::derive_circle_resolution_grant(
                 conflict_hash,
                 author_pubkey,
             );
             roster.authorizes_resolution_grant(
                 author_pubkey,
                 &grant_id,
-                &crate::protocol::circle_roster::CircleRosterConflictResolutionRef {
+                &coven_protocol::circle_roster::CircleRosterConflictResolutionRef {
                     conflict_hash: *conflict_hash,
                     resolver_pubkey: author_pubkey.to_string(),
                     resolution_hash: *resolution_hash,

@@ -76,7 +76,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) async fn materialized_frontier_for_test(
         &self,
     ) -> Result<
-        BTreeMap<String, crate::protocol::store_commit::StoreBatchCommitRef>,
+        BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
         crate::database::DbError,
     > {
         self.database.materialized_frontier().await
@@ -85,8 +85,8 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn circle_bootstrap_coverage_for_test(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-    ) -> Result<Option<crate::protocol::circle::CircleBootstrapCoverageRef>, crate::database::DbError>
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, crate::database::DbError>
     {
         self.database.circle_bootstrap_coverage_ref(circle_id).await
     }
@@ -94,7 +94,7 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn circle_control_activation_count_for_test(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, crate::database::DbError> {
         self.database
             .circle_control_activation_count_for_test(circle_id)
@@ -106,8 +106,8 @@ impl<'storage> RestoringStore<'storage> {
         &self,
     ) -> Result<
         Vec<(
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::circle_activation::VerifiedCircleImage,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::circle_activation::VerifiedCircleImage,
         )>,
         crate::database::DbError,
     > {
@@ -136,8 +136,8 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn tamper_author_exclusion_locator_for_test(
         &self,
-        exclusion: &crate::protocol::store_commit::StoreDeviceExclusionRef,
-        candidate: &crate::protocol::store_commit::StoreBatchCommitRef,
+        exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
+        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
         tamper: crate::database::AuthorExclusionLocatorTamper,
     ) -> Result<(), crate::database::DbError> {
         self.database
@@ -148,8 +148,8 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn author_exclusion_activation_for_candidate_for_test(
         &self,
-        candidate: crate::protocol::store_commit::StoreBatchCommitRef,
-        author: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
+        author: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<Option<crate::database::AuthorExclusionActivationLocator>, crate::database::DbError>
     {
         self.database
@@ -160,7 +160,7 @@ impl<'storage> RestoringStore<'storage> {
     #[cfg(test)]
     pub(crate) async fn author_exclusion_activation_evidence_for_test(
         &self,
-        exclusion: &crate::protocol::store_commit::StoreDeviceExclusionRef,
+        exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
     ) -> Result<(String, String), crate::database::DbError> {
         self.database
             .author_exclusion_activation_evidence_for_test(exclusion)

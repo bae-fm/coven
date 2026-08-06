@@ -1,11 +1,11 @@
 use crate::database::*;
-use crate::protocol::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
-use crate::protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
+use coven_protocol::blob::{Provenance, BLOB_TOMBSTONE_GRACE};
+use coven_protocol::store_commit::{commit_semantic_prefix, StreamActivationId};
 
 pub(super) fn reclaim_test_object(path: &str) -> ExactObjectRef {
     let bytes = path.as_bytes();
     ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(path.to_string())
+        coven_protocol::objects::ObjectSlot::logical(path.to_string())
             .expect("valid reclaim test slot"),
         u64::try_from(bytes.len()).expect("reclaim test object length fits u64"),
         ObjectHash::digest(bytes),
@@ -18,7 +18,7 @@ pub(super) fn reclaim_test_activation(
 ) -> ReclaimCommitActivation {
     ReclaimCommitActivation::new(
         commit,
-        crate::protocol::store_commit::StoreDeviceHeadRef {
+        coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: ObjectHash::digest(format!("{label} reclaim head").as_bytes()),
             object: reclaim_test_object(&format!("store-v1/test/{label}/reclaim-head.json")),
         },
@@ -28,18 +28,18 @@ pub(super) fn reclaim_test_activation(
 
 pub(super) fn snapshot_activation(label: &str) -> StreamActivationId {
     let registration_bytes = format!("{label} snapshot registration");
-    let registration = crate::protocol::store_commit::StoreDeviceRegistrationRef {
+    let registration = coven_protocol::store_commit::StoreDeviceRegistrationRef {
         device_id: format!("{:0>64}", label.len())
             .parse()
             .expect("valid snapshot test device id"),
         registration_hash: ObjectHash::digest(registration_bytes.as_bytes()),
         object: reclaim_test_object(&format!("store-v1/test/{label}/snapshot-registration.json")),
     };
-    crate::protocol::store_commit::StreamActivation::device_authorized(
+    coven_protocol::store_commit::StreamActivation::device_authorized(
         ObjectHash::digest(format!("{label} Store root").as_bytes()),
         registration,
-        crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
-            first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
+        coven_protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
+            first_slot: coven_protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/snapshots/1.json"
             ))
             .expect("valid snapshot activation slot"),
@@ -72,7 +72,7 @@ pub(super) fn things_migration() -> Migration {
     )
 }
 
-pub(super) fn things_table(identity: crate::protocol::synced_schema::RowIdentity) -> SyncedTable {
+pub(super) fn things_table(identity: coven_protocol::synced_schema::RowIdentity) -> SyncedTable {
     SyncedTable::new("things", identity)
 }
 
@@ -92,7 +92,7 @@ pub(super) fn scoped_things_migration() -> Migration {
 pub(super) fn scoped_things_table() -> SyncedTable {
     SyncedTable::new(
         "things",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")
 }
@@ -100,11 +100,11 @@ pub(super) fn scoped_things_table() -> SyncedTable {
 pub(super) fn exact_blob_binding(row_id: &str, stamp: &str, bytes: &[u8]) -> RowBlobLocatorBinding {
     let plaintext_hash = ObjectHash::digest(bytes);
     let uploader_bytes = b"database test uploader registration";
-    let uploader = crate::protocol::store_commit::StoreDeviceRegistrationRef {
+    let uploader = coven_protocol::store_commit::StoreDeviceRegistrationRef {
         device_id: "aa".repeat(32).parse().expect("valid test device id"),
         registration_hash: ObjectHash::digest(uploader_bytes),
         object: ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/devices/database-test-uploader.json".to_string(),
             )
             .expect("valid uploader registration slot"),
@@ -122,7 +122,7 @@ pub(super) fn exact_blob_binding(row_id: &str, stamp: &str, bytes: &[u8]) -> Row
     )
     .expect("valid locator");
     let stored = b"stored representation".to_vec();
-    let slot = crate::protocol::objects::ObjectSlot::logical(locator.semantic_key())
+    let slot = coven_protocol::objects::ObjectSlot::logical(locator.semantic_key())
         .expect("valid exact slot");
     let object = ExactObjectRef::new(slot, stored.len() as u64, ObjectHash::digest(&stored));
     RowBlobLocatorBinding::new(
@@ -146,10 +146,10 @@ pub(super) fn local_row_blob(row_id: &str, stamp: &str, bytes: &[u8]) -> RowBlob
         BlobRef {
             namespace: locator.namespace().to_string(),
             id: locator.blob_id().to_string(),
-            scope: crate::protocol::blob::BlobScope::Master,
+            scope: coven_protocol::blob::BlobScope::Master,
             cloud_path: locator.cloud_path().map(str::to_string),
             provenance: Provenance::HostProvided,
-            fill: crate::protocol::blob::CacheFill::CacheLazy,
+            fill: coven_protocol::blob::CacheFill::CacheLazy,
         },
         locator.plaintext_size(),
         locator.plaintext_hash(),
@@ -164,7 +164,7 @@ pub(super) fn open_outbox_database(device_id: &str) -> Database {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
@@ -172,15 +172,15 @@ pub(super) fn open_outbox_database(device_id: &str) -> Database {
     .expect("open outbox database")
 }
 
-pub(super) fn test_candidate_family() -> crate::protocol::store_commit::CandidateFamilyId {
-    crate::protocol::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+pub(super) fn test_candidate_family() -> coven_protocol::store_commit::CandidateFamilyId {
+    coven_protocol::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
         b"database test candidate family",
     ))
 }
 
 pub(super) fn test_commit_coord() -> StoreCommitCoord {
     StoreCommitCoord {
-        stream_id: crate::protocol::membership::AuthorStreamId::from_bytes([7; 32]),
+        stream_id: coven_protocol::membership::AuthorStreamId::from_bytes([7; 32]),
         sequence: 1,
     }
 }
@@ -189,7 +189,7 @@ pub(super) fn test_commit_ref() -> StoreBatchCommitRef {
     let coord = test_commit_coord();
     let commit_hash = ObjectHash::digest(b"database test commit");
     let StoreCommitCoord { stream_id, .. } = &coord;
-    let slot = crate::protocol::objects::ObjectSlot::logical(format!(
+    let slot = coven_protocol::objects::ObjectSlot::logical(format!(
         "{}.json",
         commit_semantic_prefix(
             test_candidate_family(),
@@ -209,13 +209,13 @@ pub(super) fn test_commit_ref() -> StoreBatchCommitRef {
 pub(super) fn blob_binding_table() -> SyncedTable {
     SyncedTable::new(
         "photos",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .carries_blob(
-        crate::protocol::synced_schema::BlobDecl::new(
+        coven_protocol::synced_schema::BlobDecl::new(
             "images",
             Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheLazy,
+            coven_protocol::blob::CacheFill::CacheLazy,
         )
         .with_cloud_path_column("cloud_path"),
     )

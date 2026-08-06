@@ -1,17 +1,17 @@
 //! Row-level sync gating.
 //!
 //! A host declares a boolean **gate** column on a *root* synced table (via
-//! [`SyncedTable::gated_by`](crate::protocol::synced_schema::SyncedTable::gated_by)). A root row
+//! [`SyncedTable::gated_by`](coven_protocol::synced_schema::SyncedTable::gated_by)). A root row
 //! is shared — i.e. it syncs to peers — iff its gate column is true. The gate
 //! flows down *declared foreign keys*: a child row is shared iff the row at the
 //! top of its FK chain (its gated-ancestor root) is shared. A
-//! [`SyncedTable::remote_root`](crate::protocol::synced_schema::SyncedTable::remote_root) is a
+//! [`SyncedTable::remote_root`](coven_protocol::synced_schema::SyncedTable::remote_root) is a
 //! root whose rows and FK descendants always sync, and whose blobs are always
 //! Remote. Rows that are not gated and not FK-descendants of a gated or remote root
 //! always sync.
 //!
 //! The gate also flows **up** for declared *ancestors*
-//! ([`SyncedTable::gated_by_descendants`](crate::protocol::synced_schema::SyncedTable::gated_by_descendants)).
+//! ([`SyncedTable::gated_by_descendants`](coven_protocol::synced_schema::SyncedTable::gated_by_descendants)).
 //! An ancestor is an always-shared FK *parent* of gated rows (e.g. an album is
 //! the FK parent of releases). Left alone it would sync even when its whole gated
 //! subtree is cut, landing on peers as an orphan with zero children. A
@@ -19,7 +19,7 @@
 //! holds a kept row referencing it; the keep composes recursively up the FK chain
 //! to the gated roots at the bottom. The keep-children are inferred from the live
 //! FK graph, never declared — except a child the host marks an *asset*
-//! ([`SyncedTable::asset`](crate::protocol::synced_schema::SyncedTable::asset)), a decoration
+//! ([`SyncedTable::asset`](coven_protocol::synced_schema::SyncedTable::asset)), a decoration
 //! (cover, artist image) that rides its subject's gate but never grants keep, so
 //! it is excluded from the subject's keep-children. An asset is typically a
 //! host-provided blob; see the [blob concept tree](crate::blob) for the blob-side
@@ -189,16 +189,16 @@ pub enum GateError {
         parent: String,
     },
     CircleAuthority {
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         active_records: usize,
     },
     /// A host write named a Circle whose control chain has terminated in a
     /// deletion. The Circle accepts no further content.
     CircleDeleted {
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     },
     InvalidCircleControl {
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         reason: String,
     },
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated

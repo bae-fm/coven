@@ -30,7 +30,7 @@
 //! Both transitions operate on every exact blob-bearing row under the root and
 //! branch on provenance only to choose its Local filesystem home.
 //!
-//! A [`SyncedTable::remote_root`](crate::protocol::synced_schema::SyncedTable::remote_root)
+//! A [`SyncedTable::remote_root`](coven_protocol::synced_schema::SyncedTable::remote_root)
 //! has no Local state in this model: its rows sync normally and its blobs are
 //! Remote by construction, so these transition APIs reject it.
 //!
@@ -45,11 +45,11 @@ use std::collections::HashMap;
 
 use crate::database::DbError;
 use crate::database::StoreDatabase;
-use crate::protocol::blob::{Provenance, RowBlobRef};
-use crate::protocol::synced_schema::SyncedTable;
 use coven_foundation::store_dir::StoreDir;
+use coven_protocol::blob::{Provenance, RowBlobRef};
+use coven_protocol::synced_schema::SyncedTable;
 
-use crate::protocol::blob::BlobTransitionObserver;
+use coven_protocol::blob::BlobTransitionObserver;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -117,14 +117,14 @@ pub enum MakeLocalError {
 struct ExactPlaintextFile {
     path: PathBuf,
     expected_size: u64,
-    expected_hash: crate::protocol::store_commit::ObjectHash,
+    expected_hash: coven_protocol::store_commit::ObjectHash,
 }
 
 impl ExactPlaintextFile {
     fn new(
         path: PathBuf,
         expected_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Self {
         Self {
             path,
@@ -160,7 +160,7 @@ impl ExactPlaintextFile {
                 .ok_or_else(|| format!("file size overflow: {}", self.path.display()))?;
             hasher.update(&buffer[..read]);
         }
-        let hash = crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
+        let hash = coven_protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
         if size != self.expected_size || hash != self.expected_hash {
             return Err(format!(
                 "plaintext facts {size}/{hash} differ from expected facts {}/{}",
@@ -266,7 +266,7 @@ impl LocalBlobTransitions {
 
         let mut uploads = Vec::with_capacity(refs.len());
         for reference in refs {
-            if reference.authority() != &crate::protocol::blob::RowBlobAuthority::Local
+            if reference.authority() != &coven_protocol::blob::RowBlobAuthority::Local
                 || reference.stored().is_some()
             {
                 return Err(MakeRemoteError::AlreadyRemote(
@@ -378,7 +378,7 @@ impl LocalBlobTransitions {
         for reference in &references {
             if !matches!(
                 reference.authority(),
-                crate::protocol::blob::RowBlobAuthority::Remote(_)
+                coven_protocol::blob::RowBlobAuthority::Remote(_)
             ) || reference.stored().is_none()
             {
                 return Err(MakeLocalError::UnresolvedLocality(

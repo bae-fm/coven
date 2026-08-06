@@ -7,31 +7,31 @@ use super::{
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
 use crate::database::StoreDatabase;
-use crate::protocol::circle::{
+use crate::storage::SyncStorage;
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_keys::keys;
+use coven_protocol::circle::{
     circle_control_head_prefix, circle_metadata_head_prefix, circle_roster_head_prefix,
     circle_semantic_prefix, CircleAccessDisposition, CircleMetadataHeadRef, CircleOperationId,
     CirclePublicationBlocked, CircleRosterHeadRef, CircleSemanticSlot, CircleTransitionDraft,
     CircleTransitionPolicyObjects, PreparedCircleTransition, StoreMembershipStateRef,
 };
-use crate::protocol::objects::{
+use coven_protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
     CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects,
     CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreCommitCoord, StoreCommitOrder,
     StoreOperationMembershipAuthority, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
-use crate::storage::SyncStorage;
-use coven_keys::encryption::{EncryptionService, MasterKeyring};
-use coven_keys::keys;
 
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
-    announcement_stream_id: crate::protocol::membership::AuthorStreamId,
+    announcement_stream_id: coven_protocol::membership::AuthorStreamId,
     database: StoreDatabase,
-    membership: crate::protocol::membership::MembershipChain,
-    root: crate::protocol::store_commit::StoreRootRef,
+    membership: coven_protocol::membership::MembershipChain,
+    root: coven_protocol::store_commit::StoreRootRef,
     storage: std::sync::Arc<dyn SyncStorage>,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -40,8 +40,8 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
 impl CircleBootstrapBlobVerification for CircleCandidatePreparer<'_, '_> {
     async fn verify_stored_blob(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }
 }
@@ -58,20 +58,20 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             .storage
             .allocate_protocol_slot(context, semantic_prefix, extension)
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         self.prepare_circle_object_at(context, slot, semantic_prefix, bytes)
     }
 
     pub(super) fn prepare_circle_object_at(
         &self,
         context: &ProtocolObjectContext,
-        slot: crate::protocol::objects::ObjectSlot,
+        slot: coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         bytes: Vec<u8>,
     ) -> Result<PreparedExactObject, CircleOperationError> {
         self.storage
             .prepare_protocol_object(context, slot, semantic_prefix, bytes)
-            .map_err(crate::protocol::objects::StoreObjectError::from)
+            .map_err(coven_protocol::objects::StoreObjectError::from)
             .map_err(CircleOperationError::from)
     }
 
@@ -124,14 +124,14 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             CircleTransitionHistory::Successor(reference) => Some(reference.as_ref()),
         };
         let previous_objects =
-            previous_control.map(crate::protocol::store_commit::CircleControlRef::objects);
+            previous_control.map(coven_protocol::store_commit::CircleControlRef::objects);
         let mut roster_entries =
             previous_objects.map_or_else(BTreeMap::new, |objects| objects.roster_entries.clone());
         let mut roster_heads =
             previous_objects.map_or_else(Vec::new, |objects| objects.roster_heads.clone());
         let mut roster_frontier = if matches!(
             &draft.policy.roster,
-            crate::protocol::circle::CircleRosterDraftPolicy::Founder { .. }
+            coven_protocol::circle::CircleRosterDraftPolicy::Founder { .. }
         ) {
             Vec::new()
         } else {
@@ -157,7 +157,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             metadata_entries.extend(branch.metadata_entries.clone());
             roster_heads.extend(branch.roster_heads.iter().cloned());
             for head in &branch.metadata_heads {
-                crate::protocol::circle::merge_frontier_head(
+                coven_protocol::circle::merge_frontier_head(
                     &mut metadata_heads,
                     head.clone(),
                     |head| head.coord.stream_key(),
@@ -208,14 +208,14 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 
             let roster_policy = std::mem::replace(
                 &mut draft.policy.roster,
-                crate::protocol::circle::CircleRosterDraftPolicy::Inherited,
+                coven_protocol::circle::CircleRosterDraftPolicy::Inherited,
             );
             let roster_successor = match roster_policy {
-                crate::protocol::circle::CircleRosterDraftPolicy::Inherited => None,
-                crate::protocol::circle::CircleRosterDraftPolicy::Founder { entry } => {
+                coven_protocol::circle::CircleRosterDraftPolicy::Inherited => None,
+                coven_protocol::circle::CircleRosterDraftPolicy::Founder { entry } => {
                     Some((true, None, entry))
                 }
-                crate::protocol::circle::CircleRosterDraftPolicy::Successor {
+                coven_protocol::circle::CircleRosterDraftPolicy::Successor {
                     predecessor,
                     entry,
                 } => Some((false, Some(predecessor), entry)),
@@ -259,7 +259,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &prefix,
                         )
                         .await?;
-                        let head: crate::protocol::circle::CircleRosterHead =
+                        let head: coven_protocol::circle::CircleRosterHead =
                             serde_json::from_slice(&bytes).map_err(|error| {
                                 CircleOperationError::InvalidState(format!(
                                     "parse predecessor Circle roster head: {error}"
@@ -290,7 +290,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let current_slot = storage
                             .allocate_protocol_slot(&roster_context, &current_prefix, ".json")
                             .await
-                            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                            .map_err(coven_protocol::objects::StoreObjectError::from)?;
                         let activation = local_writer.circle_grant_authorized_activation(
                             store_root_hash,
                             owner_grant.clone(),
@@ -334,7 +334,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         ".json",
                     )
                     .await
-                    .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                    .map_err(coven_protocol::objects::StoreObjectError::from)?;
                 let head = local_writer.sign_circle_roster_head(
                     &entry,
                     entry_prepared.reference().clone(),
@@ -368,7 +368,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             };
 
             if let Some((_, predecessor_chain, entry, head, reference)) = &prepared_roster {
-                let exact_head = crate::protocol::circle::ExactCircleRosterHead::bind(
+                let exact_head = coven_protocol::circle::ExactCircleRosterHead::bind(
                     head.clone(),
                     reference.clone(),
                 )
@@ -377,7 +377,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     Some(predecessor) => {
                         predecessor.with_exact_successor(entry.clone(), exact_head)
                     }
-                    None => crate::protocol::circle::CircleRosterChain::from_entries_with_heads(
+                    None => coven_protocol::circle::CircleRosterChain::from_entries_with_heads(
                         vec![entry.clone()],
                         vec![exact_head],
                     ),
@@ -388,7 +388,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             }
 
-            let roster_state = crate::protocol::circle::MergeCircleRosterStateRef {
+            let roster_state = coven_protocol::circle::MergeCircleRosterStateRef {
                 heads: roster_frontier,
                 resolutions: roster_resolutions.keys().cloned().collect(),
                 state_hash: draft.roster.state_hash,
@@ -414,7 +414,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &prefix,
                         )
                         .await?;
-                        let head: crate::protocol::circle::CircleMetadataHead =
+                        let head: coven_protocol::circle::CircleMetadataHead =
                             serde_json::from_slice(&bytes).map_err(|error| {
                                 CircleOperationError::InvalidState(format!(
                                     "parse predecessor Circle metadata head: {error}"
@@ -438,7 +438,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             None,
                         )
                     } else {
-                        let stream_key = crate::protocol::circle::CircleAuthorStreamKey {
+                        let stream_key = coven_protocol::circle::CircleAuthorStreamKey {
                             author_pubkey: draft.metadata.author_pubkey.clone(),
                             device_id: draft.metadata.device_id.clone(),
                             stream_id: metadata_stream,
@@ -448,7 +448,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let slot = storage
                             .allocate_protocol_slot(&metadata_context, &prefix, ".json")
                             .await
-                            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                            .map_err(coven_protocol::objects::StoreObjectError::from)?;
                         let activation = local_writer.circle_grant_authorized_activation(
                             store_root_hash,
                             owner_grant.clone(),
@@ -504,7 +504,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             &prefix,
                         )
                         .await?;
-                        let head: crate::protocol::circle::CircleMetadataHead =
+                        let head: coven_protocol::circle::CircleMetadataHead =
                             serde_json::from_slice(&bytes).map_err(|error| {
                                 CircleOperationError::InvalidState(format!(
                                     "parse predecessor Circle metadata head: {error}"
@@ -529,7 +529,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         ".json",
                     )
                     .await
-                    .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                    .map_err(coven_protocol::objects::StoreObjectError::from)?;
                 let metadata_head = local_writer.sign_circle_metadata_head(
                     &draft.metadata,
                     metadata_prepared.reference().clone(),
@@ -587,7 +587,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .clone()
                 };
                 (
-                    crate::protocol::circle::MergeCircleMetadataStateRef {
+                    coven_protocol::circle::MergeCircleMetadataStateRef {
                         heads: metadata_heads.clone(),
                         selected: selected.clone(),
                         state_hash: if selected == draft.metadata.coord() {
@@ -640,7 +640,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     .iter()
                     .map(|access| access.leaf.leaf_hash)
                     .collect::<Vec<_>>();
-                let (root, proofs) = crate::protocol::circle::merkle_root_and_proofs(&leaf_hashes);
+                let (root, proofs) = coven_protocol::circle::merkle_root_and_proofs(&leaf_hashes);
                 (Some(root), proofs)
             };
 
@@ -657,7 +657,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 let head_object = previous.head_object();
                 control_frontier
                     .retain(|head| head.coord.stream_key() != previous.control().stream_key());
-                control_frontier.push(crate::protocol::circle::MergeCircleControlHeadRef {
+                control_frontier.push(coven_protocol::circle::MergeCircleControlHeadRef {
                     coord: previous.control().clone(),
                     head_hash,
                     object: head_object.clone(),
@@ -681,7 +681,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         &prefix,
                     )
                     .await?;
-                    let head: crate::protocol::circle::CircleControlHead =
+                    let head: coven_protocol::circle::CircleControlHead =
                         serde_json::from_slice(&bytes).map_err(|error| {
                             CircleOperationError::InvalidState(format!(
                                 "parse predecessor Circle control head: {error}"
@@ -698,7 +698,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         None,
                     )
                 } else {
-                    let stream_key = crate::protocol::circle::CircleAuthorStreamKey {
+                    let stream_key = coven_protocol::circle::CircleAuthorStreamKey {
                         author_pubkey: draft.control.value.author_pubkey.clone(),
                         device_id: local_writer.circle_device_id(),
                         stream_id: control_stream,
@@ -708,7 +708,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let slot = storage
                         .allocate_protocol_slot(&control_context, &prefix, ".json")
                         .await
-                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                        .map_err(coven_protocol::objects::StoreObjectError::from)?;
                     let activation = local_writer.circle_grant_authorized_activation(
                         store_root_hash,
                         owner_grant.clone(),
@@ -720,7 +720,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     (slot, 1, None, Some(activation))
                 };
 
-            let crate::protocol::circle::CircleControlValue {
+            let coven_protocol::circle::CircleControlValue {
                 order,
                 state,
                 author_authority,
@@ -745,7 +745,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             access_epoch.covered_control_heads = control_frontier;
             if let (
                 Some((true, _, entry, _, _)),
-                crate::protocol::circle::MergeCircleOwnerAuthorityRef::Roster {
+                coven_protocol::circle::MergeCircleOwnerAuthorityRef::Roster {
                     roster,
                     created_at,
                     ..
@@ -761,7 +761,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         "Circle close finalization did not construct an active epoch".to_string(),
                     )
                 })?;
-                let successor = crate::protocol::circle::CircleEpochSuccessor {
+                let successor = coven_protocol::circle::CircleEpochSuccessor {
                     epoch_id: active_epoch.common.epoch_id,
                     key_fingerprint: active_epoch.common.key_fingerprint,
                     owners: active_epoch.common.owners.clone(),
@@ -770,7 +770,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     roster: active_epoch.roster.clone(),
                     store_membership: active_epoch.store_membership.clone(),
                 };
-                let outcome = crate::protocol::circle::CircleEpochCloseOutcome::signed(
+                let outcome = coven_protocol::circle::CircleEpochCloseOutcome::signed(
                     &finalization.close_control,
                     &finalization.intent,
                     finalization.responses,
@@ -779,7 +779,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 )?;
                 let outcome_hash = outcome.outcome_hash();
                 let close_id = outcome.close_id;
-                active_epoch.common.origin = crate::protocol::circle::CircleEpochOrigin::Closed {
+                active_epoch.common.origin = coven_protocol::circle::CircleEpochOrigin::Closed {
                     closed_epoch_id: finalization.close_control.value.epoch_id(),
                     close_control: finalization.close_control.coord.clone(),
                     close_id,
@@ -787,7 +787,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     cutoff: outcome.cutoff.clone(),
                 };
                 let outcome_prefix =
-                    crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+                    coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                         draft.circle_id,
                         close_id,
                     );
@@ -798,24 +798,23 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     ),
                     finalization.outcome_slot,
                     &outcome_prefix,
-                    crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone())
+                    coven_protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone())
                         .to_bytes(),
                 )?;
-                let outcome_ref =
-                    crate::protocol::circle::CircleEpochCloseOutcomeRef::from_outcome(
-                        &outcome,
-                        outcome_prepared.reference().clone(),
-                    )?;
+                let outcome_ref = coven_protocol::circle::CircleEpochCloseOutcomeRef::from_outcome(
+                    &outcome,
+                    outcome_prepared.reference().clone(),
+                )?;
                 prepared.insert("epoch-close-outcome".to_string(), outcome_prepared);
                 close_outcome = Some((outcome, outcome_ref));
             }
             if let Some(cancellation_draft) = draft.close_cancellation.take() {
-                let cancellation = crate::protocol::circle::CircleEpochCloseCancellation::signed(
+                let cancellation = coven_protocol::circle::CircleEpochCloseCancellation::signed(
                     &cancellation_draft.close_control,
                     identity_signer,
                 )?;
                 let cancellation_prefix =
-                    crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+                    coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                         draft.circle_id,
                         cancellation.close_id,
                     );
@@ -826,13 +825,13 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     ),
                     cancellation_draft.outcome_slot,
                     &cancellation_prefix,
-                    crate::protocol::circle::CircleEpochCloseSlotValue::Cancellation(
+                    coven_protocol::circle::CircleEpochCloseSlotValue::Cancellation(
                         cancellation.clone(),
                     )
                     .to_bytes(),
                 )?;
                 let cancellation_ref =
-                    crate::protocol::circle::CircleEpochCloseCancellationRef::from_cancellation(
+                    coven_protocol::circle::CircleEpochCloseCancellationRef::from_cancellation(
                         &cancellation,
                         cancellation_prepared.reference().clone(),
                     )?;
@@ -888,7 +887,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         &prefix,
                     )
                     .await?;
-                    let head: crate::protocol::circle::CircleControlHead =
+                    let head: coven_protocol::circle::CircleControlHead =
                         serde_json::from_slice(&bytes).map_err(|error| {
                             CircleOperationError::InvalidState(format!(
                                 "parse predecessor Circle control head: {error}"
@@ -913,7 +912,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     ".json",
                 )
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let control_head = local_writer.sign_circle_control_head(
                 &draft.control.value,
                 control_prepared.reference().clone(),
@@ -939,7 +938,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 
             CircleTransitionPolicyObjects {
                 roster: prepared_roster.map(|(_, _, entry, head, _)| {
-                    crate::protocol::circle::CircleRosterPolicyObjects { entry, head }
+                    coven_protocol::circle::CircleRosterPolicyObjects { entry, head }
                 }),
                 metadata_head,
                 control_head,
@@ -1028,9 +1027,9 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             .map(|object| object.reference().clone());
         stream_activations.sort();
         let close_intent = match draft.control.value.state() {
-            crate::protocol::circle::CircleControlState::ActiveEpoch(_)
-            | crate::protocol::circle::CircleControlState::Deleted(_) => None,
-            crate::protocol::circle::CircleControlState::EpochClose(close) => {
+            coven_protocol::circle::CircleControlState::ActiveEpoch(_)
+            | coven_protocol::circle::CircleControlState::Deleted(_) => None,
+            coven_protocol::circle::CircleControlState::EpochClose(close) => {
                 Some(close.intent.clone())
             }
         };
@@ -1070,10 +1069,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
     }
 
     pub(super) fn new(
-        announcement_stream_id: crate::protocol::membership::AuthorStreamId,
+        announcement_stream_id: coven_protocol::membership::AuthorStreamId,
         database: StoreDatabase,
-        membership: crate::protocol::membership::MembershipChain,
-        root: crate::protocol::store_commit::StoreRootRef,
+        membership: coven_protocol::membership::MembershipChain,
+        root: coven_protocol::store_commit::StoreRootRef,
         storage: std::sync::Arc<dyn SyncStorage>,
         local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -1163,10 +1162,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 }
             }
             let state_hash = match current.status() {
-                crate::protocol::membership::MembershipStatus::Resolved(resolved) => {
+                coven_protocol::membership::MembershipStatus::Resolved(resolved) => {
                     resolved.state_hash
                 }
-                crate::protocol::membership::MembershipStatus::Conflict(_) => {
+                coven_protocol::membership::MembershipStatus::Conflict(_) => {
                     return Err(CircleOperationError::InvalidState(
                         "circle creation requires resolved Store membership".to_string(),
                     ));
@@ -1190,7 +1189,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 .map_or(1, |reference| reference.coord.sequence() + 1);
             let stream_id = announcement_stream_id;
             let dependencies =
-                crate::protocol::store_commit::CommitFrontier::from_refs(commit_base.frontier)
+                coven_protocol::store_commit::CommitFrontier::from_refs(commit_base.frontier)
                     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let coord = StoreCommitCoord {
                 stream_id,
@@ -1290,7 +1289,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .active_grants()
                         .find(|(_, record)| {
                             record.member_pubkey == author_pubkey
-                                && record.role == crate::protocol::circle::CircleRole::Owner
+                                && record.role == coven_protocol::circle::CircleRole::Owner
                         })
                         .map(|(grant, _)| grant)
                         .ok_or_else(|| {
@@ -1315,7 +1314,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     })?;
                     let circle_encryption =
                         coven_keys::encryption::EncryptionService::from(keyring_value);
-                    let recipient_slot = crate::protocol::circle::recipient_slot(
+                    let recipient_slot = coven_protocol::circle::recipient_slot(
                         signer,
                         &request.member_pubkey,
                         request.circle_id,
@@ -1325,7 +1324,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .await?;
                     let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
                     let image_prefix =
-                        crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
+                        coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
                             request.circle_id,
                             candidate_family,
                             &author_pubkey,
@@ -1346,11 +1345,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             request.bootstrap.snapshot.db_image.clone(),
                         )
                         .await?;
-                    let bootstrap = crate::protocol::circle::CircleBootstrapRef {
+                    let bootstrap = coven_protocol::circle::CircleBootstrapRef {
                         coverage: request.bootstrap.coverage.clone(),
                         schema_version: db.schema_version(),
                         sync_routing_hash: db.sync_routing_hash(),
-                        image: crate::protocol::store_commit::SnapshotImageRef {
+                        image: coven_protocol::store_commit::SnapshotImageRef {
                             image_hash,
                             object: bootstrap_prepared.reference().clone(),
                         },
@@ -1403,7 +1402,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .active_grants()
                         .find(|(_, record)| {
                             record.member_pubkey == author_pubkey
-                                && record.role == crate::protocol::circle::CircleRole::Owner
+                                && record.role == coven_protocol::circle::CircleRole::Owner
                         })
                         .map(|(grant, _)| grant)
                         .ok_or_else(|| {
@@ -1432,10 +1431,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .resolved_with_successor(removal.clone())
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
                     let remaining_members = remaining_roster.members();
-                    let close_id = crate::protocol::circle::CircleEpochCloseId::from_operation_id(
+                    let close_id = coven_protocol::circle::CircleEpochCloseId::from_operation_id(
                         &operation_id,
                     );
-                    let intent = crate::protocol::circle::CircleEpochCloseIntent::signed(
+                    let intent = coven_protocol::circle::CircleEpochCloseIntent::signed(
                         store_root_hash,
                         request.circle_id,
                         close_id,
@@ -1447,7 +1446,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )?;
                     let intent_hash = intent.intent_hash();
                     let intent_prefix =
-                        crate::protocol::circle::circle_epoch_close_intent_semantic_prefix(
+                        coven_protocol::circle::circle_epoch_close_intent_semantic_prefix(
                             request.circle_id,
                             close_id,
                             intent_hash,
@@ -1474,12 +1473,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         )
                         .await?;
                     let intent_ref =
-                        crate::protocol::circle::CircleEpochCloseIntentRef::from_intent(
+                        coven_protocol::circle::CircleEpochCloseIntentRef::from_intent(
                             &intent,
                             intent_prepared.reference().clone(),
                         )?;
                     let outcome_prefix =
-                        crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+                        coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                             request.circle_id,
                             close_id,
                         );
@@ -1490,12 +1489,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let outcome_slot = storage
                         .allocate_protocol_slot(&close_outcome_context, &outcome_prefix, ".json")
                         .await
-                        .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                        .map_err(coven_protocol::objects::StoreObjectError::from)?;
                     let mut participants = Vec::new();
                     for record in resolved_devices.devices.values() {
                         if !matches!(
                             record.status,
-                            crate::protocol::store_commit::StoreDeviceStatus::Active
+                            coven_protocol::store_commit::StoreDeviceStatus::Active
                         ) {
                             continue;
                         }
@@ -1506,7 +1505,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             continue;
                         }
                         let response_prefix =
-                            crate::protocol::circle::circle_epoch_close_response_semantic_prefix(
+                            coven_protocol::circle::circle_epoch_close_response_semantic_prefix(
                                 request.circle_id,
                                 close_id,
                                 record.registration.device_id,
@@ -1518,8 +1517,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         let response_slot = storage
                             .allocate_protocol_slot(&response_context, &response_prefix, ".json")
                             .await
-                            .map_err(crate::protocol::objects::StoreObjectError::from)?;
-                        participants.push(crate::protocol::circle::CircleEpochCloseParticipant {
+                            .map_err(coven_protocol::objects::StoreObjectError::from)?;
+                        participants.push(coven_protocol::circle::CircleEpochCloseParticipant {
                             registration: record.registration.clone(),
                             response_slot,
                         });
@@ -1594,8 +1593,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     };
                     let mut losing_branches = Vec::with_capacity(request.losing_branches.len());
                     for branch in &request.losing_branches {
-                        losing_branches.push(crate::protocol::circle::ResolvedConflictBranch {
-                            control_head: crate::protocol::circle::MergeCircleControlHeadRef {
+                        losing_branches.push(coven_protocol::circle::ResolvedConflictBranch {
+                            control_head: coven_protocol::circle::MergeCircleControlHeadRef {
                                 coord: branch.reference.control().clone(),
                                 head_hash: branch.reference.head_hash(),
                                 object: branch.reference.head_object().clone(),
@@ -1699,7 +1698,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let mut bootstrap_objects = Vec::new();
                     for (index, access) in draft.access.iter_mut().enumerate() {
                         let image_prefix =
-                            crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
+                            coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
                                 request.circle_id,
                                 candidate_family,
                                 &access.leaf.value.owner_pubkey,
@@ -1724,11 +1723,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                     request.bootstrap.snapshot.db_image.clone(),
                                 )
                                 .await?;
-                            let bootstrap = crate::protocol::circle::CircleBootstrapRef {
+                            let bootstrap = coven_protocol::circle::CircleBootstrapRef {
                                 coverage: request.bootstrap.coverage.clone(),
                                 schema_version: db.schema_version(),
                                 sync_routing_hash: db.sync_routing_hash(),
-                                image: crate::protocol::store_commit::SnapshotImageRef {
+                                image: coven_protocol::store_commit::SnapshotImageRef {
                                     image_hash,
                                     object: bootstrap_prepared.reference().clone(),
                                 },
@@ -1854,7 +1853,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     ".json",
                 )
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let head = local_writer.sign_circle_store_head(
                 store_root_hash,
                 commit_ref.clone(),
@@ -1876,7 +1875,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     &head_prefix,
                     head.to_bytes(),
                 )
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             prepared_objects.insert("store-head".to_string(), head_prepared);
             (
                 creation,

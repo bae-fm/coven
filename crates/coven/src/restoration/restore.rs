@@ -11,7 +11,6 @@ use tracing::info;
 
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
 use crate::oauth::OAuthTokens;
-use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
@@ -22,6 +21,7 @@ use coven_keys::custody::KeyCustody;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::{StoreKeys, UserKeypair};
+use coven_protocol::synced_schema::SyncedTable;
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they
@@ -184,7 +184,7 @@ impl RestoreSource {
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     store_id: &str,
-    store_root: crate::protocol::store_commit::StoreRootRef,
+    store_root: coven_protocol::store_commit::StoreRootRef,
     serialized_keyring: Option<&str>,
     store_name: &str,
     synced_tables: &[SyncedTable],
@@ -192,9 +192,9 @@ pub async fn restore_from_cloud(
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     source: RestoreSource,
-    membership_floor: &crate::protocol::membership::MembershipFloor,
+    membership_floor: &coven_protocol::membership::MembershipFloor,
     keypair: &UserKeypair,
-    authority: &crate::protocol::recovery::RestoreAuthority,
+    authority: &coven_protocol::recovery::RestoreAuthority,
     continuation_device_signer: Option<&UserKeypair>,
     layout: &StoreLayout,
     clock: coven_foundation::clock::ClockRef,
@@ -282,25 +282,25 @@ pub async fn restore_from_cloud(
         // checked up front, so this create and the failure-cleanup below own
         // it entirely).
         let device_id = match authority {
-            crate::protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
+            coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
                 continuation.registration.device_id.to_string()
             }
-            crate::protocol::recovery::RestoreAuthority::OwnerRecovery(_) => ids.new_id(),
+            coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_) => ids.new_id(),
         };
         store_dir.ensure_created()?;
 
         let continuation = match (authority, continuation_device_signer) {
             (
-                crate::protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation),
+                coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation),
                 Some(_),
             ) => Some(continuation),
-            (crate::protocol::recovery::RestoreAuthority::ActivatedContinuation(_), None) => {
+            (coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(_), None) => {
                 return Err(BootstrapError::InvalidSigningKey(
                     "activated continuation has no device signing key".to_string(),
                 ));
             }
-            (crate::protocol::recovery::RestoreAuthority::OwnerRecovery(_), None) => None,
-            (crate::protocol::recovery::RestoreAuthority::OwnerRecovery(_), Some(_)) => {
+            (coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_), None) => None,
+            (coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_), Some(_)) => {
                 return Err(BootstrapError::InvalidSigningKey(
                     "Owner recovery cannot carry an activated device signer".to_string(),
                 ));
@@ -344,8 +344,8 @@ pub async fn restore_from_cloud(
             .install(
                 &store_dir,
                 synced_tables.to_vec(),
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 device_id.clone(),
                 clock.clone(),
                 migrations,
@@ -379,7 +379,7 @@ pub async fn restore_from_cloud(
                 .install_activated_device_continuation(continuation.clone())
                 .await?;
         }
-        if let crate::protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) = authority {
+        if let coven_protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) = authority {
             store.recover_owner_device(recovery).await?;
         }
 
@@ -465,10 +465,10 @@ pub async fn restore_from_code(
     // with this keypair during restore, and `restore_from_cloud` imports it into
     // custody just before saving the config.
     let identity_secret = match &parsed.authority {
-        crate::protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
+        coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
             &continuation.identity_signing_secret
         }
-        crate::protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) => {
+        coven_protocol::recovery::RestoreAuthority::OwnerRecovery(recovery) => {
             &recovery.owner_identity_secret
         }
     };
@@ -483,7 +483,7 @@ pub async fn restore_from_code(
         })?;
     let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(BootstrapError::Key)?;
     let continuation_device_signer = match &parsed.authority {
-        crate::protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
+        coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
             let bytes: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] =
                 hex::decode(&continuation.device_signing_secret)
                     .map_err(|error| {
@@ -500,7 +500,7 @@ pub async fn restore_from_code(
                     })?;
             Some(UserKeypair::from_signing_key_bytes(&bytes).map_err(BootstrapError::Key)?)
         }
-        crate::protocol::recovery::RestoreAuthority::OwnerRecovery(_) => None,
+        coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_) => None,
     };
 
     // `parsed.provider` is already the shared `CloudHomeJoinInfo`; restore matches

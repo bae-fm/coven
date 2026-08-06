@@ -1,9 +1,9 @@
 use crate::database::StoreDatabase;
-use crate::protocol::membership::MembershipGrantId;
-use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
-use crate::protocol::store_commit::ObjectHash;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{self, UserKeypair};
+use coven_protocol::membership::MembershipGrantId;
+use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::store_commit::ObjectHash;
 
 use super::authority::target_key;
 use super::journal::OwnerPromotionJournalState;
@@ -18,7 +18,7 @@ struct PromotionCandidate {
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     member: UserKeypair,
     member_db: crate::database::Database,
-    member_registration: crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     encryption: EncryptionService,
 }
 
@@ -43,7 +43,7 @@ impl PromotionCandidate {
                 &owner,
                 &keys::public_key_hex(&member),
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &encryption,
                 "Merge Store",
             )
@@ -96,7 +96,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
                 &founder,
                 &keys::public_key_hex(member),
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &encryption,
                 "Merge Store",
             )
@@ -223,7 +223,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .expect("load activated promotion head");
     assert!(matches!(
         opened.activation,
-        crate::protocol::membership::MembershipHeadActivation::StoreCommit { .. }
+        coven_protocol::membership::MembershipHeadActivation::StoreCommit { .. }
     ));
 
     let mut journal = StoreDatabase::new(&owner_db)
@@ -457,7 +457,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
             crate::sync::store::owner::owner_promotion::OwnerPromotionError::Stale(reason)
                 if matches!(
                     reason.as_ref(),
-                    crate::protocol::store_commit::OwnerPromotionStaleReason::MergeActivationRejected
+                    coven_protocol::store_commit::OwnerPromotionStaleReason::MergeActivationRejected
                 )
         ),
         "the finalization ends on the verified winner: {lost}",

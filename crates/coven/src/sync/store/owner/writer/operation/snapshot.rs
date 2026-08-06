@@ -13,15 +13,15 @@ use crate::database::{CreatedSnapshot, SnapshotBlobAudience};
 use tracing::{info, warn};
 
 use super::SnapshotHistoryConstruction;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 #[cfg(test)]
-use crate::protocol::store_commit::StoreSnapshotRef;
-use crate::protocol::store_commit::{
+use coven_keys::keys::UserKeypair;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+#[cfg(test)]
+use coven_protocol::store_commit::StoreSnapshotRef;
+use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
     SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
-#[cfg(test)]
-use coven_keys::keys::UserKeypair;
 
 pub(crate) struct SnapshotCut {
     pub(crate) snapshot: CreatedSnapshot,
@@ -178,7 +178,7 @@ impl super::AuthorizedWriterOperation<'_> {
 
     pub(crate) async fn capture_snapshot_cut(
         &self,
-        tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+        tables: Vec<coven_protocol::synced_schema::SyncedTable>,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StoreSnapshotCut, crate::database::DbError> {
         let (snapshot, coverage) = self
@@ -238,20 +238,19 @@ impl super::AuthorizedWriterOperation<'_> {
             .store_device_state_for_history_cut(&history_cut)
             .await
             .map_err(SnapshotError::from)?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(SnapshotError::PublicationState(
                 "snapshot publication requires resolved membership".to_string(),
             ));
         };
-        let membership_state =
-            crate::protocol::circle_control::StoreMembershipStateRef::from_parts(
-                membership.head_refs().to_vec(),
-                membership.resolution_refs().to_vec(),
-                resolved_devices.recovery.clone(),
-                resolved.state_hash,
-            )
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        let membership_state = coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
+            membership.head_refs().to_vec(),
+            membership.resolution_refs().to_vec(),
+            resolved_devices.recovery.clone(),
+            resolved.state_hash,
+        )
+        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         let state = StoreSnapshotState {
             membership: membership_state,
             devices,
@@ -288,7 +287,7 @@ impl super::AuthorizedWriterOperation<'_> {
             None => (0, None, self.writer.first_snapshot_slot()),
         };
 
-        let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
+        let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
             activation: self
                 .writer
                 .snapshot_activation_id()
@@ -397,7 +396,7 @@ impl super::AuthorizedWriterOperation<'_> {
     async fn prepare_snapshot_blobs(
         &self,
         snapshot: CreatedSnapshot,
-        owner: crate::protocol::remote_object::SnapshotObjectOwner,
+        owner: coven_protocol::remote_object::SnapshotObjectOwner,
     ) -> Result<(Vec<u8>, Vec<crate::database::PreparedSnapshotBlob>), SnapshotError> {
         let database = &self.database;
         let storage = self.storage.as_ref();
@@ -413,9 +412,9 @@ impl super::AuthorizedWriterOperation<'_> {
     for captured in blobs {
         let (audience, protection, package_authority) = match captured.audience {
             SnapshotBlobAudience::Store => (
-                crate::protocol::blob::locator::RemoteAudience::Store,
+                coven_protocol::blob::locator::RemoteAudience::Store,
                 storage.store_blob_protection().map_err(SnapshotError::Bucket)?,
-                crate::protocol::audience_package::PackageAudience::Store,
+                coven_protocol::audience_package::PackageAudience::Store,
             ),
             SnapshotBlobAudience::Circle { circle_id, control } => {
                 let access = database
@@ -424,9 +423,9 @@ impl super::AuthorizedWriterOperation<'_> {
                     .map_err(SnapshotError::from)?;
                 let key_fingerprint = access.key_fingerprint();
                 (
-                    crate::protocol::blob::locator::RemoteAudience::Circle(circle_id),
+                    coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
                     access.blob_protection(),
-                    crate::protocol::audience_package::PackageAudience::Circle {
+                    coven_protocol::audience_package::PackageAudience::Circle {
                         circle_id,
                         control: control.coordinate().clone(),
                         key_fingerprint,
@@ -434,7 +433,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 )
             }
         };
-        if captured.fact.blob.provenance == crate::protocol::blob::Provenance::UserProvided
+        if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
             && captured.fact.previous.is_none()
         {
             return Err(SnapshotError::PublishBlobs(format!(
@@ -442,7 +441,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 captured.fact.blob.namespace, captured.fact.blob.id
             )));
         }
-        if captured.fact.blob.provenance == crate::protocol::blob::Provenance::UserProvided {
+        if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
             let locator = super::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
@@ -474,7 +473,7 @@ impl super::AuthorizedWriterOperation<'_> {
         .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         if let Some(index) = coalesced.get(&coalesce_key).copied() {
             let stored = prepared[index].bindings[0].blob().clone();
-            let binding = crate::protocol::audience_package::RowBlobLocatorBinding::new(
+            let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
                 captured.fact.table,
                 captured.fact.row_id,
                 captured.fact.row_stamp,
@@ -494,7 +493,7 @@ impl super::AuthorizedWriterOperation<'_> {
             )
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
-        if captured.fact.blob.provenance == crate::protocol::blob::Provenance::UserProvided
+        if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
             && !blob.uploaded_verified
         {
             return Err(SnapshotError::PublishBlobs(format!(
@@ -514,7 +513,7 @@ impl super::AuthorizedWriterOperation<'_> {
                 "prepared snapshot blob awaiting upload has no exact spool".to_string(),
             ));
         }
-        let remote = crate::protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+        let remote = coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
             &blob.stored,
             owner.clone(),
         )

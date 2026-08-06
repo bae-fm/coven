@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::database::*;
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, SnapshotMeta, StoreSnapshotRef,
 };
 
@@ -117,7 +117,7 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
+                let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
                     activation: meta.successor.activation,
                     generation: meta.generation,
                 };
@@ -186,7 +186,7 @@ impl StoreDatabase {
                     ));
                 }
                 install_snapshot_blob_plans_on(&tx, &outbound.blobs)?;
-                let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
+                let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
                     activation: outbound.meta.value.successor.activation,
                     generation: outbound.meta.value.generation,
                 };

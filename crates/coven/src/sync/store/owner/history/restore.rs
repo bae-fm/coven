@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     OwnerRecoveryNode, OwnerRecoveryNodeRef, SnapshotMeta, StoreAck, StoreAckRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreSnapshotRef,
 };
@@ -18,8 +18,8 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         &self,
         reference: &OwnerRecoveryNodeRef,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<OwnerRecoveryNode>,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::VerifiedObject<OwnerRecoveryNode>,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history.load_owner_recovery_node(reference).await
     }
@@ -29,8 +29,8 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<StoreAck>,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::VerifiedObject<StoreAck>,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history.load_store_ack(reference, registration).await
     }
@@ -51,7 +51,7 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
         reference: &StoreSnapshotRef,
-    ) -> Result<(StoreSnapshotRef, SnapshotMeta), crate::protocol::objects::StoreObjectError> {
+    ) -> Result<(StoreSnapshotRef, SnapshotMeta), coven_protocol::objects::StoreObjectError> {
         self.history
             .load_store_snapshot(registration_ref, registration, reference)
             .await

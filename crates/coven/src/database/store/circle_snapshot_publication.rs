@@ -1,6 +1,6 @@
 use crate::database::*;
-use crate::protocol::circle::CircleId;
-use crate::protocol::store_commit::{
+use coven_protocol::circle::CircleId;
+use coven_protocol::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
     CircleSnapshotRef,
 };
@@ -97,7 +97,7 @@ impl StoreDatabase {
                     ),
                     None => (
                         0,
-                        crate::protocol::objects::ObjectSlot::logical(format!(
+                        coven_protocol::objects::ObjectSlot::logical(format!(
                             "{}.json",
                             circle_snapshot_slot_prefix(meta.circle_id, &device_id, 0)
                         ))
@@ -116,7 +116,7 @@ impl StoreDatabase {
                 let next_generation = meta.generation.checked_add(1).ok_or_else(|| {
                     DbError::Message("Circle snapshot generation overflow".to_string())
                 })?;
-                let activation = crate::protocol::store_commit::circle_snapshot_stream_activation(
+                let activation = coven_protocol::store_commit::circle_snapshot_stream_activation(
                     registration.store_root.store_root_hash,
                     registration_ref,
                     meta.circle_id,
@@ -139,7 +139,7 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
+                let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
                     activation: meta.successor.activation,
                     generation: meta.generation,
                 };
@@ -225,7 +225,7 @@ impl StoreDatabase {
                     ));
                 }
                 install_snapshot_blob_plans_on(&tx, &outbound.blobs)?;
-                let snapshot_owner = crate::protocol::remote_object::SnapshotObjectOwner {
+                let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
                     activation: outbound.meta.value.successor.activation,
                     generation: outbound.meta.value.generation,
                 };

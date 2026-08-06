@@ -4,9 +4,6 @@ use std::sync::Arc;
 use super::*;
 use crate::database::Database;
 use crate::database::{AuthorExclusionLocatorTamper, StoreDatabase};
-use crate::protocol::store_commit::{
-    StoreAckExclusionState, StoreCommitCoord, StoreDeviceExclusionRef, StoreDeviceRegistrationRef,
-};
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
@@ -15,13 +12,16 @@ use crate::sync::test_helpers::{
 };
 use crate::{StoreDir, WriteId};
 use coven_keys::keys::UserKeypair;
+use coven_protocol::store_commit::{
+    StoreAckExclusionState, StoreCommitCoord, StoreDeviceExclusionRef, StoreDeviceRegistrationRef,
+};
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
@@ -91,7 +91,7 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         freezes.is_empty(),
         "the exclusion target must not freeze its own Store stream"
     );
-    let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+    let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
         store_database(&reopened)
             .materialized_frontier()
             .await
@@ -132,7 +132,7 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         });
         candidate_staged.notified().await;
 
-        let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+        let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             store_database(&reopened)
                 .materialized_frontier()
                 .await
@@ -279,7 +279,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         .capture_snapshot_image_for_test(store.root.clone(), snapshot_dir, None)
         .await
         .expect("create author exclusion snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
         owner_database
             .materialized_frontier()
             .await
@@ -450,7 +450,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             .capture_snapshot_image_for_test(store.root.clone(), snapshot_dir, None)
             .await
             .expect("create pre-exclusion snapshot");
-        let snapshot_coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+        let snapshot_coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
             owner_database
                 .materialized_frontier()
                 .await
@@ -540,8 +540,8 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             .install(
                 &store_dir,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "post-snapshot-joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
@@ -925,7 +925,7 @@ impl<'a> ExcludedPeer<'a> {
             &candidates.candidate.head.value.commit,
             &candidates.authority.head.value.commit,
         ] {
-            let prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
+            let prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
                 &reference.object,
                 ".json",
             )
@@ -938,7 +938,7 @@ impl<'a> ExcludedPeer<'a> {
                         &prefix,
                     )
                     .await,
-                Err(crate::protocol::objects::StorageError::NotFound(_))
+                Err(coven_protocol::objects::StorageError::NotFound(_))
             ));
         }
         let peer_store = self
@@ -956,8 +956,8 @@ impl<'a> ExcludedPeer<'a> {
                         .load_store_package_for_test(commit.reference())
                         .await,
                     Err(StoreError::Object(
-                        crate::protocol::objects::StoreObjectError::Storage(
-                            crate::protocol::objects::StorageError::NotFound(_)
+                        coven_protocol::objects::StoreObjectError::Storage(
+                            coven_protocol::objects::StorageError::NotFound(_)
                         )
                     ))
                 ));
@@ -977,38 +977,38 @@ fn indexed_shared_blob(
     label: &str,
     candidate: &StoreBatchCommitRef,
     uploader: &StoreDeviceRegistrationRef,
-    activated: std::collections::BTreeSet<crate::protocol::remote_object::SharedObjectOwner>,
-) -> crate::protocol::remote_object::RemoteObjectRecord {
+    activated: std::collections::BTreeSet<coven_protocol::remote_object::SharedObjectOwner>,
+) -> coven_protocol::remote_object::RemoteObjectRecord {
     let stored_bytes = format!("stored excluded-author blob {label}").into_bytes();
-    let locator = crate::protocol::blob::locator::BlobLocator::opaque(
+    let locator = coven_protocol::blob::locator::BlobLocator::opaque(
         "excluded-author-test",
         label,
         uploader.clone(),
-        crate::protocol::blob::locator::RemoteAudience::Store,
+        coven_protocol::blob::locator::RemoteAudience::Store,
         crate::BlobScope::Master,
         crate::KeyFingerprint::from_bytes([17; 32]),
         1,
         ObjectHash::digest(format!("plaintext excluded-author blob {label}").as_bytes()),
     )
     .expect("construct indexed shared blob locator");
-    let object = crate::protocol::objects::ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(locator.semantic_key())
+    let object = coven_protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ObjectSlot::logical(locator.semantic_key())
             .expect("construct indexed shared blob slot"),
         u64::try_from(stored_bytes.len()).expect("indexed shared blob size fits u64"),
         ObjectHash::digest(&stored_bytes),
     );
     let locator_bytes = locator.to_bytes();
-    let record = crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
-        crate::protocol::remote_object::SharedObjectRecord {
-            identity: crate::protocol::remote_object::SharedLiveSetObjectRef {
-                domain: crate::protocol::remote_object::SharedLiveSetObjectDomain::StoredBlob,
+    let record = coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(
+        coven_protocol::remote_object::SharedObjectRecord {
+            identity: coven_protocol::remote_object::SharedLiveSetObjectRef {
+                domain: coven_protocol::remote_object::SharedLiveSetObjectDomain::StoredBlob,
                 semantic_hash: ObjectHash::digest(&locator_bytes),
                 object: object.clone(),
             },
-            bytes: crate::protocol::remote_object::RemoteObjectBytes::blob(locator_bytes, object)
+            bytes: coven_protocol::remote_object::RemoteObjectBytes::blob(locator_bytes, object)
                 .expect("construct indexed shared blob bytes"),
-            state: crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
-                ownership: crate::protocol::remote_object::SharedObjectOwnership {
+            state: coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
+                ownership: coven_protocol::remote_object::SharedObjectOwnership {
                     pending: std::collections::BTreeSet::from([candidate.clone()]),
                     activated,
                     nonactivated: Vec::new(),
@@ -1131,7 +1131,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         .expect("excluded peer candidate exists");
     let candidate_ref = candidate.head.value.commit.clone();
     let candidate_graph_objects =
-        crate::protocol::remote_object::CandidateObjectGraph::from_commit(&candidate.commit.value)
+        coven_protocol::remote_object::CandidateObjectGraph::from_commit(&candidate.commit.value)
             .expect("read excluded candidate object graph")
             .exact_objects()
             .cloned()
@@ -1141,7 +1141,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         store.root.store_root_hash,
         ProtocolObjectDomain::StoreHead,
     );
-    let candidate_head_prefix = crate::protocol::store_commit::head_slot_prefix(
+    let candidate_head_prefix = coven_protocol::store_commit::head_slot_prefix(
         &candidate
             .head
             .value
@@ -1154,7 +1154,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         store.root.store_root_hash,
         ProtocolObjectDomain::StoreCommit,
     );
-    let candidate_commit_prefix = crate::protocol::store_commit::semantic_prefix_from_exact_object(
+    let candidate_commit_prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
         &candidate_ref.object,
         ".json",
     )
@@ -1548,8 +1548,8 @@ async fn run_excluded_author_candidate_cleanup_case(
         crate::database::MergeAbandonmentState::None
     ));
     let indexed_shared_blobs = if index_shared_blobs {
-        let snapshot_owner = crate::protocol::remote_object::SharedObjectOwner::Snapshot(
-            crate::protocol::remote_object::SnapshotObjectOwner {
+        let snapshot_owner = coven_protocol::remote_object::SharedObjectOwner::Snapshot(
+            coven_protocol::remote_object::SnapshotObjectOwner {
                 activation: target_registration
                     .value()
                     .store_snapshot_activation(&target)
@@ -1635,18 +1635,15 @@ async fn run_excluded_author_candidate_cleanup_case(
                 .remote_object_for_test(object)
                 .await
                 .expect("load indexed shared blob ownership transition");
-            let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = record
+            let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) = record
             else {
                 panic!("indexed blob changed remote-object domain");
             };
             match (index, record.state) {
-                (0, crate::protocol::remote_object::OwnedObjectState::RetirementPending { .. }) => {
-                }
+                (0, coven_protocol::remote_object::OwnedObjectState::RetirementPending { .. }) => {}
                 (
                     1,
-                    crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
-                        ownership,
-                    },
+                    coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership },
                 ) if ownership.pending.is_empty() && ownership.activated.len() == 1 => {}
                 _ => panic!("excluded candidate retained indexed shared blob ownership"),
             }
@@ -1713,14 +1710,14 @@ async fn run_excluded_author_candidate_cleanup_case(
             .await
             .expect("load cleanup candidate ownership");
         {
-            let crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) =
+            let coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) =
                 &mut remote
             else {
                 panic!("cleanup candidate is not a commit");
             };
-            let crate::protocol::remote_object::CandidateCommitState::CleanupPending {
+            let coven_protocol::remote_object::CandidateCommitState::CleanupPending {
                 proof:
-                    crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                    coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                         activation_head,
                         ..
                     },
@@ -1791,7 +1788,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                         &candidate_head_prefix,
                     )
                     .await,
-                Err(crate::protocol::objects::StorageError::NotFound(_))
+                Err(coven_protocol::objects::StorageError::NotFound(_))
             ));
             assert!(crate::database::StoreDatabase::new(&retried)
                 .protocol_inert_object(candidate_head.clone())
@@ -1824,11 +1821,11 @@ async fn run_excluded_author_candidate_cleanup_case(
                     .candidate_nonactivation_proof(&candidate_ref)
                     .expect("read exact late candidate proof"),
                 Some(
-                    crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                    coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
                 )
             ));
             let mut mismatched = inert.clone();
-            let mut mismatched_head: crate::protocol::store_commit::StoreDeviceHead =
+            let mut mismatched_head: coven_protocol::store_commit::StoreDeviceHead =
                 serde_json::from_slice(&mismatched.canonical_semantic_bytes)
                     .expect("parse inert candidate head");
             mismatched_head.body_mut().commit.object = candidate_head.clone();
@@ -1837,7 +1834,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                 store.root.store_root_hash,
                 ProtocolObjectDomain::StoreHead,
             );
-            let head_prefix = crate::protocol::store_commit::head_slot_prefix(
+            let head_prefix = coven_protocol::store_commit::head_slot_prefix(
                 &target.device_id.to_string(),
                 candidate_ref.coord.sequence(),
             );
@@ -1853,7 +1850,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             mismatched.canonical_semantic_bytes = mismatched_bytes.clone();
             mismatched.identity.semantic_hash = ObjectHash::digest(&mismatched_bytes);
             mismatched.identity.object = mismatched_prepared.reference().clone();
-            let crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+            let coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                 reference,
             } = &mut mismatched.identity.domain
             else {
@@ -1878,7 +1875,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                         &candidate_head_prefix,
                     )
                     .await,
-                Err(crate::protocol::objects::StorageError::NotFound(_))
+                Err(coven_protocol::objects::StorageError::NotFound(_))
             ));
         }
         ExcludedCandidateHeadPublication::AfterAbsentProofThirdWinner => {
@@ -1898,7 +1895,7 @@ async fn run_excluded_author_candidate_cleanup_case(
                 &candidate_commit_prefix,
             )
             .await,
-        Err(crate::protocol::objects::StorageError::NotFound(_))
+        Err(coven_protocol::objects::StorageError::NotFound(_))
     ));
     let store_package = candidate
         .commit
@@ -1915,8 +1912,8 @@ async fn run_excluded_author_candidate_cleanup_case(
             .load_store_package_for_test(candidate.commit.value.reference())
             .await,
         Err(StoreError::Object(
-            crate::protocol::objects::StoreObjectError::Storage(
-                crate::protocol::objects::StorageError::NotFound(_)
+            coven_protocol::objects::StoreObjectError::Storage(
+                coven_protocol::objects::StorageError::NotFound(_)
             )
         ))
     ));
@@ -1983,7 +1980,7 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
     async fn open(
         store: &'storage TestStore,
         store_dir: &'storage StoreDir,
-        membership_floor: &crate::protocol::membership::MembershipFloor,
+        membership_floor: &coven_protocol::membership::MembershipFloor,
         schema_version: u32,
         identity: &UserKeypair,
         device_id: String,
@@ -1998,8 +1995,8 @@ impl<'storage> PublishedExclusionSnapshot<'storage> {
             .install(
                 store_dir,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 device_id,
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),

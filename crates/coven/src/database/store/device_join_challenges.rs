@@ -5,9 +5,9 @@ use super::*;
 impl StoreDatabase {
     pub(crate) async fn prepare_device_join_challenge_publication(
         &self,
-        challenge: crate::protocol::provider::CrossPrincipalProbeChallenge,
-    ) -> Result<crate::protocol::provider::DeviceJoinChallengePublicationRecord, DbError> {
-        use crate::protocol::provider::{
+        challenge: coven_protocol::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<coven_protocol::provider::DeviceJoinChallengePublicationRecord, DbError> {
+        use coven_protocol::provider::{
             DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
         };
 
@@ -49,10 +49,10 @@ impl StoreDatabase {
 
     pub(crate) async fn publish_device_join_challenge(
         &self,
-        authorization: crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: crate::protocol::provider::CrossPrincipalProbeChallenge,
+        authorization: coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: coven_protocol::provider::CrossPrincipalProbeChallenge,
     ) -> Result<(), DbError> {
-        use crate::protocol::provider::{
+        use coven_protocol::provider::{
             DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
         };
 
@@ -113,26 +113,26 @@ impl StoreDatabase {
 }
 
 #[async_trait::async_trait]
-impl crate::protocol::provider::DeviceJoinChallengePublicationJournal for StoreDatabase {
+impl coven_protocol::provider::DeviceJoinChallengePublicationJournal for StoreDatabase {
     async fn prepare(
         &self,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
     ) -> Result<
-        crate::protocol::provider::DeviceJoinChallengePublicationRecord,
-        crate::protocol::objects::StorageError,
+        coven_protocol::provider::DeviceJoinChallengePublicationRecord,
+        coven_protocol::objects::StorageError,
     > {
         self.prepare_device_join_challenge_publication(challenge.clone())
             .await
-            .map_err(|error| crate::protocol::objects::StorageError::Storage(error.to_string()))
+            .map_err(|error| coven_protocol::objects::StorageError::Storage(error.to_string()))
     }
 
     async fn claim_published(
         &self,
-        authorization: &crate::protocol::provider::DeviceJoinChallengePublicationAuthorization,
-        challenge: &crate::protocol::provider::CrossPrincipalProbeChallenge,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        authorization: &coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.publish_device_join_challenge(authorization.clone(), challenge.clone())
             .await
-            .map_err(|error| crate::protocol::objects::StorageError::Storage(error.to_string()))
+            .map_err(|error| coven_protocol::objects::StorageError::Storage(error.to_string()))
     }
 }

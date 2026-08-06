@@ -8,15 +8,15 @@ pub(crate) struct RetainedMergeMaterializationCache {
 
 pub(crate) enum RetainedCommitAuthority<'a> {
     StoredBytes,
-    Operation(&'a crate::protocol::store_commit::VerifiedStoreBatchCommit),
+    Operation(&'a coven_protocol::store_commit::VerifiedStoreBatchCommit),
 }
 
 pub(crate) enum RetainedCommitAuthorities<'a> {
     StoredBytes,
     Operation(
         &'a BTreeMap<
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
         >,
     ),
 }
@@ -70,7 +70,7 @@ impl RetainedMergeMaterializationCache {
     pub(crate) fn replay_inputs_on(
         &mut self,
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.replay_inputs_with_authorities_on(conn, root, RetainedCommitAuthorities::StoredBytes)
     }
@@ -78,10 +78,10 @@ impl RetainedMergeMaterializationCache {
     pub(crate) fn replay_inputs_with_verified_commits_on(
         &mut self,
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         verified: &BTreeMap<
-            crate::protocol::store_commit::StoreBatchCommitRef,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
         >,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.replay_inputs_with_authorities_on(
@@ -94,7 +94,7 @@ impl RetainedMergeMaterializationCache {
     pub(crate) fn replay_inputs_with_authorities_on(
         &mut self,
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         authorities: RetainedCommitAuthorities<'_>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = query_mapped_rows(
@@ -173,9 +173,9 @@ impl RetainedMergeMaterializationCache {
     pub(crate) fn verified_circle_activation_on(
         &self,
         conn: &Connection,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<Option<crate::protocol::circle_activation::VerifiedCircleReference>, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
         let Some(activation_commit) =
             StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, control)?
         else {
@@ -234,7 +234,7 @@ impl RetainedMergeMaterializationCache {
         blob_decls: &BlobDecls,
         gates: &crate::database::Gates,
         synced_tables: &[SyncedTable],
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         retracted: &BTreeSet<StoreBatchCommitRef>,
         history_cut: Option<&CommitFrontier>,
         include_local_write_overlays: bool,
@@ -396,7 +396,7 @@ impl RetainedMergeMaterializationCache {
                 };
                 let mut retained_packages = Vec::new();
                 for package in materialization.packages() {
-                    if let crate::protocol::audience_package::PackageAudience::Circle {
+                    if let coven_protocol::audience_package::PackageAudience::Circle {
                         circle_id,
                         control,
                         ..
@@ -632,15 +632,15 @@ fn replay_dependency_is_baseline_covered(
 pub(crate) struct CircleReplayEpochIndex {
     pub(super) control_epochs: BTreeMap<
         (
-            crate::protocol::circle::CircleId,
-            crate::protocol::circle::CircleControlCoord,
+            coven_protocol::circle::CircleId,
+            coven_protocol::circle::CircleControlCoord,
         ),
-        crate::protocol::circle::CircleEpochId,
+        coven_protocol::circle::CircleEpochId,
     >,
     pub(super) cutoffs: BTreeMap<
         (
-            crate::protocol::circle::CircleId,
-            crate::protocol::circle::CircleEpochId,
+            coven_protocol::circle::CircleId,
+            coven_protocol::circle::CircleEpochId,
         ),
         CommitFrontier,
     >,
@@ -648,20 +648,20 @@ pub(crate) struct CircleReplayEpochIndex {
 
 pub(crate) struct CircleRestoreSelectionIndex {
     pub(crate) circles: Vec<(
-        crate::protocol::circle::CircleId,
-        Vec<crate::protocol::circle::CircleControlCoord>,
+        coven_protocol::circle::CircleId,
+        Vec<coven_protocol::circle::CircleControlCoord>,
     )>,
     pub(crate) preserved_images: Vec<(
         StoreBatchCommitRef,
-        crate::protocol::circle_activation::VerifiedCircleImage,
+        coven_protocol::circle_activation::VerifiedCircleImage,
     )>,
 }
 
 impl CircleReplayEpochIndex {
     pub(crate) fn record_control(
         &mut self,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::PreparedCircleControl,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::PreparedCircleControl,
     ) -> Result<(), DbError> {
         let control_key = (circle_id, control.coord.clone());
         match self.control_epochs.entry(control_key) {
@@ -676,7 +676,7 @@ impl CircleReplayEpochIndex {
                 )));
             }
         }
-        let crate::protocol::circle::CircleEpochOrigin::Closed {
+        let coven_protocol::circle::CircleEpochOrigin::Closed {
             closed_epoch_id,
             cutoff,
             ..
@@ -700,7 +700,7 @@ impl CircleReplayEpochIndex {
 
     pub(crate) fn include_verified_activations(
         &mut self,
-        activations: &[crate::protocol::circle_activation::VerifiedCircleReference],
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         for activation in activations {
             self.record_control(activation.circle_id, &activation.control)?;
@@ -711,8 +711,8 @@ impl CircleReplayEpochIndex {
     pub(crate) fn permits(
         &self,
         commit_ref: &StoreBatchCommitRef,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         let epoch_id = self
             .control_epochs

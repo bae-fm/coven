@@ -16,8 +16,8 @@ fn reclaim_target_package(
     label: &str,
     owner: &StoreBatchCommitRef,
 ) -> (
-    crate::protocol::store_commit::StorePackageRef,
-    crate::protocol::remote_object::RemoteObjectRecord,
+    coven_protocol::store_commit::StorePackageRef,
+    coven_protocol::remote_object::RemoteObjectRecord,
 ) {
     let package = AudiencePackage::store(
         ObjectHash::digest(format!("{label} Store root").as_bytes()),
@@ -32,9 +32,9 @@ fn reclaim_target_package(
     let semantic = package.to_bytes();
     let stored = format!("{label} stored package").into_bytes();
     let object = ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(format!(
+        coven_protocol::objects::ObjectSlot::logical(format!(
             "{}.pkg",
-            crate::protocol::store_commit::package_semantic_prefix(
+            coven_protocol::store_commit::package_semantic_prefix(
                 test_candidate_family(),
                 &owner.coord.stream_id.to_string(),
                 owner.coord.sequence(),
@@ -45,30 +45,30 @@ fn reclaim_target_package(
         stored.len() as u64,
         ObjectHash::digest(&stored),
     );
-    let reference = crate::protocol::store_commit::StorePackageRef {
+    let reference = coven_protocol::store_commit::StorePackageRef {
         candidate_family: package.candidate_family(),
         content_hash: ObjectHash::digest(&semantic),
         schema_version: package.schema_version(),
         changeset_size: semantic.len() as u64,
         object: object.clone(),
     };
-    let prepared = crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
-        crate::protocol::remote_object::CandidateObjectRecord {
-            identity: crate::protocol::remote_object::CandidateExclusiveTarget {
+    let prepared = coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
+        coven_protocol::remote_object::CandidateObjectRecord {
+            identity: coven_protocol::remote_object::CandidateExclusiveTarget {
                 family: package.candidate_family(),
                 domain:
-                    crate::protocol::remote_object::CandidateExclusiveObjectDomain::StorePackage {
+                    coven_protocol::remote_object::CandidateExclusiveObjectDomain::StorePackage {
                         reference: reference.clone(),
                     },
                 semantic_hash: ObjectHash::digest(&semantic),
                 object: object.clone(),
             },
-            bytes: crate::protocol::remote_object::RemoteObjectBytes::inline(
+            bytes: coven_protocol::remote_object::RemoteObjectBytes::inline(
                 semantic, stored, object,
             )
             .expect("reclaim package remote bytes"),
-            state: crate::protocol::remote_object::CandidateObjectState::Prepared {
-                ownership: crate::protocol::remote_object::PendingCandidateOwnership {
+            state: coven_protocol::remote_object::CandidateObjectState::Prepared {
+                ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner.clone()]),
                     nonactivated: Vec::new(),
                 },
@@ -88,7 +88,7 @@ fn reclaim_target_package(
 /// A Store commit reference at `sequence`, distinct per `label`.
 fn reclaim_commit(label: &str, sequence: u64) -> StoreBatchCommitRef {
     let coord = StoreCommitCoord {
-        stream_id: crate::protocol::membership::AuthorStreamId::from_bytes([11; 32]),
+        stream_id: coven_protocol::membership::AuthorStreamId::from_bytes([11; 32]),
         sequence,
     };
     let commit_hash = ObjectHash::digest(format!("{label} commit").as_bytes());
@@ -97,7 +97,7 @@ fn reclaim_commit(label: &str, sequence: u64) -> StoreBatchCommitRef {
         commit_hash,
         object: reclaim_test_object(&format!(
             "{}.json",
-            crate::protocol::store_commit::commit_semantic_prefix(
+            coven_protocol::store_commit::commit_semantic_prefix(
                 test_candidate_family(),
                 &coord.stream_id.to_string(),
                 sequence,
@@ -114,12 +114,12 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         reclaim_target_package("closed-reclaimed-package", &target_activation);
     let authorization_activation = reclaim_commit("closed-reclaimed-package/authority", 2);
     let receipt_activation = reclaim_commit("closed-reclaimed-package/receipt", 3);
-    let authorization = crate::protocol::reclaim::ReclaimAuthorizationRef {
+    let authorization = coven_protocol::reclaim::ReclaimAuthorizationRef {
         authorization_hash: ObjectHash::digest(b"closed reclaim authorization"),
-        evidence: crate::protocol::reclaim::ReclaimEvidenceRef {
+        evidence: coven_protocol::reclaim::ReclaimEvidenceRef {
             evidence_hash: ObjectHash::digest(b"closed reclaim evidence"),
-            target: Box::new(crate::protocol::reclaim::ReclaimTarget::StorePackage(
-                crate::protocol::reclaim::StorePackageReclaimTarget {
+            target: Box::new(coven_protocol::reclaim::ReclaimTarget::StorePackage(
+                coven_protocol::reclaim::StorePackageReclaimTarget {
                     package: target,
                     activation: target_activation,
                 },
@@ -184,7 +184,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .expect("verify irreversible absence closure");
 
-    let receipt = crate::protocol::reclaim::ReclaimReceiptRef {
+    let receipt = coven_protocol::reclaim::ReclaimReceiptRef {
         receipt_hash: ObjectHash::digest(b"closed reclaim receipt"),
         authorization: authorization.clone(),
         object: reclaim_test_object("store-v1/reclaim/receipts/closed.json"),
@@ -219,11 +219,11 @@ fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
         "0000000001000-0000-owner",
         b"snapshot owner bytes",
     );
-    let expected = crate::protocol::remote_object::SnapshotObjectOwner {
+    let expected = coven_protocol::remote_object::SnapshotObjectOwner {
         activation: snapshot_activation("verified"),
         generation: 7,
     };
-    let install = |owner: crate::protocol::remote_object::SnapshotObjectOwner| {
+    let install = |owner: coven_protocol::remote_object::SnapshotObjectOwner| {
         conn.execute("DELETE FROM remote_objects", [])
             .expect("clear snapshot owner");
         let remote = RemoteObjectRecord::snapshot_activated_blob(binding.blob(), owner)
@@ -242,20 +242,20 @@ fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
     validate_snapshot_object_owner_records_on(&conn, &expected)
         .expect("verified snapshot owner matches");
 
-    install(crate::protocol::remote_object::SnapshotObjectOwner {
+    install(coven_protocol::remote_object::SnapshotObjectOwner {
         activation: expected.activation,
         generation: expected.generation - 1,
     });
     validate_snapshot_object_owner_records_on(&conn, &expected)
         .expect("an earlier generation remains valid snapshot ownership");
 
-    install(crate::protocol::remote_object::SnapshotObjectOwner {
+    install(coven_protocol::remote_object::SnapshotObjectOwner {
         activation: snapshot_activation("other"),
         generation: expected.generation,
     });
     assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
 
-    install(crate::protocol::remote_object::SnapshotObjectOwner {
+    install(coven_protocol::remote_object::SnapshotObjectOwner {
         activation: expected.activation,
         generation: expected.generation + 1,
     });
@@ -293,7 +293,7 @@ async fn upload_retry_preserves_prepared_object_handoff() {
     crate::database::StoreDatabase::new(&db)
         .mark_blob_upload_prepared(
             &entry,
-            crate::protocol::audience_package::PackageAudience::Store,
+            coven_protocol::audience_package::PackageAudience::Store,
             stored.clone(),
             spool_path.clone(),
         )
@@ -327,7 +327,7 @@ async fn upload_retry_preserves_prepared_object_handoff() {
             source_path: PathBuf::from("/source/retried"),
             retain_pinned: true,
             state: OutboxUploadState::Prepared {
-                authority: crate::protocol::audience_package::PackageAudience::Store,
+                authority: coven_protocol::audience_package::PackageAudience::Store,
                 stored,
                 spool_path,
             },
@@ -347,7 +347,7 @@ async fn upload_retry_preserves_prepared_object_handoff() {
     assert!(matches!(
         state,
         OutboxUploadState::Created {
-            authority: crate::protocol::audience_package::PackageAudience::Store,
+            authority: coven_protocol::audience_package::PackageAudience::Store,
             ..
         }
     ));

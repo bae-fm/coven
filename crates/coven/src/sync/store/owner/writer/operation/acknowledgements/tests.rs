@@ -11,8 +11,8 @@ fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
@@ -54,7 +54,7 @@ struct LosingAckFixture {
     db: Database,
     device: TestDevice,
     outbound: crate::database::OutboundStoreAck,
-    losing: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
+    losing: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
 }
 
 impl LosingAckFixture {
@@ -81,19 +81,18 @@ impl LosingAckFixture {
             .prepare_plan()
             .await
             .expect("prepare competing Store operation");
-        let grant_id =
-            crate::protocol::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
+        let grant_id = coven_protocol::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
         let grant_prefix =
-            crate::protocol::store_commit::provider_access_grant_semantic_prefix(&grant_id);
+            coven_protocol::store_commit::provider_access_grant_semantic_prefix(&grant_id);
         let grant_bytes = b"competing provider grant";
-        let grant = crate::protocol::provider::StoreMemberProviderAccessGrantRef {
+        let grant = coven_protocol::provider::StoreMemberProviderAccessGrantRef {
             grant_id,
-            grant_hash: crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
-            object: crate::protocol::objects::ExactObjectRef::new(
-                crate::protocol::objects::ObjectSlot::logical(format!("{grant_prefix}.json"))
+            grant_hash: coven_protocol::store_commit::ObjectHash::digest(grant_bytes),
+            object: coven_protocol::objects::ExactObjectRef::new(
+                coven_protocol::objects::ObjectSlot::logical(format!("{grant_prefix}.json"))
                     .expect("valid provider grant slot"),
                 grant_bytes.len() as u64,
-                crate::protocol::store_commit::ObjectHash::digest(grant_bytes),
+                coven_protocol::store_commit::ObjectHash::digest(grant_bytes),
             ),
         };
         let competing = writer
@@ -534,23 +533,23 @@ async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
         .mark_uploaded_verified()
         .expect("acknowledgement upload is durable");
     let winner_bytes = b"different valid winner head";
-    let winner_object = crate::protocol::objects::ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(
+    let winner_object = coven_protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ObjectSlot::logical(
             "store-v1/heads/ack-nonactivation-winner.json".to_string(),
         )
         .expect("valid winner slot"),
         winner_bytes.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(winner_bytes),
+        coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
     );
-    let nonactivation = crate::protocol::remote_object::CandidateNonactivation::unverified_for_test(
-        crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+    let nonactivation = coven_protocol::remote_object::CandidateNonactivation::unverified_for_test(
+        coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
             coord: candidate.reference.coord.clone(),
             object: candidate.reference.object.clone(),
             canonical_signed_bytes: candidate.commit.to_bytes(),
         },
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
-            winner_head: crate::protocol::store_commit::StoreDeviceHeadRef {
-                head_hash: crate::protocol::store_commit::ObjectHash::digest(winner_bytes),
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+            winner_head: coven_protocol::store_commit::StoreDeviceHeadRef {
+                head_hash: coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
                 object: winner_object,
             },
         },
@@ -602,7 +601,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
         .expect("losing acknowledgement is retained outside reducer state");
     assert!(matches!(
         inert.identity.domain,
-        crate::protocol::remote_object::RetainedAuthorityObjectDomain::Acknowledgement {
+        coven_protocol::remote_object::RetainedAuthorityObjectDomain::Acknowledgement {
             ref reference
         } if reference == &outbound.reference
     ));
@@ -693,7 +692,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             .await
             .is_err());
 
-        let head = crate::protocol::store_commit::StoreDeviceHeadRef {
+        let head = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: losing.head.head_hash(),
             object: losing.prepared_head.reference().clone(),
         };
@@ -702,12 +701,12 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             .await
             .expect("load test head ownership");
         {
-            let crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
+            let coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
                 &mut remote
             else {
                 panic!("test head is not retained authority");
             };
-            let crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
+            let coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
                 former_candidates,
             } = &mut record.state
             else {
@@ -716,17 +715,17 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             let Some(nonactivation) = former_candidates.first_mut() else {
                 panic!("test head has no loss proof");
             };
-            let crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+            let coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
                 winner_head,
             } = nonactivation.proof_mut_for_test()
             else {
                 panic!("test head has a non-Merge loss proof");
             };
             let tampered_bytes = b"different winner at the same head slot";
-            winner_head.object = crate::protocol::objects::ExactObjectRef::new(
+            winner_head.object = coven_protocol::objects::ExactObjectRef::new(
                 winner_head.object.slot().clone(),
                 tampered_bytes.len() as u64,
-                crate::protocol::store_commit::ObjectHash::digest(tampered_bytes),
+                coven_protocol::store_commit::ObjectHash::digest(tampered_bytes),
             );
             remote.validate().expect("validate test head ownership");
         }
@@ -771,7 +770,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         .await;
     let expected_head = candidate.head.clone();
     let expected_prepared = candidate.prepared_head.clone();
-    let alternate_next = crate::protocol::objects::ObjectSlot::opaque(
+    let alternate_next = coven_protocol::objects::ObjectSlot::opaque(
         expected_head.successor.next_slot.logical_key().to_string(),
         "alternate-next-slot".to_string(),
     )
@@ -780,7 +779,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         .sign_device_head_for_test(
             candidate.reference.clone(),
             expected_head.history_summary,
-            crate::protocol::store_commit::SuccessorLink {
+            coven_protocol::store_commit::SuccessorLink {
                 activation: expected_head.successor.activation,
                 predecessor: expected_head.successor.predecessor.clone(),
                 next_slot: alternate_next,
@@ -792,7 +791,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         device.store_root().store_root_hash,
         ProtocolObjectDomain::StoreHead,
     );
-    let head_prefix = crate::protocol::store_commit::head_slot_prefix(
+    let head_prefix = coven_protocol::store_commit::head_slot_prefix(
         &outbound.reference.registration.device_id.to_string(),
         candidate.commit.seq(),
     );
@@ -1005,14 +1004,14 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
         .await
         .expect("read staged Circle acknowledgement object");
     let sabotage = b"different bytes at the reserved Circle acknowledgement slot".to_vec();
-    let sabotage_ref = crate::protocol::objects::ExactObjectRef::new(
+    let sabotage_ref = coven_protocol::objects::ExactObjectRef::new(
         prepared.reference().slot().clone(),
         sabotage.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(&sabotage),
+        coven_protocol::store_commit::ObjectHash::digest(&sabotage),
     );
     assert_ne!(&sabotage_ref, prepared.reference());
     let sabotage_prepared =
-        crate::protocol::objects::PreparedExactObject::new(sabotage_ref, sabotage)
+        coven_protocol::objects::PreparedExactObject::new(sabotage_ref, sabotage)
             .expect("build sabotage object");
     storage
         .create_protocol_object(&sabotage_prepared)

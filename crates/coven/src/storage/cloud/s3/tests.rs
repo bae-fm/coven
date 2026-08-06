@@ -828,7 +828,7 @@ async fn an_opaque_s3_locator_is_not_retryable() {
 
 #[tokio::test]
 async fn provider_binding_canonicalizes_the_custom_origin_and_hashes_the_access_key_id() {
-    use crate::protocol::objects::{ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding};
+    use coven_protocol::objects::{ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding};
 
     let home = test_home(
         "bucket-a".to_string(),
@@ -886,7 +886,7 @@ fn sts_transport_failure_remains_retryable_transport() {
 
 #[test]
 fn sts_identity_accepts_stable_aws_principals_and_rejects_federated_users() {
-    use crate::protocol::objects::AwsPrincipal;
+    use coven_protocol::objects::AwsPrincipal;
 
     assert_eq!(
         aws_caller_identity(

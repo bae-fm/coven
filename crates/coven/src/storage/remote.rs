@@ -14,20 +14,20 @@ use std::sync::{Arc, RwLock};
 
 use super::provider_probe::ProviderProbeStorage;
 use super::SyncStorage;
-use crate::protocol::objects::ObjectSlot;
-#[cfg(test)]
-use crate::protocol::objects::ProtocolObjectDomain;
-use crate::protocol::objects::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
-    ResolvedProviderBinding, RotationGate, RotationPending, StorageError,
-};
-use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::{BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage};
 use coven_keys::encryption::{
     EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
     SEALED_BLOB_HEADER_LEN,
 };
 use coven_keys::keys::UserKeypair;
+use coven_protocol::objects::ObjectSlot;
+#[cfg(test)]
+use coven_protocol::objects::ProtocolObjectDomain;
+use coven_protocol::objects::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectProtection,
+    ResolvedProviderBinding, RotationGate, RotationPending, StorageError,
+};
+use coven_protocol::store_commit::ObjectHash;
 
 mod blob_io;
 mod cipher;
@@ -139,16 +139,16 @@ impl CloudSyncStorage {
 
     fn validate_blob_locator_home(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
+        locator: &coven_protocol::blob::locator::BlobLocator,
     ) -> Result<(), StorageError> {
         let valid = matches!(
             (locator, self.blob_paths, self.cipher.is_plaintext()),
             (
-                crate::protocol::blob::locator::BlobLocator::Opaque { .. },
+                coven_protocol::blob::locator::BlobLocator::Opaque { .. },
                 BlobPathScheme::Hashed,
                 false
             ) | (
-                crate::protocol::blob::locator::BlobLocator::Browsable { .. },
+                coven_protocol::blob::locator::BlobLocator::Browsable { .. },
                 BlobPathScheme::Plain,
                 true
             )
@@ -164,8 +164,8 @@ impl CloudSyncStorage {
 
     async fn validate_blob_append_authority(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<(), StorageError> {
         authority
             .reference
@@ -249,7 +249,7 @@ impl CloudSyncStorage {
     ///
     /// **A cloud object is never rewritten with different bytes, so no two blobs ever
     /// share a key.** `Hashed` gets that from the key itself; `Plain` gets it from the
-    /// blob's declared [`BlobReplacement`](crate::protocol::blob::BlobReplacement), which coven
+    /// blob's declared [`BlobReplacement`](coven_protocol::blob::BlobReplacement), which coven
     /// enforces where a blob is derived from its row ([`crate::database::BlobDecls`]) —
     /// a replaceable blob's readable path must name it, and a write-once blob's row can
     /// never be repointed. Either way, an object's *presence* at a blob's key is proof of
@@ -303,8 +303,8 @@ impl CloudSyncStorage {
     async fn blob_write_registration(
         &self,
         label: &str,
-    ) -> crate::protocol::store_commit::ReferencedStoreDeviceRegistration {
-        use crate::protocol::store_commit::{
+    ) -> coven_protocol::store_commit::ReferencedStoreDeviceRegistration {
+        use coven_protocol::store_commit::{
             DeviceStreamAnchor, StoreCreationId, StoreDeviceRegistration,
             StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
         };
@@ -357,7 +357,7 @@ impl CloudSyncStorage {
                 ObjectHash::digest(&bytes),
             ),
         );
-        crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+        coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
             reference,
             registration,
         )

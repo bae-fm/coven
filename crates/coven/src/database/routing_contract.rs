@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::database::foreign_key_edges;
-use crate::protocol::store_commit::ObjectHash;
-use crate::protocol::synced_schema::{GateRole, RowIdentity, SyncedTable};
+use coven_protocol::store_commit::ObjectHash;
+use coven_protocol::synced_schema::{GateRole, RowIdentity, SyncedTable};
 
 const SYNC_ROUTING_CONTRACT_VERSION: u32 = 1;
 
@@ -259,26 +259,24 @@ fn canonical_table(
         namespace: blob.namespace.clone(),
         cloud_path_column: blob.cloud_path_column.clone(),
         scope: match &blob.scope {
-            crate::protocol::blob::BlobScope::Master => CanonicalBlobScope::Master,
-            crate::protocol::blob::BlobScope::Derived(name) => {
+            coven_protocol::blob::BlobScope::Master => CanonicalBlobScope::Master,
+            coven_protocol::blob::BlobScope::Derived(name) => {
                 CanonicalBlobScope::Derived(name.clone())
             }
         },
         provenance: match blob.provenance {
-            crate::protocol::blob::Provenance::UserProvided => CanonicalProvenance::UserProvided,
-            crate::protocol::blob::Provenance::HostProvided => CanonicalProvenance::HostProvided,
+            coven_protocol::blob::Provenance::UserProvided => CanonicalProvenance::UserProvided,
+            coven_protocol::blob::Provenance::HostProvided => CanonicalProvenance::HostProvided,
         },
         fill: match blob.fill {
-            crate::protocol::blob::CacheFill::CacheEager => CanonicalCacheFill::CacheEager,
-            crate::protocol::blob::CacheFill::CacheLazy => CanonicalCacheFill::CacheLazy,
+            coven_protocol::blob::CacheFill::CacheEager => CanonicalCacheFill::CacheEager,
+            coven_protocol::blob::CacheFill::CacheLazy => CanonicalCacheFill::CacheLazy,
         },
         replacement: match blob.replacement {
-            crate::protocol::blob::BlobReplacement::Replaceable => {
+            coven_protocol::blob::BlobReplacement::Replaceable => {
                 CanonicalBlobReplacement::Replaceable
             }
-            crate::protocol::blob::BlobReplacement::WriteOnce => {
-                CanonicalBlobReplacement::WriteOnce
-            }
+            coven_protocol::blob::BlobReplacement::WriteOnce => CanonicalBlobReplacement::WriteOnce,
         },
     });
     let mut required_names = BTreeSet::from(["id".to_string(), "_updated_at".to_string()]);

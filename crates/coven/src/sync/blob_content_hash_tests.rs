@@ -3,12 +3,12 @@
 //! and slots, and provider rollback at the correct slot fails the stored hash
 //! check before any plaintext is published locally.
 
-use crate::protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
-use crate::protocol::objects::{BlobSpoolProtection, StorageError};
 use crate::storage::cloud::ExactSlotStorage;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::TestStore;
 use coven_keys::encryption::EncryptionService;
+use coven_protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
+use coven_protocol::objects::{BlobSpoolProtection, StorageError};
 
 const BLOB_ID: &str = "blobxxxx";
 const STORE_KEY: [u8; 32] = [42; 32];

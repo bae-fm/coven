@@ -1,10 +1,10 @@
 use super::*;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::store_commit::{
+use crate::sync::store::StoreRegistrationError;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::store_commit::{
     ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreAckRef,
     SuccessorLink,
 };
-use crate::sync::store::StoreRegistrationError;
 
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
     database: StoreDatabase,
@@ -80,7 +80,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &self,
         identity: &UserKeypair,
         attempt_ref: DeviceJoinAttemptRef,
-        verified_attempt: crate::protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+        verified_attempt: coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
         bootstrap_plan: super::DeviceJoinBootstrapPlan,
         attempt_activation: StoreBatchCommitRef,
         owner: &StoreDeviceRegistration,
@@ -188,7 +188,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                     "join registration has no acknowledgement anchor".to_string(),
                 ));
             };
-            let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 attempt.store_root.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
             );
@@ -301,11 +301,11 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
     pub(super) async fn create_cross_principal_response(
         &self,
         challenge: &CrossPrincipalProbeChallenge,
-        context: &crate::protocol::provider::CrossPrincipalResponseContext,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
         store: &StoreProviderBinding,
         administrator_signing_pubkey: &str,
         identity: &UserKeypair,
-    ) -> Result<CrossPrincipalProbeResponse, crate::protocol::provider::ProviderProbeError> {
+    ) -> Result<CrossPrincipalProbeResponse, coven_protocol::provider::ProviderProbeError> {
         self.storage
             .provider_probes()
             .create_cross_principal_response(

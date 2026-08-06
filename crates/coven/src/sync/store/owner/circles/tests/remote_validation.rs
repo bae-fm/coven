@@ -154,7 +154,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         "{error}"
     );
 
-    let verified_commit = crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+    let verified_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
         &commit.to_bytes(),
         store.root.store_root_hash,
         &commit_ref,

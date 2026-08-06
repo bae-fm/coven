@@ -20,7 +20,7 @@ pub(crate) struct AuthorizedWriterOperation<'storage> {
     history: AuthorizedStoreHistory<'storage>,
     storage: &'storage Arc<dyn SyncStorage>,
     store_dir: &'storage StoreDir,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
     writer: Arc<LocalStoreWriter>,
     keyrings: LocalWriterKeyrings<'storage>,
 }
@@ -31,7 +31,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         history: AuthorizedStoreHistory<'storage>,
         storage: &'storage Arc<dyn SyncStorage>,
         store_dir: &'storage StoreDir,
-        membership: crate::protocol::membership::MembershipChain,
+        membership: coven_protocol::membership::MembershipChain,
         writer: Arc<LocalStoreWriter>,
         keyrings: LocalWriterKeyrings<'storage>,
     ) -> Self {

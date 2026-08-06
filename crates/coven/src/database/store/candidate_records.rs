@@ -1,11 +1,11 @@
 use crate::database::*;
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
+use coven_protocol::store_commit::{
     ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
     StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
-use crate::write::WriteId;
+use coven_protocol::write::WriteId;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,9 +16,9 @@ pub(crate) struct PreparedMergeCandidate {
     pub(crate) commit: VerifiedStoreBatchCommit,
     pub(crate) reference: StoreBatchCommitRef,
     pub(crate) canonical_signed_bytes: Vec<u8>,
-    pub(crate) commit_prepared: crate::protocol::objects::PreparedExactObject,
+    pub(crate) commit_prepared: coven_protocol::objects::PreparedExactObject,
     pub(crate) head: StoreDeviceHead,
-    pub(crate) head_prepared: crate::protocol::objects::PreparedExactObject,
+    pub(crate) head_prepared: coven_protocol::objects::PreparedExactObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub(super) fn begin_candidate_nonactivation_targets_on(
     tx: &rusqlite::Transaction<'_>,
     candidate: &StoreBatchCommitRef,
     objects: &[ExactObjectRef],
-    nonactivation: &crate::protocol::remote_object::CandidateNonactivation,
+    nonactivation: &coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<Vec<CandidateCleanupObject>, DbError> {
     let mut unique = BTreeSet::new();
     let mut cleanup = Vec::new();
@@ -170,10 +170,10 @@ pub(crate) fn parse_prepared_merge_candidate_parts_on(
     let registration =
         load_activated_registration_on(conn, &root, &unverified.author_registration)?;
     let coord = StoreCommitCoord {
-        stream_id: crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+        stream_id: coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             &unverified.author_registration,
-            crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
         ),
         sequence: unverified.seq(),
     };
@@ -240,20 +240,20 @@ pub(crate) fn parse_prepared_merge_publication_on(
 
 pub(super) enum MergeCandidateHeadEvidence<'a> {
     OccupiedByProof,
-    Verified(&'a crate::protocol::remote_object::VerifiedCandidateHeadNonactivation),
+    Verified(&'a coven_protocol::remote_object::VerifiedCandidateHeadNonactivation),
 }
 
 pub(crate) fn author_exclusion_activation_for_candidate_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
 ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
     let expected_stream =
-        crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+        coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
             author,
-            crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
         );
     let StoreCommitCoord {
         stream_id,
@@ -279,7 +279,7 @@ pub(crate) fn author_exclusion_activation_for_candidate_on(
             "candidate author differs from the current device registration".to_string(),
         ));
     }
-    let crate::protocol::store_commit::StoreDeviceStatus::Inactive {
+    let coven_protocol::store_commit::StoreDeviceStatus::Inactive {
         terminals,
         accepted_cut: _,
     } = &record.status
@@ -295,11 +295,11 @@ pub(crate) fn author_exclusion_activation_for_candidate_on(
 }
 
 pub(crate) fn select_author_exclusion_activation_locator(
-    terminals: &[crate::protocol::store_commit::StoreDeviceExclusionRef],
-    expected_stream: &crate::protocol::causal_grants::AuthorStreamId,
+    terminals: &[coven_protocol::store_commit::StoreDeviceExclusionRef],
+    expected_stream: &coven_protocol::causal_grants::AuthorStreamId,
     sequence: u64,
     mut load: impl FnMut(
-        &crate::protocol::store_commit::StoreDeviceExclusionRef,
+        &coven_protocol::store_commit::StoreDeviceExclusionRef,
     ) -> Result<AuthorExclusionActivationLocator, DbError>,
 ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
     for exclusion in terminals {
@@ -317,8 +317,8 @@ pub(crate) fn select_author_exclusion_activation_locator(
 
 pub(crate) fn load_author_exclusion_activation_locator_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    exclusion: &crate::protocol::store_commit::StoreDeviceExclusionRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
 ) -> Result<AuthorExclusionActivationLocator, DbError> {
     let exclusion_json = serde_json::to_string(exclusion)
         .map_err(|error| DbError::context("serialize author exclusion reference", error))?;
@@ -370,21 +370,21 @@ pub(crate) fn load_author_exclusion_activation_locator_on(
 }
 
 pub(super) enum BlockedMergeCandidateNonactivation {
-    Merge(crate::protocol::remote_object::CandidateNonactivation),
+    Merge(coven_protocol::remote_object::CandidateNonactivation),
     Terminal {
-        durable: crate::protocol::remote_object::CandidateNonactivation,
-        head_nonactivation: crate::protocol::remote_object::VerifiedCandidateHeadNonactivation,
+        durable: coven_protocol::remote_object::CandidateNonactivation,
+        head_nonactivation: coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
     },
 }
 
 pub(super) fn blocked_merge_candidate_nonactivation(
-    verified: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+    verified: coven_protocol::remote_object::VerifiedCandidateNonactivation,
 ) -> Result<BlockedMergeCandidateNonactivation, DbError> {
     if matches!(
         verified.proof(),
-        crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
-            | crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
-            | crate::protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. }
+        coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+            | coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+            | coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. }
     ) {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
@@ -404,9 +404,9 @@ pub(super) fn blocked_merge_candidate_nonactivation(
 
 pub(super) fn validate_terminal_candidate_authority_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &PreparedMergeCandidate,
-    durable: &crate::protocol::remote_object::CandidateNonactivation,
+    durable: &coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
     if durable
         .reference()
@@ -422,11 +422,11 @@ pub(super) fn validate_terminal_candidate_authority_on(
 
 pub(crate) fn validate_terminal_nonactivation_authority_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
-    durable: &crate::protocol::remote_object::CandidateNonactivation,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    durable: &coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
     match durable.proof() {
-        crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+        coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
             exclusion,
             accepted_cut,
             activation_head,
@@ -458,7 +458,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
                 ));
             }
         }
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
             activation_commit,
             ..
         } => {
@@ -480,13 +480,13 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
                 ));
             }
         }
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction {
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction {
             dependency_nonactivation,
             ..
         } => {
             validate_terminal_nonactivation_authority_on(conn, root, dependency_nonactivation)?;
         }
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
             return Err(DbError::Message(
                 "terminal candidate authority received another proof family".to_string(),
             ));
@@ -497,7 +497,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
 
 pub(super) fn begin_blocked_merge_candidate_nonactivation_on(
     tx: &rusqlite::Transaction<'_>,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
     nonactivation: &BlockedMergeCandidateNonactivation,
@@ -537,7 +537,7 @@ pub(crate) fn begin_merge_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
-    nonactivation: &crate::protocol::remote_object::CandidateNonactivation,
+    nonactivation: &coven_protocol::remote_object::CandidateNonactivation,
     include_indexed_blobs: bool,
     extra_objects: &[ExactObjectRef],
 ) -> Result<(), DbError> {
@@ -556,10 +556,10 @@ pub(super) fn begin_merge_candidate_nonactivation_with_verified_head_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
-    nonactivation: &crate::protocol::remote_object::CandidateNonactivation,
+    nonactivation: &coven_protocol::remote_object::CandidateNonactivation,
     include_indexed_blobs: bool,
     extra_objects: &[ExactObjectRef],
-    head_nonactivation: &crate::protocol::remote_object::VerifiedCandidateHeadNonactivation,
+    head_nonactivation: &coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
 ) -> Result<(), DbError> {
     begin_merge_candidate_nonactivation_with_head_evidence_on(
         conn,
@@ -576,7 +576,7 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
-    nonactivation: &crate::protocol::remote_object::CandidateNonactivation,
+    nonactivation: &coven_protocol::remote_object::CandidateNonactivation,
     include_indexed_blobs: bool,
     extra_objects: &[ExactObjectRef],
     head_evidence: MergeCandidateHeadEvidence<'_>,
@@ -649,7 +649,7 @@ pub(super) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
 /// Circle-operation discard so both derive the authority identically.
 pub(super) fn terminal_candidate_verification_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     candidate: PreparedMergeCandidate,
 ) -> Result<Option<TerminalCandidateCleanupVerification>, DbError> {
     let remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
@@ -660,13 +660,13 @@ pub(super) fn terminal_candidate_verification_on(
         return Ok(None);
     };
     let authority = match proof {
-        crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+        coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
             exclusion,
             ..
         } => TerminalCandidateAuthority::AuthorExclusion(
             load_author_exclusion_activation_locator_on(conn, root, exclusion)?,
         ),
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
             grant_id,
             membership,
             activation_commit,
@@ -677,8 +677,8 @@ pub(super) fn terminal_candidate_verification_on(
             activation_commit: activation_commit.clone(),
             activation_head: activation_head.clone(),
         },
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
-            let durable = crate::protocol::remote_object::CandidateNonactivation::from_durable_parts(
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+            let durable = coven_protocol::remote_object::CandidateNonactivation::from_durable_parts(
                 &candidate.reference,
                 &candidate.commit,
                 proof.clone(),
@@ -686,11 +686,11 @@ pub(super) fn terminal_candidate_verification_on(
             .map_err(|error| DbError::Message(error.to_string()))?;
             validate_terminal_nonactivation_authority_on(conn, root, &durable)?;
             TerminalCandidateAuthority::DependencyRetraction(
-                crate::protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
+                coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                     .map_err(|error| DbError::Message(error.to_string()))?,
             )
         }
-        crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
             return Ok(None)
         }
     };
@@ -713,14 +713,14 @@ pub(super) fn merge_candidate_cleanup_targets_on(
         RemoteObjectRecord::CandidateCommit(record)
             if matches!(
                 &record.state,
-                crate::protocol::remote_object::CandidateCommitState::CleanupPending {
-                    proof: crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                        | crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
-                        | crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
-                } | crate::protocol::remote_object::CandidateCommitState::AbsentVerified {
-                    proof: crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                        | crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
-                        | crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+                coven_protocol::remote_object::CandidateCommitState::CleanupPending {
+                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                        | coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                        | coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+                } | coven_protocol::remote_object::CandidateCommitState::AbsentVerified {
+                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                        | coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                        | coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
                 }
             )
     ) {
@@ -849,13 +849,13 @@ pub(super) fn finish_merge_retraction_cleanup_on(
         if matches!(
             remote,
             RemoteObjectRecord::CandidateCommit(
-                crate::protocol::remote_object::CandidateCommitRecord {
-                    state: crate::protocol::remote_object::CandidateCommitState::AbsentVerified { .. },
+                coven_protocol::remote_object::CandidateCommitRecord {
+                    state: coven_protocol::remote_object::CandidateCommitState::AbsentVerified { .. },
                     ..
                 }
             ) | RemoteObjectRecord::CandidateExclusive(
-                crate::protocol::remote_object::CandidateObjectRecord {
-                    state: crate::protocol::remote_object::CandidateObjectState::AbsentVerified { .. },
+                coven_protocol::remote_object::CandidateObjectRecord {
+                    state: coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. },
                     ..
                 }
             )

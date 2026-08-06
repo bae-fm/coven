@@ -11,11 +11,11 @@ use crate::database::{
     required_store_root_authority_on, DbError, DurablePreparedProtocolObject, StoreWriteBase,
     LOCAL_DEVICE_ID_STATE_KEY,
 };
-use crate::protocol::remote_object::RemoteObjectRecord;
-use crate::protocol::store_commit::{
+use coven_protocol::remote_object::RemoteObjectRecord;
+use coven_protocol::store_commit::{
     CommitFrontier, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
 };
-use crate::write::WriteStatus;
+use coven_protocol::write::WriteStatus;
 use rusqlite::OptionalExtension;
 
 impl StoreDatabase {
@@ -65,10 +65,10 @@ impl StoreDatabase {
             }
             registration_ref.verify_registration(registration)
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            let stream_id = crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            let stream_id = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 stage.root.store_root_hash,
                 &registration_ref,
-                crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
             let expected_coord = StoreCommitCoord {
                 stream_id,
@@ -230,7 +230,7 @@ impl StoreDatabase {
                     ));
                 }
                 match value.audience() {
-                    crate::protocol::audience_package::PackageAudience::Store => {
+                    coven_protocol::audience_package::PackageAudience::Store => {
                         let partition = partitions.store.as_ref().ok_or_else(|| {
                             DbError::Message(
                                 "prepared Store package has no Store partition".to_string(),
@@ -248,7 +248,7 @@ impl StoreDatabase {
                             .verify_store_package(package.semantic_bytes())
                             .map_err(|error| DbError::Message(error.to_string()))?;
                     }
-                    crate::protocol::audience_package::PackageAudience::Circle {
+                    coven_protocol::audience_package::PackageAudience::Circle {
                         circle_id,
                         ..
                     } => {
@@ -257,7 +257,7 @@ impl StoreDatabase {
                             .iter()
                             .find(|partition| {
                                 partition.audience
-                                    == crate::protocol::circle::Audience::Circle(*circle_id)
+                                    == coven_protocol::circle::Audience::Circle(*circle_id)
                             })
                             .ok_or_else(|| {
                                 DbError::Message(format!(
@@ -292,7 +292,7 @@ impl StoreDatabase {
                 &stage.audiences.packages,
                 &stage.audiences.blobs,
             )?;
-            let head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+            let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: stage.head.value.head_hash(),
                 object: stage.head.prepared.reference().clone(),
             };
@@ -413,8 +413,8 @@ impl StoreDatabase {
                 }
                 if stage.commit.value.write_id != stage.write_id
                     || stage.commit.value.abandoned_candidates()
-                        != [crate::protocol::store_commit::CandidateCleanupManifest {
-                            candidate: crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+                        != [coven_protocol::store_commit::CandidateCleanupManifest {
+                            candidate: coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
                                 coord: candidate.reference.coord.clone(),
                                 object: candidate.reference.object.clone(),
                                 canonical_signed_bytes: candidate.canonical_signed_bytes.clone(),
@@ -456,7 +456,7 @@ impl StoreDatabase {
                 )
                 .map_err(|error| DbError::context("Merge abandonment commit", error))?;
                 persist_exact_remote_object_on(&tx, &authority_commit, "Merge abandonment commit")?;
-                let authority_head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+                let authority_head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
                     head_hash: stage.head.value.head_hash(),
                     object: stage.head.prepared.reference().clone(),
                 };
@@ -538,7 +538,7 @@ impl StoreDatabase {
                 };
                 let inverse_changeset = StoreDatabase::invert_changeset(&changeset)?;
                 let partitions = vec![crate::database::AudiencePartition {
-                    audience: crate::protocol::circle::Audience::Store,
+                    audience: coven_protocol::circle::Audience::Store,
                     control: None,
                     changeset,
                 }];

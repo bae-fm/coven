@@ -6,14 +6,14 @@ fn exact_partition_blob(
     spool_path: Option<&str>,
 ) -> PreparedPartitionBlob {
     let uploader_bytes = b"outbound exact-ref test uploader";
-    let uploader = crate::protocol::store_commit::StoreDeviceRegistrationRef {
+    let uploader = coven_protocol::store_commit::StoreDeviceRegistrationRef {
         device_id: "ab"
             .repeat(32)
             .parse()
             .expect("valid exact-ref test device id"),
         registration_hash: ObjectHash::digest(uploader_bytes),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/test/exact-ref-uploader.json".to_string(),
             )
             .expect("valid exact-ref uploader slot"),
@@ -21,7 +21,7 @@ fn exact_partition_blob(
             ObjectHash::digest(uploader_bytes),
         ),
     };
-    let locator = crate::protocol::blob::locator::BlobLocator::browsable(
+    let locator = coven_protocol::blob::locator::BlobLocator::browsable(
         "images",
         "shared-blob",
         uploader,
@@ -31,8 +31,8 @@ fn exact_partition_blob(
     )
     .expect("valid exact-ref test locator");
     let stored_bytes = b"stored exact-ref bytes";
-    let object = crate::protocol::objects::ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::opaque(
+    let object = coven_protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ObjectSlot::opaque(
             locator.semantic_key(),
             physical_id.to_string(),
         )
@@ -41,8 +41,8 @@ fn exact_partition_blob(
         ObjectHash::digest(stored_bytes),
     );
     PreparedPartitionBlob {
-        audience: crate::protocol::blob::locator::RemoteAudience::Store,
-        stored: crate::protocol::blob::locator::StoredBlobRef::new(locator, object)
+        audience: coven_protocol::blob::locator::RemoteAudience::Store,
+        stored: coven_protocol::blob::locator::StoredBlobRef::new(locator, object)
             .expect("valid exact stored blob"),
         spool_path: spool_path.map(std::path::PathBuf::from),
         uploaded_verified,
@@ -50,7 +50,7 @@ fn exact_partition_blob(
 }
 
 fn exact_blob_owner() -> StoreBatchCommitRef {
-    let stream_id = crate::protocol::membership::AuthorStreamId::from_digest(ObjectHash::digest(
+    let stream_id = coven_protocol::membership::AuthorStreamId::from_digest(ObjectHash::digest(
         b"exact-ref owner stream",
     ));
     StoreBatchCommitRef {
@@ -59,8 +59,8 @@ fn exact_blob_owner() -> StoreBatchCommitRef {
             sequence: 1,
         },
         commit_hash: ObjectHash::digest(b"exact-ref owner"),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/test/exact-ref-owner.json".to_string(),
             )
             .expect("valid exact-ref owner slot"),
@@ -94,7 +94,7 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
         .stored
         .object()
         .clone();
-    let first_id = crate::protocol::remote_object::remote_object_id(&first_object);
+    let first_id = coven_protocol::remote_object::remote_object_id(&first_object);
     let first_remote = forward
         .0
         .iter()
@@ -102,10 +102,10 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
         .expect("identical exact ref remains indexed");
     assert!(matches!(
         first_remote,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 record.state,
-                crate::protocol::remote_object::OwnedObjectState::UploadedVerified { .. }
+                coven_protocol::remote_object::OwnedObjectState::UploadedVerified { .. }
             )
     ));
     let first_index = forward
@@ -167,13 +167,13 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         row_id: "photo-1".to_string(),
         row_stamp: "0000000001000-0000-A".to_string(),
         column: "id".to_string(),
-        blob: crate::protocol::blob::BlobRef {
+        blob: coven_protocol::blob::BlobRef {
             namespace: "photos".to_string(),
             id: "photo-1".to_string(),
-            scope: crate::protocol::blob::BlobScope::Master,
+            scope: coven_protocol::blob::BlobScope::Master,
             cloud_path: None,
-            provenance: crate::protocol::blob::Provenance::UserProvided,
-            fill: crate::protocol::blob::CacheFill::CacheLazy,
+            provenance: coven_protocol::blob::Provenance::UserProvided,
+            fill: coven_protocol::blob::CacheFill::CacheLazy,
         },
         plaintext_size: plaintext.len() as u64,
         plaintext_hash: ObjectHash::digest(plaintext),
@@ -181,7 +181,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         previous: None,
         audience_move: None,
     };
-    let audience = crate::protocol::blob::locator::RemoteAudience::Store;
+    let audience = coven_protocol::blob::locator::RemoteAudience::Store;
     let locator = prepare_partition_blob_locator(&fact, audience.clone(), &protection, &authority)
         .expect("prepare exact blob locator");
     let spool = store_dir.outbound_blob_spool_path(locator.locator_hash());
@@ -197,7 +197,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
             )
             .await
             .expect("seed exact spool"),
-        crate::protocol::objects::BlobSpoolWrite::Created
+        coven_protocol::objects::BlobSpoolWrite::Created
     );
     let expected_spool = tokio::fs::read(&spool)
         .await
@@ -229,7 +229,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let error = match writer
         .prepare_partition_blob(
             &fact,
-            crate::protocol::blob::locator::RemoteAudience::Store,
+            coven_protocol::blob::locator::RemoteAudience::Store,
             store
                 .storage()
                 .store_blob_protection()

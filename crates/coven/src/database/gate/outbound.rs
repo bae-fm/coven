@@ -15,7 +15,7 @@ use super::model::{
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
 use crate::database::{create_table_sql, quote_ident, rewrite_create_into_schema};
-use crate::protocol::circle::Audience;
+use coven_protocol::circle::Audience;
 
 #[derive(Clone, Copy)]
 enum OutboundScope {

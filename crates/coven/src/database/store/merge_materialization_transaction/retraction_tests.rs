@@ -1,9 +1,9 @@
 use super::retraction::*;
 use super::*;
 
-fn test_object(path: &str) -> crate::protocol::objects::ExactObjectRef {
-    crate::protocol::objects::ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(path.to_string())
+fn test_object(path: &str) -> coven_protocol::objects::ExactObjectRef {
+    coven_protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ObjectSlot::logical(path.to_string())
             .expect("valid test object slot"),
         0,
         ObjectHash::digest(path.as_bytes()),
@@ -12,7 +12,7 @@ fn test_object(path: &str) -> crate::protocol::objects::ExactObjectRef {
 
 #[test]
 fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
-    let stream = crate::protocol::causal_grants::AuthorStreamId::from_bytes([19; 32]);
+    let stream = coven_protocol::causal_grants::AuthorStreamId::from_bytes([19; 32]);
     let commit = |sequence: u64, label: &str| StoreBatchCommitRef {
         coord: StoreCommitCoord {
             stream_id: stream,
@@ -53,7 +53,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     let database = crate::database::synthetic_store::open_test_db();
     let activation = StoreBatchCommitRef {
         coord: StoreCommitCoord {
-            stream_id: crate::protocol::causal_grants::AuthorStreamId::from_bytes([23; 32]),
+            stream_id: coven_protocol::causal_grants::AuthorStreamId::from_bytes([23; 32]),
             sequence: 7,
         },
         commit_hash: ObjectHash::digest(b"Circle bootstrap retraction activation"),

@@ -1,12 +1,12 @@
 use super::*;
 use crate::database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
-use crate::protocol::store_commit::{
+use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
+use crate::sync::store::owner::verified_history::prepare_merge_abandonment_history_summary;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
+use coven_protocol::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CandidateCleanupManifest,
     StoreBatchCommitDeletionTarget,
 };
-use crate::sync::store::owner::history::abandonment::MergeCandidateAbandonment;
-use crate::sync::store::owner::verified_history::prepare_merge_abandonment_history_summary;
 use std::sync::Arc;
 
 impl AuthorizedWriterOperation<'_> {

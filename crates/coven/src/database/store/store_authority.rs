@@ -1,6 +1,6 @@
 use crate::database::*;
 use crate::database::{RetainedReplayAuthority, RetainedReplayGenesisAuthority, GENERATION_ZERO};
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     ResolvedStoreDeviceState, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
 };
 use rusqlite::OptionalExtension;
@@ -18,7 +18,7 @@ impl StoreDatabase {
 
     pub(crate) async fn persist_membership_head_cursors(
         &self,
-        head_refs: Vec<crate::protocol::membership::MembershipHeadRef>,
+        head_refs: Vec<coven_protocol::membership::MembershipHeadRef>,
     ) -> Result<(), DbError> {
         self.connection
             .call(move |conn| {
@@ -32,7 +32,7 @@ impl StoreDatabase {
 
     pub(crate) async fn local_store_root_ref(
         &self,
-    ) -> Result<Option<crate::protocol::store_commit::StoreRootRef>, DbError> {
+    ) -> Result<Option<coven_protocol::store_commit::StoreRootRef>, DbError> {
         self.connection
             .call(|conn| {
                 load_store_root_authority_on(conn)
@@ -43,7 +43,7 @@ impl StoreDatabase {
 
     pub(crate) async fn validated_store_owner(
         &self,
-        expected_root: &crate::protocol::store_commit::StoreRootRef,
+        expected_root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<String, DbError> {
         let expected_root = expected_root.clone();
         self.connection
@@ -57,7 +57,7 @@ impl StoreDatabase {
                 }
                 let owner = get_protocol_state_on(
                     conn,
-                    crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
+                    coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
                 )?
                 .ok_or_else(|| DbError::Message("Store owner anchor is absent".to_string()))?;
                 if owner != protocol_root.descriptor.founder_pubkey {
@@ -104,7 +104,7 @@ impl StoreDatabase {
 
     pub(crate) async fn install_store_owner_anchor(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         root_bytes: Vec<u8>,
         founder_reference: StoreDeviceRegistrationRef,
         founder: StoreDeviceRegistration,
@@ -134,7 +134,7 @@ impl StoreDatabase {
                 )?;
                 crate::database::set_protocol_state_on(
                     &tx,
-                    crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
+                    coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
                     &owner,
                 )?;
                 membership.install_on(&tx)?;
@@ -178,8 +178,8 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                use crate::protocol::provider::{ExactProbeProgress, ProviderProbeJournalRecord};
-                use crate::protocol::store_creation::{
+                use coven_protocol::provider::{ExactProbeProgress, ProviderProbeJournalRecord};
+                use coven_protocol::store_creation::{
                     StoreCreationAttempt, STORE_CREATION_ATTEMPT_STATE_KEY,
                 };
 
@@ -323,7 +323,7 @@ impl StoreDatabase {
 
     pub(crate) async fn complete_store_founder_graph(
         &self,
-        expected_root: crate::protocol::store_commit::StoreRootRef,
+        expected_root: coven_protocol::store_commit::StoreRootRef,
         expected_registration: StoreDeviceRegistrationRef,
         expected_initial_ack: StoreAckRef,
         expected_membership: FounderMembershipRefs,
@@ -335,7 +335,7 @@ impl StoreDatabase {
             let graph = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
                 DbError::Message("local Store founder graph is absent".to_string())
             })?;
-            let root = crate::protocol::store_commit::StoreRootRef {
+            let root = coven_protocol::store_commit::StoreRootRef {
                 store_root_id: graph.root.value.descriptor.store_root_id(),
                 store_root_hash: graph.root.value.object_hash(),
                 object: graph.root.object.clone(),
@@ -355,7 +355,7 @@ impl StoreDatabase {
                 ));
             }
             let founder_authority =
-                crate::protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
+                coven_protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
                     root: root.clone(),
                 };
             let device_genesis = ResolvedStoreDeviceState::founder(
@@ -458,7 +458,7 @@ impl StoreDatabase {
             }
             install_store_root_authority_on(&tx, &root, &graph.root.bytes)?;
             let activation = serde_json::to_string(
-                &crate::protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
+                &coven_protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
                     root: root.clone(),
                 },
             )
@@ -533,7 +533,7 @@ impl StoreDatabase {
             }
             crate::database::set_protocol_state_on(
                 &tx,
-                crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
+                coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
                 &graph.root.value.descriptor.founder_pubkey,
             )?;
             crate::database::InitialStoreMembershipAuthority {

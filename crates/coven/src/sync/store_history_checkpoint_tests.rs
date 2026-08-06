@@ -1,9 +1,9 @@
-use crate::protocol::membership::MembershipChain;
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
 use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
 use coven_keys::keys::UserKeypair;
+use coven_protocol::membership::MembershipChain;
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
 
 fn store_database(db: &crate::database::Database) -> crate::database::StoreDatabase {
     crate::database::StoreDatabase::new(db)
@@ -173,7 +173,7 @@ impl PublishedHistory {
 async fn assert_signed_head_rejects_summary(
     device: &crate::sync::test_helpers::TestDevice,
     retained: &crate::database::OwnedVerifiedMergeMaterialization,
-    summary: &crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    summary: &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 ) {
     let state = device
         .resolved_store_device_state_for_test(&retained.history_summary().post_state)
@@ -264,13 +264,13 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .await
                 .expect("load Store root")
                 .expect("Store root exists");
-            let grant = crate::protocol::membership::MembershipGrantId(ObjectHash::digest(
+            let grant = coven_protocol::membership::MembershipGrantId(ObjectHash::digest(
                 b"forged-checkpoint-recovery",
             ));
-            let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
+            let anchor = coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
                 first_slot: retained[0].activation_head_object().slot().clone(),
             };
-            let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+            let activation = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
                 &root,
                 "forged-checkpoint-owner",
                 &grant,
@@ -393,7 +393,7 @@ async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
 #[tokio::test]
 async fn signed_head_rejects_an_omitted_acknowledgement() {
     let fixture = PublishedHistory::publish(1).await;
-    let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
         store_database(&fixture.db)
             .materialized_frontier()
             .await
@@ -422,7 +422,7 @@ struct MemberRemovalHistory {
     db: crate::database::Database,
     store: std::sync::Arc<TestStore>,
     device: crate::sync::test_helpers::TestDevice,
-    summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 impl MemberRemovalHistory {
@@ -446,7 +446,7 @@ impl MemberRemovalHistory {
                 &owner,
                 &member_pubkey,
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &encryption,
                 "Retained removal proof",
             )
@@ -504,7 +504,7 @@ async fn signed_head_rejects_an_omitted_membership_removal() {
         .find_map(|(reference, proof)| {
             matches!(
                 proof.entry_value.change,
-                crate::protocol::membership::MembershipChange::RemoveMember { .. }
+                coven_protocol::membership::MembershipChange::RemoveMember { .. }
             )
             .then(|| reference.clone())
         })
@@ -524,7 +524,7 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
         .find(|proof| {
             matches!(
                 proof.entry_value.change,
-                crate::protocol::membership::MembershipChange::RemoveMember { .. }
+                coven_protocol::membership::MembershipChange::RemoveMember { .. }
             )
         })
         .expect("retained history contains the removal control proof");
@@ -545,13 +545,13 @@ async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() 
         .find(|proof| {
             matches!(
                 proof.entry_value.change,
-                crate::protocol::membership::MembershipChange::RemoveMember { .. }
+                coven_protocol::membership::MembershipChange::RemoveMember { .. }
             )
         })
         .expect("retained history contains a membership proof");
     let bytes = b"incomplete retained resolution authority";
     proof.resolution = Some(
-        crate::protocol::membership::StoreMembershipConflictResolutionRef {
+        coven_protocol::membership::StoreMembershipConflictResolutionRef {
             conflict_hash: ObjectHash::digest(b"retained resolution conflict"),
             resolver_pubkey: "retained-resolution-resolver".to_string(),
             resolution_hash: ObjectHash::digest(bytes),
@@ -581,7 +581,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
         .capture_snapshot_image_for_test(fixture.store.root.clone(), snapshot_dir, None)
         .await
         .expect("create checkpoint snapshot image");
-    let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
         database
             .materialized_frontier()
             .await
@@ -606,7 +606,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
         .find_map(|(reference, proof)| {
             matches!(
                 proof.entry_value.change,
-                crate::protocol::membership::MembershipChange::RemoveMember { .. }
+                coven_protocol::membership::MembershipChange::RemoveMember { .. }
             )
             .then(|| reference.clone())
         })
@@ -618,7 +618,7 @@ async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
         .await
         .expect("re-sign internally valid snapshot through Store authority");
     let forged_bytes = forged.to_bytes();
-    let forged_reference = crate::protocol::store_commit::StoreSnapshotRef {
+    let forged_reference = coven_protocol::store_commit::StoreSnapshotRef {
         generation: forged.generation,
         snapshot_hash: forged.snapshot_hash(),
         object: ExactObjectRef::new(

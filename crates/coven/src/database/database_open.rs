@@ -175,7 +175,7 @@ impl DatabaseCore {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::protocol::blob::TransferLimits,
+        transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
@@ -242,7 +242,7 @@ impl DatabaseCore {
                             &tx,
                             &gates,
                             routing_key,
-                            &crate::protocol::circle::Audience::Store,
+                            &coven_protocol::circle::Audience::Store,
                         )
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     }
@@ -304,7 +304,7 @@ impl DatabaseCore {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::protocol::blob::TransferLimits,
+        transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState), OpenError> {

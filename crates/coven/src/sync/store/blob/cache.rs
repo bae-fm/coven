@@ -96,23 +96,23 @@
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
 use crate::database::DbError;
-use crate::protocol::objects::StorageError;
 use crate::storage::SyncStorage;
 use coven_foundation::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };
+use coven_protocol::objects::StorageError;
 
 /// Closed cloud access for one exact Remote blob. Store code resolves the
 /// authority; the cache only reads bytes with the supplied protection.
 pub(crate) struct RemoteBlobAccess<'a> {
     storage: &'a dyn SyncStorage,
-    protection: crate::protocol::objects::BlobSpoolProtection,
+    protection: coven_protocol::objects::BlobSpoolProtection,
 }
 
 impl<'a> RemoteBlobAccess<'a> {
     pub(crate) fn new(
         storage: &'a dyn SyncStorage,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        protection: coven_protocol::objects::BlobSpoolProtection,
     ) -> Self {
         Self {
             storage,
@@ -122,7 +122,7 @@ impl<'a> RemoteBlobAccess<'a> {
 
     pub(super) async fn stage_verified_plaintext(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.storage
@@ -133,7 +133,7 @@ impl<'a> RemoteBlobAccess<'a> {
 
     pub(super) async fn open_range_reader(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::storage::BlobRangeReader, BlobCacheError> {
         self.storage
             .open_blob_range_reader(stored, self.protection.clone())
@@ -215,8 +215,8 @@ pub enum BlobCacheError {
         path: std::path::PathBuf,
         expected_size: u64,
         actual_size: u64,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
-        actual_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: coven_protocol::store_commit::ObjectHash,
+        actual_hash: coven_protocol::store_commit::ObjectHash,
     },
 }
 
@@ -366,7 +366,7 @@ impl From<coven_foundation::store_dir::LocalBlobStoreError> for BlobCacheError {
 /// file the user owns and edits; coven's own copies are published by rename or
 /// hard link and never written in place.
 pub struct BlobStream {
-    blob: crate::protocol::blob::BlobRef,
+    blob: coven_protocol::blob::BlobRef,
     source: BlobStreamSource,
 }
 
@@ -382,7 +382,7 @@ pub(super) enum BlobStreamSource {
 
 impl BlobStream {
     pub(super) fn from_source(
-        blob: crate::protocol::blob::BlobRef,
+        blob: coven_protocol::blob::BlobRef,
         source: BlobStreamSource,
     ) -> Self {
         Self { blob, source }

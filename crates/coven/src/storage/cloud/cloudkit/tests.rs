@@ -177,7 +177,7 @@ impl CloudKitOps for MockCloudKitOps {
         };
         Ok(CloudKitProviderIdentity {
             container_id: "iCloud.example.coven".to_string(),
-            environment: crate::protocol::objects::CloudKitEnvironment::Development,
+            environment: coven_protocol::objects::CloudKitEnvironment::Development,
             owner_name: owner_name.to_string(),
             zone_name: zone_name.to_string(),
             current_user_record_name: "current-user".to_string(),
@@ -552,7 +552,7 @@ fn make_cloud_home_with_ops() -> (CloudKitCloudHome, Arc<MockCloudKitOps>) {
 
 #[tokio::test]
 async fn provider_binding_uses_the_bridge_container_zone_and_current_user() {
-    use crate::protocol::objects::{ProviderPrincipalId, StoreProviderBinding};
+    use coven_protocol::objects::{ProviderPrincipalId, StoreProviderBinding};
     let (home, _) = make_cloud_home_with_ops();
 
     let binding = ExactSlotStorage::provider_binding(&home)
@@ -563,7 +563,7 @@ async fn provider_binding_uses_the_bridge_container_zone_and_current_user() {
         binding.store,
         StoreProviderBinding::CloudKit {
             container_id: "iCloud.example.coven".to_string(),
-            environment: crate::protocol::objects::CloudKitEnvironment::Development,
+            environment: coven_protocol::objects::CloudKitEnvironment::Development,
             owner_name: "private-owner".to_string(),
             zone_name: "private-zone".to_string(),
         }

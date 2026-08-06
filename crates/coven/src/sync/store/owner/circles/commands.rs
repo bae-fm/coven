@@ -1,9 +1,9 @@
 use super::{
     CircleAuthoringState, CircleOperationError, CircleOperationIntent, CircleTransitionHistory,
 };
-use crate::protocol::circle::{CircleCloseStatus, CircleId, CircleRole, CircleRosterChain};
-use crate::protocol::store_commit::CircleControlRef;
 use crate::storage::BlobPathScheme;
+use coven_protocol::circle::{CircleCloseStatus, CircleId, CircleRole, CircleRosterChain};
+use coven_protocol::store_commit::CircleControlRef;
 
 pub(crate) struct StoreCircleCommands<'store> {
     store: &'store super::Store,
@@ -75,7 +75,7 @@ impl<'store> StoreCircleCommands<'store> {
         &self,
         circle_id: CircleId,
         member_pubkey: String,
-    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleOperationId, CircleOperationError> {
         let mut writer = self.writer().await?;
         writer
             .circles()
@@ -94,7 +94,7 @@ impl<'store> StoreCircleCommands<'store> {
     pub(crate) async fn resolve_circle_control(
         &self,
         circle_id: CircleId,
-        chosen: crate::protocol::circle::CircleControlCoord,
+        chosen: coven_protocol::circle::CircleControlCoord,
     ) -> Result<(), CircleOperationError> {
         let mut writer = self.writer().await?;
         writer
@@ -114,7 +114,7 @@ impl<'store> StoreCircleCommands<'store> {
     pub(crate) async fn cancel_circle_epoch_close(
         &self,
         circle_id: CircleId,
-    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleOperationId, CircleOperationError> {
         let mut writer = self.writer().await?;
         writer.circles().cancel_circle_epoch_close(circle_id).await
     }
@@ -126,7 +126,7 @@ impl<'store> StoreCircleCommands<'store> {
     pub(crate) async fn exclude_circle_close_device(
         &self,
         circle_id: CircleId,
-        excluded_device_id: crate::protocol::store_commit::StoreDeviceId,
+        excluded_device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<(), CircleOperationError> {
         let mut writer = self.writer().await?;
         writer
@@ -142,7 +142,7 @@ impl<'store> StoreCircleCommands<'store> {
     /// idempotent and re-blocks if authority is still absent.
     pub(crate) async fn retry_circle_operation(
         &self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<(), CircleOperationError> {
         let mut writer = self.writer().await?;
@@ -163,7 +163,7 @@ impl<'store> StoreCircleCommands<'store> {
     /// durable `Discarding` state.
     pub(crate) async fn discard_circle_operation(
         &self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), CircleOperationError> {
         self.require_protected_paths()?;
         let mut authorized = self
@@ -234,7 +234,7 @@ pub(crate) struct CircleResolveControlRequest {
     /// retained conflict set inside the journal transaction, so a branch
     /// discovered between command and activation resurfaces as a new conflict
     /// rather than being silently swallowed.
-    pub(super) conflicting_branches: Vec<crate::protocol::circle::CircleControlCoord>,
+    pub(super) conflicting_branches: Vec<coven_protocol::circle::CircleControlCoord>,
 }
 
 pub(crate) struct CircleResolveLosingBranch {
@@ -244,24 +244,24 @@ pub(crate) struct CircleResolveLosingBranch {
     pub(super) reference: CircleControlRef,
     /// The metadata entry this branch selected — one input to the resolution's
     /// deterministic name selection over the merged frontier.
-    pub(super) selected_metadata: crate::protocol::circle::CircleMetadata,
+    pub(super) selected_metadata: coven_protocol::circle::CircleMetadata,
 }
 
 pub(crate) struct CircleFinalizeEpochCloseRequest {
-    pub(super) operation_id: crate::protocol::circle::CircleOperationId,
+    pub(super) operation_id: coven_protocol::circle::CircleOperationId,
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) metadata_stamp: String,
     pub(super) current: CircleAuthoringState,
     pub(super) previous_control: CircleControlRef,
     pub(super) roster_chain: CircleRosterChain,
-    pub(super) intent: crate::protocol::circle::CircleEpochCloseIntent,
-    pub(super) responses: Vec<crate::protocol::circle::CircleEpochCloseSettlement>,
+    pub(super) intent: coven_protocol::circle::CircleEpochCloseIntent,
+    pub(super) responses: Vec<coven_protocol::circle::CircleEpochCloseSettlement>,
     pub(super) bootstrap: crate::sync::store::SnapshotCut,
 }
 
 pub(crate) struct CircleCancelEpochCloseRequest {
-    pub(super) operation_id: crate::protocol::circle::CircleOperationId,
+    pub(super) operation_id: coven_protocol::circle::CircleOperationId,
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) current: CircleAuthoringState,
@@ -329,7 +329,7 @@ impl CircleOperationRequest {
     /// rather than being re-derived into the other.
     pub(super) fn settlement(
         &self,
-    ) -> Option<(crate::protocol::circle::CircleOperationId, crate::WriteId)> {
+    ) -> Option<(coven_protocol::circle::CircleOperationId, crate::WriteId)> {
         match self {
             Self::FinalizeEpochClose(request) => Some((
                 request.operation_id.clone(),

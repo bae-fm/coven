@@ -1,19 +1,19 @@
-use crate::protocol::objects::{ProtocolObjectDomain, StoreObjectError};
-use crate::protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFrontier};
+use coven_protocol::objects::{ProtocolObjectDomain, StoreObjectError};
+use coven_protocol::store_commit::{circle_ack_slot_prefix, CircleAck, CommitFrontier};
 
 use super::StoreAckError;
 
 pub(crate) struct CircleAcknowledgementReader<'operation, 'storage> {
     database: &'operation crate::database::StoreDatabase,
     storage: &'storage dyn crate::storage::SyncStorage,
-    root: &'operation crate::protocol::store_commit::StoreRootRef,
+    root: &'operation coven_protocol::store_commit::StoreRootRef,
 }
 
 impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation crate::database::StoreDatabase,
         storage: &'storage dyn crate::storage::SyncStorage,
-        root: &'operation crate::protocol::store_commit::StoreRootRef,
+        root: &'operation coven_protocol::store_commit::StoreRootRef,
     ) -> Self {
         Self {
             database,
@@ -24,7 +24,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
 
     pub(crate) async fn load(
         &self,
-        reference: &crate::protocol::store_commit::CircleAckRef,
+        reference: &coven_protocol::store_commit::CircleAckRef,
     ) -> Result<CircleAck, StoreAckError> {
         let access = self
             .database
@@ -64,9 +64,9 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
 
     pub(crate) async fn stable_dominating(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         snapshot_cut: &CommitFrontier,
-    ) -> Result<Option<Vec<crate::protocol::store_commit::CircleAckRef>>, StoreAckError> {
+    ) -> Result<Option<Vec<coven_protocol::store_commit::CircleAckRef>>, StoreAckError> {
         let devices = self
             .database
             .active_circle_access_devices(circle_id)

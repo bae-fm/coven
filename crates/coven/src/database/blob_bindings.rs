@@ -232,7 +232,7 @@ impl Database {
                     .map_err(|error| DbError::Message(error.to_string()))?
             } else {
                 match crate::database::live_row_audience(conn, gates, &table_name, &row_id) {
-                    Ok(audience) => Some(audience != crate::protocol::circle::Audience::Local),
+                    Ok(audience) => Some(audience != coven_protocol::circle::Audience::Local),
                     Err(
                         crate::database::GateError::MissingAudienceRow { .. }
                         | crate::database::GateError::MissingAudienceParent { .. },
@@ -318,7 +318,7 @@ impl Database {
                     .optional()
                     .map_err(DbError::from)?;
                 let exact = if let Some((authority_json, remote_object_id)) = installed {
-                    let package_authority: crate::protocol::audience_package::PackageAudience =
+                    let package_authority: coven_protocol::audience_package::PackageAudience =
                         serde_json::from_str(&authority_json).map_err(|error| {
                             DbError::context(format!("remote blob row {:?}/{row_id:?} has invalid audience authority", table.name()), error)
                         })?;

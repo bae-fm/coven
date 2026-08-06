@@ -19,7 +19,7 @@ fn success() -> SyncLoopSuccess {
 #[test]
 fn storage_configuration_failure_is_terminal() {
     let status = storage_check_failure_status(
-        &crate::protocol::objects::StorageError::Configuration("missing bucket".to_string()),
+        &coven_protocol::objects::StorageError::Configuration("missing bucket".to_string()),
     );
 
     assert!(matches!(status, SyncLoopStatus::Failed { .. }));
@@ -30,7 +30,7 @@ fn database() -> crate::database::StoreDatabase {
         std::path::Path::new(":memory:"),
         Vec::new(),
         chrono::Duration::days(30),
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "status-test".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],

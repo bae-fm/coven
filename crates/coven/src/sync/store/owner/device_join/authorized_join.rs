@@ -1,8 +1,8 @@
 use super::journal::{database_error, provider_error};
 use super::*;
-use crate::protocol::store_commit::device_join_exchange::require_cancelled_outcome;
-use crate::protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 use crate::storage::VerifiedObjectWrites;
+use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
+use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
 mod provider_administrator;
 
@@ -23,8 +23,8 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuth
     storage: std::sync::Arc<dyn SyncStorage>,
     root: StoreRootRef,
     protocol_root: StoreProtocolRoot,
-    verified_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
-    membership: crate::protocol::membership::MembershipChain,
+    verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
+    membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     authority: Authority,
 }
@@ -36,8 +36,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         storage: std::sync::Arc<dyn SyncStorage>,
         root: StoreRootRef,
         protocol_root: StoreProtocolRoot,
-        verified_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
-        membership: crate::protocol::membership::MembershipChain,
+        verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
@@ -56,7 +56,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     pub(crate) fn into_provider_administrator(
         self,
     ) -> Result<AuthorizedProviderAdministratorJoin<'operation, 'storage>, DeviceJoinError> {
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
             self.membership.status()
         else {
             return Err(DeviceJoinError::MembershipConflict);
@@ -130,7 +130,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let root = self.root.clone();
         let binding = self.storage.provider_binding().await?;
         let attempt_id = self.database.new_device_join_attempt_id();
-        let attempt_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let attempt_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
@@ -138,11 +138,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .storage
             .allocate_protocol_slot(
                 &attempt_context,
-                &crate::protocol::store_commit::device_join_attempt_semantic_prefix(attempt_id),
+                &coven_protocol::store_commit::device_join_attempt_semantic_prefix(attempt_id),
                 ".json",
             )
             .await?;
-        let outcome_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let outcome_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
@@ -150,7 +150,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .storage
             .allocate_protocol_slot(
                 &outcome_context,
-                &crate::protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id),
+                &coven_protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id),
                 ".json",
             )
             .await?;
@@ -187,7 +187,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &self,
         grant_id: &ProviderAdminGrantId,
     ) -> Result<ProviderAdminGrantRecord, DeviceJoinError> {
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
             self.membership.status()
         else {
             return Err(DeviceJoinError::MembershipConflict);
@@ -223,13 +223,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::OwnerAuthorityRequired);
         }
         let abandonment_object = self.local_writer.sign_device_join_abandonment(&offer)?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
         );
-        let prefix = crate::protocol::store_commit::device_join_abandonment_semantic_prefix(
-            offer.attempt_id,
-        );
+        let prefix =
+            coven_protocol::store_commit::device_join_abandonment_semantic_prefix(offer.attempt_id);
         let prepared = self.storage.prepare_protocol_object(
             &context,
             offer.attempt_slot.clone(),
@@ -374,12 +373,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             request.response.clone(),
             offer.owner_grant.clone(),
         )?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
         let prefix =
-            crate::protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
+            coven_protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
         let prepared = self.storage.prepare_protocol_object(
             &context,
             offer.attempt_slot.clone(),
@@ -459,14 +458,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
-            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled,
+            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled,
             attempt.owner_grant.clone(),
         )?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
-        let prefix = crate::protocol::store_commit::device_join_outcome_semantic_prefix(
+        let prefix = coven_protocol::store_commit::device_join_outcome_semantic_prefix(
             attempt_ref.attempt_id,
         );
         let prepared = self.storage.prepare_protocol_object(
@@ -617,7 +616,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                         return Err(DeviceJoinError::AttemptMismatch);
                     }
                 };
-                let context = crate::protocol::provider::CrossPrincipalResponseContext {
+                let context = coven_protocol::provider::CrossPrincipalResponseContext {
                     challenge: attempt.provider_approval.request.cross_challenge_context(),
                     expected_registration_hash: attempt.expected_registration.registration_hash(),
                     response_slot,
@@ -638,16 +637,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
-            crate::protocol::store_commit::DeviceJoinDisposition::Activated {
+            coven_protocol::store_commit::DeviceJoinDisposition::Activated {
                 readiness: completion.readiness.proof.clone(),
             },
             offer.owner_grant.clone(),
         )?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             offer.store_root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinOutcome,
         );
-        let prefix = crate::protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id);
+        let prefix = coven_protocol::store_commit::device_join_outcome_semantic_prefix(attempt_id);
         let outcome_hash = outcome.outcome_hash();
         let (prepared, outcome_ref, intent) = match &*current.progress {
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
@@ -697,12 +696,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await
             .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         let activated_registration =
-            crate::protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
-                crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+            coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
+                coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                     completion.readiness.proof.registration.clone(),
                     attempt.expected_registration.clone(),
                 )?,
-                crate::protocol::store_commit::StoreDeviceRegistrationActivation::Join {
+                coven_protocol::store_commit::StoreDeviceRegistrationActivation::Join {
                     attempt_id,
                     outcome: outcome_ref.clone(),
                 },
@@ -802,11 +801,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .value;
         if !matches!(
             outcome.disposition,
-            crate::protocol::store_commit::DeviceJoinDisposition::Cancelled
+            coven_protocol::store_commit::DeviceJoinDisposition::Cancelled
         ) {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        crate::protocol::store_commit::device_join_exchange::validate_terminals(
+        coven_protocol::store_commit::device_join_exchange::validate_terminals(
             &cancellation.outcome,
             &administrator_terminal,
             &joiner_terminal,
@@ -832,11 +831,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );
-        let prefix = crate::protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
+        let prefix = coven_protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
             attempt_ref.attempt_id,
         );
         let (receipt_object, receipt_ref, prepared, intent) = match &*current.progress {
@@ -999,11 +998,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::JournalConflict);
         }
         let plan = self.writer.prepare_plan().await?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             self.root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );
-        let prefix = crate::protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
+        let prefix = coven_protocol::store_commit::device_join_cleanup_receipt_semantic_prefix(
             receipt.receipt.attempt_id,
         );
         let bytes = self

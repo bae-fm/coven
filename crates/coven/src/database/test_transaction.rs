@@ -54,7 +54,7 @@ impl DatabaseTestTransaction<'_, '_> {
         &self,
         root_table: &str,
         root_id: &str,
-        row: &crate::protocol::blob::RowBlobRef,
+        row: &coven_protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         retain_pinned: bool,
         created_at: &str,

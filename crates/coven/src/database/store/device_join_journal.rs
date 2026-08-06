@@ -1,8 +1,8 @@
 //! The adjacency rules the device-join journal's compare-and-swap update
 //! enforces between recorded steps, and the failures a journal write reports.
 
-use crate::protocol::store_commit::device_join_exchange::DeviceJoinAbandonment;
-use crate::protocol::store_commit::device_join_journal::{
+use coven_protocol::store_commit::device_join_exchange::DeviceJoinAbandonment;
+use coven_protocol::store_commit::device_join_journal::{
     DeviceJoinJournalRecord, DeviceJoinRoleProgress, JoinerJoinProgress, OwnerJoinProgress,
     ProviderAdminJoinProgress,
 };

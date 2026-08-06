@@ -5,8 +5,8 @@
 //! mechanics rather than any host's real shape.
 
 use crate::database::{Database, DbError};
-use crate::protocol::synced_schema::{BlobDecl, SyncedTable};
 use crate::Migration;
+use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
@@ -19,16 +19,16 @@ pub(crate) fn test_synced_tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ]
 }
@@ -43,16 +43,16 @@ pub(crate) fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
     vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .carries_blob(decl),
     ]
@@ -65,16 +65,16 @@ pub(crate) fn test_synced_tables_remote_root_with_blob(decl: BlobDecl) -> Vec<Sy
     vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .remote_root(),
         SyncedTable::new(
             "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .carries_blob(decl),
     ]
@@ -93,21 +93,21 @@ pub(crate) fn test_synced_tables_with_user_and_host_blobs(
     vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "note_tags",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
         SyncedTable::new(
             "note_photos",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .carries_blob(photo_decl),
         SyncedTable::new(
             "note_covers",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .carries_blob(cover_decl),
     ]
@@ -129,8 +129,8 @@ pub(crate) fn open_test_db_with_blob(decl: BlobDecl) -> Database {
 pub(crate) fn read_test_db(namespace: &str) -> Database {
     open_test_db_with_blob(BlobDecl::new(
         namespace,
-        crate::protocol::blob::Provenance::UserProvided,
-        crate::protocol::blob::CacheFill::CacheLazy,
+        coven_protocol::blob::Provenance::UserProvided,
+        coven_protocol::blob::CacheFill::CacheLazy,
     ))
 }
 
@@ -139,17 +139,17 @@ pub(crate) fn read_test_db(namespace: &str) -> Database {
 pub(crate) fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Database {
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         namespace,
-        crate::protocol::blob::Provenance::UserProvided,
-        crate::protocol::blob::CacheFill::CacheLazy,
+        coven_protocol::blob::Provenance::UserProvided,
+        coven_protocol::blob::CacheFill::CacheLazy,
     ));
-    let limits = crate::protocol::blob::TransferLimits {
+    let limits = coven_protocol::blob::TransferLimits {
         uploads: std::num::NonZeroUsize::MIN,
         downloads: std::num::NonZeroUsize::new(downloads).expect("downloads limit is nonzero"),
     };
     Database::open(
         std::path::Path::new(":memory:"),
         tables,
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         limits,
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -243,7 +243,7 @@ pub(crate) fn open_test_db_schema(
     open_test_db_schema_with_tombstone_grace(
         tables,
         migrations,
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
     )
 }
 
@@ -257,7 +257,7 @@ fn open_test_db_schema_with_tombstone_grace(
         std::path::Path::new(":memory:"),
         tables,
         grace,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -272,7 +272,7 @@ fn open_test_db_schema_with_tombstone_grace(
 ///
 /// Used only by the register-clock tests (`hlc_register_tests`).
 pub(crate) fn open_test_db_with_hlc(
-    hlc: std::sync::Arc<crate::protocol::hlc::Hlc>,
+    hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
     seed: impl for<'connection> Fn(&crate::MigrationContext<'connection>) -> Result<(), DbError>
         + Send
         + Sync
@@ -285,8 +285,8 @@ pub(crate) fn open_test_db_with_hlc(
     Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         hlc,
         &migrations,
     )
@@ -302,8 +302,8 @@ pub(crate) fn store_database(db: &Database) -> crate::database::StoreDatabase {
 pub(crate) fn photo_decl() -> BlobDecl {
     BlobDecl::new(
         "photos",
-        crate::protocol::blob::Provenance::HostProvided,
-        crate::protocol::blob::CacheFill::CacheEager,
+        coven_protocol::blob::Provenance::HostProvided,
+        coven_protocol::blob::CacheFill::CacheEager,
     )
 }
 
@@ -313,16 +313,16 @@ pub(crate) fn remote_root_db(decl: BlobDecl) -> Database {
         vec![
             SyncedTable::new(
                 "notes",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .remote_root(),
             SyncedTable::new(
                 "note_tags",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
             SyncedTable::new(
                 "note_photos",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .carries_blob(decl),
         ],

@@ -16,7 +16,6 @@ mod handle;
 pub(crate) mod join_code;
 pub(crate) mod joining;
 pub(crate) mod oauth;
-pub(crate) mod protocol;
 mod read_handle;
 pub(crate) mod restoration;
 pub(crate) mod restore_code;
@@ -32,7 +31,6 @@ pub(crate) mod store_rows;
 pub(crate) mod store_security;
 pub(crate) mod store_sync;
 pub(crate) mod sync;
-mod write;
 
 #[cfg(test)]
 mod blob_facade_tests;
@@ -70,6 +68,34 @@ pub use coven_keys::keys::{
     keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,
     IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
 };
+pub use coven_protocol::blob::{
+    content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
+    ContentHasher, DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure,
+    UploadFailureCause, UploadFailures,
+};
+pub use coven_protocol::hlc::Timestamp;
+pub use coven_protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
+pub use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
+pub use coven_protocol::write::{
+    AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,
+    WriteResolution, WriteRetractionWitness, WriteStatus,
+};
+pub use coven_protocol::{
+    Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
+    CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
+    CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleOperationKind,
+    CircleOperationState, CircleRole, CircleState, CloudKitAcceptedShare, CommitFrontier,
+    CrossPrincipalProbeReceipt, DeviceJoinAttemptId, DeviceJoinAttemptRef, ExactSlotProbeReceipt,
+    MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo, MembershipCoord,
+    ObjectHash, ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange,
+    ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderAdminMembershipChange,
+    ProviderAdminState, ProviderCapabilityProof, ProviderProbeId, StoreBatchCommitRef,
+    StoreCommitCoord, StoreCommitOrder, StoreDeviceId,
+};
+pub use coven_protocol::{
+    AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
+    ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
+};
 pub use database::{
     BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
     QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
@@ -93,30 +119,6 @@ pub use oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{AuthorizeRequest, OAuthClientCreds, OAuthClientCredsError};
 pub use oauth::{OAuthClients, OAuthTokens};
-pub use protocol::blob::{
-    content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    ContentHasher, DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure,
-    UploadFailureCause, UploadFailures,
-};
-pub use protocol::hlc::Timestamp;
-pub use protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
-pub use protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
-pub use protocol::{
-    Audience, Circle, CircleCloseParticipant, CircleCloseSettlement, CircleCloseStatus,
-    CircleControlCoord, CircleEpochCloseId, CircleId, CircleInfo, CircleMemberInfo,
-    CircleOperationBlock, CircleOperationId, CircleOperationInfo, CircleOperationKind,
-    CircleOperationState, CircleRole, CircleState, CloudKitAcceptedShare, CommitFrontier,
-    CrossPrincipalProbeReceipt, DeviceJoinAttemptId, DeviceJoinAttemptRef, ExactSlotProbeReceipt,
-    MemberInfo, MemberRole, MembershipConflictChoice, MembershipConflictInfo, MembershipCoord,
-    ObjectHash, ProviderAccessLocator, ProviderAccessWithdrawal, ProviderAdminChange,
-    ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderAdminMembershipChange,
-    ProviderAdminState, ProviderCapabilityProof, ProviderProbeId, StoreBatchCommitRef,
-    StoreCommitCoord, StoreCommitOrder, StoreDeviceId,
-};
-pub use protocol::{
-    AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
-    ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
-};
 pub use read_handle::CovenReadHandle;
 pub use restoration::{
     decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
@@ -151,8 +153,4 @@ pub use sync::{
     ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
     ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
     SyncLoopStatus, SyncLoopSuccess,
-};
-pub use write::{
-    AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,
-    WriteResolution, WriteRetractionWitness, WriteStatus,
 };

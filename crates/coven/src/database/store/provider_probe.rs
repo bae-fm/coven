@@ -2,10 +2,8 @@ use super::*;
 
 use async_trait::async_trait;
 
-use crate::protocol::objects::StorageError;
-use crate::protocol::provider::{
-    ProviderProbeId, ProviderProbeJournal, ProviderProbeJournalRecord,
-};
+use coven_protocol::objects::StorageError;
+use coven_protocol::provider::{ProviderProbeId, ProviderProbeJournal, ProviderProbeJournalRecord};
 
 #[async_trait]
 impl ProviderProbeJournal for StoreDatabase {
@@ -102,18 +100,18 @@ impl ProviderProbeJournal for StoreDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::objects::ObjectSlot;
-    use crate::protocol::provider::test_fixtures::{
+    use coven_protocol::objects::ObjectSlot;
+    use coven_protocol::provider::test_fixtures::{
         test_device_binding, test_exact_receipt, test_store_binding,
     };
-    use crate::protocol::provider::{ExactProbeJournal, ExactProbeProgress};
+    use coven_protocol::provider::{ExactProbeJournal, ExactProbeProgress};
 
     #[tokio::test]
     async fn database_probe_journal_rejects_a_skipped_progress_state() {
         let db = crate::database::synthetic_store::open_test_db();
         let journal = crate::database::StoreDatabase::new(&db);
         let probe_id = ProviderProbeId::from_bytes([44; 32]);
-        let binding = crate::protocol::objects::ResolvedProviderBinding {
+        let binding = coven_protocol::objects::ResolvedProviderBinding {
             store: test_store_binding(),
             device: test_device_binding(),
         };

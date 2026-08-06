@@ -3,14 +3,14 @@ use crate::sync::store::circle_controls::CircleOperationError;
 pub(super) trait CircleBootstrapBlobVerification {
     async fn verify_stored_blob(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError>;
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError>;
 
     async fn verify_snapshot_blobs(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         snapshot: &crate::database::CreatedSnapshot,
-    ) -> Result<Vec<crate::protocol::blob::RowBlobRef>, CircleOperationError> {
+    ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, CircleOperationError> {
         let mut blobs = Vec::with_capacity(snapshot.blobs.len());
         for captured in &snapshot.blobs {
             let crate::database::SnapshotBlobAudience::Circle {
@@ -30,9 +30,9 @@ pub(super) trait CircleBootstrapBlobVerification {
             })?;
             if captured_circle != circle_id
                 || previous.authority.remote_audience()
-                    != crate::protocol::blob::locator::RemoteAudience::Circle(circle_id)
+                    != coven_protocol::blob::locator::RemoteAudience::Circle(circle_id)
                 || previous.stored.locator().audience()
-                    != crate::protocol::blob::locator::RemoteAudience::Circle(circle_id)
+                    != coven_protocol::blob::locator::RemoteAudience::Circle(circle_id)
             {
                 return Err(CircleOperationError::InvalidState(
                     "Circle bootstrap blob belongs to another audience".to_string(),
@@ -47,7 +47,7 @@ pub(super) trait CircleBootstrapBlobVerification {
                     ))
                 })?;
             blobs.push(
-                crate::protocol::blob::RowBlobRef::new(
+                coven_protocol::blob::RowBlobRef::new(
                     captured.fact.table.clone(),
                     captured.fact.row_id.clone(),
                     captured.fact.row_stamp.clone(),
@@ -55,7 +55,7 @@ pub(super) trait CircleBootstrapBlobVerification {
                     captured.fact.blob.clone(),
                     captured.fact.plaintext_size,
                     captured.fact.plaintext_hash,
-                    crate::protocol::blob::RowBlobAuthority::Remote(previous.authority.clone()),
+                    coven_protocol::blob::RowBlobAuthority::Remote(previous.authority.clone()),
                     Some(previous.stored.clone()),
                 )
                 .map_err(CircleOperationError::InvalidState)?,

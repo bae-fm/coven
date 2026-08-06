@@ -31,7 +31,7 @@ impl PlaintextReader {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum PlaintextChunkError {
     #[error(transparent)]
-    Remote(#[from] crate::protocol::objects::StorageError),
+    Remote(#[from] coven_protocol::objects::StorageError),
     #[error("invalid remote content: {0}")]
     InvalidContent(String),
     #[error("local plaintext source: {0}")]
@@ -51,11 +51,11 @@ pub(super) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> 
 /// Stream the exact stored size and SHA-256 identity of a local file.
 pub(super) async fn exact_file_facts(
     path: &Path,
-) -> Result<(u64, crate::protocol::store_commit::ObjectHash), String> {
+) -> Result<(u64, coven_protocol::store_commit::ObjectHash), String> {
     let (size, digest) = coven_foundation::local_file::file_facts(path).await?;
     Ok((
         size,
-        crate::protocol::store_commit::ObjectHash::from_digest(digest),
+        coven_protocol::store_commit::ObjectHash::from_digest(digest),
     ))
 }
 

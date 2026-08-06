@@ -1,8 +1,8 @@
 use super::{DbError, StoreDatabase};
-use crate::protocol::store_commit::{
+use crate::WriteId;
+use coven_protocol::store_commit::{
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionRef, StoreDeviceHeadRef,
 };
-use crate::WriteId;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug)]
@@ -34,7 +34,7 @@ impl StoreDatabase {
         let photo_id = photo_id.to_string();
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = crate::protocol::blob::content_hash(bytes);
+        let hash = coven_protocol::blob::content_hash(bytes);
         self.connection
             .call(move |connection| {
                 connection
@@ -83,7 +83,7 @@ impl StoreDatabase {
         &self,
         root_table: &str,
         root_id: &str,
-        reference: &crate::protocol::blob::RowBlobRef,
+        reference: &coven_protocol::blob::RowBlobRef,
         source_path: &std::path::Path,
         created_at: &str,
     ) -> Result<(), DbError> {
@@ -280,7 +280,7 @@ impl StoreDatabase {
     pub(crate) async fn install_test_active_circle(
         &self,
         label: String,
-    ) -> Result<crate::protocol::circle::CircleId, DbError> {
+    ) -> Result<coven_protocol::circle::CircleId, DbError> {
         self.connection
             .call(move |connection| {
                 let database = crate::database::DatabaseTestSql::new(connection);
@@ -401,8 +401,8 @@ impl StoreDatabase {
 
     pub(crate) async fn compare_circle_bootstrap_replay_with_missing_coverage_for_test(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        routing_key: crate::protocol::circle::RowRoutingKey,
+        root: coven_protocol::store_commit::StoreRootRef,
+        routing_key: coven_protocol::circle::RowRoutingKey,
         historical_id: String,
         late_id: String,
     ) -> Result<(i64, i64, i64, i64), DbError> {
@@ -422,7 +422,7 @@ impl StoreDatabase {
                     &BTreeSet::new(),
                     None,
                     false,
-                    crate::protocol::membership::LocalStoreMembership::Current,
+                    coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
                 let retained_count = retained.query_row(
                     "SELECT COUNT(*) FROM documents WHERE id = ?1",
@@ -447,7 +447,7 @@ impl StoreDatabase {
                     &BTreeSet::new(),
                     None,
                     false,
-                    crate::protocol::membership::LocalStoreMembership::Current,
+                    coven_protocol::membership::LocalStoreMembership::Current,
                 )?;
                 let sabotaged_count = sabotaged.query_row(
                     "SELECT COUNT(*) FROM documents WHERE id = ?1",
@@ -473,7 +473,7 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_bootstrap_coverage_count_for_test(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
         self.connection
             .call(move |connection| {
@@ -490,8 +490,8 @@ impl StoreDatabase {
 
     pub(crate) async fn reject_changed_circle_bootstrap_image_hash_for_test(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        root: crate::protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        root: coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
     ) -> Result<String, DbError> {
         let activation_commit = activation_commit.clone();
@@ -772,13 +772,13 @@ impl StoreDatabase {
                             )
                             .map_err(DbError::from)?;
                         let mut cut: std::collections::BTreeMap<
-                            crate::protocol::causal_grants::AuthorStreamId,
+                            coven_protocol::causal_grants::AuthorStreamId,
                             StoreBatchCommitRef,
                         > = serde_json::from_str(&cut).map_err(|error| {
                             DbError::context("parse exclusion accepted cut", error)
                         })?;
                         cut.insert(
-                            crate::protocol::causal_grants::AuthorStreamId::from_digest(
+                            coven_protocol::causal_grants::AuthorStreamId::from_digest(
                                 ObjectHash::digest(b"wrong exclusion accepted-cut stream"),
                             ),
                             candidate.clone(),

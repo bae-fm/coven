@@ -1,5 +1,5 @@
 use crate::database::*;
-use crate::protocol::store_commit::{StoreAck, StoreAckRef, StoreDeviceRegistrationRef};
+use coven_protocol::store_commit::{StoreAck, StoreAckRef, StoreDeviceRegistrationRef};
 use rusqlite::OptionalExtension;
 
 use super::*;

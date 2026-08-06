@@ -284,7 +284,7 @@ async fn binding_and_close_test_home() -> (
 
 #[tokio::test]
 async fn provider_binding_uses_the_folder_identity_and_current_account() {
-    use crate::protocol::objects::{ProviderPrincipalId, StoreProviderBinding};
+    use coven_protocol::objects::{ProviderPrincipalId, StoreProviderBinding};
     let (home, requests, shutdown) = binding_and_close_test_home().await;
 
     let binding = ExactSlotStorage::provider_binding(&home)

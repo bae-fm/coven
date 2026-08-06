@@ -1,19 +1,19 @@
 //! Cross-principal provider probe execution: reserving, creating, and
 //! settling exact probe slots on the primary and peer provider storage, over
-//! the probe transcript model in [`crate::protocol::provider`].
+//! the probe transcript model in [`coven_protocol::provider`].
 
 use std::sync::Arc;
 
-use crate::protocol::objects::{ExactObjectRef, ObjectSlot, StorageError};
-use crate::protocol::provider::*;
-use crate::protocol::provider::{
+use crate::storage::cloud::{BlobBody, CloudHomeError, ExactSlotStorage};
+use coven_keys::keys::UserKeypair;
+use coven_protocol::objects::{ExactObjectRef, ObjectSlot, StorageError};
+use coven_protocol::provider::*;
+use coven_protocol::provider::{
     advance_cross_completion, advance_exact, cross_challenge_hash, cross_response_hash, invalid,
     validate_cross_provider_evidence, validate_cross_provider_evidence_context,
 };
-use crate::protocol::store_commit::ObjectHash;
-use crate::protocol::StoreProviderBinding;
-use crate::storage::cloud::{BlobBody, CloudHomeError, ExactSlotStorage};
-use coven_keys::keys::UserKeypair;
+use coven_protocol::store_commit::ObjectHash;
+use coven_protocol::StoreProviderBinding;
 
 pub(crate) struct ProviderProbeStorage {
     primary: Arc<dyn ExactSlotStorage>,
@@ -378,7 +378,7 @@ impl ProviderProbeStorage {
         &self,
         journal: &dyn ProviderProbeJournal,
         probe_id: ProviderProbeId,
-        binding: &crate::protocol::objects::ResolvedProviderBinding,
+        binding: &coven_protocol::objects::ResolvedProviderBinding,
     ) -> Result<ExactSlotProbeReceipt, ProviderProbeError> {
         let first = self.primary.as_ref();
         let second = self.peer.as_ref();

@@ -12,11 +12,11 @@ pub(crate) enum TerminalNonactivationCandidate {
         verification: crate::database::TerminalCandidateCleanupVerification,
     },
     CircleOperation {
-        operation_id: crate::protocol::circle::CircleOperationId,
+        operation_id: coven_protocol::circle::CircleOperationId,
         verification: crate::database::TerminalCandidateCleanupVerification,
     },
     MergeRetraction {
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
         verification: crate::database::TerminalCandidateCleanupVerification,
     },
 }
@@ -42,8 +42,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn discard_candidate_nonactivation(
         &mut self,
         candidate: &crate::database::BlockedMergeCandidate,
-        revoked_grant: Option<&crate::protocol::membership::MembershipGrantId>,
-    ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
+        revoked_grant: Option<&coven_protocol::membership::MembershipGrantId>,
+    ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let verified_candidate = self
             .history_verifier
@@ -57,7 +57,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             )
             .await?
         {
-            let target = crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+            let target = coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
                 coord: verified_candidate.reference().coord.clone(),
                 object: verified_candidate.reference().object.clone(),
                 canonical_signed_bytes: verified_candidate.value().to_bytes(),
@@ -92,18 +92,18 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn membership_revocation_candidate_nonactivation(
         &mut self,
-        revoked_grant: &crate::protocol::membership::MembershipGrantId,
-        candidate: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_head: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_head_object: &crate::protocol::objects::ExactObjectRef,
-    ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
+        revoked_grant: &coven_protocol::membership::MembershipGrantId,
+        candidate: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        candidate_head: &coven_protocol::store_commit::StoreDeviceHead,
+        candidate_head_object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let root = self.history_verifier.verified_root().reference().clone();
         let expected_stream =
-            crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
                 &candidate.value().author_registration,
-                crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
         let candidate_sequence = candidate.reference().coord.sequence();
         for witness in self
@@ -135,18 +135,18 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                         error,
                     ) => StoreError::InvalidOutbound(error),
                 })?;
-            let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
+            let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
                 membership.status()
             else {
                 continue;
             };
             if !matches!(
                 resolved.grants.get(revoked_grant),
-                Some(crate::protocol::causal_grants::GrantState::Tombstoned { .. })
+                Some(coven_protocol::causal_grants::GrantState::Tombstoned { .. })
             ) {
                 continue;
             }
-            let activation_head = crate::protocol::store_commit::StoreDeviceHeadRef {
+            let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: witness.activation_head().head_hash(),
                 object: witness.activation_head_object().clone(),
             };
@@ -170,10 +170,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn excluded_candidate_nonactivation(
         &mut self,
-        candidate: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_head: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_head_object: &crate::protocol::objects::ExactObjectRef,
-    ) -> Result<Option<crate::protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
+        candidate: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        candidate_head: &coven_protocol::store_commit::StoreDeviceHead,
+        candidate_head_object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<Option<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StoreError>
     {
         let candidate_ref = candidate.reference().clone();
         let root = self.history_verifier.verified_root().reference().clone();
@@ -188,7 +188,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         else {
             return Ok(None);
         };
-        let candidate_target = crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+        let candidate_target = coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
             coord: candidate_ref.coord.clone(),
             object: candidate_ref.object.clone(),
             canonical_signed_bytes: candidate.value().to_bytes(),
@@ -216,11 +216,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn verify_author_exclusion_nonactivation(
         &mut self,
         locator: &crate::database::AuthorExclusionActivationLocator,
-        candidate: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        candidate_head: &crate::protocol::store_commit::StoreDeviceHead,
-        candidate_head_object: &crate::protocol::objects::ExactObjectRef,
+        candidate: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        candidate_head: &coven_protocol::store_commit::StoreDeviceHead,
+        candidate_head_object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<
-        crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        coven_protocol::remote_object::VerifiedCandidateNonactivation,
         crate::sync::store::owner::pull::StorePullError,
     > {
         let retained = self
@@ -296,7 +296,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         verification: &crate::database::TerminalCandidateCleanupVerification,
     ) -> Result<
-        crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        coven_protocol::remote_object::VerifiedCandidateNonactivation,
         crate::sync::store::owner::pull::StorePullError,
     > {
         let reference = &verification.candidate.head.value.commit;
@@ -311,7 +311,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 ),
             );
         }
-        let target = crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+        let target = coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
             coord: reference.coord.clone(),
             object: verification.candidate.commit.object.clone(),
             canonical_signed_bytes: verification.candidate.commit.bytes.clone(),
@@ -345,7 +345,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .await
             }
             crate::database::TerminalCandidateAuthority::DependencyRetraction(authority) => {
-                crate::protocol::remote_object::VerifiedCandidateNonactivation::from_verified_dependency_retraction_authority(
+                coven_protocol::remote_object::VerifiedCandidateNonactivation::from_verified_dependency_retraction_authority(
                     authority.clone(),
                     target,
                     candidate.author(),

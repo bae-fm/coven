@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) struct PreparedMergeHistorySuccessor {
     pub(crate) summary: RetainedVerifiedMergeHistorySummary,
-    pub(crate) head_slot: crate::protocol::objects::ObjectSlot,
+    pub(crate) head_slot: coven_protocol::objects::ObjectSlot,
     pub(crate) predecessor_head: Option<store_commit::StoreDeviceHeadRef>,
 }
 

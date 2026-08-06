@@ -21,7 +21,7 @@ use super::{
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, RevokeOutcome,
     UploadProgress,
 };
-use crate::protocol::objects::ObjectSlot;
+use coven_protocol::objects::ObjectSlot;
 use runtime::S3Runtime;
 
 /// S3-backed cloud home.
@@ -507,20 +507,20 @@ impl S3PartSink {
     }
 }
 
-fn s3_access_key_id_hash(access_key_id: &str) -> crate::protocol::store_commit::ObjectHash {
+fn s3_access_key_id_hash(access_key_id: &str) -> coven_protocol::store_commit::ObjectHash {
     const DOMAIN: &[u8] = b"coven.s3-access-key-id.v1\0";
     let mut material = Vec::with_capacity(DOMAIN.len() + access_key_id.len());
     material.extend_from_slice(DOMAIN);
     material.extend_from_slice(access_key_id.as_bytes());
-    crate::protocol::store_commit::ObjectHash::digest(&material)
+    coven_protocol::store_commit::ObjectHash::digest(&material)
 }
 
 fn aws_caller_identity(
     account_id: &str,
     arn: &str,
     user_id: &str,
-) -> Result<(String, crate::protocol::objects::AwsPrincipal), CloudHomeError> {
-    use crate::protocol::objects::AwsPrincipal;
+) -> Result<(String, coven_protocol::objects::AwsPrincipal), CloudHomeError> {
+    use coven_protocol::objects::AwsPrincipal;
 
     if account_id.len() != 12 || !account_id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(CloudHomeError::Configuration(
@@ -981,8 +981,8 @@ impl CloudHome for S3CloudHome {
 impl ExactSlotStorage for S3CloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
-        use crate::protocol::objects::{
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use coven_protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding,
             StoreProviderBinding,
         };
@@ -1033,7 +1033,7 @@ impl ExactSlotStorage for S3CloudHome {
             }
             Some(endpoint) => (
                 S3EndpointBinding::Custom {
-                    origin: crate::protocol::provider::canonical_custom_s3_origin(endpoint)
+                    origin: coven_protocol::provider::canonical_custom_s3_origin(endpoint)
                         .map_err(|error| CloudHomeError::Configuration(error.to_string()))?,
                 },
                 ProviderPrincipalId::CustomS3Credential {

@@ -3,9 +3,9 @@
 //! files-on-disk model is exercised directly.
 
 use crate::database::StoreDatabase;
-use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::sync::store::blob::StoreBlobCache;
 use crate::sync::test_helpers::{open_test_db, temp_store_dir};
+use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 
 /// Store a host-provided blob, read it back whole, then drop it.
 #[tokio::test]

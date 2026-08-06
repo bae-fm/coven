@@ -31,11 +31,11 @@ use std::collections::HashMap;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::database::{quote_ident, table_columns as session_table_columns};
-use crate::protocol::blob::{
+use coven_foundation::changeset::{ChangeOp, RowChange};
+use coven_protocol::blob::{
     cloud_path_names_blob, BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance,
 };
-use crate::protocol::synced_schema::SyncedTable;
-use coven_foundation::changeset::{ChangeOp, RowChange};
+use coven_protocol::synced_schema::SyncedTable;
 
 /// Why building the blob-declaration model failed.
 #[derive(Debug)]
@@ -625,7 +625,7 @@ impl BlobDecls {
         conn: &Connection,
         namespace: &str,
         blob_id: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Result<bool, BlobDeclError> {
         let Some((table, blob)) = self.table_for_namespace(namespace) else {
             return Ok(false);

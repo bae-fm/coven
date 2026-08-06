@@ -4,8 +4,8 @@ use crate::storage::VerifiedObjectWrites;
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn reject_excluded_merge_candidate(
         &self,
-        candidate: &crate::protocol::store_commit::StoreBatchCommitRef,
-        author: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
+        author: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<(), StoreError> {
         if self
             .database
@@ -33,15 +33,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let stream_id = self.announcement_stream_id();
         let base = self.database.local_commit_base(stream_id).await?;
         let previous = base.predecessor;
-        let dependencies = crate::protocol::store_commit::CommitFrontier::from_refs(base.frontier)
+        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(base.frontier)
             .map(|frontier| frontier.commits().clone())
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let seq = operations::next_store_sequence(previous.as_ref())?;
-        let coord = crate::protocol::store_commit::StoreCommitCoord {
+        let coord = coven_protocol::store_commit::StoreCommitCoord {
             stream_id,
             sequence: seq,
         };
-        let order = crate::protocol::store_commit::StoreCommitOrder {
+        let order = coven_protocol::store_commit::StoreCommitOrder {
             seq,
             predecessor: previous,
             dependencies,
@@ -69,7 +69,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 order,
                 authorization.membership_state,
                 authorization.device_state_ref,
-                crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
+                coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor },
                 owner_grant,
             ),
             authorization.membership,
@@ -79,33 +79,33 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) fn membership_authority(
         &self,
-        membership: &crate::protocol::membership::MembershipChain,
-    ) -> Result<crate::protocol::store_commit::StoreOperationMembershipAuthority, StoreError> {
+        membership: &coven_protocol::membership::MembershipChain,
+    ) -> Result<coven_protocol::store_commit::StoreOperationMembershipAuthority, StoreError> {
         let writer = self.writer.author_pubkey();
         let predecessor = membership.write_grant_authority(&writer).ok_or_else(|| {
             StoreError::Preparation(crate::sync::store::StorePreparationError::Gate(format!(
                 "Store writer {writer} has no active membership grant"
             )))
         })?;
-        Ok(crate::protocol::store_commit::StoreOperationMembershipAuthority { predecessor })
+        Ok(coven_protocol::store_commit::StoreOperationMembershipAuthority { predecessor })
     }
 
     pub(crate) async fn prepare_conflict_resolution_plan(
         &mut self,
-        candidate_membership_heads: &[crate::protocol::membership::MembershipHeadRef],
+        candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<MergeConflictResolutionCommitPlan, StoreError> {
         let root = self.store_root().clone();
         let stream_id = self.announcement_stream_id();
         let base = self.database.local_commit_base(stream_id).await?;
         let previous = base.predecessor;
-        let dependencies = crate::protocol::store_commit::CommitFrontier::from_refs(base.frontier)
+        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(base.frontier)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let seq = operations::next_store_sequence(previous.as_ref())?;
-        let coord = crate::protocol::store_commit::StoreCommitCoord {
+        let coord = coven_protocol::store_commit::StoreCommitCoord {
             stream_id,
             sequence: seq,
         };
-        let order = crate::protocol::store_commit::StoreCommitOrder {
+        let order = coven_protocol::store_commit::StoreCommitOrder {
             seq,
             predecessor: previous,
             dependencies: dependencies.0,
@@ -141,7 +141,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         plan: operations::StoreOperationCommitPlan,
         batch: operations::StoreOperationBatch,
-    ) -> Result<crate::protocol::store_commit::StoreBatchCommitRef, StoreError> {
+    ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
         let prepared = self.prepare_candidate_borrowed(&plan, batch).await?;
         match self.publish_prepared(Box::new(prepared), None, None).await? {
             operations::StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
@@ -173,7 +173,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         candidate: Box<operations::PreparedStoreOperationCommit>,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<
-            crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
         let retained_operation_objects = candidate
@@ -200,12 +200,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn publish(
         &mut self,
         mut activation: operations::PreparedStoreOperationActivation,
-        head: crate::protocol::store_commit::StoreDeviceHead,
-        prepared_head: crate::protocol::objects::PreparedExactObject,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        head: coven_protocol::store_commit::StoreDeviceHead,
+        prepared_head: coven_protocol::objects::PreparedExactObject,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<
-            crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
         let database = self.database.clone();
@@ -258,11 +258,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     StoreError::InvalidOutbound(format!("record uploaded Store candidate: {error}"))
                 })?;
         }
-        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
+            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
         );
-        let head_prefix = crate::protocol::store_commit::head_slot_prefix(
+        let head_prefix = coven_protocol::store_commit::head_slot_prefix(
             &commit.author_registration.device_id.to_string(),
             commit.seq(),
         );
@@ -273,7 +273,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
         {
             Ok(()) => {}
-            Err(crate::protocol::objects::StorageError::SlotCollision(_)) => {
+            Err(coven_protocol::objects::StorageError::SlotCollision(_)) => {
                 return self
                     .resolve_head_collision(
                         activation.candidate,
@@ -286,7 +286,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await;
             }
             Err(error) => {
-                return Err(crate::protocol::objects::StoreObjectError::from(error).into());
+                return Err(coven_protocol::objects::StoreObjectError::from(error).into());
             }
         }
         self.storage
@@ -298,7 +298,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await
             .map_err(StoreError::readback)?;
-        let activation_head = crate::protocol::store_commit::StoreDeviceHeadRef {
+        let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object: prepared_head.reference().clone(),
         };
@@ -310,17 +310,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     StoreError::InvalidOutbound(format!("record uploaded Store head: {error}"))
                 })?;
             membership_completion.is_none().then(|| {
-                std::iter::once(crate::protocol::remote_object::remote_object_id(
+                std::iter::once(coven_protocol::remote_object::remote_object_id(
                     &reference.object,
                 ))
                 .chain(
                     activation
                         .retained_operation_objects
                         .iter()
-                        .map(crate::protocol::remote_object::remote_object_id),
+                        .map(coven_protocol::remote_object::remote_object_id),
                 )
                 .chain(std::iter::once(
-                    crate::protocol::remote_object::remote_object_id(prepared_head.reference()),
+                    coven_protocol::remote_object::remote_object_id(prepared_head.reference()),
                 ))
                 .collect::<Vec<_>>()
             })
@@ -331,13 +331,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             let completion_ids = completion
                 .object_refs()
                 .iter()
-                .map(crate::protocol::remote_object::remote_object_id)
+                .map(coven_protocol::remote_object::remote_object_id)
                 .collect::<std::collections::BTreeSet<_>>();
             if completion_ids.is_empty()
-                || !completion_ids.contains(&crate::protocol::remote_object::remote_object_id(
+                || !completion_ids.contains(&coven_protocol::remote_object::remote_object_id(
                     &reference.object,
                 ))
-                || !completion_ids.contains(&crate::protocol::remote_object::remote_object_id(
+                || !completion_ids.contains(&coven_protocol::remote_object::remote_object_id(
                     prepared_head.reference(),
                 ))
             {
@@ -394,13 +394,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let retained_device_operations = match &batch {
             operations::StoreOperationBatch::DeviceExclusionProposal(proposal) => Some(
-                crate::protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
+                coven_protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
                     vec![proposal.clone()],
                     Vec::new(),
                 ),
             ),
             operations::StoreOperationBatch::DeviceExclusionOutcome(outcome) => Some(
-                crate::protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
+                coven_protocol::store_commit::RetainedStoreDeviceOperations::from_sources(
                     Vec::new(),
                     vec![outcome.clone()],
                 ),
@@ -409,12 +409,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         let (commit, registration_activation) =
             plan.sign_batch(self.database.new_store_write_id(), batch)?;
-        let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             plan.root().store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreCommit,
+            coven_protocol::objects::ProtocolObjectDomain::StoreCommit,
         );
         let stream_id = plan.coord().stream_id.to_string();
-        let prefix = crate::protocol::store_commit::commit_semantic_prefix(
+        let prefix = coven_protocol::store_commit::commit_semantic_prefix(
             commit.candidate_family(),
             &stream_id,
             commit.seq(),
@@ -423,10 +423,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let slot = storage
             .allocate_protocol_slot(&context, &prefix, ".json")
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let prepared = storage
             .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let verified_commit =
             plan.verify_prepared_commit(&commit.to_bytes(), prepared.reference().clone())?;
         let common = operations::PreparedStoreOperationCommon {
@@ -465,7 +465,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .verify_for(plan.root(), &common.commit)
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
             None => {
-                crate::protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
+                coven_protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                     &common.commit,
                 )
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
@@ -479,9 +479,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         ))
         .await
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             common.commit.store_root_hash,
-            crate::protocol::objects::ProtocolObjectDomain::StoreHead,
+            coven_protocol::objects::ProtocolObjectDomain::StoreHead,
         );
         let device_id = plan.device_id().to_string();
         let successor = self
@@ -495,25 +495,25 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let next_prefix = crate::protocol::store_commit::head_slot_prefix(
+        let next_prefix = coven_protocol::store_commit::head_slot_prefix(
             &device_id,
             operations::successor_store_sequence(common.commit.seq())?,
         );
         let next_slot = storage
             .allocate_protocol_slot(&head_context, &next_prefix, ".json")
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let head = plan.sign_device_head(
             common.reference.clone(),
             successor.summary.digest(),
-            crate::protocol::store_commit::SuccessorLink {
+            coven_protocol::store_commit::SuccessorLink {
                 activation: plan.announcement_activation_id()?,
                 predecessor: successor.predecessor_head.map(|reference| reference.object),
                 next_slot,
             },
         )?;
         let head_prefix =
-            crate::protocol::store_commit::head_slot_prefix(&device_id, common.commit.seq());
+            coven_protocol::store_commit::head_slot_prefix(&device_id, common.commit.seq());
         let prepared_head = storage
             .prepare_protocol_object(
                 &head_context,
@@ -521,7 +521,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 &head_prefix,
                 head.to_bytes(),
             )
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         Ok(operations::PreparedStoreOperationCommit {
             common,
             head,
@@ -532,7 +532,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn finish_nonactivating_acknowledgement(
         &self,
-        acknowledgement: crate::protocol::store_commit::StoreAckRef,
+        acknowledgement: coven_protocol::store_commit::StoreAckRef,
     ) -> Result<(), StoreError> {
         let target = self
             .database
@@ -553,10 +553,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn resolve_head_collision(
         &mut self,
         mut candidate: Box<operations::PreparedStoreOperationCommit>,
-        commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        reference: crate::protocol::store_commit::StoreBatchCommitRef,
-        head: crate::protocol::store_commit::StoreDeviceHead,
-        prepared_head: crate::protocol::objects::PreparedExactObject,
+        commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
+        head: coven_protocol::store_commit::StoreDeviceHead,
+        prepared_head: coven_protocol::objects::PreparedExactObject,
         head_prefix: String,
     ) -> Result<operations::StoreOperationPublicationOutcome, StoreError> {
         let database = self.database.clone();
@@ -587,7 +587,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         let nonactivation = observation
             .verified_nonactivation(
-                crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+                coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
                     coord: reference.coord.clone(),
                     object: reference.object.clone(),
                     canonical_signed_bytes: commit.to_bytes(),

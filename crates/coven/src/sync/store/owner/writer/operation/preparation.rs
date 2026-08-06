@@ -1,13 +1,13 @@
 use super::close_prepared_packages;
 use crate::database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use crate::sync::store::operations::{next_store_sequence, successor_store_sequence};
+use crate::sync::store::StoreError;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     commit_semantic_prefix, head_slot_prefix, CirclePackageInput, StoreCommitCoord,
     StoreCommitOperationsInput, StoreCommitOrder, StorePackageInput, SuccessorLink,
 };
-use crate::sync::store::operations::{next_store_sequence, successor_store_sequence};
-use crate::sync::store::StoreError;
 
 use super::AuthorizedWriterOperation;
 
@@ -16,8 +16,8 @@ struct LocalBlobDropRequest {
     namespace: String,
     id: String,
     size: u64,
-    plaintext_hash: crate::protocol::store_commit::ObjectHash,
-    disposition: crate::protocol::blob::DeferredLocalBlobDisposition,
+    plaintext_hash: coven_protocol::store_commit::ObjectHash,
+    disposition: coven_protocol::blob::DeferredLocalBlobDisposition,
 }
 
 impl AuthorizedWriterOperation<'_> {
@@ -43,7 +43,7 @@ impl AuthorizedWriterOperation<'_> {
             ));
         }
         let dependencies =
-            crate::protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
+            coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
                 .map(|frontier| frontier.commits().clone())
                 .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let preparation = async {
@@ -70,7 +70,7 @@ impl AuthorizedWriterOperation<'_> {
                 if matches!(
                     fact.audience_move,
                     Some(crate::database::StoreWriteBlobMoveDestination::Local)
-                ) || fact.blob.provenance != crate::protocol::blob::Provenance::HostProvided
+                ) || fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided
                 {
                     continue;
                 }
@@ -91,11 +91,11 @@ impl AuthorizedWriterOperation<'_> {
                     continue;
                 }
                 let disposition = match fact.blob.fill {
-                    crate::protocol::blob::CacheFill::CacheEager => {
-                        crate::protocol::blob::DeferredLocalBlobDisposition::Cache
+                    coven_protocol::blob::CacheFill::CacheEager => {
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Cache
                     }
-                    crate::protocol::blob::CacheFill::CacheLazy => {
-                        crate::protocol::blob::DeferredLocalBlobDisposition::Drop
+                    coven_protocol::blob::CacheFill::CacheLazy => {
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Drop
                     }
                 };
                 let drop = LocalBlobDropRequest {
@@ -180,7 +180,7 @@ impl AuthorizedWriterOperation<'_> {
 
             let store_package = prepared_packages
                 .iter()
-                .find(|package| package.audience == crate::protocol::circle::Audience::Store)
+                .find(|package| package.audience == coven_protocol::circle::Audience::Store)
                 .map(|package| StorePackageInput {
                     candidate_family,
                     schema_version: db.schema_version(),
@@ -190,7 +190,7 @@ impl AuthorizedWriterOperation<'_> {
             let circle_packages = prepared_packages
                 .iter()
                 .filter_map(|package| {
-                    let crate::protocol::circle::Audience::Circle(circle_id) = package.audience
+                    let coven_protocol::circle::Audience::Circle(circle_id) = package.audience
                     else {
                         return None;
                     };
@@ -372,7 +372,7 @@ fn bind_local_cleanup(
                 ),
             ));
         }
-        drops.push(crate::protocol::blob::DeferredLocalBlobDrop {
+        drops.push(coven_protocol::blob::DeferredLocalBlobDrop {
             namespace: request.namespace,
             id: request.id,
             size: request.size,

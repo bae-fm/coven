@@ -15,7 +15,7 @@ pub(super) fn live_blob_row(
     conn: &Connection,
     table: &str,
     row_id: &str,
-    declaration: &crate::protocol::synced_schema::BlobDecl,
+    declaration: &coven_protocol::synced_schema::BlobDecl,
 ) -> Result<Option<LiveBlobRow>, DbError> {
     let cloud_path = declaration
         .cloud_path_column
@@ -73,7 +73,7 @@ pub(super) fn live_blob_row(
 
 pub(super) fn validate_live_blob_row(
     binding: &RowBlobLocatorBinding,
-    declaration: &crate::protocol::synced_schema::BlobDecl,
+    declaration: &coven_protocol::synced_schema::BlobDecl,
     row: &LiveBlobRow,
     live_audience: &RemoteAudience,
 ) -> Result<(), DbError> {
@@ -96,7 +96,7 @@ pub(super) fn validate_live_blob_locator(
     column: &str,
     row_stamp: &str,
     stored: &StoredBlobRef,
-    declaration: &crate::protocol::synced_schema::BlobDecl,
+    declaration: &coven_protocol::synced_schema::BlobDecl,
     row: &LiveBlobRow,
     live_audience: &RemoteAudience,
 ) -> Result<(), DbError> {
@@ -169,7 +169,7 @@ pub(super) fn validate_stored_locator_on(
 pub(super) fn validate_stored_row_binding_on(
     conn: &Connection,
     binding: &RowBlobLocatorBinding,
-    expected_authority: &crate::protocol::audience_package::PackageAudience,
+    expected_authority: &coven_protocol::audience_package::PackageAudience,
     expected_remote_object_id: ObjectHash,
 ) -> Result<(), DbError> {
     let (audience_authority, remote_object_id): (String, String) = conn
@@ -185,7 +185,7 @@ pub(super) fn validate_stored_row_binding_on(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(DbError::from)?;
-    let actual_authority: crate::protocol::audience_package::PackageAudience =
+    let actual_authority: coven_protocol::audience_package::PackageAudience =
         serde_json::from_str(&audience_authority)
             .map_err(|error| DbError::context("parse stored row blob audience authority", error))?;
     if &actual_authority != expected_authority
@@ -263,7 +263,7 @@ pub(crate) fn load_prepared_audience_objects_on(
 
 pub(crate) fn load_activated_registration_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     reference: &StoreDeviceRegistrationRef,
 ) -> Result<StoreDeviceRegistration, DbError> {
     let (bytes, encoded): (Vec<u8>, String) = conn
@@ -308,7 +308,7 @@ pub(crate) fn previous_row_blob_for_write_on(
         CloudOutboxRecords::new(conn).created_upload_handoff(table, row_id, column, row_stamp)?
     {
         let locator = handoff.stored.locator();
-        if !crate::protocol::blob::locator_describes_row(
+        if !coven_protocol::blob::locator_describes_row(
             locator,
             blob,
             plaintext_size,
@@ -335,7 +335,7 @@ pub(crate) fn previous_row_blob_for_write_on(
     let Some((authority, object_id)) = raw else {
         return Ok(None);
     };
-    let authority: crate::protocol::audience_package::PackageAudience =
+    let authority: coven_protocol::audience_package::PackageAudience =
         serde_json::from_str(&authority)
             .map_err(|error| DbError::context("prior row blob authority", error))?;
     let object_id = object_id
@@ -349,7 +349,7 @@ pub(crate) fn previous_row_blob_for_write_on(
     }
     let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
         .map_err(|error| DbError::context("prior row blob locator", error))?;
-    if !crate::protocol::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash)
+    if !coven_protocol::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash)
     {
         return Ok(None);
     }

@@ -2,8 +2,8 @@ use std::path::Path;
 
 use crate::database::Gates;
 use crate::database::{CloudOutboxRecords, Database, DbError, ExternalBlobRecords};
-use crate::protocol::hlc::UpdatedAtStamper;
 use crate::{Provenance, SyncedTable};
+use coven_protocol::hlc::UpdatedAtStamper;
 
 /// Host SQL against Coven's retained database connection.
 ///

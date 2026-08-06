@@ -126,23 +126,23 @@ pub enum StorePullError {
     #[error("database: {0}")]
     Database(#[from] DbError),
     #[error("Store protocol: {0}")]
-    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("Store protocol root: {0}")]
     ProtocolRoot(#[from] crate::sync::store::protocol_root::StoreProtocolRootError),
     #[error("remote object record: {0}")]
-    RemoteObject(#[from] crate::protocol::remote_object::RemoteObjectRecordError),
+    RemoteObject(#[from] coven_protocol::remote_object::RemoteObjectRecordError),
     #[error("membership chain: {0}")]
     MembershipChain(#[from] crate::sync::store::membership::AnchoredChainError),
     #[error("device join exchange: {0}")]
     DeviceJoinExchange(
-        #[from] crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
+        #[from] coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
     ),
     #[error("Store operation: {0}")]
     Store(#[source] Box<crate::sync::store::StoreError>),
     #[error("serialization: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("row routing key: {0}")]
-    RowRoutingKey(#[from] crate::protocol::circle::RowRoutingKeyError),
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
     /// Pulled Store evidence contradicts itself — a commit outside its own
     /// verified history, a reference that differs from the state it names, a
     /// precondition the pull requires. Invariant text with no source error:
@@ -186,7 +186,7 @@ impl StorePullError {
 #[derive(Debug, thiserror::Error)]
 pub enum StorePullMembershipError {
     #[error("{0}")]
-    State(#[source] crate::protocol::membership::MembershipError),
+    State(#[source] coven_protocol::membership::MembershipError),
     #[error("{0}")]
     Message(String),
 }

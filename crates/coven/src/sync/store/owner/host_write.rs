@@ -5,17 +5,17 @@ use crate::database::{
     DbError, HostWriteBlobTransaction, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWriteBlobMoveDestination,
 };
-use crate::protocol::blob::locator::RemoteAudience;
-use crate::protocol::blob::{Provenance, RowBlobAuthority};
-use crate::protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
 use crate::storage::SyncStorage;
 use coven_foundation::store_dir::StoreDir;
+use coven_protocol::blob::locator::RemoteAudience;
+use coven_protocol::blob::{Provenance, RowBlobAuthority};
+use coven_protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
 
 #[doc(hidden)]
 pub(crate) struct HostWriteBlobStaging {
     runtime: tokio::runtime::Handle,
     storage: std::sync::Arc<dyn SyncStorage>,
-    store_root: crate::protocol::store_commit::StoreRootRef,
+    store_root: coven_protocol::store_commit::StoreRootRef,
     store_dir: StoreDir,
 }
 
@@ -23,7 +23,7 @@ impl HostWriteBlobStaging {
     pub(super) fn new(
         runtime: tokio::runtime::Handle,
         storage: std::sync::Arc<dyn SyncStorage>,
-        store_root: crate::protocol::store_commit::StoreRootRef,
+        store_root: coven_protocol::store_commit::StoreRootRef,
         store_dir: StoreDir,
     ) -> Self {
         Self {
@@ -76,7 +76,7 @@ impl HostWriteBlobStaging {
             moved_rows
                 .get(&(fact.table.clone(), fact.row_id.clone()))
                 .is_some_and(|audience_move| {
-                    audience_move.destination != crate::protocol::circle::Audience::Local
+                    audience_move.destination != coven_protocol::circle::Audience::Local
                 })
         });
         let registration = if remote_destination_exists {
@@ -92,7 +92,7 @@ impl HostWriteBlobStaging {
             };
             let source = source_authority(fact, &audience_move.source)?;
             match &audience_move.destination {
-                crate::protocol::circle::Audience::Local => {
+                coven_protocol::circle::Audience::Local => {
                     self.stage_local_destination(transaction, fact, &source, files)
                         .await?;
                     fact.audience_move = Some(StoreWriteBlobMoveDestination::Local);
@@ -133,7 +133,7 @@ impl HostWriteBlobStaging {
                         )
                         .await
                         .map_err(|error| move_materialization_error(fact, error))?;
-                    if spool_write == crate::protocol::objects::BlobSpoolWrite::Created {
+                    if spool_write == coven_protocol::objects::BlobSpoolWrite::Created {
                         files
                             .created
                             .push(StagedAudienceBlobFile::new(spool_path.clone()));
@@ -152,17 +152,17 @@ impl HostWriteBlobStaging {
     fn destination_protection(
         &self,
         transaction: &HostWriteBlobTransaction<'_, '_>,
-        destination: &crate::protocol::circle::Audience,
+        destination: &coven_protocol::circle::Audience,
         partitions: &[AudiencePartition],
         fact: &StoreWriteBlobFact,
     ) -> Result<(RemoteAudience, BlobSpoolProtection), DbError> {
         match destination {
-            crate::protocol::circle::Audience::Store => self
+            coven_protocol::circle::Audience::Store => self
                 .storage
                 .store_blob_protection()
                 .map(|protection| (RemoteAudience::Store, protection))
                 .map_err(|error| move_materialization_error(fact, error)),
-            crate::protocol::circle::Audience::Circle(circle_id) => {
+            coven_protocol::circle::Audience::Circle(circle_id) => {
                 let partition = partitions
                     .iter()
                     .find(|partition| partition.audience == *destination)
@@ -187,7 +187,7 @@ impl HostWriteBlobStaging {
                     .map_err(|error| move_materialization_error(fact, error))?;
                 Ok((RemoteAudience::Circle(*circle_id), access.blob_protection()))
             }
-            crate::protocol::circle::Audience::Local => {
+            coven_protocol::circle::Audience::Local => {
                 unreachable!("Local handled before protection")
             }
         }
@@ -198,17 +198,17 @@ impl HostWriteBlobStaging {
         transaction: &HostWriteBlobTransaction<'_, '_>,
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, DbError> {
         match source
             .opening_authority(stored)
             .map_err(|error| move_materialization_error(fact, error))?
         {
-            crate::protocol::blob::BlobOpeningAuthority::Store => self
+            coven_protocol::blob::BlobOpeningAuthority::Store => self
                 .storage
                 .store_blob_protection()
                 .map_err(|error| move_materialization_error(fact, error)),
-            crate::protocol::blob::BlobOpeningAuthority::Circle {
+            coven_protocol::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
                 key_fingerprint,
@@ -427,10 +427,10 @@ impl StagedAudienceBlobFile {
 
 fn source_authority(
     fact: &StoreWriteBlobFact,
-    source: &crate::protocol::circle::Audience,
+    source: &coven_protocol::circle::Audience,
 ) -> Result<RowBlobAuthority, DbError> {
     match source {
-        crate::protocol::circle::Audience::Local => Ok(RowBlobAuthority::Local),
+        coven_protocol::circle::Audience::Local => Ok(RowBlobAuthority::Local),
         source => {
             let expected = RemoteAudience::try_from(source.clone())
                 .map_err(|error| move_materialization_error(fact, error))?;
@@ -506,7 +506,7 @@ impl<'a> ExactMovePlaintext<'a> {
             })?;
             hasher.update(&buffer[..read]);
         }
-        let hash = crate::protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
+        let hash = coven_protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
         if size != self.fact.plaintext_size || hash != self.fact.plaintext_hash {
             return Err(move_materialization_error(
                 self.fact,

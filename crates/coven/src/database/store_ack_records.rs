@@ -1,6 +1,6 @@
 use crate::database::local_store_identity::local_store_authority_on;
 use crate::database::query_mapped_rows;
-use crate::protocol::store_commit::CircleAck;
+use coven_protocol::store_commit::CircleAck;
 
 use super::*;
 
@@ -71,9 +71,9 @@ pub(crate) fn verify_next_local_store_ack_on(
 
 pub(super) fn store_ack_first_slot(
     registration: &StoreDeviceRegistration,
-) -> Result<&crate::protocol::objects::ObjectSlot, DbError> {
+) -> Result<&coven_protocol::objects::ObjectSlot, DbError> {
     match &registration.acknowledgements {
-        crate::protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements { first_slot } => {
+        coven_protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements { first_slot } => {
             Ok(first_slot)
         }
         _ => Err(DbError::Message(
@@ -84,9 +84,9 @@ pub(super) fn store_ack_first_slot(
 
 pub(crate) fn store_snapshot_first_slot(
     registration: &StoreDeviceRegistration,
-) -> Result<&crate::protocol::objects::ObjectSlot, DbError> {
+) -> Result<&coven_protocol::objects::ObjectSlot, DbError> {
     match &registration.snapshots {
-        crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots { first_slot } => {
+        coven_protocol::store_commit::DeviceStreamAnchor::StoreSnapshots { first_slot } => {
             Ok(first_slot)
         }
         _ => Err(DbError::Message(
@@ -126,7 +126,7 @@ pub(crate) fn load_published_store_ack_on(
 pub(crate) fn finish_outbound_store_ack_on(
     conn: &Connection,
     reference: &StoreAckRef,
-    successor_slot: &crate::protocol::objects::ObjectSlot,
+    successor_slot: &coven_protocol::objects::ObjectSlot,
 ) -> Result<(), DbError> {
     let removed = conn
         .execute(
@@ -161,7 +161,7 @@ pub(crate) fn finish_outbound_store_ack_on(
 
 pub(crate) fn load_outbound_circle_acks_on(
     conn: &Connection,
-) -> Result<Vec<crate::protocol::prepared_commit::CircleAckActivation>, DbError> {
+) -> Result<Vec<coven_protocol::prepared_commit::CircleAckActivation>, DbError> {
     let authority = local_store_authority_on(conn)?;
     let registration = authority.value();
     let root = &registration.store_root;
@@ -180,7 +180,7 @@ pub(crate) fn load_outbound_circle_acks_on(
     )?;
     let mut activations = Vec::with_capacity(rows.len());
     for (reference, bytes, prepared) in rows {
-        let reference: crate::protocol::store_commit::CircleAckRef =
+        let reference: coven_protocol::store_commit::CircleAckRef =
             serde_json::from_str(&reference)
                 .map_err(|error| DbError::context("outbound Circle acknowledgement ref", error))?;
         let prepared: PreparedExactObject = serde_json::from_str(&prepared)
@@ -192,7 +192,7 @@ pub(crate) fn load_outbound_circle_acks_on(
         }
         let value = CircleAck::parse_at(&bytes, root, &reference, registration)
             .map_err(|error| DbError::context("outbound Circle acknowledgement", error))?;
-        activations.push(crate::protocol::prepared_commit::CircleAckActivation {
+        activations.push(coven_protocol::prepared_commit::CircleAckActivation {
             reference,
             ack: ExactProtocolObject {
                 value,
@@ -209,7 +209,7 @@ pub(crate) fn load_outbound_circle_acks_on(
 /// `expected`; `mismatch` is the error when another acknowledgement is queued.
 pub(crate) fn load_expected_outbound_store_ack_on(
     conn: &Connection,
-    expected: &crate::protocol::store_commit::StoreAckRef,
+    expected: &coven_protocol::store_commit::StoreAckRef,
     mismatch: &str,
 ) -> Result<OutboundStoreAck, DbError> {
     let outbound = load_outbound_store_ack_on(conn)?
@@ -225,7 +225,7 @@ pub(crate) fn load_expected_outbound_store_ack_on(
 /// when that row is gone.
 pub(crate) fn set_outbound_store_ack_activation_on(
     conn: &Connection,
-    expected: &crate::protocol::store_commit::StoreAckRef,
+    expected: &coven_protocol::store_commit::StoreAckRef,
     activation: &crate::database::OutboundStoreAckActivation,
     missing: &str,
 ) -> Result<(), DbError> {

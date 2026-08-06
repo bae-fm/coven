@@ -10,7 +10,6 @@ use tracing::{info, warn};
 use crate::database::supported_version;
 use crate::database::Database;
 use crate::join_code::InviteCode;
-use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::store::{
@@ -24,6 +23,7 @@ use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
+use coven_protocol::synced_schema::SyncedTable;
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -51,7 +51,7 @@ pub enum BootstrapError {
     #[error("Store device join transport: {0}")]
     DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
     #[error("storage: {0}")]
-    Storage(#[from] crate::protocol::objects::StorageError),
+    Storage(#[from] coven_protocol::objects::StorageError),
     #[error("config: {0}")]
     Config(#[from] ConfigError),
     #[error("keyring: {0}")]
@@ -551,7 +551,7 @@ impl DeviceJoinClient {
         on_status: impl Fn(&str),
         cancel: &watch::Receiver<bool>,
     ) -> Result<
-        crate::protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
+        coven_protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
         BootstrapError,
     > {
         let offer = &bootstrap.bootstrap.request.approval.request.offer;
@@ -599,8 +599,8 @@ impl DeviceJoinClient {
             .install(
                 &store_dir,
                 self.synced_tables.clone(),
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 device_id,
                 self.clock.clone(),
                 &self.migrations,
@@ -663,8 +663,8 @@ impl DeviceJoinClient {
         let db = Database::open(
             &db_path,
             self.synced_tables.clone(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id.clone(),
             self.clock.clone(),
             &self.migrations,

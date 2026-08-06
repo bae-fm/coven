@@ -4,15 +4,15 @@ use super::*;
 /// The blob's own locator names its audience, and a commit carries at most one
 /// package per audience, so the audience selects the package outright.
 pub(super) fn audience_blob_binding_package(
-    commit: &crate::protocol::store_commit::StoreBatchCommit,
-    audience: crate::protocol::blob::locator::RemoteAudience,
+    commit: &coven_protocol::store_commit::StoreBatchCommit,
+    audience: coven_protocol::blob::locator::RemoteAudience,
 ) -> Option<AudienceBlobBindingPackage> {
     match audience {
-        crate::protocol::blob::locator::RemoteAudience::Store => commit
+        coven_protocol::blob::locator::RemoteAudience::Store => commit
             .store_package()
             .cloned()
             .map(AudienceBlobBindingPackage::Store),
-        crate::protocol::blob::locator::RemoteAudience::Circle(circle_id) => commit
+        coven_protocol::blob::locator::RemoteAudience::Circle(circle_id) => commit
             .circle_packages()
             .iter()
             .find(|package| package.circle_id == circle_id)
@@ -88,12 +88,12 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             {
                 if matches!(
                     &remote,
-                    crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                    coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
                         if matches!(
                             record.identity.domain,
-                            crate::protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
-                                | crate::protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
-                                | crate::protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
+                            coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
                         )
                 ) {
                     database
@@ -203,7 +203,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         }
 
         let plan = self.writer.prepare_plan().await?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(StoreReclaimError::Authorization(
                 "provider execution requires resolved Store membership".to_string(),
@@ -280,7 +280,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     root.store_root_hash,
                     ProtocolObjectDomain::StorePackage,
                 ),
-                crate::protocol::store_commit::package_semantic_prefix(
+                coven_protocol::store_commit::package_semantic_prefix(
                     target.package.candidate_family,
                     &target.activation.coord.stream_id.to_string(),
                     target.activation.coord.sequence(),
@@ -308,7 +308,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         root.store_root_hash,
                         ProtocolObjectDomain::CirclePackage,
                     ),
-                    crate::protocol::store_commit::circle_package_semantic_prefix(
+                    coven_protocol::store_commit::circle_package_semantic_prefix(
                         target.package.circle_id,
                         target.package.package.candidate_family,
                         &target.activation.coord.stream_id.to_string(),
@@ -341,9 +341,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         root.store_root_hash,
                         ProtocolObjectDomain::CircleBootstrapImage,
                     ),
-                    crate::protocol::store_commit::semantic_prefix_from_exact_object(
+                    coven_protocol::store_commit::semantic_prefix_from_exact_object(
                         &target.coverage.bootstrap.image.object,
-                        crate::protocol::objects::ProtectedObjectDomain::CircleBootstrapImage
+                        coven_protocol::objects::ProtectedObjectDomain::CircleBootstrapImage
                             .extension(),
                     )
                     .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
@@ -368,9 +368,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         root.store_root_hash,
                         ProtocolObjectDomain::CircleSnapshotImage,
                     ),
-                    crate::protocol::store_commit::semantic_prefix_from_exact_object(
+                    coven_protocol::store_commit::semantic_prefix_from_exact_object(
                         &target.image.object,
-                        crate::protocol::objects::ProtectedObjectDomain::CircleSnapshotImage
+                        coven_protocol::objects::ProtectedObjectDomain::CircleSnapshotImage
                             .extension(),
                     )
                     .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
@@ -396,7 +396,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
 
     pub(super) async fn choose_snapshot(
         &mut self,
-        registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
+        registrations: &[coven_protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
         let storage = self.storage.clone();
         let root = self.root.clone();

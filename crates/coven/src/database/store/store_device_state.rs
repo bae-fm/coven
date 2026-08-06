@@ -1,5 +1,5 @@
 use crate::database::*;
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     CommitFrontier, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceExclusionProposalId,
     StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceStateRef, StoreHistoryCut,
     VerifiedStoreDeviceOperations,
@@ -51,7 +51,7 @@ pub(super) fn load_store_device_snapshot_on(
 
 pub(super) fn store_device_state_for_history_cut_on(
     conn: &Connection,
-    cut: &crate::protocol::store_commit::StoreHistoryCut,
+    cut: &coven_protocol::store_commit::StoreHistoryCut,
 ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
     let genesis = load_store_device_genesis_state_on(conn)?;
     let frontier = &cut.0;
@@ -98,7 +98,7 @@ pub(super) fn load_declared_store_device_state_on(
 
 pub(super) fn load_store_device_exclusion_freezes_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
 ) -> Result<BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalAck>, DbError> {
     let mut statement = conn
         .prepare(
@@ -118,7 +118,7 @@ pub(super) fn load_store_device_exclusion_freezes_on(
     let mut existing = BTreeMap::new();
     for row in rows {
         let (proposal_id, proposal_ref, target_cut) = row.map_err(DbError::from)?;
-        let proposal: crate::protocol::store_commit::StoreDeviceExclusionProposalRef =
+        let proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef =
             serde_json::from_str(&proposal_ref)
                 .map_err(|error| DbError::context("stored device exclusion proposal ref", error))?;
         proposal
@@ -133,10 +133,10 @@ pub(super) fn load_store_device_exclusion_freezes_on(
             .map_err(|error| DbError::context("stored device exclusion target cut", error))?;
         let target_frontier = &target_cut.0;
         let target_stream =
-            crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
                 &proposal.target,
-                crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
         if target_frontier.len() > 1
             || target_frontier
@@ -160,7 +160,7 @@ pub(super) fn load_store_device_exclusion_freezes_on(
 
 pub(super) fn apply_store_device_exclusion_freezes_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     state: &ResolvedStoreDeviceState,
     operations: &VerifiedStoreDeviceOperations,
 ) -> Result<(), DbError> {
@@ -204,7 +204,7 @@ pub(super) fn apply_store_device_exclusion_freezes_on(
                     record.registration == local_registration
                         && matches!(
                             record.status,
-                            crate::protocol::store_commit::StoreDeviceStatus::Active
+                            coven_protocol::store_commit::StoreDeviceStatus::Active
                         )
                 });
             if !local_was_active {
@@ -219,10 +219,10 @@ pub(super) fn apply_store_device_exclusion_freezes_on(
                 ));
             }
             let target_stream =
-                crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+                coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                     root.store_root_hash,
                     &reference.target,
-                    crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                    coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
                 );
             let target =
                 StoreDatabase::latest_position_for_device_on(conn, &target_stream.to_string())?;

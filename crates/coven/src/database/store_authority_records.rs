@@ -25,7 +25,7 @@ impl DurableFounderGraph {
                 "founder Store root differs from its prepared exact object".to_string(),
             ));
         }
-        let root_ref = crate::protocol::store_commit::StoreRootRef {
+        let root_ref = coven_protocol::store_commit::StoreRootRef {
             store_root_id: root.descriptor.store_root_id(),
             store_root_hash: root.object_hash(),
             object: self.root.object.clone(),
@@ -43,7 +43,7 @@ impl DurableFounderGraph {
             || registration.provider != root.descriptor.founder_provider_admin.provider
             || !matches!(
                 registration.origin,
-                crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
+                coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
             )
         {
             return Err(DbError::Message(
@@ -99,7 +99,7 @@ impl DurableFounderGraph {
             let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
                 DbError::Message("founder entry has no Store membership anchor".to_string())
             })?;
-            let crate::protocol::store_commit::GrantStreamAnchor::StoreMembership { first_slot } =
+            let coven_protocol::store_commit::GrantStreamAnchor::StoreMembership { first_slot } =
                 anchor
             else {
                 return Err(DbError::Message(
@@ -118,11 +118,11 @@ impl DurableFounderGraph {
                 || head.object != *head.prepared.reference()
                 || head.object.slot() != &first_slot
                 || parsed_head.body.successor.activation
-                    != crate::protocol::store_commit::StreamActivation::grant_authorized(
+                    != coven_protocol::store_commit::StreamActivation::grant_authorized(
                         root_ref.store_root_hash,
                         registration_ref.clone(),
                         parsed_entry.author_owner_grant.clone(),
-                        crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
+                        coven_protocol::store_commit::GrantStreamAnchor::StoreMembership {
                             first_slot: first_slot.clone(),
                         },
                     )
@@ -227,7 +227,7 @@ pub(crate) fn load_store_root_authority_on(
     conn: &Connection,
 ) -> Result<
     Option<(
-        crate::protocol::store_commit::StoreRootRef,
+        coven_protocol::store_commit::StoreRootRef,
         StoreProtocolRoot,
     )>,
     DbError,
@@ -260,7 +260,7 @@ pub(crate) fn load_store_root_authority_on(
             ));
         }
         Ok((
-            crate::protocol::store_commit::StoreRootRef {
+            coven_protocol::store_commit::StoreRootRef {
                 store_root_id: value.descriptor.store_root_id(),
                 store_root_hash,
                 object,
@@ -273,7 +273,7 @@ pub(crate) fn load_store_root_authority_on(
 
 pub(crate) fn required_store_root_authority_on(
     conn: &Connection,
-) -> Result<crate::protocol::store_commit::StoreRootRef, DbError> {
+) -> Result<coven_protocol::store_commit::StoreRootRef, DbError> {
     load_store_root_authority_on(conn)?
         .map(|(reference, _)| reference)
         .ok_or(DbError::StoreRootHashMissing)
@@ -281,7 +281,7 @@ pub(crate) fn required_store_root_authority_on(
 
 pub(crate) fn install_store_root_authority_on(
     conn: &Connection,
-    reference: &crate::protocol::store_commit::StoreRootRef,
+    reference: &coven_protocol::store_commit::StoreRootRef,
     bytes: &[u8],
 ) -> Result<(), DbError> {
     let value = StoreProtocolRoot::parse(bytes)
@@ -346,13 +346,13 @@ pub(super) fn validate_replay_authority_on(
             |row| row.get(0),
         )
         .map_err(DbError::from)?;
-    let authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation =
+    let authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation =
         serde_json::from_str(&authority).map_err(|error| {
             DbError::context("retained replay founder activation authority", error)
         })?;
     if founder.store_root != root_ref
         || authority
-            != (crate::protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
+            != (coven_protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
                 root: root_ref.clone(),
             })
     {
@@ -569,7 +569,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
 
 pub(crate) fn install_store_founder_state_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     founder_reference: &StoreDeviceRegistrationRef,
     founder: &StoreDeviceRegistration,
     founder_bytes: &[u8],
@@ -589,7 +589,7 @@ pub(crate) fn install_store_founder_state_on(
         ));
     }
     let founder_authority =
-        crate::protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
+        coven_protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
             root: root.clone(),
         };
     let founder_values = (
@@ -736,7 +736,7 @@ pub(crate) fn load_local_store_founder_graph_on(
             "local founder Store root hash differs from its bytes".to_string(),
         ));
     }
-    let root_ref = crate::protocol::store_commit::StoreRootRef {
+    let root_ref = coven_protocol::store_commit::StoreRootRef {
         store_root_id: root_value.descriptor.store_root_id(),
         store_root_hash,
         object: root_prepared.reference().clone(),

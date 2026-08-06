@@ -1,11 +1,11 @@
 //! Durable creation and exact opening of the Store protocol root.
 
-use crate::protocol::objects::ProtocolObjectDomain;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::store_commit::{
+use crate::storage::SyncStorage;
+use coven_protocol::objects::ProtocolObjectDomain;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::store_commit::{
     ObjectHash, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
 };
-use crate::storage::SyncStorage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreProtocolRootError {
@@ -24,7 +24,7 @@ pub enum StoreProtocolRootError {
 #[derive(Clone)]
 pub(crate) struct VerifiedStoreRoot {
     reference: StoreRootRef,
-    object: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
+    object: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
 }
 
 impl VerifiedStoreRoot {
@@ -50,7 +50,7 @@ impl VerifiedStoreRoot {
             .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
             .filter(|registration| registration.is_activated())
         {
-            let registration = crate::protocol::store_commit::StoreDeviceRegistration::parse_at(
+            let registration = coven_protocol::store_commit::StoreDeviceRegistration::parse_at(
                 &local.registration_bytes,
                 expected,
                 local.device_id,
@@ -75,7 +75,7 @@ impl VerifiedStoreRoot {
 
     pub(crate) fn from_verified_object(
         reference: StoreRootRef,
-        object: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        object: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
     ) -> Result<Self, StoreProtocolError> {
         let verified_reference = StoreRootRef {
             store_root_id: object.value.descriptor.store_root_id(),
@@ -98,7 +98,7 @@ impl VerifiedStoreRoot {
         &self.object.value
     }
 
-    pub(crate) fn object(&self) -> &crate::protocol::objects::VerifiedObject<StoreProtocolRoot> {
+    pub(crate) fn object(&self) -> &coven_protocol::objects::VerifiedObject<StoreProtocolRoot> {
         &self.object
     }
 }
@@ -106,8 +106,8 @@ impl VerifiedStoreRoot {
 pub(super) async fn load_pinned_store_protocol_root(
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
-) -> Result<crate::protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+) -> Result<coven_protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
     );
@@ -115,19 +115,19 @@ pub(super) async fn load_pinned_store_protocol_root(
         .read_protocol_object(
             &context,
             &expected.object,
-            crate::protocol::store_commit::store_protocol_root_logical_key(),
+            coven_protocol::store_commit::store_protocol_root_logical_key(),
         )
         .await
         .map_err(StoreObjectError::from)?;
     let verified = StoreProtocolRoot::parse_pinned(&bytes, expected).map_err(|source| {
         StoreObjectError::InvalidObject {
-            semantic_prefix: crate::protocol::store_commit::store_protocol_root_logical_key()
+            semantic_prefix: coven_protocol::store_commit::store_protocol_root_logical_key()
                 .to_string(),
             key: expected.object.slot().logical_key().to_string(),
             source: Box::new(source),
         }
     })?;
-    Ok(crate::protocol::objects::VerifiedObject {
+    Ok(coven_protocol::objects::VerifiedObject {
         value: verified,
         bytes,
         semantic_hash: expected.store_root_hash,
@@ -139,15 +139,15 @@ pub(super) async fn load_exact_store_protocol_root(
     storage: &dyn SyncStorage,
     expected: &StoreRootRef,
     expected_sync_routing_hash: ObjectHash,
-) -> Result<crate::protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
+) -> Result<coven_protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
     let verified = load_pinned_store_protocol_root(storage, expected).await?;
     if verified.value.descriptor.sync_routing_hash != expected_sync_routing_hash {
         return Err(StoreObjectError::InvalidObject {
-            semantic_prefix: crate::protocol::store_commit::store_protocol_root_logical_key()
+            semantic_prefix: coven_protocol::store_commit::store_protocol_root_logical_key()
                 .to_string(),
             key: expected.object.slot().logical_key().to_string(),
             source: Box::new(
-                crate::protocol::store_commit::StoreProtocolError::SyncRoutingMismatch {
+                coven_protocol::store_commit::StoreProtocolError::SyncRoutingMismatch {
                     expected: expected_sync_routing_hash,
                     actual: verified.value.descriptor.sync_routing_hash,
                 },

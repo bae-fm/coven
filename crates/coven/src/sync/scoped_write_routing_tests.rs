@@ -6,11 +6,11 @@
 
 use crate::database::StoreDatabase;
 use crate::database::*;
-use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
-use crate::protocol::synced_schema::SyncedTable;
 use crate::sync::test_helpers::{test_cloud_home, TestStore};
 use crate::{Migration, WriteStatus};
 use coven_keys::encryption::EncryptionService;
+use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
+use coven_protocol::synced_schema::SyncedTable;
 use std::path::Path;
 
 async fn capture_scoped_write_then_reopen(
@@ -24,7 +24,7 @@ async fn capture_scoped_write_then_reopen(
     let path = temp.path().join(format!("{name}.db"));
     let tables = vec![SyncedTable::new(
         "accounts",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
     let migrations = vec![Migration::sql(
@@ -40,7 +40,7 @@ async fn capture_scoped_write_then_reopen(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -98,7 +98,7 @@ async fn capture_scoped_write_then_reopen(
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         format!("{name}-device"),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -115,9 +115,9 @@ fn assert_prepared_partitions(
         .iter()
         .map(|partition| {
             let audience = match partition.audience {
-                crate::protocol::circle::Audience::Store => "store".to_string(),
-                crate::protocol::circle::Audience::Circle(circle) => circle.to_string(),
-                crate::protocol::circle::Audience::Local => "local".to_string(),
+                coven_protocol::circle::Audience::Store => "store".to_string(),
+                coven_protocol::circle::Audience::Circle(circle) => circle.to_string(),
+                coven_protocol::circle::Audience::Local => "local".to_string(),
             };
             (
                 audience,
@@ -221,14 +221,14 @@ async fn merge_local_only_scoped_write_is_not_pending() {
 async fn circle_only_write_emits_a_mirror_only_store_package() {
     let tables = vec![SyncedTable::new(
         "accounts",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
     let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "circle-only-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -333,14 +333,14 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
 async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     let tables = vec![SyncedTable::new(
         "accounts",
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
     let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "move-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -444,17 +444,17 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
     let tables = vec![
         SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .scoped_by("audience"),
         SyncedTable::new(
             "categories",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .scoped_by("audience"),
         SyncedTable::new(
             "comments",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .inherits_audience_through("note_id"),
     ];
@@ -462,7 +462,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "foreign-key-move-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(

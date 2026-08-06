@@ -434,7 +434,7 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn read_protocol_slot(
         &self,
         context: &ProtocolObjectContext,
-        slot: &crate::protocol::objects::ObjectSlot,
+        slot: &coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<(Vec<u8>, ExactObjectRef), StorageError> {
         self.storage

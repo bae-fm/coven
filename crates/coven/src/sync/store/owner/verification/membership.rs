@@ -1,15 +1,15 @@
 use super::StoreCommitVerifier;
-use crate::protocol::membership::{
+use crate::storage::run_blocking_object_verification;
+use coven_protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipGrantId, MembershipHeadRef,
     StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
-use crate::protocol::objects::{
+use coven_protocol::objects::{
     ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError, VerifiedObject,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     membership_entry_semantic_prefix, membership_resolution_semantic_prefix, StoreProtocolError,
 };
-use crate::storage::run_blocking_object_verification;
 
 pub(crate) struct StoreMembershipObjectVerifier<'operation, 'storage> {
     commit_verifier: &'operation StoreCommitVerifier<'storage>,
@@ -45,9 +45,9 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
                 coord.entry_hash,
                 move |bytes| {
                     let entry: MembershipEntry =
-                        crate::protocol::objects::decode_protocol_object(bytes)?;
+                        coven_protocol::objects::decode_protocol_object(bytes)?;
                     if entry.coord() != expected_coord
-                        || !crate::protocol::membership::verify_membership_entry(&entry)
+                        || !coven_protocol::membership::verify_membership_entry(&entry)
                     {
                         return Err(StoreProtocolError::Malformed(
                             "exact membership entry differs from its reference".to_string(),
@@ -82,7 +82,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
                 reference.resolution_hash,
                 move |bytes| {
                     let resolution: StoreMembershipConflictResolution =
-                        crate::protocol::objects::decode_protocol_object(bytes)?;
+                        coven_protocol::objects::decode_protocol_object(bytes)?;
                     if resolution.store_root_hash != store_root_hash
                         || resolution.conflict_hash != expected.conflict_hash
                         || resolution.resolver_pubkey != expected.resolver_pubkey
@@ -102,7 +102,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
     pub(crate) async fn load_head_for_registration(
         &self,
         reference: &MembershipHeadRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<VerifiedObject<AuthorHead>, StoreObjectError> {
         let semantic_prefix = reference
             .object
@@ -130,8 +130,8 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
                 semantic_prefix,
                 reference.head_hash,
                 move |bytes| {
-                    let head: AuthorHead = crate::protocol::objects::decode_protocol_object(bytes)?;
-                    crate::protocol::objects::verify_membership_head_reference(
+                    let head: AuthorHead = coven_protocol::objects::decode_protocol_object(bytes)?;
+                    coven_protocol::objects::verify_membership_head_reference(
                         &head,
                         &expected_coord,
                         expected_head_hash,
@@ -174,14 +174,14 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         let head: AuthorHead = run_blocking_object_verification(
             semantic_prefix,
             &reference.object,
-            Box::new(move || crate::protocol::objects::decode_protocol_object(&parse_bytes)),
+            Box::new(move || coven_protocol::objects::decode_protocol_object(&parse_bytes)),
         )
         .await?;
         let registration = self
             .commit_verifier
             .load_registration(&head.body.author_registration)
             .await?;
-        crate::protocol::objects::verify_membership_head_reference(
+        coven_protocol::objects::verify_membership_head_reference(
             &head,
             &reference.coord,
             reference.head_hash,
@@ -202,10 +202,10 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
 
     pub(crate) async fn load_head_at_slot(
         &self,
-        slot: &crate::protocol::objects::ObjectSlot,
+        slot: &coven_protocol::objects::ObjectSlot,
         author: &str,
         grant: &MembershipGrantId,
-        stream_id: crate::protocol::membership::AuthorStreamId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
         sequence: u64,
     ) -> Result<VerifiedObject<AuthorHead>, StoreObjectError> {
         let semantic_prefix = slot.logical_key().strip_suffix(".json").ok_or_else(|| {
@@ -229,7 +229,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         let head: AuthorHead = run_blocking_object_verification(
             semantic_prefix,
             &object,
-            Box::new(move || crate::protocol::objects::decode_protocol_object(&parse_bytes)),
+            Box::new(move || coven_protocol::objects::decode_protocol_object(&parse_bytes)),
         )
         .await?;
         let coord = head.entry_coord();
@@ -251,7 +251,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             .load_registration(&head.body.author_registration)
             .await?;
         let head_hash = head.head_hash();
-        crate::protocol::objects::verify_membership_head_reference(
+        coven_protocol::objects::verify_membership_head_reference(
             &head,
             &coord,
             head_hash,

@@ -41,7 +41,7 @@ pub enum DeviceJoinError {
     #[error("device join activation is not materialized in the installed Store database")]
     ActivationNotMaterialized,
     #[error(transparent)]
-    Object(#[from] crate::protocol::objects::StoreObjectError),
+    Object(#[from] coven_protocol::objects::StoreObjectError),
     #[error(transparent)]
     Registration(#[from] crate::sync::store::StoreRegistrationError),
     #[error(transparent)]
@@ -49,9 +49,9 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Outbound(#[from] crate::sync::store::StoreError),
     #[error(transparent)]
-    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error(transparent)]
-    Storage(#[from] crate::protocol::objects::StorageError),
+    Storage(#[from] coven_protocol::objects::StorageError),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
 }
@@ -60,21 +60,21 @@ impl DeviceJoinError {
     /// Classify an exact create-and-readback failure: an object that opened to
     /// other bytes is the caller's `mismatch` verdict; every other failure is
     /// the storage failure itself.
-    pub(crate) fn readback(error: crate::protocol::objects::StorageError, mismatch: Self) -> Self {
+    pub(crate) fn readback(error: coven_protocol::objects::StorageError, mismatch: Self) -> Self {
         match error {
-            crate::protocol::objects::StorageError::ReadbackMismatch(_) => mismatch,
+            coven_protocol::objects::StorageError::ReadbackMismatch(_) => mismatch,
             error => Self::Storage(error),
         }
     }
 }
 
-impl From<crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError>
+impl From<coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError>
     for DeviceJoinError
 {
     fn from(
-        error: crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
+        error: coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
     ) -> Self {
-        use crate::protocol::store_commit::device_join_exchange::DeviceJoinExchangeError as E;
+        use coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError as E;
         match error {
             E::InvalidSignature => DeviceJoinError::InvalidSignature,
             E::OfferMismatch => DeviceJoinError::OfferMismatch,

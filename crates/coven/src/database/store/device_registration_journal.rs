@@ -1,7 +1,5 @@
 use crate::database::*;
-use crate::protocol::store_commit::{
-    StoreAck, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-};
+use coven_protocol::store_commit::{StoreAck, StoreDeviceRegistration, StoreDeviceRegistrationRef};
 use rusqlite::OptionalExtension;
 
 use super::*;
@@ -92,7 +90,7 @@ impl LocalRegistrationRecord {
         &self,
         conn: &rusqlite::Connection,
         subject: &str,
-    ) -> Result<crate::protocol::store_commit::StoreRootRef, DbError> {
+    ) -> Result<coven_protocol::store_commit::StoreRootRef, DbError> {
         let root = required_store_root_authority_on(conn)?;
         if self.registration.value.store_root != root {
             return Err(DbError::Message(format!(
@@ -227,9 +225,8 @@ impl StoreDatabase {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let root = record.require_installed_store_root(&tx, SUBJECT)?;
-                let crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
-                    ..
-                } = &record.registration().origin
+                let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } =
+                    &record.registration().origin
                 else {
                     return Err(DbError::Message(
                         "existing local founder device has a non-founder origin".to_string(),
@@ -243,7 +240,7 @@ impl StoreDatabase {
                     ));
                 }
                 let authority =
-                    crate::protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
+                    coven_protocol::store_commit::StoreDeviceRegistrationActivation::Founder {
                         root: root.clone(),
                     };
                 let objects = record.columns(SUBJECT)?;
@@ -349,16 +346,16 @@ impl StoreDatabase {
         registration: ExactProtocolObject<StoreDeviceRegistration>,
         initial_ack_ref: StoreAckRef,
         initial_ack: ExactProtocolObject<StoreAck>,
-        activation: crate::protocol::store_commit::StoreDeviceRegistrationActivation,
+        activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
     ) -> Result<bool, DbError> {
         let (
-            crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+            coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
                 recovery_id: origin_recovery_id,
                 recovery_slot,
                 owner_grant,
                 ..
             },
-            crate::protocol::store_commit::StoreDeviceRegistrationActivation::Recovery {
+            coven_protocol::store_commit::StoreDeviceRegistrationActivation::Recovery {
                 recovery_id: activation_recovery_id,
                 node,
             },

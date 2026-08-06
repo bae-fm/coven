@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::protocol::circle::{CircleControlCoord, CircleInfo, CircleRole};
 use crate::sync::store::Store;
+use coven_protocol::circle::{CircleControlCoord, CircleInfo, CircleRole};
 
 const ROUTING_KEY: [u8; 32] = [42; 32];
 
@@ -495,9 +495,9 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
 /// successor.
 fn open_routing_db() -> Database {
     crate::sync::test_helpers::open_test_db_schema(
-        vec![crate::protocol::synced_schema::SyncedTable::new(
+        vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
         vec![crate::Migration::sql(
@@ -514,8 +514,8 @@ fn open_routing_db() -> Database {
 
 #[tokio::test]
 async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
-    use crate::protocol::membership::MemberRole;
     use crate::sync::cycle::{PreparedSyncComponents, StoreInitialization};
+    use coven_protocol::membership::MemberRole;
 
     let db1 = open_routing_db();
     let (store, _home, founder, journal) = persist_merge_operation(&db1, "resolve-closing").await;
@@ -665,7 +665,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
             .expect("branch is retained");
         if matches!(
             activation.control.value.state(),
-            crate::protocol::circle::CircleControlState::EpochClose(_)
+            coven_protocol::circle::CircleControlState::EpochClose(_)
         ) {
             closing.push(branch.clone());
         }
@@ -727,14 +727,14 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
             .expect("read post-cancellation branch activation")
             .expect("post-cancellation branch is retained");
         match activation.control.value.state() {
-            crate::protocol::circle::CircleControlState::ActiveEpoch(_) => {
+            coven_protocol::circle::CircleControlState::ActiveEpoch(_) => {
                 assert!(
                     reopened.replace(branch.clone()).is_none(),
                     "cancellation produces one active successor"
                 );
             }
-            crate::protocol::circle::CircleControlState::EpochClose(_) => closing_count += 1,
-            crate::protocol::circle::CircleControlState::Deleted(_) => {
+            coven_protocol::circle::CircleControlState::EpochClose(_) => closing_count += 1,
+            coven_protocol::circle::CircleControlState::Deleted(_) => {
                 panic!("cancellation cannot introduce a deleted branch")
             }
         }

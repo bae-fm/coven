@@ -13,18 +13,18 @@ use crate::database::{
     update_remote_object_on, BlobActivation, CloudOutboxRecords, CompletePreparedStoreWriteOutcome,
     Database, DbError, PreparedAudienceBlob, RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
 };
-use crate::protocol::remote_object::remote_object_id;
-use crate::protocol::store_commit::{
+use coven_protocol::remote_object::remote_object_id;
+use coven_protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceHead, VerifiedStoreBatchCommit,
 };
-use crate::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
+use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 
 impl StoreDatabase {
     pub(crate) async fn complete_prepared_store_write(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         accepted: StoreBatchCommitRef,
-        nonactivations: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
+        nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<CompletePreparedStoreWriteOutcome, DbError> {
         let nonactivations = nonactivations
             .into_iter()
@@ -160,7 +160,7 @@ impl StoreDatabase {
                         || accepted != authority.reference
                         || !matches!(
                             &authority.commit.body,
-                            crate::protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
+                            coven_protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
                         )
                     {
                         return Err(DbError::Message(
@@ -280,10 +280,10 @@ impl StoreDatabase {
                 let registration =
                     load_activated_registration_on(&tx, &root, &unverified.author_registration)?;
                 let expected_stream =
-                    crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+                    coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                         root.store_root_hash,
                         &unverified.author_registration,
-                        crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                        coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
                     );
                 if accepted.coord.stream_id != expected_stream
                     || accepted.object != *commit.prepared().reference()
@@ -510,7 +510,7 @@ impl StoreDatabase {
     pub(crate) async fn mark_merge_candidate_conflict(
         &self,
         write_id: WriteId,
-        nonactivations: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
+        nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<(), DbError> {
         let first = nonactivations.first().ok_or_else(|| {
             DbError::Message("Merge candidate conflict has no verified candidates".to_string())
@@ -520,21 +520,21 @@ impl StoreDatabase {
             .cloned()
             .map_err(|error| DbError::Message(error.to_string()))?;
         let winner_head = match first.proof() {
-            crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+            coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
                 winner_head,
             } => winner_head.clone(),
-            crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. } => {
+            coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. } => {
                 return Err(DbError::Message(
                     "Merge slot conflict cannot carry author-exclusion evidence".to_string(),
                 ));
             }
-            crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {
+            coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. } => {
                 return Err(DbError::Message(
                     "Merge slot conflict cannot carry membership-grant revocation evidence"
                         .to_string(),
                 ));
             }
-            crate::protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+            coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
                 return Err(DbError::Message(
                     "Merge slot conflict cannot carry dependent-retraction evidence".to_string(),
                 ));

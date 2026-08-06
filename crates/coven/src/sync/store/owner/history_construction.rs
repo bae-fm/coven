@@ -1,5 +1,5 @@
-use crate::protocol::store_commit::StoreRootRef;
 use crate::storage::SyncStorage;
+use coven_protocol::store_commit::StoreRootRef;
 
 use super::pull::StorePullError;
 use super::verification::StoreCommitVerifier;

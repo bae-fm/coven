@@ -1,22 +1,22 @@
 use std::collections::BTreeSet;
 
 use crate::database::{persist_exact_remote_object_on, DbError};
-use crate::protocol::remote_object::RemoteObjectRecord;
+use coven_protocol::remote_object::RemoteObjectRecord;
 
 use super::StoreDatabase;
 
 impl StoreDatabase {
     pub(crate) async fn load_owner_promotion_journal(
         &self,
-        promotion_id: crate::protocol::store_commit::OwnerPromotionId,
-    ) -> Result<Option<crate::protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
+        promotion_id: coven_protocol::store_commit::OwnerPromotionId,
+    ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
         let key = format!("owner_promotion/{promotion_id}");
         self.connection
             .call(move |conn| {
                 crate::database::get_protocol_state_on(conn, &key)?
                     .map(|value| {
-                        let journal: crate::protocol::owner_promotion_journal::OwnerPromotionJournal =
+                        let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
                             serde_json::from_str(&value).map_err(|error| {
                                 DbError::context("parse Owner-promotion journal", error)
                             })?;
@@ -33,7 +33,7 @@ impl StoreDatabase {
     pub(crate) async fn load_owner_promotion_target(
         &self,
         key: String,
-    ) -> Result<Option<crate::protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
+    ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
         self.connection
             .call(move |conn| {
@@ -41,7 +41,7 @@ impl StoreDatabase {
                 let Some(value) = value else {
                     return Ok(None);
                 };
-                let journal: crate::protocol::owner_promotion_journal::OwnerPromotionJournal =
+                let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
                     serde_json::from_str(&value).map_err(|error| {
                         DbError::context("parse Owner-promotion target journal", error)
                     })?;
@@ -63,8 +63,8 @@ impl StoreDatabase {
     pub(crate) async fn begin_owner_promotion_journal(
         &self,
         target_key: String,
-        journal: crate::protocol::owner_promotion_journal::OwnerPromotionJournal,
-    ) -> Result<crate::protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
+        journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
+    ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
         journal
             .validate_begin()
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -109,8 +109,8 @@ impl StoreDatabase {
 
     pub(crate) async fn begin_owner_promotion_acceptance_journal(
         &self,
-        journal: crate::protocol::owner_promotion_journal::OwnerPromotionJournal,
-    ) -> Result<crate::protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
+        journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
+    ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
         journal
             .validate_acceptance_begin()
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -141,7 +141,7 @@ impl StoreDatabase {
 
     pub(crate) async fn advance_owner_promotion_journal(
         &self,
-        transition: crate::protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
+        transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
     ) -> Result<(), DbError> {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
@@ -170,10 +170,10 @@ impl StoreDatabase {
     /// later membership publication on that stream.
     pub(crate) async fn end_nonactivated_owner_promotion_candidate(
         &self,
-        transition: crate::protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
-        candidate: crate::protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<crate::protocol::objects::ExactObjectRef>,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
+        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
+        objects: Vec<coven_protocol::objects::ExactObjectRef>,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         if nonactivation
             .candidate_reference()
@@ -216,8 +216,8 @@ impl StoreDatabase {
     /// is still there.
     pub(crate) async fn owner_promotion_candidate_cleanup_targets(
         &self,
-        candidate: crate::protocol::store_commit::StoreBatchCommitRef,
-        objects: Vec<crate::protocol::objects::ExactObjectRef>,
+        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
+        objects: Vec<coven_protocol::objects::ExactObjectRef>,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         self.connection
             .call(move |conn| {
@@ -265,9 +265,9 @@ impl StoreDatabase {
 
     pub(crate) async fn replace_failed_owner_promotion_journal(
         &self,
-        previous: crate::protocol::owner_promotion_journal::OwnerPromotionJournal,
-        replacement: crate::protocol::owner_promotion_journal::OwnerPromotionJournal,
-    ) -> Result<crate::protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
+        previous: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
+        replacement: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
+    ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
         previous
             .validate_failed_attempt_replacement(&replacement)
             .map_err(|error| DbError::Message(error.to_string()))?;

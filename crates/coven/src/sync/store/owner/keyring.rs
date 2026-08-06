@@ -1,23 +1,23 @@
-use crate::protocol::membership::MembershipChain;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::protocol::wrapped_store_key::{
-    PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
-};
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{IdentityKeyAuthority, UserKeypair};
+use coven_protocol::membership::MembershipChain;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use coven_protocol::wrapped_store_key::{
+    PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
+};
 
 use crate::sync::store::membership::InviteError;
 
 /// Store-key operations bound to one exact Store root and its storage.
 pub(crate) struct StoreKeyrings<'storage> {
     storage: &'storage dyn crate::storage::SyncStorage,
-    root: crate::protocol::store_commit::StoreRootRef,
+    root: coven_protocol::store_commit::StoreRootRef,
 }
 
 impl<'storage> StoreKeyrings<'storage> {
     pub(crate) fn new(
         storage: &'storage dyn crate::storage::SyncStorage,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
     ) -> Self {
         Self { storage, root }
     }
@@ -75,7 +75,7 @@ impl<'storage> StoreKeyrings<'storage> {
         let bytes = serde_json::to_vec(&value).map_err(|error| {
             StorageError::Parse(format!("serialize wrapped Store key: {error}"))
         })?;
-        let wrap_hash = crate::protocol::store_commit::ObjectHash::digest(&bytes);
+        let wrap_hash = coven_protocol::store_commit::ObjectHash::digest(&bytes);
         let semantic_prefix = format!(
             "keys/{}/{}/{}/{}",
             value.author_pubkey, recipient, value.generation, wrap_hash
@@ -139,7 +139,7 @@ impl<'storage> StoreKeyrings<'storage> {
             });
         }
         merged.ok_or_else(|| {
-            InviteError::Bucket(crate::protocol::objects::StorageError::NotFound(format!(
+            InviteError::Bucket(coven_protocol::objects::StorageError::NotFound(format!(
                 "no activated wrapped Store-key ref for {recipient}"
             )))
         })
@@ -159,18 +159,18 @@ fn wrapped_key_references(
 /// membership names.
 pub(crate) async fn load_wrapped_store_key(
     storage: &dyn crate::storage::SyncStorage,
-    store_root_hash: crate::protocol::store_commit::ObjectHash,
+    store_root_hash: coven_protocol::store_commit::ObjectHash,
     reference: &WrappedStoreKeyRef,
-) -> Result<WrappedStoreKey, crate::protocol::objects::StorageError> {
-    let context = crate::protocol::objects::ProtocolObjectContext::recipient_sealed(
+) -> Result<WrappedStoreKey, coven_protocol::objects::StorageError> {
+    let context = coven_protocol::objects::ProtocolObjectContext::recipient_sealed(
         store_root_hash,
-        crate::protocol::objects::ProtocolObjectDomain::StoreWrappedKey,
+        coven_protocol::objects::ProtocolObjectDomain::StoreWrappedKey,
     );
     let bytes = storage
         .read_protocol_object(&context, &reference.object, &reference.semantic_prefix())
         .await?;
     let value: WrappedStoreKey = serde_json::from_slice(&bytes).map_err(|error| {
-        crate::protocol::objects::StorageError::Parse(format!("parse wrapped Store key: {error}"))
+        coven_protocol::objects::StorageError::Parse(format!("parse wrapped Store key: {error}"))
     })?;
     reference.validate_value(&value, &bytes)?;
     Ok(value)
@@ -179,10 +179,10 @@ pub(crate) async fn load_wrapped_store_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::wrapped_store_key::WrappedStoreKey;
     use crate::storage::SyncStorage as _;
     use crate::sync::test_helpers::{open_test_db, test_cloud_home, TestStore};
     use coven_keys::keys::UserKeypair;
+    use coven_protocol::wrapped_store_key::WrappedStoreKey;
 
     #[tokio::test]
     async fn distinct_wraps_at_one_generation_remain_distinct_exact_objects() {

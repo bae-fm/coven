@@ -6,16 +6,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
+        role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, crate::sync::store::membership::MembershipOpsError>
     {
-        if role == crate::protocol::membership::MemberRole::Owner {
+        if role == coven_protocol::membership::MemberRole::Owner {
             return Err(crate::sync::store::membership::MembershipOpsError::Invite(
                 crate::sync::store::membership::InviteError::Membership(
-                    crate::protocol::membership::MembershipError::OwnerPromotionRequired,
+                    coven_protocol::membership::MembershipError::OwnerPromotionRequired,
                 ),
             ));
         }
@@ -114,7 +114,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let wrapped = plan.wrapped_key.validate()?;
         let authority_matches = matches!(
             &plan.publication.entry.change,
-            crate::protocol::membership::MembershipChange::SetMember { wrapped_key, .. }
+            coven_protocol::membership::MembershipChange::SetMember { wrapped_key, .. }
                 if wrapped_key == &plan.wrapped_key.reference
         );
         if !authority_matches
@@ -242,7 +242,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             owner_pubkey,
             wrapped_key,
             store_root: root,
-            membership_floor: crate::protocol::membership::MembershipFloor(
+            membership_floor: coven_protocol::membership::MembershipFloor(
                 self.membership.head_refs().to_vec(),
             ),
         })
@@ -500,37 +500,33 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn resolve_membership_conflict(
         &mut self,
-        choice: &crate::protocol::membership::MembershipConflictChoice,
+        choice: &coven_protocol::membership::MembershipConflictChoice,
         created_at: &str,
     ) -> Result<
-        crate::protocol::membership::StoreMembershipConflictResolutionRef,
+        coven_protocol::membership::StoreMembershipConflictResolutionRef,
         crate::sync::store::membership::MembershipOpsError,
     > {
         let mut membership = self.membership.clone();
         let valid_choice = match (membership.status(), choice.selection()) {
             (
-                crate::protocol::membership::MembershipStatus::Conflict(
-                    crate::protocol::membership::MembershipConflict::ConcurrentMemberAssignments {
+                coven_protocol::membership::MembershipStatus::Conflict(
+                    coven_protocol::membership::MembershipConflict::ConcurrentMemberAssignments {
                         conflict_hash,
                         conflicting_grants,
                         ..
                     },
                 ),
-                crate::protocol::membership::MembershipConflictSelection::MemberAssignment {
-                    grant,
-                },
+                coven_protocol::membership::MembershipConflictSelection::MemberAssignment { grant },
             ) => conflict_hash == &choice.conflict_hash() && conflicting_grants.contains_key(grant),
             (
-                crate::protocol::membership::MembershipStatus::Conflict(
-                    crate::protocol::membership::MembershipConflict::RevocationCycle {
+                coven_protocol::membership::MembershipStatus::Conflict(
+                    coven_protocol::membership::MembershipConflict::RevocationCycle {
                         conflict_hash,
                         maximal_valid_branches,
                         ..
                     },
                 ),
-                crate::protocol::membership::MembershipConflictSelection::RevocationBranch {
-                    heads,
-                },
+                coven_protocol::membership::MembershipConflictSelection::RevocationBranch { heads },
             ) => {
                 conflict_hash == &choice.conflict_hash()
                     && maximal_valid_branches
@@ -541,7 +537,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         };
         if !valid_choice {
             return Err(crate::sync::store::membership::InviteError::Membership(
-                crate::protocol::membership::MembershipError::InvalidConflictResolution,
+                coven_protocol::membership::MembershipError::InvalidConflictResolution,
             )
             .into());
         }
@@ -689,7 +685,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     &plan.transition,
                     &plan.publication,
                     plan.candidate.clone(),
-                    crate::protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
+                    coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                         intent_hash: persistence.intent_hash(),
                         progress_bytes: MembershipMutationProgress::ResolutionActivated {
                             candidate: plan.candidate.reference.clone(),

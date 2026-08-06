@@ -119,7 +119,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
             )
             .await
             .expect("read successor circles"),
-        vec![crate::protocol::circle::CircleInfo::Active {
+        vec![coven_protocol::circle::CircleInfo::Active {
             id: later.circle_id(),
             name: "Later Circle".to_string(),
             role: CircleRole::Owner,
@@ -259,7 +259,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .iter()
         .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
         .expect("peer has an exact retained Circle envelope");
-    let local_pair = serde_json::to_vec(&crate::protocol::circle::PreparedCircleAccess {
+    let local_pair = serde_json::to_vec(&coven_protocol::circle::PreparedCircleAccess {
         leaf: local_access.leaf.clone(),
         envelope: local_access.envelope.clone(),
     })

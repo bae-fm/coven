@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use tracing::info;
 
 use crate::database::*;
-use crate::protocol::synced_schema::SyncedTable;
+use coven_protocol::synced_schema::SyncedTable;
 
 use super::*;
 
@@ -23,7 +23,7 @@ pub(crate) struct SnapshotBlobFact {
 pub(crate) enum SnapshotBlobAudience {
     Store,
     Circle {
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         control: crate::database::CirclePartitionControl,
     },
 }
@@ -110,10 +110,10 @@ impl SnapshotDatabaseImage {
     fn capture(
         self,
         connection: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-        audience: &crate::protocol::circle::Audience,
+        audience: &coven_protocol::circle::Audience,
     ) -> Result<CreatedSnapshot, SnapshotImageError> {
         if tables.is_empty() {
             return self.finish(Err(SnapshotImageError::NoSyncedTables));
@@ -134,8 +134,7 @@ impl SnapshotDatabaseImage {
                     )));
                 }
             };
-            match crate::protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
-            {
+            match coven_protocol::circle::derive_row_routing_key(encryption, root.store_root_hash) {
                 Ok(routing_key) => Some(routing_key),
                 Err(error) => {
                     return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
@@ -159,7 +158,7 @@ impl SnapshotDatabaseImage {
             Ok(blobs) => blobs,
             Err(error) => return self.finish(Err(error)),
         };
-        if matches!(audience, crate::protocol::circle::Audience::Circle(_)) {
+        if matches!(audience, coven_protocol::circle::Audience::Circle(_)) {
             if let Err(error) = self.strip_circle_transport_state() {
                 return self.finish(Err(error));
             }
@@ -263,10 +262,10 @@ impl SnapshotDatabaseImage {
 
     fn project(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         synced: &[SyncedTable],
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-        audience: &crate::protocol::circle::Audience,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        audience: &coven_protocol::circle::Audience,
     ) -> Result<(), SnapshotImageError> {
         let connection = Connection::open(&self.path).map_err(|error| {
             SnapshotImageError::Projection(format!("failed to open snapshot copy: {error}"))
@@ -298,18 +297,18 @@ impl SnapshotDatabaseImage {
                         SnapshotImageError::Projection(format!("clear {table}: {error}"))
                     })?;
             }
-            if matches!(audience, crate::protocol::circle::Audience::Store) {
+            if matches!(audience, coven_protocol::circle::Audience::Store) {
                 StoreDatabase::retain_snapshot_replay_inputs_on(&transaction, root)
                     .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
                 StoreDatabase::retain_snapshot_device_states_on(&transaction, root, coverage)
                     .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             }
             let preserved_non_synced_tables = match audience {
-                crate::protocol::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
-                crate::protocol::circle::Audience::Circle(_) => {
+                coven_protocol::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
+                coven_protocol::circle::Audience::Circle(_) => {
                     CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES
                 }
-                crate::protocol::circle::Audience::Local => {
+                coven_protocol::circle::Audience::Local => {
                     return Err(SnapshotImageError::Projection(
                         "Local rows cannot enter a snapshot".to_string(),
                     ));
@@ -335,14 +334,16 @@ impl SnapshotDatabaseImage {
             }
 
             match audience {
-                crate::protocol::circle::Audience::Store => gates
-                    .delete_gated_false(&transaction)
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?,
-                crate::protocol::circle::Audience::Circle(_) => {
+                coven_protocol::circle::Audience::Store => {
+                    gates
+                        .delete_gated_false(&transaction)
+                        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
+                }
+                coven_protocol::circle::Audience::Circle(_) => {
                     crate::database::retain_snapshot_audience_rows(&transaction, &gates, audience)
                         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
                 }
-                crate::protocol::circle::Audience::Local => {
+                coven_protocol::circle::Audience::Local => {
                     return Err(SnapshotImageError::Projection(
                         "Local rows cannot enter a snapshot".to_string(),
                     ));
@@ -364,7 +365,7 @@ impl SnapshotDatabaseImage {
             transaction
                 .commit()
                 .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            if matches!(audience, crate::protocol::circle::Audience::Store) {
+            if matches!(audience, coven_protocol::circle::Audience::Store) {
                 connection
                     .execute_batch("VACUUM")
                     .map_err(|error| SnapshotImageError::Projection(format!("vacuum: {error}")))?;
@@ -492,7 +493,7 @@ impl SnapshotDatabaseImage {
                 ))
             })?;
             let external_path =
-                if publication.blob.provenance == crate::protocol::blob::Provenance::UserProvided {
+                if publication.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
                     live.query_row(
                         "SELECT path FROM local_blob_refs
                          WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
@@ -532,15 +533,15 @@ impl SnapshotDatabaseImage {
             )
             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
             {
-                crate::protocol::circle::Audience::Store => SnapshotBlobAudience::Store,
-                crate::protocol::circle::Audience::Circle(circle_id) => {
+                coven_protocol::circle::Audience::Store => SnapshotBlobAudience::Store,
+                coven_protocol::circle::Audience::Circle(circle_id) => {
                     SnapshotBlobAudience::Circle {
                         circle_id,
                         control: crate::database::active_circle_control(live, circle_id)
                             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?,
                     }
                 }
-                crate::protocol::circle::Audience::Local => {
+                coven_protocol::circle::Audience::Local => {
                     return Err(SnapshotImageError::Projection(format!(
                         "scoped snapshot retains local blob row {:?}/{:?}",
                         publication.table, publication.row_id
@@ -600,14 +601,14 @@ impl Drop for SnapshotDatabaseImage {
 impl StoreDatabase {
     pub(crate) async fn capture_store_snapshot_cut(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         tables: Vec<SyncedTable>,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<
         (
             CreatedSnapshot,
-            crate::protocol::store_commit::CommitFrontier,
+            coven_protocol::store_commit::CommitFrontier,
         ),
         DbError,
     > {
@@ -621,11 +622,11 @@ impl StoreDatabase {
                             &root,
                             &tables,
                             routing_encryption.as_ref(),
-                            &crate::protocol::circle::Audience::Store,
+                            &coven_protocol::circle::Audience::Store,
                         )
                     })
                     .map_err(snapshot_image_db_error)?;
-                let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+                let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(connection, None)?,
                 )
                 .map_err(|error| DbError::context("snapshot coverage", error))?;
@@ -636,15 +637,15 @@ impl StoreDatabase {
 
     pub(crate) async fn capture_circle_snapshot_cut(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         tables: Vec<SyncedTable>,
         routing_encryption: coven_keys::encryption::EncryptionService,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<
         (
             CreatedSnapshot,
-            crate::protocol::store_commit::CommitFrontier,
+            coven_protocol::store_commit::CommitFrontier,
         ),
         DbError,
     > {
@@ -658,11 +659,11 @@ impl StoreDatabase {
                             &root,
                             &tables,
                             Some(&routing_encryption),
-                            &crate::protocol::circle::Audience::Circle(circle_id),
+                            &coven_protocol::circle::Audience::Circle(circle_id),
                         )
                     })
                     .map_err(snapshot_image_db_error)?;
-                let coverage = crate::protocol::store_commit::CommitFrontier::from_refs(
+                let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(connection, None)?,
                 )
                 .map_err(|error| DbError::context("snapshot coverage", error))?;
@@ -674,13 +675,13 @@ impl StoreDatabase {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn capture_circle_snapshot_at_cutoff(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         tables: Vec<SyncedTable>,
         routing_encryption: coven_keys::encryption::EncryptionService,
-        routing_key: crate::protocol::circle::RowRoutingKey,
-        circle_id: crate::protocol::circle::CircleId,
-        cutoff: crate::protocol::store_commit::CommitFrontier,
+        routing_key: coven_protocol::circle::RowRoutingKey,
+        circle_id: coven_protocol::circle::CircleId,
+        cutoff: coven_protocol::store_commit::CommitFrontier,
     ) -> Result<CreatedSnapshot, DbError> {
         let blob_decls = self.blob_decls();
         let gates = self.gates();
@@ -696,10 +697,10 @@ impl StoreDatabase {
                 &std::collections::BTreeSet::new(),
                 Some(&cutoff),
                 false,
-                crate::protocol::membership::LocalStoreMembership::Current,
+                coven_protocol::membership::LocalStoreMembership::Current,
             )?;
             transaction.rollback().map_err(DbError::from)?;
-            let replay_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+            let replay_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
                 Self::materialized_frontier_on(&replay, None)?,
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -715,7 +716,7 @@ impl StoreDatabase {
                         &root,
                         &tables,
                         Some(&routing_encryption),
-                        &crate::protocol::circle::Audience::Circle(circle_id),
+                        &coven_protocol::circle::Audience::Circle(circle_id),
                     )
                 })
                 .map_err(snapshot_image_db_error)
@@ -726,7 +727,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn capture_snapshot_image_for_test(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<u8>, DbError> {
@@ -740,7 +741,7 @@ impl StoreDatabase {
                             &root,
                             &tables,
                             routing_encryption.as_ref(),
-                            &crate::protocol::circle::Audience::Store,
+                            &coven_protocol::circle::Audience::Store,
                         )
                     })
                     .map(|snapshot| snapshot.db_image)
@@ -752,10 +753,10 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn capture_circle_snapshot_image_for_test(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
         routing_encryption: coven_keys::encryption::EncryptionService,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Vec<u8>, DbError> {
         let tables = self.synced_tables().to_vec();
         self.connection
@@ -767,7 +768,7 @@ impl StoreDatabase {
                             &root,
                             &tables,
                             Some(&routing_encryption),
-                            &crate::protocol::circle::Audience::Circle(circle_id),
+                            &coven_protocol::circle::Audience::Circle(circle_id),
                         )
                     })
                     .map(|snapshot| snapshot.db_image)
@@ -899,12 +900,12 @@ fn scope_authenticated_blob_graph(
 
 pub(crate) fn verify_circle_bootstrap_image(
     image: &[u8],
-    reference: &crate::protocol::circle::CircleBootstrapRef,
-    circle_id: crate::protocol::circle::CircleId,
+    reference: &coven_protocol::circle::CircleBootstrapRef,
+    circle_id: coven_protocol::circle::CircleId,
     tables: &[SyncedTable],
-    routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+    routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
 ) -> Result<(), SnapshotImageError> {
-    if crate::protocol::store_commit::ObjectHash::digest(image) != reference.image.image_hash {
+    if coven_protocol::store_commit::ObjectHash::digest(image) != reference.image.image_hash {
         return Err(SnapshotImageError::Projection(
             "Circle bootstrap image differs from its signed hash".to_string(),
         ));
@@ -944,7 +945,7 @@ pub(crate) fn verify_circle_bootstrap_image(
             &connection,
             &gates,
             routing_key,
-            &crate::protocol::circle::Audience::Circle(circle_id),
+            &coven_protocol::circle::Audience::Circle(circle_id),
         )
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     }
@@ -976,8 +977,8 @@ pub(crate) fn verify_circle_bootstrap_image(
             || row.plaintext_hash != binding.plaintext_hash().to_string()
             || !matches!(
                 binding.authority(),
-                crate::protocol::blob::RowBlobAuthority::Remote(
-                    crate::protocol::audience_package::PackageAudience::Circle {
+                coven_protocol::blob::RowBlobAuthority::Remote(
+                    coven_protocol::audience_package::PackageAudience::Circle {
                         circle_id: binding_circle,
                         ..
                     }

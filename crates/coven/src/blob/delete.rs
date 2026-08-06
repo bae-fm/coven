@@ -42,11 +42,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::database::{OutboxEntry, OutboxOperation};
-use crate::protocol::blob::locator::StoredBlobRef;
-use crate::protocol::objects::StorageError;
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipherAccess, CloudRotationAccess};
 use coven_keys::keys::{self, UserKeypair};
+use coven_protocol::blob::locator::StoredBlobRef;
+use coven_protocol::objects::StorageError;
 
 /// The cloud key-prefix under which tombstones live. The suffix after this prefix
 /// is the hash of the exact immutable provider object reference.
@@ -54,8 +54,8 @@ pub(crate) const TOMBSTONE_PREFIX: &str = "blob_tombstones/";
 
 pub(crate) fn tombstone_object_id(
     stored: &StoredBlobRef,
-) -> crate::protocol::store_commit::ObjectHash {
-    crate::protocol::remote_object::remote_object_id(stored.object())
+) -> coven_protocol::store_commit::ObjectHash {
+    coven_protocol::remote_object::remote_object_id(stored.object())
 }
 
 pub(crate) fn tombstone_key(stored: &StoredBlobRef, suffix: &str) -> String {

@@ -1,5 +1,5 @@
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::store_commit::{StoreBatchCommitRef, StoreDeviceId};
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::store_commit::{StoreBatchCommitRef, StoreDeviceId};
 
 #[derive(Debug)]
 pub enum StorePreparationError {
@@ -9,7 +9,7 @@ pub enum StorePreparationError {
     AssetUpload(String),
     Storage {
         operation: &'static str,
-        source: crate::protocol::objects::StorageError,
+        source: coven_protocol::objects::StorageError,
     },
     LocalUserBlob {
         namespace: String,
@@ -66,7 +66,7 @@ pub enum StoreError {
     #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("Store protocol: {0}")]
-    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("Store protocol state {key:?} is absent")]
     MissingState { key: &'static str },
     #[error("Store protocol state {key:?} is invalid: {reason}")]
@@ -90,7 +90,7 @@ pub enum StoreError {
     BlobStorage {
         namespace: String,
         id: String,
-        source: crate::protocol::objects::StorageError,
+        source: coven_protocol::objects::StorageError,
     },
     #[error("candidate cleanup: {0}")]
     CandidateCleanup(#[from] crate::sync::store::owner::pull::StorePullError),
@@ -115,16 +115,16 @@ pub enum StoreError {
         actual: Box<StoreBatchCommitRef>,
     },
     #[error("{0}")]
-    CirclePublicationBlocked(crate::protocol::circle::CirclePublicationBlocked),
+    CirclePublicationBlocked(coven_protocol::circle::CirclePublicationBlocked),
 }
 
 impl StoreError {
     /// Classify an exact create-and-readback failure: an object that opened to
     /// bytes other than the ones sealed into it is an invalid outbound object,
     /// not a storage failure.
-    pub(crate) fn readback(error: crate::protocol::objects::StorageError) -> Self {
+    pub(crate) fn readback(error: coven_protocol::objects::StorageError) -> Self {
         match error {
-            crate::protocol::objects::StorageError::ReadbackMismatch(key) => Self::InvalidOutbound(
+            coven_protocol::objects::StorageError::ReadbackMismatch(key) => Self::InvalidOutbound(
                 format!("exact readback of {key} differs from its signed bytes"),
             ),
             error => StoreObjectError::from(error).into(),
@@ -147,7 +147,7 @@ impl StoreError {
                 reason: self.to_string(),
             }),
             Self::CirclePublicationBlocked(
-                crate::protocol::circle::CirclePublicationBlocked::RotationRequired {
+                coven_protocol::circle::CirclePublicationBlocked::RotationRequired {
                     circle_id,
                     removed_members,
                 },
@@ -200,14 +200,14 @@ impl StoreError {
     }
 }
 
-impl From<crate::protocol::prepared_commit::PreparedCommitError> for StoreError {
-    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+impl From<coven_protocol::prepared_commit::PreparedCommitError> for StoreError {
+    fn from(error: coven_protocol::prepared_commit::PreparedCommitError) -> Self {
         StoreError::InvalidOutbound(error.to_string())
     }
 }
 
-impl From<crate::protocol::membership_mutation::MembershipPreparationError> for StoreError {
-    fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
+impl From<coven_protocol::membership_mutation::MembershipPreparationError> for StoreError {
+    fn from(error: coven_protocol::membership_mutation::MembershipPreparationError) -> Self {
         StoreError::InvalidOutbound(error.to_string())
     }
 }

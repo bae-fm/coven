@@ -525,7 +525,7 @@ async fn foreign_founder_installs_no_connection() {
     assert!(!sync.has_remote_storage_for_test());
     assert_eq!(
         database
-            .get_protocol_state(crate::protocol::membership::OWNER_PUBKEY_STATE_KEY)
+            .get_protocol_state(coven_protocol::membership::OWNER_PUBKEY_STATE_KEY)
             .await
             .unwrap(),
         None,

@@ -4,7 +4,7 @@ use super::AuthorizedWriterOperation;
 
 mod authority;
 mod error;
-pub(crate) use crate::protocol::owner_promotion_journal as journal;
+pub(crate) use coven_protocol::owner_promotion_journal as journal;
 mod operation;
 
 pub(crate) use error::OwnerPromotionError;

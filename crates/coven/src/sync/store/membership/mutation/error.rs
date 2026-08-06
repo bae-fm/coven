@@ -1,7 +1,7 @@
-use crate::protocol::membership::MembershipError;
-use crate::protocol::objects::StorageError;
 use crate::storage::cloud::CloudHomeError;
 use coven_keys::keys::KeyError;
+use coven_protocol::membership::MembershipError;
+use coven_protocol::objects::StorageError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
@@ -27,17 +27,17 @@ pub enum InviteError {
     InvalidDurableMutation(String),
 }
 
-impl From<crate::protocol::objects::StoreObjectError> for InviteError {
-    fn from(error: crate::protocol::objects::StoreObjectError) -> Self {
+impl From<coven_protocol::objects::StoreObjectError> for InviteError {
+    fn from(error: coven_protocol::objects::StoreObjectError) -> Self {
         match error {
-            crate::protocol::objects::StoreObjectError::Storage(error) => Self::Bucket(error),
+            coven_protocol::objects::StoreObjectError::Storage(error) => Self::Bucket(error),
             error => Self::InvalidDurableMutation(error.to_string()),
         }
     }
 }
 
-impl From<crate::protocol::membership_mutation::MembershipPreparationError> for InviteError {
-    fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
+impl From<coven_protocol::membership_mutation::MembershipPreparationError> for InviteError {
+    fn from(error: coven_protocol::membership_mutation::MembershipPreparationError) -> Self {
         InviteError::InvalidDurableMutation(error.to_string())
     }
 }

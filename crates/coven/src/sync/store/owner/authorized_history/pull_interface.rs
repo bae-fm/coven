@@ -3,7 +3,7 @@ use super::*;
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn pull(
         &mut self,
-        membership: &crate::protocol::membership::MembershipChain,
+        membership: &coven_protocol::membership::MembershipChain,
         identity: Option<&UserKeypair>,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<pull::StorePullExecution, pull::StorePullError> {
@@ -23,15 +23,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn pull_store_blob_protection(
         &self,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
     {
         self.blob_source.store_protection()
     }
 
     pub(crate) async fn prepare_pull_package(
         &self,
-        package: crate::protocol::audience_package::AudiencePackage,
-        blob_protection: crate::protocol::objects::BlobSpoolProtection,
+        package: coven_protocol::audience_package::AudiencePackage,
+        blob_protection: coven_protocol::objects::BlobSpoolProtection,
         schema: std::sync::Arc<crate::database::TableSchema>,
     ) -> Result<
         Result<PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
@@ -76,7 +76,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             let Some(blob) = blob else {
                 continue;
             };
-            if blob.fill != crate::protocol::blob::CacheFill::CacheEager {
+            if blob.fill != coven_protocol::blob::CacheFill::CacheEager {
                 continue;
             }
             let row_id = match change.pk() {
@@ -180,14 +180,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn pull_device_state_for_cut(
         &self,
-        cut: &crate::protocol::store_commit::StoreHistoryCut,
+        cut: &coven_protocol::store_commit::StoreHistoryCut,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), crate::database::DbError> {
         self.database.store_device_state_for_history_cut(cut).await
     }
 
     pub(crate) async fn pull_device_state_for_order(
         &self,
-        order: &crate::protocol::store_commit::StoreCommitOrder,
+        order: &coven_protocol::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), crate::database::DbError> {
         self.database.store_device_state_for_order(order).await
     }
@@ -210,14 +210,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn pull_exclusion_freezes(
         &self,
-    ) -> Result<Vec<crate::protocol::store_commit::StoreDeviceProposalAck>, crate::database::DbError>
+    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, crate::database::DbError>
     {
         self.database.store_device_exclusion_freezes().await
     }
 
     pub(crate) async fn record_pull_circle_close_exclusions(
         &self,
-        exclusions: Vec<crate::protocol::circle_activation::LocalCircleExclusion>,
+        exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), crate::database::DbError> {
         self.database
             .record_circle_close_exclusions(exclusions)
@@ -228,11 +228,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn commit_pull_materialization(
         &self,
         materialization: PreparedMergeMaterialization,
-        retractions: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
+        retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
         local_store_membership: pull::LocalStoreMembership,
-        routing_key: Option<crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<crate::protocol::membership::ApplyOutcome, crate::database::DbError> {
+    ) -> Result<coven_protocol::membership::ApplyOutcome, crate::database::DbError> {
         self.database
             .apply_received_merge_materialization(
                 materialization,
@@ -264,7 +264,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn load_active_pull_registrations(
         &self,
     ) -> Result<
-        Vec<crate::protocol::store_commit::ReferencedStoreDeviceRegistration>,
+        Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>,
         pull::StorePullError,
     > {
         let durable = self
@@ -283,7 +283,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             }
             if !matches!(
                 opened.value.store_commits,
-                crate::protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { .. }
+                coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { .. }
             ) {
                 return Err(pull::StorePullError::InvalidState(format!(
                     "activated Store registration {} has no Merge announcement anchor",
@@ -299,7 +299,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         membership: &MembershipChain,
     ) -> Result<
-        Vec<crate::protocol::store_commit::ReferencedStoreDeviceRegistration>,
+        Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>,
         pull::StorePullError,
     > {
         self.history_verifier
@@ -309,9 +309,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn discover_pull_stream(
         &mut self,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        inactive_accepted_cut: Option<&crate::protocol::store_commit::StoreHistoryCut>,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        inactive_accepted_cut: Option<&coven_protocol::store_commit::StoreHistoryCut>,
     ) -> Result<pull::MergeStreamDiscovery, pull::StorePullError> {
         self.history_verifier
             .discover_merge_stream(registration_ref, registration, inactive_accepted_cut)
@@ -344,8 +344,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         reference: &StoreBatchCommitRef,
     ) -> Result<
-        Option<crate::protocol::objects::VerifiedObject<Vec<u8>>>,
-        crate::protocol::objects::StoreObjectError,
+        Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history_verifier.load_store_package(reference).await
     }
@@ -400,9 +400,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         coverage: &CommitFrontier,
         frontier: &std::collections::BTreeMap<String, StoreBatchCommitRef>,
         device_state: &ResolvedStoreDeviceState,
-        exclusion_freezes: &[crate::protocol::store_commit::StoreDeviceProposalAck],
+        exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
         commit_ref: &StoreBatchCommitRef,
-        commit: &crate::protocol::store_commit::StoreBatchCommit,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
         let stream_id = pull::commit_stream_id(&commit_ref.coord);
         if let Some(current) = frontier.get(&stream_id) {
@@ -559,7 +559,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn verified_pull_membership_objects(
         &mut self,
         commit_ref: &StoreBatchCommitRef,
-        commit: &crate::protocol::store_commit::StoreBatchCommit,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<
         Option<crate::sync::store::owner::verification::VerifiedMergeMembershipClosure>,
         pull::StorePullError,
@@ -571,11 +571,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn verify_pull_owner_recovery_activation(
         &self,
-        commit: &crate::protocol::store_commit::StoreBatchCommit,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<
         Option<(
-            crate::protocol::membership::MembershipGrantId,
-            crate::protocol::store_commit::OwnerRecoveryActivationId,
+            coven_protocol::membership::MembershipGrantId,
+            coven_protocol::store_commit::OwnerRecoveryActivationId,
         )>,
         pull::StorePullError,
     > {
@@ -587,10 +587,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn retain_pull_acknowledgement(
         &self,
         commit_ref: &StoreBatchCommitRef,
-        commit: &crate::protocol::store_commit::StoreBatchCommit,
-        author: &crate::protocol::store_commit::StoreDeviceRegistration,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
+        author: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<
-        Option<crate::protocol::store_commit::RetainedVerifiedActivatedAck>,
+        Option<coven_protocol::store_commit::RetainedVerifiedActivatedAck>,
         pull::StorePullError,
     > {
         let acknowledgement = self
@@ -613,7 +613,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn remember_pull_commit(
         &mut self,
-        commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<(), pull::StorePullError> {
         self.history_verifier
             .remember(commit)
@@ -623,15 +623,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn verified_pull_terminal_retractions(
         &mut self,
-        activation_head: &crate::protocol::store_commit::StoreDeviceHead,
-        activation_head_object: &crate::protocol::objects::ExactObjectRef,
-        activation_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        activation_head: &coven_protocol::store_commit::StoreDeviceHead,
+        activation_head_object: &coven_protocol::objects::ExactObjectRef,
+        activation_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         activation_predecessor_state: &ResolvedStoreDeviceState,
         activation_predecessor_membership: &MembershipChain,
-        device_operations: &crate::protocol::store_commit::VerifiedStoreDeviceOperations,
+        device_operations: &coven_protocol::store_commit::VerifiedStoreDeviceOperations,
         loaded_predecessor_memberships: &pull::LoadedMergePredecessorMemberships,
     ) -> Result<
-        Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
+        Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
         pull::StorePullError,
     > {
         let root = self.history_verifier.verified_root().reference().clone();
@@ -658,7 +658,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
         let activation_commit_ref = activation_commit.reference();
         let activation_commit_value = activation_commit.value();
-        let activation_head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+        let activation_head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: activation_head.head_hash(),
             object: activation_head_object.clone(),
         };
@@ -685,10 +685,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .await?;
             if locator.is_none() {
                 let expected_stream =
-                    crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+                    coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                         root.store_root_hash,
                         &candidate.value().author_registration,
-                        crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                        coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
                     );
                 for (exclusion, accepted_cut) in device_operations.exclusions() {
                     if exclusion.proposal.target != candidate.value().author_registration {
@@ -741,7 +741,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 }
                 if !matches!(
                     current_resolved.grants.get(grant_id),
-                    Some(crate::protocol::causal_grants::GrantState::Tombstoned { .. })
+                    Some(coven_protocol::causal_grants::GrantState::Tombstoned { .. })
                 ) {
                     continue;
                 }
@@ -804,9 +804,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 let Some((_dependency_reference, dependency)) = dependency else {
                     continue;
                 };
-                let verified = crate::protocol::remote_object::VerifiedCandidateNonactivation::dependency_retraction(
+                let verified = coven_protocol::remote_object::VerifiedCandidateNonactivation::dependency_retraction(
                     dependency,
-                    crate::protocol::store_commit::StoreBatchCommitDeletionTarget {
+                    coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
                         coord: materialization.commit_ref().coord.clone(),
                         object: materialization.commit_ref().object.clone(),
                         canonical_signed_bytes: candidate.value().to_bytes(),

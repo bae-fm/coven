@@ -3,7 +3,7 @@ use crate::database::connection_io::capture_changeset;
 
 use super::fixtures::*;
 use crate::database::*;
-use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
+use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
 
 #[tokio::test]
 async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {
@@ -11,10 +11,10 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "required-store-root".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[notes_migration()],
@@ -57,15 +57,13 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
     .expect("remove malformed authority");
     let signer = coven_keys::keys::UserKeypair::generate();
     let founder_provider_admin =
-        crate::protocol::provider::FounderProviderAdminGrant::from_test_label(
-            "required-store-root",
-        );
-    let descriptor = crate::protocol::store_commit::StoreCreationDescriptor {
-        creation_id: crate::protocol::store_commit::StoreCreationId::from_nonce(
+        coven_protocol::provider::FounderProviderAdminGrant::from_test_label("required-store-root");
+    let descriptor = coven_protocol::store_commit::StoreCreationDescriptor {
+        creation_id: coven_protocol::store_commit::StoreCreationId::from_nonce(
             "required-store-root",
         ),
-        provider: crate::protocol::objects::StoreProviderBinding::S3 {
-            endpoint: crate::protocol::objects::S3EndpointBinding::Custom {
+        provider: coven_protocol::objects::StoreProviderBinding::S3 {
+            endpoint: coven_protocol::objects::S3EndpointBinding::Custom {
                 origin: "https://test.invalid".to_string(),
             },
             region: "test-region".to_string(),
@@ -75,40 +73,40 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         schema_version: db.schema_version(),
         sync_routing_hash: db.sync_routing_hash(),
         founder_pubkey: coven_keys::keys::public_key_hex(&signer),
-        founder_grant: crate::protocol::causal_grants::MembershipGrantId::from_test_label(
+        founder_grant: coven_protocol::causal_grants::MembershipGrantId::from_test_label(
             "required-store-root founder",
         ),
-        root_slot: crate::protocol::objects::ObjectSlot::logical(
-            crate::protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
+        root_slot: coven_protocol::objects::ObjectSlot::logical(
+            coven_protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
         )
         .expect("valid Store root slot"),
-        founder_registration: crate::protocol::objects::ObjectSlot::logical(
+        founder_registration: coven_protocol::objects::ObjectSlot::logical(
             "store-v1/test/required-store-root/registration.json".to_string(),
         )
         .expect("valid founder registration slot"),
         founder_provider_admin,
-        founder_membership: crate::protocol::store_commit::GrantStreamAnchor::StoreMembership {
-            first_slot: crate::protocol::objects::ObjectSlot::logical(
+        founder_membership: coven_protocol::store_commit::GrantStreamAnchor::StoreMembership {
+            first_slot: coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/test/required-store-root/membership/1.json".to_string(),
             )
             .expect("valid membership slot"),
         },
-        founder_recovery: crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
-            first_slot: crate::protocol::objects::ObjectSlot::logical(
+        founder_recovery: coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery {
+            first_slot: coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/test/required-store-root/recovery/1.json".to_string(),
             )
             .expect("valid recovery slot"),
         },
     };
-    let root = crate::protocol::store_commit::StoreProtocolRoot::signed(descriptor, &signer)
+    let root = coven_protocol::store_commit::StoreProtocolRoot::signed(descriptor, &signer)
         .expect("sign Store root authority");
     let bytes = root.to_bytes();
     let expected = root.object_hash();
-    let reference = crate::protocol::store_commit::StoreRootRef {
+    let reference = coven_protocol::store_commit::StoreRootRef {
         store_root_id: root.descriptor.store_root_id(),
         store_root_hash: expected,
         object: ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/store-protocol-root/required-store-root.json".to_string(),
             )
             .expect("valid Store root slot"),
@@ -135,10 +133,10 @@ fn fresh_open_rolls_back_host_schema_and_coven_metadata_when_routing_is_invalid(
     let result = Database::open(
         &path,
         vec![things_table(
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "fresh-routing-failure".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -181,10 +179,10 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
     let database = Database::open(
         &path,
         vec![things_table(
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -205,10 +203,10 @@ fn initialized_open_commits_ordinary_migration_without_changing_routing_contract
     let database = Database::open(
         &path,
         vec![things_table(
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "ordinary-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -247,7 +245,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
     let table = || {
         SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("audience")
     };
@@ -255,7 +253,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         &path,
         vec![table()],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "routing-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[v1()],
@@ -279,7 +277,7 @@ fn initialized_open_rolls_back_routing_migration_and_user_version() {
         &path,
         vec![table()],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "routing-first-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[v1(), v2],
@@ -355,7 +353,7 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
             &path,
             tables.clone(),
             BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "schema-seed".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &migrations,
@@ -371,7 +369,7 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
             &path,
             tables.clone(),
             BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "schema-writer".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &migrations,
@@ -388,7 +386,7 @@ fn writer_and_read_only_open_reject_every_coven_schema_shape_change_without_rewr
             &path,
             tables,
             BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "schema-reader".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &migrations,
@@ -438,12 +436,12 @@ fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
     let tables = vec![
         SyncedTable::new(
             "parents",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )
         .gated_by("shared"),
         SyncedTable::new(
             "children",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         ),
     ];
 
@@ -451,7 +449,7 @@ fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-gate-open".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[migration],
@@ -492,7 +490,7 @@ fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_i
     )
     .expect("schema and seed");
     let tables = vec![things_table(
-        crate::protocol::synced_schema::RowIdentity::SharedKey,
+        coven_protocol::synced_schema::RowIdentity::SharedKey,
     )];
 
     let mut primary_key_session = attach_session(&conn, &tables).expect("attach session");
@@ -547,10 +545,10 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
     let writer_error = match Database::open(
         Path::new(":memory:"),
         vec![things_table(
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-writer".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -577,10 +575,10 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
     let writer = Database::open(
         &path,
         vec![things_table(
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-seed".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -600,10 +598,10 @@ fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
     let reader_error = match Database::open_read_only(
         &path,
         vec![things_table(
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-uuid-reader".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[things_migration()],
@@ -622,11 +620,11 @@ fn database_open_rejects_duplicate_synced_table_declarations() {
     let error = match Database::open(
         Path::new(":memory:"),
         vec![
-            things_table(crate::protocol::synced_schema::RowIdentity::SharedKey),
-            things_table(crate::protocol::synced_schema::RowIdentity::IndependentUuid),
+            things_table(coven_protocol::synced_schema::RowIdentity::SharedKey),
+            things_table(coven_protocol::synced_schema::RowIdentity::IndependentUuid),
         ],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "duplicate-things".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[things_migration()],
@@ -643,13 +641,13 @@ fn database_open_rejects_duplicate_synced_table_declarations() {
 #[tokio::test]
 async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     let tables = vec![things_table(
-        crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+        coven_protocol::synced_schema::RowIdentity::IndependentUuid,
     )];
     let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "invalid-host-identity".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[things_migration()],
@@ -713,13 +711,13 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
 #[tokio::test]
 async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid_rolls_back() {
     let tables = vec![things_table(
-        crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+        coven_protocol::synced_schema::RowIdentity::IndependentUuid,
     )];
     let db = Database::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "host-identity-changes".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[things_migration()],
@@ -832,7 +830,7 @@ async fn database_open_rejects_empty_device_id() {
         Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         String::new(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
@@ -855,10 +853,10 @@ async fn database_open_rejects_host_declared_reserved_tables() {
             Path::new(":memory:"),
             vec![SyncedTable::new(
                 table_name,
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )],
             BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             format!("reserved-{table_name}"),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &[notes_migration()],
@@ -881,10 +879,10 @@ fn database_open_rejects_host_triggers_using_coven_cleanup_guard_names() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "reserved-cleanup-trigger".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -913,10 +911,10 @@ async fn database_open_rejects_empty_synced_table_name() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "empty-synced-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[notes_migration()],
@@ -938,10 +936,10 @@ async fn database_open_accepts_normal_host_synced_table() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "normal-synced-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[notes_migration()],
@@ -961,7 +959,7 @@ fn open_contract_error(
         Path::new(":memory:"),
         tables,
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         device_id.to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(1, "contract", migration_sql)],
@@ -978,7 +976,7 @@ async fn database_open_rejects_integer_primary_key() {
         "CREATE TABLE things (id INTEGER PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "integer-pk",
     );
@@ -995,7 +993,7 @@ async fn database_open_rejects_primary_key_not_at_column_zero() {
          _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "pk-not-first",
     );
@@ -1011,7 +1009,7 @@ async fn database_open_rejects_primary_key_named_other_than_id() {
         "CREATE TABLE things (thing_id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "pk-misnamed",
     );
@@ -1028,7 +1026,7 @@ async fn database_open_rejects_composite_primary_key() {
          _updated_at TEXT NOT NULL, PRIMARY KEY (id, part)) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "composite-pk",
     );
@@ -1044,7 +1042,7 @@ async fn database_open_rejects_nullable_updated_at() {
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "nullable-updated-at",
     );
@@ -1060,7 +1058,7 @@ async fn database_open_rejects_non_strict_synced_table() {
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL);",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "non-strict",
     );
@@ -1076,7 +1074,7 @@ async fn database_open_rejects_declared_table_no_migration_creates() {
         "CREATE TABLE other (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "declared-never-created",
     );
@@ -1092,7 +1090,7 @@ async fn database_open_rejects_synced_table_spelling_that_differs_from_live_sche
         "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
         vec![SyncedTable::new(
             "Things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         "case-variant-table-name",
     );
@@ -1109,11 +1107,11 @@ async fn database_open_rejects_case_variant_duplicate_synced_tables() {
         vec![
             SyncedTable::new(
                 "things",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
             SyncedTable::new(
                 "THINGS",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             ),
         ],
         "case-variant-duplicate-table",
@@ -1130,10 +1128,10 @@ async fn database_open_accepts_strict_synced_table() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "strict-synced-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -1154,10 +1152,10 @@ async fn database_open_ignores_undeclared_non_strict_local_table() {
         Path::new(":memory:"),
         vec![SyncedTable::new(
             "things",
-            crate::protocol::synced_schema::RowIdentity::SharedKey,
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
         )],
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "undeclared-local-table".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[Migration::sql(
@@ -1173,10 +1171,10 @@ async fn database_open_ignores_undeclared_non_strict_local_table() {
 #[tokio::test]
 async fn database_open_rejects_duplicate_blob_namespace() {
     let blob = |namespace| {
-        crate::protocol::synced_schema::BlobDecl::new(
+        coven_protocol::synced_schema::BlobDecl::new(
             namespace,
-            crate::protocol::blob::Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheLazy,
+            coven_protocol::blob::Provenance::HostProvided,
+            coven_protocol::blob::CacheFill::CacheLazy,
         )
     };
     let error = open_contract_error(
@@ -1187,12 +1185,12 @@ async fn database_open_rejects_duplicate_blob_namespace() {
         vec![
             SyncedTable::new(
                 "covers",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .carries_blob(blob("images")),
             SyncedTable::new(
                 "thumbs",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .carries_blob(blob("images")),
         ],

@@ -85,8 +85,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         signer: &UserKeypair,
     ) -> Result<(), crate::sync::store::owner::registration::StoreRegistrationError> {
-        use crate::protocol::objects::ProtocolObjectDomain;
-        use crate::protocol::store_commit::{
+        use coven_protocol::objects::ProtocolObjectDomain;
+        use coven_protocol::store_commit::{
             ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckRef,
             StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
         };
@@ -105,7 +105,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             != storage
                 .provider_binding()
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?
+                .map_err(coven_protocol::objects::StoreObjectError::from)?
                 .device
         {
             return Err(
@@ -120,13 +120,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             )
         })?;
 
-        let registration_context =
-            crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
-                root.store_root_hash,
-                ProtocolObjectDomain::StoreDeviceRegistration,
-            );
+        let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
         let registration_prefix =
-            crate::protocol::store_commit::founder_registration_semantic_prefix(
+            coven_protocol::store_commit::founder_registration_semantic_prefix(
                 match founder.value.origin {
                     StoreDeviceRegistrationOrigin::Founder { creation_id } => creation_id,
                     _ => return Err(
@@ -143,7 +142,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 &registration_prefix,
             )
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         if registration_bytes != founder.bytes
             || registration_prepared.reference() != &founder.object
         {
@@ -165,7 +164,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 ),
             );
         };
-        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -173,7 +172,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let (ack_bytes, ack_prepared) = storage
             .read_prepared_protocol_slot(&ack_context, first_slot, &ack_prefix)
             .await
-            .map_err(crate::protocol::objects::StoreObjectError::from)?;
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes).map_err(|error| {
             crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
                 error.to_string(),
@@ -200,14 +199,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
         self.database
             .install_existing_local_founder_device(
-                crate::protocol::objects::ExactProtocolObject {
+                coven_protocol::objects::ExactProtocolObject {
                     value: founder.value,
                     bytes: registration_bytes,
                     object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 ack_ref,
-                crate::protocol::objects::ExactProtocolObject {
+                coven_protocol::objects::ExactProtocolObject {
                     value: ack,
                     bytes: ack_bytes,
                     object: ack_prepared.reference().clone(),
@@ -263,9 +262,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn authorize_writer(
         self,
-        membership: crate::protocol::membership::MembershipChain,
+        membership: coven_protocol::membership::MembershipChain,
         identity: &'storage UserKeypair,
-        registration: crate::protocol::store_commit::ReferencedStoreDeviceRegistration,
+        registration: coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
         device_signer: UserKeypair,
     ) -> crate::sync::store::owner::writer::AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();

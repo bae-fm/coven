@@ -14,10 +14,10 @@ use super::outbound::{
 };
 use super::{all_row_ids, query_mapped_rows, query_row_optional, GateError};
 use crate::database::quote_ident;
-use crate::protocol::circle::{
+use coven_protocol::circle::{
     row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey,
 };
-use crate::protocol::circle_activation::CircleCurrentState;
+use coven_protocol::circle_activation::CircleCurrentState;
 
 mod inbound;
 mod partitioning;

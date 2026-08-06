@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DurableDeviceRegistration {
-    pub device_id: crate::protocol::store_commit::StoreDeviceId,
+    pub device_id: coven_protocol::store_commit::StoreDeviceId,
     pub registration_hash: ObjectHash,
     pub registration_bytes: Vec<u8>,
     pub prepared: PreparedExactObject,
@@ -17,7 +17,7 @@ pub(crate) enum LocalDeviceRegistrationState {
     Prepared,
     Created,
     Activated {
-        authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation,
+        authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
     },
 }
 
@@ -65,7 +65,7 @@ pub(crate) struct DurableSnapshotPublication {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedSnapshotBlob {
     pub bindings: Vec<RowBlobLocatorBinding>,
-    pub authority: crate::protocol::audience_package::PackageAudience,
+    pub authority: coven_protocol::audience_package::PackageAudience,
     pub remote: RemoteObjectRecord,
     pub spool_path: Option<PathBuf>,
 }
@@ -73,21 +73,21 @@ pub(crate) struct PreparedSnapshotBlob {
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedStoreSnapshot {
     pub reference: StoreSnapshotRef,
-    pub successor_slot: crate::protocol::objects::ObjectSlot,
+    pub successor_slot: coven_protocol::objects::ObjectSlot,
     pub meta: SnapshotMeta,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DurableCircleSnapshotPublication {
-    pub reference: crate::protocol::store_commit::CircleSnapshotRef,
-    pub meta: ExactProtocolObject<crate::protocol::store_commit::CircleSnapshotMeta>,
+    pub reference: coven_protocol::store_commit::CircleSnapshotRef,
+    pub meta: ExactProtocolObject<coven_protocol::store_commit::CircleSnapshotMeta>,
     pub image: ExactProtocolObject<Vec<u8>>,
     pub blobs: Vec<PreparedSnapshotBlob>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedCircleSnapshot {
-    pub reference: crate::protocol::store_commit::CircleSnapshotRef,
-    pub successor_slot: crate::protocol::objects::ObjectSlot,
-    pub cut: crate::protocol::store_commit::CommitFrontier,
+    pub reference: coven_protocol::store_commit::CircleSnapshotRef,
+    pub successor_slot: coven_protocol::objects::ObjectSlot,
+    pub cut: coven_protocol::store_commit::CommitFrontier,
 }

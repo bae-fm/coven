@@ -91,7 +91,7 @@ impl StoreDatabase {
     pub(crate) async fn blocked_merge_history_summary(
         &self,
         write_id: WriteId,
-    ) -> Result<crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary, DbError> {
+    ) -> Result<coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary, DbError> {
         self.connection
             .call(move |conn| {
                 let raw: String = conn
@@ -167,7 +167,7 @@ impl StoreDatabase {
 
     pub(crate) async fn author_exclusion_activation_for_candidate(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
@@ -180,9 +180,9 @@ impl StoreDatabase {
 
     pub(crate) async fn begin_blocked_merge_candidate_nonactivation(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         write_id: WriteId,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
         self.connection
@@ -228,10 +228,10 @@ impl StoreDatabase {
 
     pub(crate) async fn begin_prepared_merge_abandonment_nonactivation(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         write_id: WriteId,
-        candidate_nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
-        authority_nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        candidate_nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
+        authority_nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let candidate_nonactivation =
             blocked_merge_candidate_nonactivation(candidate_nonactivation)?;

@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::protocol::blob::{CacheFill, Provenance};
 use crate::storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare,
@@ -14,6 +13,7 @@ use coven_foundation::clock::SystemClock;
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{test_keyring, StoreKeys};
+use coven_protocol::blob::{CacheFill, Provenance};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -63,7 +63,7 @@ fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
 
 fn host_blob_test_db(namespace: &str) -> Database {
     open_test_db_with_blob(
-        crate::protocol::synced_schema::BlobDecl::new(
+        coven_protocol::synced_schema::BlobDecl::new(
             namespace,
             Provenance::HostProvided,
             CacheFill::CacheLazy,
@@ -92,7 +92,7 @@ impl PausedUploadDrain {
 }
 
 #[async_trait::async_trait]
-impl crate::protocol::blob::BlobTransitionObserver for PausedUploadDrain {
+impl coven_protocol::blob::BlobTransitionObserver for PausedUploadDrain {
     async fn on_blob_upload_started(&self, _blob_id: &str) {}
 
     async fn on_blob_uploaded(&self, _blob_id: &str) {}
@@ -139,7 +139,7 @@ impl HostBlobTestOps for CovenHandle {
         let cloud_path = cloud_path.to_string();
         let bytes = bytes.to_vec();
         let size = bytes.len() as i64;
-        let hash = crate::protocol::blob::content_hash(&bytes);
+        let hash = coven_protocol::blob::content_hash(&bytes);
         let write = self
                 .write(
                     {
@@ -641,7 +641,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
             assert!(
                 matches!(
                     local.authority(),
-                    crate::protocol::blob::RowBlobAuthority::Local
+                    coven_protocol::blob::RowBlobAuthority::Local
                 ),
                 "the row stays Local until the exact upload completes",
             );
@@ -791,7 +791,7 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
                 .expect("capture Local row before the drain");
             assert!(matches!(
                 local.authority(),
-                crate::protocol::blob::RowBlobAuthority::Local
+                coven_protocol::blob::RowBlobAuthority::Local
             ));
 
             let outcome = handle

@@ -1,11 +1,11 @@
 use super::*;
 use crate::database::Database;
-use crate::protocol::store_commit::OpenedRetainedMergeHistorySummary;
 use crate::sync::store::owner::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
 use coven_keys::keys::MasterKeyCustody;
+use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 
 #[path = "tests/effective_access_failure.rs"]
 mod effective_access_failure;
@@ -255,13 +255,13 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
 }
 
 fn scoped_replay_schema() -> (
-    Vec<crate::protocol::synced_schema::SyncedTable>,
+    Vec<coven_protocol::synced_schema::SyncedTable>,
     Vec<crate::Migration>,
 ) {
     (
-        vec![crate::protocol::synced_schema::SyncedTable::new(
+        vec![coven_protocol::synced_schema::SyncedTable::new(
             "notes",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience")],
         vec![crate::Migration::sql(
@@ -287,8 +287,8 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
     Database::open(
         path,
         tables,
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "scoped-replay-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -296,7 +296,7 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
     .expect("open scoped replay database")
 }
 
-fn exact_circle_package_slot(commit: &StoreBatchCommit) -> crate::protocol::objects::ObjectSlot {
+fn exact_circle_package_slot(commit: &StoreBatchCommit) -> coven_protocol::objects::ObjectSlot {
     let [reference] = commit.circle_packages() else {
         panic!("test commit must contain one Circle package");
     };
@@ -311,7 +311,7 @@ struct EffectiveAccessFixture {
     member: coven_keys::keys::UserKeypair,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     home: std::sync::Arc<crate::InMemoryCloudHome>,
-    circle_id: crate::protocol::circle::CircleId,
+    circle_id: coven_protocol::circle::CircleId,
 }
 
 impl EffectiveAccessFixture {
@@ -420,7 +420,7 @@ impl EffectiveAccessFixture {
                 &owner,
                 &coven_keys::keys::public_key_hex(&member),
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &coven_keys::encryption::EncryptionService::from_key([42; 32]),
                 "Effective Access Store",
             )
@@ -479,7 +479,7 @@ impl EffectiveAccessFixture {
             .add_circle_member(
                 circle_id,
                 coven_keys::keys::public_key_hex(&member),
-                crate::protocol::circle::CircleRole::Member,
+                coven_protocol::circle::CircleRole::Member,
             )
             .await
             .expect("add effective-access Circle member");
@@ -875,7 +875,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
             &fixture.owner,
             &coven_keys::keys::public_key_hex(&fixture.member),
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             "Effective Access Store",
         )
@@ -1231,7 +1231,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
             &founder,
             &crate::sync::test_helpers::pubkey_hex(&candidate),
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &encryption,
             "Causal Membership Proof",
         )
@@ -1303,7 +1303,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .load_commit_for_test(&earlier_control)
         .await
         .expect("load traversal-earlier control");
-    let Some(crate::protocol::store_commit::StoreControl { transition }) =
+    let Some(coven_protocol::store_commit::StoreControl { transition }) =
         earlier_value.value().control()
     else {
         panic!("earlier Owner position is not a Merge membership control");
@@ -1571,7 +1571,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         .expect("list owner Circles after deletion");
     assert!(
         matches!(owner_circles.as_slice(),
-            [crate::protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+            [coven_protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
         "the owner reports the Circle as deleted: {owner_circles:?}"
     );
 
@@ -1620,7 +1620,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         .expect("list member Circles after deletion");
     assert!(
         matches!(member_circles.as_slice(),
-            [crate::protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+            [coven_protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
         "the member reports the Circle as deleted: {member_circles:?}"
     );
 
@@ -1687,7 +1687,7 @@ async fn a_non_owner_is_refused_circle_deletion() {
         .expect("list member Circles after the refused deletion");
     assert!(
         matches!(circles.as_slice(),
-            [crate::protocol::circle::CircleInfo::Active { id, .. }] if *id == fixture.circle_id),
+            [coven_protocol::circle::CircleInfo::Active { id, .. }] if *id == fixture.circle_id),
         "the refused deletion leaves the Circle active: {circles:?}"
     );
 }
@@ -1752,7 +1752,7 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
         .expect("list member Circles after the later deletion");
     assert!(
         matches!(circles.as_slice(),
-            [crate::protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
+            [coven_protocol::circle::CircleInfo::Deleted { id }] if *id == fixture.circle_id),
         "the applied-then-pruned order converges to deleted: {circles:?}"
     );
 }

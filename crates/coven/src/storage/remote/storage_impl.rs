@@ -73,12 +73,12 @@ impl SyncStorage for CloudSyncStorage {
 
     fn store_blob_protection(
         &self,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, StorageError> {
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, StorageError> {
         Ok(match self.cipher_for_seal()? {
             CloudCipher::Encrypted(encryption) => {
-                crate::protocol::objects::BlobSpoolProtection::Opaque(encryption)
+                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption)
             }
-            CloudCipher::Plaintext => crate::protocol::objects::BlobSpoolProtection::Browsable,
+            CloudCipher::Plaintext => coven_protocol::objects::BlobSpoolProtection::Browsable,
         })
     }
 
@@ -113,7 +113,7 @@ impl SyncStorage for CloudSyncStorage {
         let reference = ExactObjectRef::new(
             slot,
             stored.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(&stored),
+            coven_protocol::store_commit::ObjectHash::digest(&stored),
         );
         PreparedExactObject::new(reference, stored)
     }
@@ -219,7 +219,7 @@ impl SyncStorage for CloudSyncStorage {
                 let object = ExactObjectRef::new(
                     slot.clone(),
                     stored.len() as u64,
-                    crate::protocol::store_commit::ObjectHash::digest(&stored),
+                    coven_protocol::store_commit::ObjectHash::digest(&stored),
                 );
                 let prepared = PreparedExactObject::new(object, stored.clone())?;
                 let opened = cipher.open(stored, &aad).map_err(|error| {
@@ -240,7 +240,7 @@ impl SyncStorage for CloudSyncStorage {
             Err(error) => return Err(error.into()),
             Ok(stored)
                 if stored.len() as u64 != object.stored_size()
-                    || crate::protocol::store_commit::ObjectHash::digest(&stored)
+                    || coven_protocol::store_commit::ObjectHash::digest(&stored)
                         != object.stored_hash() =>
             {
                 return Err(StorageError::SlotCollision(format!(
@@ -278,8 +278,8 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn allocate_blob_slot(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
     ) -> Result<ObjectSlot, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
@@ -289,12 +289,12 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn seal_blob_to_spool(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+        protection: coven_protocol::objects::BlobSpoolProtection,
         plaintext_file: &Path,
         spool_file: &Path,
-    ) -> Result<crate::protocol::objects::BlobSpoolWrite, StorageError> {
+    ) -> Result<coven_protocol::objects::BlobSpoolWrite, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
@@ -329,7 +329,7 @@ impl SyncStorage for CloudSyncStorage {
                     stored_hash,
                 );
                 let blob =
-                    crate::protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
+                    coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
                         .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                 let mut reader =
                     ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
@@ -345,7 +345,7 @@ impl SyncStorage for CloudSyncStorage {
                         break;
                     }
                 }
-                return Ok(crate::protocol::objects::BlobSpoolWrite::Reused);
+                return Ok(coven_protocol::objects::BlobSpoolWrite::Reused);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -359,12 +359,12 @@ impl SyncStorage for CloudSyncStorage {
         let retry_protection = protection.clone();
         let body = match (locator, protection) {
             (
-                crate::protocol::blob::locator::BlobLocator::Opaque {
+                coven_protocol::blob::locator::BlobLocator::Opaque {
                     scope,
                     key_fingerprint,
                     ..
                 },
-                crate::protocol::objects::BlobSpoolProtection::Opaque(encryption),
+                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption),
             ) => {
                 if encryption.seal_key_fingerprint() != *key_fingerprint {
                     return Err(StorageError::InvalidContent(format!(
@@ -384,17 +384,17 @@ impl SyncStorage for CloudSyncStorage {
                     .map_err(StorageError::LocalFilesystem)?
             }
             (
-                crate::protocol::blob::locator::BlobLocator::Browsable { .. },
-                crate::protocol::objects::BlobSpoolProtection::Browsable,
+                coven_protocol::blob::locator::BlobLocator::Browsable { .. },
+                coven_protocol::objects::BlobSpoolProtection::Browsable,
             ) => BlobBody::from_file(plaintext_file)
                 .await
                 .map_err(StorageError::LocalFilesystem)?,
-            (crate::protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
+            (coven_protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "opaque blob locator requires audience encryption".to_string(),
                 ));
             }
-            (crate::protocol::blob::locator::BlobLocator::Browsable { .. }, _) => {
+            (coven_protocol::blob::locator::BlobLocator::Browsable { .. }, _) => {
                 return Err(StorageError::Configuration(
                     "browsable blob locator cannot use audience encryption".to_string(),
                 ));
@@ -436,7 +436,7 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         match staged.commit_new().await {
-            Ok(()) => Ok(crate::protocol::objects::BlobSpoolWrite::Created),
+            Ok(()) => Ok(coven_protocol::objects::BlobSpoolWrite::Created),
             Err(coven_foundation::local_file::CommitNewFileError::DestinationExists(_)) => {
                 let (stored_size, stored_hash) =
                     crate::storage::local_file::exact_file_facts(spool_file)
@@ -448,7 +448,7 @@ impl SyncStorage for CloudSyncStorage {
                     stored_hash,
                 );
                 let blob =
-                    crate::protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
+                    coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
                         .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                 let mut reader = ExactBlobPlaintextReader::new(
                     spool_file,
@@ -468,7 +468,7 @@ impl SyncStorage for CloudSyncStorage {
                         break;
                     }
                 }
-                Ok(crate::protocol::objects::BlobSpoolWrite::Reused)
+                Ok(coven_protocol::objects::BlobSpoolWrite::Reused)
             }
             Err(error) => Err(StorageError::LocalFilesystem(error.to_string())),
         }
@@ -476,11 +476,11 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn prepare_blob_object(
         &self,
-        locator: &crate::protocol::blob::locator::BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         slot: ObjectSlot,
         stored_file: &Path,
-    ) -> Result<crate::protocol::blob::locator::StoredBlobRef, StorageError> {
+    ) -> Result<coven_protocol::blob::locator::StoredBlobRef, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
@@ -494,7 +494,7 @@ impl SyncStorage for CloudSyncStorage {
         let (stored_size, stored_hash) = crate::storage::local_file::exact_file_facts(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;
-        crate::protocol::blob::locator::StoredBlobRef::new(
+        coven_protocol::blob::locator::StoredBlobRef::new(
             locator.clone(),
             ExactObjectRef::new(slot, stored_size, stored_hash),
         )
@@ -503,8 +503,8 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn create_blob_object_from_file(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
     ) -> Result<(), StorageError> {
@@ -527,7 +527,7 @@ impl SyncStorage for CloudSyncStorage {
             object.verify_stored_facts(
                 stored_file,
                 size,
-                crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                coven_protocol::store_commit::ObjectHash::from_digest(digest),
             )?;
         }
         let body = BlobBody::from_file(stored_file)
@@ -566,7 +566,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn verify_blob_object(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         self.validate_blob_locator_home(blob.locator())?;
         let expected = blob.locator().semantic_key();
@@ -582,8 +582,8 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn stage_verified_blob_plaintext(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        protection: coven_protocol::objects::BlobSpoolProtection,
         dest: &Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let stored_destination = dest.with_extension("coven-stored-download");
@@ -625,14 +625,14 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn open_blob_range_reader(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        protection: coven_protocol::objects::BlobSpoolProtection,
     ) -> Result<BlobRangeReader, StorageError> {
         let locator = blob.locator();
         self.validate_blob_locator_home(locator)?;
         let slot = blob.object().slot().clone();
         let (scope, key_fingerprint) = match locator {
-            crate::protocol::blob::locator::BlobLocator::Opaque {
+            coven_protocol::blob::locator::BlobLocator::Opaque {
                 scope,
                 key_fingerprint,
                 ..
@@ -642,14 +642,14 @@ impl SyncStorage for CloudSyncStorage {
             // answer against. Ranged reading is refused rather than served
             // unverified; the caller materializes the whole blob, where the row's
             // content hash can refuse it.
-            crate::protocol::blob::locator::BlobLocator::Browsable { .. } => {
+            coven_protocol::blob::locator::BlobLocator::Browsable { .. } => {
                 return Err(StorageError::Configuration(format!(
                     "blob {} is stored in the clear, which has no per-range verification",
                     locator.locator_hash()
                 )));
             }
         };
-        let crate::protocol::objects::BlobSpoolProtection::Opaque(master) = protection else {
+        let coven_protocol::objects::BlobSpoolProtection::Opaque(master) = protection else {
             return Err(StorageError::Configuration(
                 "opaque blob locator requires audience encryption".to_string(),
             ));
@@ -681,7 +681,7 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn delete_blob_object(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError> {
         let locator = blob.locator();
         let object = blob.object();
@@ -704,7 +704,7 @@ impl SyncStorage for CloudSyncStorage {
 impl CloudSyncStorage {
     async fn stage_exact_blob_download(
         &self,
-        blob: &crate::protocol::blob::locator::StoredBlobRef,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
         dest: &Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
@@ -740,7 +740,7 @@ impl CloudSyncStorage {
             object.verify_stored_facts(
                 staged.path(),
                 size,
-                crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                coven_protocol::store_commit::ObjectHash::from_digest(digest),
             )?;
         }
         Ok(staged)

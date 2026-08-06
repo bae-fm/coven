@@ -1,6 +1,6 @@
-use crate::protocol::objects::StorageError;
-use crate::protocol::store_commit::{OwnerPromotionId, OwnerPromotionStaleReason};
 use crate::sync::store::StoreError;
+use coven_protocol::objects::StorageError;
+use coven_protocol::store_commit::{OwnerPromotionId, OwnerPromotionStaleReason};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OwnerPromotionError {
@@ -30,33 +30,31 @@ impl From<StorageError> for OwnerPromotionError {
     }
 }
 
-impl From<crate::protocol::objects::StoreObjectError> for OwnerPromotionError {
-    fn from(error: crate::protocol::objects::StoreObjectError) -> Self {
+impl From<coven_protocol::objects::StoreObjectError> for OwnerPromotionError {
+    fn from(error: coven_protocol::objects::StoreObjectError) -> Self {
         match error {
-            crate::protocol::objects::StoreObjectError::Storage(error) => error.into(),
+            coven_protocol::objects::StoreObjectError::Storage(error) => error.into(),
             error => Self::Protocol(error.to_string()),
         }
     }
 }
 
-impl From<crate::protocol::prepared_commit::PreparedCommitError> for OwnerPromotionError {
-    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+impl From<coven_protocol::prepared_commit::PreparedCommitError> for OwnerPromotionError {
+    fn from(error: coven_protocol::prepared_commit::PreparedCommitError) -> Self {
         OwnerPromotionError::Protocol(error.to_string())
     }
 }
 
-impl From<crate::protocol::membership_mutation::MembershipPreparationError>
-    for OwnerPromotionError
-{
-    fn from(error: crate::protocol::membership_mutation::MembershipPreparationError) -> Self {
+impl From<coven_protocol::membership_mutation::MembershipPreparationError> for OwnerPromotionError {
+    fn from(error: coven_protocol::membership_mutation::MembershipPreparationError) -> Self {
         OwnerPromotionError::Protocol(error.to_string())
     }
 }
 
-impl From<crate::protocol::owner_promotion_journal::OwnerPromotionJournalError>
+impl From<coven_protocol::owner_promotion_journal::OwnerPromotionJournalError>
     for OwnerPromotionError
 {
-    fn from(error: crate::protocol::owner_promotion_journal::OwnerPromotionJournalError) -> Self {
+    fn from(error: coven_protocol::owner_promotion_journal::OwnerPromotionJournalError) -> Self {
         OwnerPromotionError::Protocol(error.to_string())
     }
 }

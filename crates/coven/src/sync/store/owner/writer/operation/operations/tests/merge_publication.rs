@@ -28,25 +28,25 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
     let remote = fixture.stored_remote_object(&fixture.package_object).await;
     assert!(matches!(
         remote,
-        crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+        coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 record.identity.domain,
-                crate::protocol::remote_object::SharedLiveSetObjectDomain::StorePackage { .. }
+                coven_protocol::remote_object::SharedLiveSetObjectDomain::StorePackage { .. }
             )
                 && matches!(
                     &record.state,
-                    crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                    coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                         ownership
                     } if ownership.pending.is_empty()
                         && ownership.activated.contains(
-                            &crate::protocol::remote_object::SharedObjectOwner::StoreCommit(
+                            &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(
                                 fixture.commit_ref.clone()
                             )
                         )
                         && ownership.activated.iter().any(|owner| matches!(
                             owner,
-                            crate::protocol::remote_object::SharedObjectOwner::RetainedReplay(
-                                crate::protocol::remote_object::RetainedReplayOwner::Commit {
+                            coven_protocol::remote_object::SharedObjectOwner::RetainedReplay(
+                                coven_protocol::remote_object::RetainedReplayOwner::Commit {
                                     commit,
                                     ..
                                 }
@@ -60,15 +60,15 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
         .await;
     assert!(matches!(
         commit,
-        crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
+                coven_protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
                     reference
                 } if reference == &fixture.commit_ref
             ) && matches!(
                 &record.state,
-                crate::protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
                     ownership
                 } if ownership.pending.is_empty()
                     && ownership.activated
@@ -78,15 +78,15 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
     let head = fixture.stored_remote_object(&fixture.head_object).await;
     assert!(matches!(
         head,
-        crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                     reference
                 } if reference.object == fixture.head_object
             ) && matches!(
                 &record.state,
-                crate::protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
                     ownership
                 } if ownership.pending.is_empty()
                     && ownership.activated
@@ -174,15 +174,15 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     let package = fixture.stored_remote_object(&fixture.package_object).await;
     assert!(matches!(
         package,
-        crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record)
+        coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record)
             if matches!(
                 &record.state,
-                crate::protocol::remote_object::CandidateObjectState::CleanupPending {
+                coven_protocol::remote_object::CandidateObjectState::CleanupPending {
                     former_candidates
                 } if former_candidates.len() == 1
                     && matches!(
                         former_candidates[0].proof(),
-                        crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+                        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
                             winner_head
                         } if winner_head == &winner
                     )
@@ -193,11 +193,11 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
         .await;
     assert!(matches!(
         commit,
-        crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(record)
+        coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record)
             if matches!(
                 &record.state,
-                crate::protocol::remote_object::CandidateCommitState::CleanupPending {
-                    proof: crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+                coven_protocol::remote_object::CandidateCommitState::CleanupPending {
+                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
                         winner_head
                     }
                 } if winner_head == &winner
@@ -206,15 +206,15 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     let head = fixture.stored_remote_object(&fixture.head_object).await;
     assert!(matches!(
         head,
-        crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
             if matches!(
                 &record.state,
-                crate::protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
+                coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
                     former_candidates
                 } if former_candidates.len() == 1
                     && matches!(
                         former_candidates[0].proof(),
-                        crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+                        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
                             winner_head
                         } if winner_head == &winner
                     )
@@ -277,10 +277,10 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
     let authority_remote = fixture.stored_remote_object(&authority.object).await;
     assert!(matches!(
         authority_remote,
-        crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
+                coven_protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
                     reference
                 } if reference == &authority
             )
@@ -507,10 +507,10 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
     let head = fixture.stored_remote_object(&accepted_head.object).await;
     assert!(matches!(
         head,
-        crate::protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+        coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
             if matches!(
                 &record.identity.domain,
-                crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                     reference
                 } if reference == &accepted_head
             )
@@ -625,8 +625,8 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             Database::open(
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "dev-writer".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),

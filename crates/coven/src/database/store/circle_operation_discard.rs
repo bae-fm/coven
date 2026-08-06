@@ -19,10 +19,10 @@ use crate::database::{
     load_protocol_inert_object_on, load_remote_object_on, DurablePreparedProtocolObject,
     TerminalCandidateCleanupVerification,
 };
-use crate::protocol::circle::{CircleAccessDisposition, CircleOperationId};
-use crate::protocol::circle_journal::{CircleOperationJournal, PreparedCircleOperation};
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::remote_object::remote_object_id;
+use coven_protocol::circle::{CircleAccessDisposition, CircleOperationId};
+use coven_protocol::circle_journal::{CircleOperationJournal, PreparedCircleOperation};
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::remote_object::remote_object_id;
 use rusqlite::Connection;
 
 /// The candidate a Circle operation would activate, plus the shared bootstrap
@@ -37,7 +37,7 @@ struct CircleOperationCandidate {
 
 pub(crate) struct CircleOperationDiscardCandidate {
     pub(crate) candidate: crate::database::BlockedMergeCandidate,
-    pub(crate) revoked_grant: Option<crate::protocol::membership::MembershipGrantId>,
+    pub(crate) revoked_grant: Option<coven_protocol::membership::MembershipGrantId>,
 }
 
 fn circle_operation_candidate_on(
@@ -114,19 +114,19 @@ impl StoreDatabase {
                 let journal = load_discardable_operation_on(conn, &operation_id)?;
                 let candidate = circle_operation_candidate_on(conn, journal.operation())?;
                 let revoked_grant = match journal.state() {
-                    crate::protocol::circle::CircleOperationState::Blocked {
+                    coven_protocol::circle::CircleOperationState::Blocked {
                         block:
-                            crate::protocol::circle::CircleOperationBlock::AuthorityLost { grant_id },
+                            coven_protocol::circle::CircleOperationBlock::AuthorityLost { grant_id },
                     } => Some(grant_id),
                     // A lost position needs no grant: its proof is the direct
                     // observation of the winner that holds the head slot.
-                    crate::protocol::circle::CircleOperationState::Blocked {
-                        block: crate::protocol::circle::CircleOperationBlock::PositionLost { .. },
+                    coven_protocol::circle::CircleOperationState::Blocked {
+                        block: coven_protocol::circle::CircleOperationBlock::PositionLost { .. },
                     }
-                    | crate::protocol::circle::CircleOperationState::Pending
-                    | crate::protocol::circle::CircleOperationState::WaitingForCloseResponses
-                    | crate::protocol::circle::CircleOperationState::Finalizing
-                    | crate::protocol::circle::CircleOperationState::Discarding => None,
+                    | coven_protocol::circle::CircleOperationState::Pending
+                    | coven_protocol::circle::CircleOperationState::WaitingForCloseResponses
+                    | coven_protocol::circle::CircleOperationState::Finalizing
+                    | coven_protocol::circle::CircleOperationState::Discarding => None,
                 };
                 Ok(CircleOperationDiscardCandidate {
                     candidate: blocked_merge_candidate_from_prepared(candidate.candidate),
@@ -141,9 +141,9 @@ impl StoreDatabase {
     /// `Discarding` state in one transaction. Restart resumes cleanup from there.
     pub(crate) async fn begin_circle_operation_discard(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         operation_id: &CircleOperationId,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), crate::DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
         let operation_id = operation_id.as_str().to_string();
@@ -179,7 +179,7 @@ impl StoreDatabase {
     /// occupation and yields no terminal verification.
     pub(crate) async fn circle_operation_discard_terminal_verifications(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         operation_id: &CircleOperationId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
@@ -201,14 +201,14 @@ impl StoreDatabase {
     /// the candidate from the journal.
     pub(crate) async fn reconcile_circle_operation_terminal_head(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         operation_id: &CircleOperationId,
-        verified: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        verified: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), crate::DbError> {
         if !matches!(
             verified.proof(),
-            crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
-                | crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
+            coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                | coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation { .. }
         ) {
             return Err(crate::DbError::Message(
                 "terminal head reconciliation received another proof family".to_string(),
@@ -385,18 +385,18 @@ impl StoreDatabase {
                     }
                     if matches!(
                         remote,
-                        crate::protocol::remote_object::RemoteObjectRecord::CandidateCommit(
-                            crate::protocol::remote_object::CandidateCommitRecord {
+                        coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(
+                            coven_protocol::remote_object::CandidateCommitRecord {
                                 state:
-                                    crate::protocol::remote_object::CandidateCommitState::AbsentVerified {
+                                    coven_protocol::remote_object::CandidateCommitState::AbsentVerified {
                                         ..
                                     },
                                 ..
                             }
-                        ) | crate::protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
-                            crate::protocol::remote_object::CandidateObjectRecord {
+                        ) | coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(
+                            coven_protocol::remote_object::CandidateObjectRecord {
                                 state:
-                                    crate::protocol::remote_object::CandidateObjectState::AbsentVerified {
+                                    coven_protocol::remote_object::CandidateObjectState::AbsentVerified {
                                         ..
                                     },
                                 ..

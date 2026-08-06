@@ -53,7 +53,7 @@ impl LoadedExactMembershipGraph {
                     "membership stream does not begin at its grant-authorized slot".to_string(),
                 ));
             }
-            let expected = crate::protocol::store_commit::StreamActivation::grant_authorized(
+            let expected = coven_protocol::store_commit::StreamActivation::grant_authorized(
                 root.store_root_hash,
                 node.head.body.author_registration.clone(),
                 grant.clone(),
@@ -225,10 +225,10 @@ fn membership_projection_activation_status(
         membership_entry_requires_store_activation(&node.entry),
         &node.head.activation,
     ) {
-        (false, crate::protocol::membership::MembershipHeadActivation::Direct) => {
+        (false, coven_protocol::membership::MembershipHeadActivation::Direct) => {
             Ok(MembershipProjectionStatus::Included)
         }
-        (true, crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
+        (true, coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
             .classify_head(&node.reference, &node.head, commit)
             .map(|status| match status {
                 crate::sync::store::owner::verified_history::VerifiedMergePrefixHeadStatus::Included => {
@@ -239,12 +239,12 @@ fn membership_projection_activation_status(
                 }
             })
             .map_err(AnchoredChainError::LoadFailed),
-        (true, crate::protocol::membership::MembershipHeadActivation::Direct) => {
+        (true, coven_protocol::membership::MembershipHeadActivation::Direct) => {
             Err(AnchoredChainError::LoadFailed(
                 "membership authority change has no exact Store activation".to_string(),
             ))
         }
-        (false, crate::protocol::membership::MembershipHeadActivation::StoreCommit { .. }) => {
+        (false, coven_protocol::membership::MembershipHeadActivation::StoreCommit { .. }) => {
             Err(AnchoredChainError::LoadFailed(
                 "direct membership change carries an unrelated Store activation".to_string(),
             ))
@@ -429,7 +429,7 @@ pub(super) fn project_membership_cut_to_store_prefix(
 pub(super) fn exact_membership_chain_from_graph(
     root: &StoreRootRef,
     graph: LoadedExactMembershipGraph,
-    provider_admin: crate::protocol::provider::ProviderAdminState,
+    provider_admin: coven_protocol::provider::ProviderAdminState,
 ) -> Result<MembershipChain, AnchoredChainError> {
     let chain = MembershipChain::from_entries_with_coords_and_heads_and_provider_admin(
         graph
@@ -446,7 +446,7 @@ pub(super) fn exact_membership_chain_from_graph(
 }
 
 pub(super) fn validate_owner_grant_records(
-    root_value: &crate::protocol::store_commit::StoreProtocolRoot,
+    root_value: &coven_protocol::store_commit::StoreProtocolRoot,
     entries: &[MembershipEntry],
 ) -> Result<(), AnchoredChainError> {
     for entry in entries {
@@ -460,9 +460,9 @@ pub(super) fn validate_owner_grant_records(
             }
             MembershipChange::SetMember {
                 role:
-                    crate::protocol::membership::StoreMembershipRoleGrant::Owner {
+                    coven_protocol::membership::StoreMembershipRoleGrant::Owner {
                         recovery:
-                            crate::protocol::membership::OwnerRecoveryAnchorRef::Promotion { .. },
+                            coven_protocol::membership::OwnerRecoveryAnchorRef::Promotion { .. },
                     },
                 ..
             } => {
@@ -470,7 +470,7 @@ pub(super) fn validate_owner_grant_records(
                 // acceptance before records are reduced into a membership chain.
             }
             MembershipChange::SetMember {
-                role: crate::protocol::membership::StoreMembershipRoleGrant::Owner { .. },
+                role: coven_protocol::membership::StoreMembershipRoleGrant::Owner { .. },
                 ..
             } => {
                 return Err(AnchoredChainError::LoadFailed(

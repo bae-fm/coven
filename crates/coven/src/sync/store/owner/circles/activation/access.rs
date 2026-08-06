@@ -24,8 +24,8 @@ struct ResolvedIdentityAccess {
 /// have reclaimed.
 fn resolve_identity_access_leaf(
     verified_access: &[VerifiedAccessPair],
-    checkpoint_members: &[(String, crate::protocol::membership::MemberRole)],
-    reference: &crate::protocol::store_commit::CircleControlRef,
+    checkpoint_members: &[(String, coven_protocol::membership::MemberRole)],
+    reference: &coven_protocol::store_commit::CircleControlRef,
     control: &PreparedCircleControl,
     commit: &StoreBatchCommit,
     identity: &UserKeypair,
@@ -210,7 +210,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &envelope_prefix,
                 )
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let envelope: AccessEnvelope =
                 serde_json::from_slice(&envelope_bytes).map_err(|error| {
                     CircleOperationError::InvalidState(format!(
@@ -249,7 +249,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     &leaf_prefix,
                 )
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle access leaf bytes differ from the paired leaf hash".to_string(),
@@ -273,9 +273,9 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         &self,
         leaf: &CircleAccessLeaf,
         control: &PreparedCircleControl,
-        bootstrap: &crate::protocol::circle::CircleBootstrapRef,
+        bootstrap: &coven_protocol::circle::CircleBootstrapRef,
         epoch_encryption: EncryptionService,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<VerifiedCircleImage, CircleOperationError> {
         if bootstrap.schema_version != self.database.schema_version()
             || bootstrap.sync_routing_hash != self.database.sync_routing_hash()
@@ -285,7 +285,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     .to_string(),
             ));
         }
-        let image_prefix = crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
+        let image_prefix = coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
             leaf.circle_id,
             leaf.candidate_family,
             &leaf.owner_pubkey,
@@ -313,8 +313,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         for binding in &bootstrap.blobs {
-            let crate::protocol::blob::RowBlobAuthority::Remote(
-                crate::protocol::audience_package::PackageAudience::Circle {
+            let coven_protocol::blob::RowBlobAuthority::Remote(
+                coven_protocol::audience_package::PackageAudience::Circle {
                     circle_id,
                     control: blob_control,
                     key_fingerprint,
@@ -365,7 +365,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!(
                         "verify Circle bootstrap blob {}: {error}",
-                        crate::protocol::remote_object::remote_object_id(stored.object())
+                        coven_protocol::remote_object::remote_object_id(stored.object())
                     ))
                 })?;
         }
@@ -382,10 +382,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) async fn resolve_local_access(
         &mut self,
         commit: &StoreBatchCommit,
-        reference: &crate::protocol::store_commit::CircleControlRef,
+        reference: &coven_protocol::store_commit::CircleControlRef,
         control: &PreparedCircleControl,
         identity: &UserKeypair,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<LocalCircleAccess, CircleOperationError> {
         let verified_access = self
             .load_access_pairs(commit, reference.circle_id(), control, reference.objects())
@@ -435,7 +435,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         &mut self,
         verified: &VerifiedStoreBatchCommit,
         identity: Option<&UserKeypair>,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         verified_prefix: &VerifiedStreamActivationPrefix,
         verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
@@ -458,7 +458,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         &mut self,
         verified: &VerifiedStoreBatchCommit,
         identity: &UserKeypair,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
         let history_verifier = &mut *self.history;
         let commit = verified.value();
@@ -486,7 +486,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         &mut self,
         verified: &VerifiedStoreBatchCommit,
         identity: Option<&UserKeypair>,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         verified_prefix: &VerifiedStreamActivationPrefix,
         verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
@@ -580,12 +580,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &prefix,
             )
             .await?;
-            let head: crate::protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
+            let head: coven_protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse exact Circle control head: {error}"
-                ))
-            })?;
+                    CircleOperationError::InvalidState(format!(
+                        "parse exact Circle control head: {error}"
+                    ))
+                })?;
             let CircleControlCoord {
                 stream_id,
                 author_pubkey,
@@ -787,7 +787,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     let roster_owners = resolved_members
                         .iter()
                         .filter_map(|(pubkey, role)| {
-                            (*role == crate::protocol::circle::CircleRole::Owner)
+                            (*role == coven_protocol::circle::CircleRole::Owner)
                                 .then_some(pubkey.clone())
                         })
                         .collect::<Vec<_>>();

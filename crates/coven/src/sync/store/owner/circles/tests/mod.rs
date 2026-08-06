@@ -4,22 +4,6 @@ use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
 use crate::database::StoreDatabase;
 use crate::database::{Database, DbError};
-use crate::protocol::circle::{
-    circle_semantic_prefix, CircleAccessDisposition, CircleId, CircleOperationId,
-    CircleOperationKind, CircleOperationState, CircleRole, CircleRosterDraftPolicy,
-    CircleSemanticSlot, CircleTransitionDraft, CircleTransitionDraftPolicy,
-    CircleTransitionPolicyObjects, PreparedCircleTransition,
-};
-use crate::protocol::membership::MemberRole;
-use crate::protocol::objects::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
-};
-use crate::protocol::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
-    commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
-    CircleAccessLeafObjectRef, CircleAccessObjectRef, GrantStreamAnchor, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StreamActivation,
-};
 use crate::storage::cloud::CloudHome;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
@@ -27,6 +11,22 @@ use crate::sync::test_helpers::{
 };
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
+use coven_protocol::circle::{
+    circle_semantic_prefix, CircleAccessDisposition, CircleId, CircleOperationId,
+    CircleOperationKind, CircleOperationState, CircleRole, CircleRosterDraftPolicy,
+    CircleSemanticSlot, CircleTransitionDraft, CircleTransitionDraftPolicy,
+    CircleTransitionPolicyObjects, PreparedCircleTransition,
+};
+use coven_protocol::membership::MemberRole;
+use coven_protocol::objects::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
+};
+use coven_protocol::store_commit::{
+    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
+    commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
+    CircleAccessLeafObjectRef, CircleAccessObjectRef, GrantStreamAnchor, ObjectHash,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StreamActivation,
+};
 
 async fn create_test_store_in_its_own_task(
     db: &Database,
@@ -101,7 +101,7 @@ fn promote_store_member_access_without_adding_to_circle_roster(
         .map(|access| access.leaf.leaf_hash)
         .collect::<Vec<_>>();
     let (access_root, proofs) =
-        crate::protocol::circle_control::merkle_root_and_proofs(&leaf_hashes);
+        coven_protocol::circle_control::merkle_root_and_proofs(&leaf_hashes);
     creation
         .control
         .value

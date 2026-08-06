@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::database::StoreDatabase;
-use crate::protocol::blob::RowBlobRef;
 use crate::storage::cloud::setup::StorageSetupError;
 use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_sync::ConfigProvider;
@@ -10,6 +9,7 @@ use crate::sync::store::blob::{
 };
 use crate::sync::{BlobCacheError, BlobStream};
 use coven_foundation::config::Config;
+use coven_protocol::blob::RowBlobRef;
 
 #[derive(Clone)]
 pub(crate) struct StoreBlobAccess {

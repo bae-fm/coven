@@ -14,9 +14,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
-        remote_objects: Option<Vec<crate::protocol::remote_object::RemoteObjectRecord>>,
+        remote_objects: Option<Vec<coven_protocol::remote_object::RemoteObjectRecord>>,
         pending_rotation_generation: Option<u64>,
-    ) -> Result<crate::protocol::store_commit::ObjectHash, InviteError> {
+    ) -> Result<coven_protocol::store_commit::ObjectHash, InviteError> {
         match remote_objects {
             Some(remote_objects) => self
                 .database
@@ -38,7 +38,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) fn membership_mutation_persistence(
         &self,
-        intent_hash: crate::protocol::store_commit::ObjectHash,
+        intent_hash: coven_protocol::store_commit::ObjectHash,
     ) -> MutationPersistence {
         MutationPersistence::new(
             self.database.clone(),
@@ -80,7 +80,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn publish_direct_membership_head(
         &mut self,
         publication: &PreparedMembershipPublication,
-        author: &crate::protocol::store_commit::StoreDeviceRegistration,
+        author: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), InviteError> {
         self.storage
             .as_ref()
@@ -296,7 +296,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         candidate: Box<operations::PreparedStoreOperationCommit>,
-        completion: crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+        completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
     ) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
         transition.validate()?;
         publication.validate()?;

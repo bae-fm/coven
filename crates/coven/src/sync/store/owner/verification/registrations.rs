@@ -102,7 +102,7 @@ impl<'a> StoreCommitVerifier<'a> {
         commit: &StoreBatchCommit,
     ) -> Result<
         Option<(
-            crate::protocol::membership::MembershipGrantId,
+            coven_protocol::membership::MembershipGrantId,
             OwnerRecoveryActivationId,
         )>,
         StorePullError,
@@ -377,10 +377,10 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) async fn load_provider_access_grant(
         &self,
-        reference: &crate::protocol::provider::StoreMemberProviderAccessGrantRef,
+        reference: &coven_protocol::provider::StoreMemberProviderAccessGrantRef,
         administrator: &StoreDeviceRegistration,
     ) -> Result<
-        VerifiedObject<crate::protocol::provider::StoreMemberProviderAccessGrant>,
+        VerifiedObject<coven_protocol::provider::StoreMemberProviderAccessGrant>,
         StoreObjectError,
     > {
         let context = ProtocolObjectContext::signed_plaintext(
@@ -397,7 +397,7 @@ impl<'a> StoreCommitVerifier<'a> {
             &semantic_prefix,
             reference.grant_hash,
             move |bytes| {
-                let grant: crate::protocol::provider::StoreMemberProviderAccessGrant =
+                let grant: coven_protocol::provider::StoreMemberProviderAccessGrant =
                     decode_protocol_object(bytes)?;
                 expected
                     .verify(&grant)

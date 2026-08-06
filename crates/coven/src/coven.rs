@@ -7,8 +7,6 @@ use std::sync::Arc;
 
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
-use crate::protocol::blob::BlobTransitionObserver;
-use crate::protocol::synced_schema::SyncedTable;
 use crate::store_sync::ConfigProvider;
 use crate::{Migration, MigrationError};
 use coven_foundation::clock::{ClockRef, SystemClock};
@@ -18,6 +16,8 @@ use coven_foundation::store_dir::{LocalBlobStoreError, PathTokenError};
 use coven_keys::custody::KeyCustody;
 use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::StoreKeys;
+use coven_protocol::blob::BlobTransitionObserver;
+use coven_protocol::synced_schema::SyncedTable;
 
 pub type CovenResult<T> = Result<T, CovenError>;
 
@@ -129,7 +129,7 @@ impl Coven {
             config,
             synced_tables: None,
             migrations: None,
-            blob_tombstone_grace: crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
+            blob_tombstone_grace: coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             blob_chunking: crate::storage::BlobChunking::DEFAULT,
             max_concurrent_uploads: NonZeroUsize::MIN,
             max_concurrent_downloads: NonZeroUsize::MIN,
@@ -181,7 +181,7 @@ impl CovenBuilder {
 
     /// How long a deleted blob is kept after its tombstone is written before the
     /// tombstone GC erases it: the cross-device convergence window. Defaults to
-    /// [`crate::protocol::blob::BLOB_TOMBSTONE_GRACE`]. Must be positive — a
+    /// [`coven_protocol::blob::BLOB_TOMBSTONE_GRACE`]. Must be positive — a
     /// zero-or-negative grace is refused at [`open`](Self::open), since it would
     /// let the GC erase a blob a lagging peer still references.
     pub fn blob_tombstone_grace(mut self, grace: chrono::Duration) -> Self {
@@ -292,7 +292,7 @@ impl CovenBuilder {
         let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
         let store_dir = config.store_dir.clone();
-        let transfer_limits = crate::protocol::blob::TransferLimits {
+        let transfer_limits = coven_protocol::blob::TransferLimits {
             uploads: self.max_concurrent_uploads,
             downloads: self.max_concurrent_downloads,
         };
@@ -374,7 +374,7 @@ impl CovenBuilder {
             &db_path,
             tables,
             self.blob_tombstone_grace,
-            crate::protocol::blob::TransferLimits {
+            coven_protocol::blob::TransferLimits {
                 uploads: self.max_concurrent_uploads,
                 downloads: self.max_concurrent_downloads,
             },

@@ -9,7 +9,7 @@ use super::pull;
 use super::verification::StoreMembershipObjectVerifier;
 use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
-use crate::protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
+use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 
 mod reclaim;
 
@@ -37,11 +37,11 @@ pub(crate) struct AuthorizedStoreHistory<'storage> {
 
 impl<'storage> AuthorizedStoreHistory<'storage> {}
 
-use crate::protocol::circle_control::StoreMembershipStateRef;
-use crate::protocol::membership::{
+use coven_protocol::circle_control::StoreMembershipStateRef;
+use coven_protocol::membership::{
     AuthorStreamId, MembershipChain, MembershipHeadRef, MembershipStatus,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     CommitFrontier, OpenedRetainedMergeHistorySummary, ResolvedStoreDeviceState,
     StoreBatchCommitRef, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
 };

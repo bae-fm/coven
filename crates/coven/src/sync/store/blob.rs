@@ -2,11 +2,11 @@
 
 use futures_util::stream::TryStreamExt;
 
-use crate::protocol::blob::{RowBlobAuthority, RowBlobRef};
-use crate::protocol::objects::{BlobSpoolProtection, StorageError};
-use crate::protocol::store_commit::StoreRootRef;
 use crate::storage::SyncStorage;
 use coven_foundation::store_dir::StoreDir;
+use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
+use coven_protocol::objects::{BlobSpoolProtection, StorageError};
+use coven_protocol::store_commit::StoreRootRef;
 
 use crate::database::StoreDatabase;
 
@@ -39,15 +39,15 @@ impl std::fmt::Display for BlobDownloadFailureCause {
 
 fn blob_opening_authority<'a>(
     authority: &'a RowBlobAuthority,
-    stored: &crate::protocol::blob::locator::StoredBlobRef,
-) -> Result<crate::protocol::blob::BlobOpeningAuthority<'a>, BlobCacheError> {
+    stored: &coven_protocol::blob::locator::StoredBlobRef,
+) -> Result<coven_protocol::blob::BlobOpeningAuthority<'a>, BlobCacheError> {
     authority
         .opening_authority(stored)
         .map_err(|error| match error {
-            crate::protocol::blob::BlobOpeningAuthorityError::LocalityUnresolved { id } => {
+            coven_protocol::blob::BlobOpeningAuthorityError::LocalityUnresolved { id } => {
                 BlobCacheError::LocalityUnresolved { id }
             }
-            error @ crate::protocol::blob::BlobOpeningAuthorityError::CircleAuthorityMismatch {
+            error @ coven_protocol::blob::BlobOpeningAuthorityError::CircleAuthorityMismatch {
                 ..
             } => BlobCacheError::Storage(StorageError::InvalidContent(error.to_string())),
         })
@@ -64,8 +64,8 @@ fn blob_source(reference: &RowBlobRef) -> Result<BlobSource, BlobCacheError> {
         RowBlobAuthority::Remote(_) => Ok(BlobSource::Cache),
         RowBlobAuthority::Local | RowBlobAuthority::PendingRemote(_) => {
             Ok(match reference.blob().provenance {
-                crate::protocol::blob::Provenance::UserProvided => BlobSource::External,
-                crate::protocol::blob::Provenance::HostProvided => BlobSource::LocalStore,
+                coven_protocol::blob::Provenance::UserProvided => BlobSource::External,
+                coven_protocol::blob::Provenance::HostProvided => BlobSource::LocalStore,
             })
         }
     }
@@ -73,7 +73,7 @@ fn blob_source(reference: &RowBlobRef) -> Result<BlobSource, BlobCacheError> {
 
 fn remote_stored_ref(
     reference: &RowBlobRef,
-) -> Result<&crate::protocol::blob::locator::StoredBlobRef, BlobCacheError> {
+) -> Result<&coven_protocol::blob::locator::StoredBlobRef, BlobCacheError> {
     reference
         .stored()
         .ok_or_else(|| BlobCacheError::LocalityUnresolved {
@@ -83,12 +83,12 @@ fn remote_stored_ref(
 
 async fn exact_file_facts(
     path: &std::path::Path,
-) -> Result<(Vec<u8>, u64, crate::protocol::store_commit::ObjectHash), String> {
+) -> Result<(Vec<u8>, u64, coven_protocol::store_commit::ObjectHash), String> {
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|error| format!("read blob file {}: {error}", path.display()))?;
     let size = bytes.len() as u64;
-    let hash = crate::protocol::store_commit::ObjectHash::digest(&bytes);
+    let hash = coven_protocol::store_commit::ObjectHash::digest(&bytes);
     Ok((bytes, size, hash))
 }
 
@@ -96,7 +96,7 @@ fn verify_file_identity(
     path: &std::path::Path,
     reference: &RowBlobRef,
     actual_size: u64,
-    actual_hash: crate::protocol::store_commit::ObjectHash,
+    actual_hash: coven_protocol::store_commit::ObjectHash,
 ) -> Result<(), BlobCacheError> {
     if actual_size != reference.plaintext_size() || actual_hash != reference.plaintext_hash() {
         return Err(BlobCacheError::LocalIntegrity {
@@ -131,7 +131,7 @@ fn verify_external_file_facts(
     reference: &RowBlobRef,
     external: &crate::database::ExternalBlob,
     size: u64,
-    hash: crate::protocol::store_commit::ObjectHash,
+    hash: coven_protocol::store_commit::ObjectHash,
 ) -> Result<(), BlobCacheError> {
     if size != external.size || size != reference.plaintext_size() {
         return Err(BlobCacheError::ExternalSizeMismatch {
@@ -262,7 +262,7 @@ impl LocalStoreBlobAccess {
                 .await
                 .map_err(|error| asset_upload_error(error.to_string()))?;
             let remove_local = match (deferred.disposition, local) {
-                (crate::protocol::blob::DeferredLocalBlobDisposition::Pin, Some(source)) => {
+                (coven_protocol::blob::DeferredLocalBlobDisposition::Pin, Some(source)) => {
                     self.store_dir
                         .populate_pinned_blob_from_file(
                             &deferred.namespace,
@@ -275,7 +275,7 @@ impl LocalStoreBlobAccess {
                         .map_err(|error| asset_upload_error(error.to_string()))?;
                     true
                 }
-                (crate::protocol::blob::DeferredLocalBlobDisposition::Cache, Some(source)) => {
+                (coven_protocol::blob::DeferredLocalBlobDisposition::Cache, Some(source)) => {
                     self.cache
                         .populate_from_file(
                             &deferred.namespace,
@@ -288,14 +288,14 @@ impl LocalStoreBlobAccess {
                         .map_err(|error| asset_upload_error(error.to_string()))?;
                     true
                 }
-                (crate::protocol::blob::DeferredLocalBlobDisposition::Drop, _) => true,
+                (coven_protocol::blob::DeferredLocalBlobDisposition::Drop, _) => true,
                 (
-                    crate::protocol::blob::DeferredLocalBlobDisposition::Pin
-                    | crate::protocol::blob::DeferredLocalBlobDisposition::Cache,
+                    coven_protocol::blob::DeferredLocalBlobDisposition::Pin
+                    | coven_protocol::blob::DeferredLocalBlobDisposition::Cache,
                     None,
                 ) => {
                     let exact = match deferred.disposition {
-                        crate::protocol::blob::DeferredLocalBlobDisposition::Pin => {
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Pin => {
                             self.store_dir
                                 .pinned_blob_is_exact(
                                     &deferred.namespace,
@@ -305,7 +305,7 @@ impl LocalStoreBlobAccess {
                                 )
                                 .await
                         }
-                        crate::protocol::blob::DeferredLocalBlobDisposition::Cache => {
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Cache => {
                             self.store_dir
                                 .cached_blob_is_exact(
                                     &deferred.namespace,
@@ -315,7 +315,7 @@ impl LocalStoreBlobAccess {
                                 )
                                 .await
                         }
-                        crate::protocol::blob::DeferredLocalBlobDisposition::Drop => unreachable!(),
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Drop => unreachable!(),
                     }
                     .map_err(|error| asset_upload_error(error.to_string()))?;
                     if !exact {
@@ -534,7 +534,7 @@ impl CurrentRemoteBlobSource {
     async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
@@ -570,7 +570,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     pub(super) async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
@@ -582,7 +582,7 @@ impl<'storage> RemoteBlobSource<'storage> {
         &self,
         cache: &StoreBlobCache,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
         self.inner
@@ -593,7 +593,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     pub(super) async fn verify_plaintext_with_protection(
         &self,
         cache_owner: &StoreBlobCache,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
@@ -606,7 +606,7 @@ impl<'storage> RemoteBlobSource<'storage> {
     pub(super) async fn protection_for_test(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, BlobCacheError> {
         self.inner.protection(authority, stored).await
     }
@@ -637,15 +637,15 @@ impl RemoteBlobSourceInner<'_> {
     async fn protection(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<BlobSpoolProtection, BlobCacheError> {
         match blob_opening_authority(authority, stored)? {
-            crate::protocol::blob::BlobOpeningAuthority::Store => self
+            coven_protocol::blob::BlobOpeningAuthority::Store => self
                 .storage
                 .as_ref()
                 .store_blob_protection()
                 .map_err(BlobCacheError::Storage),
-            crate::protocol::blob::BlobOpeningAuthority::Circle {
+            coven_protocol::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
                 key_fingerprint,
@@ -669,7 +669,7 @@ impl RemoteBlobSourceInner<'_> {
     pub(super) async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         let protection = self.protection(authority, stored).await?;
@@ -684,7 +684,7 @@ impl RemoteBlobSourceInner<'_> {
         &self,
         cache: &StoreBlobCache,
         authority: &RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
         let protection = self
@@ -698,7 +698,7 @@ impl RemoteBlobSourceInner<'_> {
     pub(super) async fn verify_plaintext_with_protection(
         &self,
         cache_owner: &StoreBlobCache,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
@@ -975,7 +975,7 @@ impl StoreBlobCache {
     async fn verify_remote_plaintext(
         &self,
         remote: &ExactRemoteBlobAccess<'_>,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
         let locator = stored.locator();
@@ -1050,7 +1050,7 @@ impl StoreBlobCache {
             source,
             reference,
             size,
-            crate::protocol::store_commit::ObjectHash::from_digest(digest),
+            coven_protocol::store_commit::ObjectHash::from_digest(digest),
         )?;
         Ok(staged)
     }
@@ -1138,9 +1138,9 @@ impl StoreBlobCache {
     pub(crate) async fn populate_from_file(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: coven_protocol::store_commit::ObjectHash,
         plaintext_size: u64,
-        plaintext_hash: crate::protocol::store_commit::ObjectHash,
+        plaintext_hash: coven_protocol::store_commit::ObjectHash,
         source: &std::path::Path,
     ) -> Result<(), BlobCacheError> {
         let destination = self
@@ -1273,7 +1273,7 @@ impl StoreBlobCache {
     pub(crate) async fn populate_bytes_for_test(
         &self,
         namespace: &str,
-        locator_hash: crate::protocol::store_commit::ObjectHash,
+        locator_hash: coven_protocol::store_commit::ObjectHash,
         bytes: &[u8],
     ) -> Result<(), BlobCacheError> {
         let destination = self.store_dir.cache_blob_path(namespace, locator_hash)?;
@@ -1296,7 +1296,7 @@ impl StoreBlobCache {
         bytes: &[u8],
         mtime_secs: u64,
     ) -> Result<(), BlobCacheError> {
-        let locator_hash = crate::protocol::store_commit::ObjectHash::digest(id.as_bytes());
+        let locator_hash = coven_protocol::store_commit::ObjectHash::digest(id.as_bytes());
         self.populate_bytes_for_test(namespace, locator_hash, bytes)
             .await?;
         let path = self.store_dir.cache_blob_path(namespace, locator_hash)?;

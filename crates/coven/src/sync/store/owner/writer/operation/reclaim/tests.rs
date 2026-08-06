@@ -1,9 +1,9 @@
 use super::*;
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::store_commit::{StoreCommitCoord, StoreProtocolError};
 use crate::storage::SyncStorage;
 use coven_keys::keys::{self, UserKeypair};
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::store_commit::{StoreCommitCoord, StoreProtocolError};
 use std::collections::BTreeMap;
 
 fn proof_object(path: &str) -> ExactObjectRef {
@@ -122,7 +122,7 @@ impl ReclaimJourneyFixture {
 
     async fn package_is_present(&self, target: &StorePackageReclaimTarget) -> bool {
         let stream_id = target.activation.coord.stream_id.to_string();
-        let prefix = crate::protocol::store_commit::package_semantic_prefix(
+        let prefix = coven_protocol::store_commit::package_semantic_prefix(
             target.package.candidate_family,
             &stream_id,
             target.activation.coord.sequence(),
@@ -285,7 +285,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
             },
             covering_snapshot: StoreSnapshotLocator {
                 author_registration: founder_authority.registration_ref().clone(),
-                snapshot: crate::protocol::store_commit::StoreSnapshotRef {
+                snapshot: coven_protocol::store_commit::StoreSnapshotRef {
                     generation: 0,
                     snapshot_hash: ObjectHash::digest(b"covering snapshot"),
                     object: proof_object("store-v1/snapshots/founder/covering"),
@@ -401,7 +401,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         .expect("sign reclaim receipt");
     let mut reassigned = receipt.clone();
     reassigned.body_mut().provider_admin_grant =
-        crate::protocol::provider::ProviderAdminGrantId(ObjectHash::digest(b"another admin"));
+        coven_protocol::provider::ProviderAdminGrantId(ObjectHash::digest(b"another admin"));
     assert!(matches!(
         reassigned.verify(founder_authority.registration()),
         Err(StoreProtocolError::InvalidSignature)
@@ -428,7 +428,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         authorization: receipt.authorization.clone(),
         activation: ReclaimCommitActivation::new(
             authorization_activation,
-            crate::protocol::store_commit::StoreDeviceHeadRef {
+            coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: ObjectHash::digest(b"reclaim authorization head"),
                 object: proof_object("store-v1/heads/reclaim-authorization.json"),
             },
@@ -457,7 +457,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
                 ProtocolObjectDomain::StorePackage,
             ),
             &target.package.object,
-            &crate::protocol::store_commit::package_semantic_prefix(
+            &coven_protocol::store_commit::package_semantic_prefix(
                 target.package.candidate_family,
                 &stream_id.to_string(),
                 target.activation.coord.sequence(),
@@ -560,7 +560,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     let prepared_candidate = candidate
         .candidate()
         .expect("reclaim operation has a candidate");
-    let activation_head = crate::protocol::store_commit::StoreDeviceHeadRef {
+    let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
         head_hash: prepared_candidate.head.head_hash(),
         object: prepared_candidate.prepared_head.reference().clone(),
     };
@@ -596,7 +596,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
                 ProtocolObjectDomain::StorePackage,
             ),
             &target_package.object,
-            &crate::protocol::store_commit::package_semantic_prefix(
+            &coven_protocol::store_commit::package_semantic_prefix(
                 target_package.candidate_family,
                 &stream_id.to_string(),
                 target_activation.coord.sequence(),
@@ -631,7 +631,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
                 ProtocolObjectDomain::StorePackage,
             ),
             &target_package.object,
-            &crate::protocol::store_commit::package_semantic_prefix(
+            &coven_protocol::store_commit::package_semantic_prefix(
                 target_package.candidate_family,
                 &stream_id.to_string(),
                 target_activation.coord.sequence(),
@@ -760,11 +760,11 @@ async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
 }
 
 /// A single-stream commit frontier at `sequence`, deterministic in `stream`.
-fn frontier_at(stream: &str, sequence: u64) -> crate::protocol::store_commit::CommitFrontier {
-    let stream_id = crate::protocol::causal_grants::AuthorStreamId::from_digest(
-        ObjectHash::digest(stream.as_bytes()),
-    );
-    let commit = crate::protocol::store_commit::StoreBatchCommitRef {
+fn frontier_at(stream: &str, sequence: u64) -> coven_protocol::store_commit::CommitFrontier {
+    let stream_id = coven_protocol::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(
+        stream.as_bytes(),
+    ));
+    let commit = coven_protocol::store_commit::StoreBatchCommitRef {
         coord: StoreCommitCoord {
             stream_id,
             sequence,
@@ -774,7 +774,7 @@ fn frontier_at(stream: &str, sequence: u64) -> crate::protocol::store_commit::Co
             "store-v1/candidates/f/commits/{stream}/{sequence}/hash"
         )),
     };
-    crate::protocol::store_commit::CommitFrontier(std::collections::BTreeMap::from([(
+    coven_protocol::store_commit::CommitFrontier(std::collections::BTreeMap::from([(
         stream_id, commit,
     )]))
 }

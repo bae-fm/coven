@@ -139,7 +139,7 @@ impl PreparedAudienceBlob {
         let requires_upload = matches!(
             &remote,
             RemoteObjectRecord::SharedLiveSet(record)
-                if matches!(record.state, crate::protocol::remote_object::OwnedObjectState::Prepared { .. })
+                if matches!(record.state, coven_protocol::remote_object::OwnedObjectState::Prepared { .. })
         );
         if requires_upload && spool_path.is_none() {
             return Err(DbError::Message(
@@ -276,13 +276,13 @@ mod tests {
         include_locator: bool,
         include_binding: bool,
     ) -> Result<(), String> {
-        use crate::protocol::audience_package::RowBlobLocatorBinding;
-        use crate::protocol::blob::BlobScope;
-        use crate::protocol::causal_grants::AuthorStreamId;
-        use crate::protocol::circle::CircleId;
-        use crate::protocol::circle_control::CircleControlCoord;
-        use crate::protocol::objects::ObjectSlot;
-        use crate::protocol::store_commit::{CandidateFamilyId, StoreCommitCoord};
+        use coven_protocol::audience_package::RowBlobLocatorBinding;
+        use coven_protocol::blob::BlobScope;
+        use coven_protocol::causal_grants::AuthorStreamId;
+        use coven_protocol::circle::CircleId;
+        use coven_protocol::circle_control::CircleControlCoord;
+        use coven_protocol::objects::ObjectSlot;
+        use coven_protocol::store_commit::{CandidateFamilyId, StoreCommitCoord};
 
         let store_root_hash = ObjectHash::digest(b"outbound-graph-store");
         let write_id = WriteId::from_generated("outbound-graph-write".to_string());
@@ -300,7 +300,7 @@ mod tests {
         let uploader = StoreDeviceRegistrationRef {
             device_id: "01"
                 .repeat(32)
-                .parse::<crate::protocol::store_commit::StoreDeviceId>()
+                .parse::<coven_protocol::store_commit::StoreDeviceId>()
                 .map_err(|error| error.to_string())?,
             registration_hash: ObjectHash::digest(uploader_bytes),
             object: ExactObjectRef::new(
@@ -352,7 +352,7 @@ mod tests {
                     device_id: "01".repeat(32),
                     stream_id: AuthorStreamId::from_bytes([5; 32]),
                     author_pubkey: "author-a".to_string(),
-                    author_owner_grant: crate::protocol::causal_grants::MembershipGrantId(
+                    author_owner_grant: coven_protocol::causal_grants::MembershipGrantId(
                         ObjectHash::digest(b"outbound-graph owner grant"),
                     ),
                     seq: 1,

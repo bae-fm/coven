@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::store_commit::VerifiedStoreBatchCommit;
+use coven_protocol::store_commit::VerifiedStoreBatchCommit;
 
 pub(crate) struct PreparedStoreWrite {
     pub write_id: WriteId,
@@ -68,7 +68,7 @@ pub(crate) struct StoreWriteBlobFact {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreWriteRemoteBlob {
-    pub authority: crate::protocol::audience_package::PackageAudience,
+    pub authority: coven_protocol::audience_package::PackageAudience,
     pub stored: StoredBlobRef,
 }
 
@@ -77,8 +77,8 @@ pub(crate) struct StoreWriteRemoteBlob {
 pub(crate) enum StoreWriteBlobMoveDestination {
     Local,
     Remote {
-        audience: crate::protocol::blob::locator::RemoteAudience,
-        locator: crate::protocol::blob::locator::BlobLocator,
+        audience: coven_protocol::blob::locator::RemoteAudience,
+        locator: coven_protocol::blob::locator::BlobLocator,
         spool_path: PathBuf,
     },
 }
@@ -117,24 +117,24 @@ pub(crate) struct PreparedMergeAbandonmentCandidates {
 pub(crate) enum CompletePreparedStoreWriteOutcome {
     Published,
     AuthorExcluded {
-        device_id: crate::protocol::store_commit::StoreDeviceId,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthorExclusionActivationLocator {
-    exclusion: crate::protocol::store_commit::StoreDeviceExclusionRef,
-    accepted_cut: BTreeMap<crate::protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
+    exclusion: coven_protocol::store_commit::StoreDeviceExclusionRef,
+    accepted_cut: BTreeMap<coven_protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
     activation_commit: StoreBatchCommitRef,
-    activation_head: crate::protocol::store_commit::StoreDeviceHeadRef,
+    activation_head: coven_protocol::store_commit::StoreDeviceHeadRef,
 }
 
 impl AuthorExclusionActivationLocator {
     pub(crate) fn verified(
-        exclusion: crate::protocol::store_commit::StoreDeviceExclusionRef,
-        accepted_cut: BTreeMap<crate::protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
+        exclusion: coven_protocol::store_commit::StoreDeviceExclusionRef,
+        accepted_cut: BTreeMap<coven_protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef>,
         activation_commit: StoreBatchCommitRef,
-        activation_head: crate::protocol::store_commit::StoreDeviceHeadRef,
+        activation_head: coven_protocol::store_commit::StoreDeviceHeadRef,
     ) -> Self {
         Self {
             exclusion,
@@ -144,17 +144,17 @@ impl AuthorExclusionActivationLocator {
         }
     }
 
-    pub(crate) fn exclusion(&self) -> &crate::protocol::store_commit::StoreDeviceExclusionRef {
+    pub(crate) fn exclusion(&self) -> &coven_protocol::store_commit::StoreDeviceExclusionRef {
         &self.exclusion
     }
 
     pub(crate) fn accepted_cut(
         &self,
-    ) -> &BTreeMap<crate::protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef> {
+    ) -> &BTreeMap<coven_protocol::causal_grants::AuthorStreamId, StoreBatchCommitRef> {
         &self.accepted_cut
     }
 
-    pub(crate) fn activation_head(&self) -> &crate::protocol::store_commit::StoreDeviceHeadRef {
+    pub(crate) fn activation_head(&self) -> &coven_protocol::store_commit::StoreDeviceHeadRef {
         &self.activation_head
     }
 
@@ -167,12 +167,12 @@ impl AuthorExclusionActivationLocator {
 pub(crate) enum TerminalCandidateAuthority {
     AuthorExclusion(AuthorExclusionActivationLocator),
     MembershipGrantRevocation {
-        grant_id: crate::protocol::membership::MembershipGrantId,
-        membership: crate::protocol::circle_control::StoreMembershipStateRef,
+        grant_id: coven_protocol::membership::MembershipGrantId,
+        membership: coven_protocol::circle_control::StoreMembershipStateRef,
         activation_commit: StoreBatchCommitRef,
-        activation_head: crate::protocol::store_commit::StoreDeviceHeadRef,
+        activation_head: coven_protocol::store_commit::StoreDeviceHeadRef,
     },
-    DependencyRetraction(crate::protocol::remote_object::VerifiedDependencyRetractionAuthority),
+    DependencyRetraction(coven_protocol::remote_object::VerifiedDependencyRetractionAuthority),
 }
 
 #[derive(Debug, Clone)]
@@ -183,20 +183,20 @@ pub(crate) struct TerminalCandidateCleanupVerification {
 
 #[derive(Debug)]
 pub(crate) struct InitialStoreMembershipAuthority {
-    pub head_refs: Vec<crate::protocol::membership::MembershipHeadRef>,
+    pub head_refs: Vec<coven_protocol::membership::MembershipHeadRef>,
 }
 
 impl InitialStoreMembershipAuthority {
     const CURSOR_STATE_KEY_PREFIX: &'static str = "membership_head_cursor/";
 
     pub(crate) fn cursor_state_key_for_stream(
-        owner_grant: &crate::protocol::membership::MembershipGrantId,
-        stream_id: crate::protocol::membership::AuthorStreamId,
+        owner_grant: &coven_protocol::membership::MembershipGrantId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
     ) -> String {
         format!("{}{owner_grant}/{stream_id}", Self::CURSOR_STATE_KEY_PREFIX)
     }
 
-    fn cursor_state_key(reference: &crate::protocol::membership::MembershipHeadRef) -> String {
+    fn cursor_state_key(reference: &coven_protocol::membership::MembershipHeadRef) -> String {
         Self::cursor_state_key_for_stream(
             &reference.coord.author_owner_grant,
             reference.coord.stream_id,
@@ -218,7 +218,7 @@ impl InitialStoreMembershipAuthority {
         let mut head_refs = Vec::new();
         for row in rows {
             let value = row.map_err(DbError::from)?;
-            let reference: crate::protocol::membership::MembershipHeadRef =
+            let reference: coven_protocol::membership::MembershipHeadRef =
                 serde_json::from_str(&value).map_err(|error| {
                     DbError::context("membership head cursor is malformed", error)
                 })?;
@@ -236,7 +236,7 @@ impl InitialStoreMembershipAuthority {
         for reference in &self.head_refs {
             let key = Self::cursor_state_key(reference);
             if let Some(existing) = get_protocol_state_on(conn, &key)? {
-                let existing: crate::protocol::membership::MembershipHeadRef =
+                let existing: coven_protocol::membership::MembershipHeadRef =
                     serde_json::from_str(&existing).map_err(|error| {
                         DbError::context("membership head cursor is malformed", error)
                     })?;
@@ -266,7 +266,7 @@ impl InitialStoreMembershipAuthority {
 
     #[cfg(test)]
     pub(crate) fn cursor_state_key_for_test(
-        reference: &crate::protocol::membership::MembershipHeadRef,
+        reference: &coven_protocol::membership::MembershipHeadRef,
     ) -> String {
         Self::cursor_state_key(reference)
     }
@@ -286,7 +286,7 @@ pub(crate) enum MergeAbandonmentState {
 pub(crate) struct OutboundStoreAck {
     pub reference: StoreAckRef,
     pub ack: ExactProtocolObject<StoreAck>,
-    pub circle_acknowledgements: Vec<crate::protocol::prepared_commit::CircleAckActivation>,
+    pub circle_acknowledgements: Vec<coven_protocol::prepared_commit::CircleAckActivation>,
     pub activation: OutboundStoreAckActivation,
 }
 
@@ -294,12 +294,12 @@ pub(crate) struct OutboundStoreAck {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum OutboundStoreAckActivation {
     AwaitingCandidate,
-    Prepared(crate::protocol::prepared_commit::PreparedStoreOperationCommit),
-    Nonactivating(crate::protocol::prepared_commit::PreparedStoreOperationCommit),
+    Prepared(coven_protocol::prepared_commit::PreparedStoreOperationCommit),
+    Nonactivating(coven_protocol::prepared_commit::PreparedStoreOperationCommit),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedStoreAck {
     pub reference: StoreAckRef,
-    pub successor_slot: crate::protocol::objects::ObjectSlot,
+    pub successor_slot: coven_protocol::objects::ObjectSlot,
 }

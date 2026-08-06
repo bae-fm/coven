@@ -171,11 +171,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 
     pub(crate) fn complete_membership_journal(
         &self,
-        completion: crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+        completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         candidate: &StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         match completion {
-            crate::protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::Mutation {
                 intent_hash,
                 progress_bytes,
                 remote_objects,
@@ -190,7 +190,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 progress_bytes,
                 crate::database::MembershipMutationActivation::WithoutRotation,
             ),
-            crate::protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::RotationMutation {
                 intent_hash,
                 progress_bytes,
                 generation,
@@ -206,7 +206,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 progress_bytes,
                 crate::database::MembershipMutationActivation::Rotation { generation },
             ),
-            crate::protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                 transition,
                 remote_objects,
             } => {
@@ -259,12 +259,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 
     pub(crate) fn record_materialized_merge_commit(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         verified_commit: &VerifiedStoreBatchCommit,
         registrations: &[ActivatedStoreDeviceRegistration],
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
-        history_summary: &crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         packages: &[AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<(), DbError> {
@@ -308,17 +308,16 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             materialization.commit(),
             materialization.device_operations(),
         )?;
-        let expected_post_state =
-            crate::protocol::store_commit::StoreDeviceStateRef::from_resolved(
-                CommitFrontier(
-                    materialization
-                        .history_summary()
-                        .frontier()
-                        .map_err(|error| DbError::Message(error.to_string()))?,
-                ),
-                &state_after,
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let expected_post_state = coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
+            CommitFrontier(
+                materialization
+                    .history_summary()
+                    .frontier()
+                    .map_err(|error| DbError::Message(error.to_string()))?,
+            ),
+            &state_after,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
         if materialization.history_summary().post_state != expected_post_state {
             return Err(DbError::Message(
                 "retained Merge history summary differs from the derived post-commit device state"
@@ -339,7 +338,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )?;
         let activation = ReclaimCommitActivation::new(
             materialization.commit_ref().clone(),
-            crate::protocol::store_commit::StoreDeviceHeadRef {
+            coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: materialization.activation_head().head_hash(),
                 object: materialization.activation_head_object().clone(),
             },
@@ -357,10 +356,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
 
     pub(crate) fn derive_materialized_store_device_state(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
-    ) -> Result<crate::protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
         let conn = self.transaction;
         let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
         let recovery_author = commit
@@ -370,7 +369,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 if activation.registration != commit.author_registration {
                     return None;
                 }
-                let crate::protocol::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                let coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
                     node,
                     ..
                 } = &activation.authority
@@ -381,7 +380,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             })
             .map(|(registration_ref, node)| {
                 let registration = load_activated_registration_on(conn, root, registration_ref)?;
-                let crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
                     owner_grant,
                     ..
                 } = registration.origin.clone()
@@ -393,9 +392,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 };
                 Ok((
                     registration_ref.clone(),
-                    crate::protocol::store_commit::OwnerRecoveryCursor {
+                    coven_protocol::store_commit::OwnerRecoveryCursor {
                         owner_grant,
-                        position: crate::protocol::store_commit::OwnerRecoveryPosition::At {
+                        position: coven_protocol::store_commit::OwnerRecoveryPosition::At {
                             node: node.clone(),
                         },
                     },
@@ -414,7 +413,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 record.registration == commit.author_registration
                     && matches!(
                         record.status,
-                        crate::protocol::store_commit::StoreDeviceStatus::Active
+                        coven_protocol::store_commit::StoreDeviceStatus::Active
                     )
             });
         if !active_author {
@@ -437,11 +436,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .map_err(|error| DbError::Message(error.to_string()))?;
         }
         let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
-            let crate::protocol::store_commit::StreamActivation::GrantAuthorized {
+            let coven_protocol::store_commit::StreamActivation::GrantAuthorized {
                 author_registration,
                 grant_id,
                 anchor:
-                    anchor @ crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
+                    anchor @ coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
                 ..
             } = activation
             else {
@@ -460,7 +459,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let registration = load_activated_registration_on(conn, root, registration)?;
                 Some((
                     grant_id.clone(),
-                    crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+                    coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
                         root,
                         &registration.author_pubkey,
                         grant_id,
@@ -516,10 +515,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             ));
         }
         let expected_stream =
-            crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
                 &commit.author_registration,
-                crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
         if commit_ref.coord.stream_id != expected_stream {
             return Err(DbError::Message(

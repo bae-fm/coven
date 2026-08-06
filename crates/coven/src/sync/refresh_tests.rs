@@ -13,8 +13,6 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::protocol::membership::{MemberRole, MembershipChain};
-use crate::protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
 use crate::storage::SyncStorage;
 use crate::storage::{CloudCipher, CloudCipherAccess, PendingRotation};
 use crate::sync::store::owner::load_wrapped_store_key;
@@ -24,6 +22,8 @@ use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::MasterKeyCustody;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::membership::{MemberRole, MembershipChain};
+use coven_protocol::wrapped_store_key::{WrappedStoreKey, WrappedStoreKeyRef};
 
 const LIB_ID: &str = "lib-refresh-test";
 
@@ -235,7 +235,7 @@ impl crate::sync::test_helpers::StorageInterceptor for MembershipReadCounter {
         &self,
         read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         if read != crate::sync::test_helpers::ProtocolRead::Object
             && semantic_prefix.starts_with("store-v1/membership/heads/")
         {

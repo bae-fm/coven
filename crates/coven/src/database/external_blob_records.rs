@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::{with_coven_sql_authority, DbError};
-use crate::protocol::blob::{RowBlobAuthority, RowBlobRef};
+use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
 
 /// An external user-owned file a blob id resolves to, read back from a
 /// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file
@@ -122,7 +122,7 @@ impl<'connection> ExternalBlobRecords<'connection> {
                 reference.blob().id
             ))
         })?;
-        let hash: crate::protocol::store_commit::ObjectHash = hash.parse().map_err(|error| {
+        let hash: coven_protocol::store_commit::ObjectHash = hash.parse().map_err(|error| {
             DbError::context(format!("external blob {} hash", reference.blob().id), error)
         })?;
         if size != reference.plaintext_size()

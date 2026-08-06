@@ -1,16 +1,16 @@
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta, SnapshotMeta,
 };
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 
 use super::{remove_snapshot_spool, SnapshotError};
 
 /// A snapshot object that opened to bytes other than the prepared ones is
 /// invalid publication state, not a storage failure.
-fn snapshot_readback_error(error: crate::protocol::objects::StorageError) -> SnapshotError {
+fn snapshot_readback_error(error: coven_protocol::objects::StorageError) -> SnapshotError {
     match error {
-        crate::protocol::objects::StorageError::ReadbackMismatch(key) => {
+        coven_protocol::objects::StorageError::ReadbackMismatch(key) => {
             SnapshotError::PublicationState(format!(
                 "exact readback of {key} differs from its prepared bytes"
             ))
@@ -75,7 +75,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                 .activated_store_device_registration(uploader.clone())
                 .await
                 .map_err(SnapshotError::from)?;
-            let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
+            let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
             if let Some(spool_path) = &prepared.spool_path {
                 self.storage
                     .create_blob_object_from_file(

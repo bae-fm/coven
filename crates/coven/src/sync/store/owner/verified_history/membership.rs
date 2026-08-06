@@ -1,12 +1,12 @@
-use crate::protocol::membership::{
+use crate::sync::store::membership::AnchoredChainError;
+use coven_protocol::membership::{
     validate_membership_floor, AuthorHead, MembershipChain, MembershipChange, MembershipCoord,
     MembershipEntry, MembershipGrantId, MembershipHeadRef, StoreMembershipConflictResolution,
     StoreMembershipConflictResolutionRef,
 };
-use crate::protocol::objects::StorageError;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::store_commit::{GrantStreamAnchor, StoreRootRef};
-use crate::sync::store::membership::AnchoredChainError;
+use coven_protocol::objects::StorageError;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::store_commit::{GrantStreamAnchor, StoreRootRef};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -202,11 +202,11 @@ fn membership_entry_requires_store_activation(entry: &MembershipEntry) -> bool {
         } => {
             matches!(
                 role,
-                crate::protocol::membership::StoreMembershipRoleGrant::Owner { .. }
+                coven_protocol::membership::StoreMembershipRoleGrant::Owner { .. }
             ) || retirement_barriers.values().any(|barrier| {
                 matches!(
                     barrier,
-                    crate::protocol::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+                    coven_protocol::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
                 )
             })
         }
@@ -216,7 +216,7 @@ fn membership_entry_requires_store_activation(entry: &MembershipEntry) -> bool {
         } => retirement_barriers.values().any(|barrier| {
             matches!(
                 barrier,
-                crate::protocol::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
+                coven_protocol::membership::MergeMembershipGrantRetirementBarrier::Owner { .. }
             )
         }),
         MembershipChange::ResolutionActivation { .. } => true,
@@ -240,7 +240,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             }
         }
         let anchor = &root_value.descriptor.founder_membership;
-        let founder_stream = crate::protocol::membership::derive_founder_stream_id(
+        let founder_stream = coven_protocol::membership::derive_founder_stream_id(
             &root.store_root_id.to_string(),
             &root_value.descriptor.founder_pubkey,
         );
@@ -449,7 +449,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &'a mut self,
         graph: graph::LoadedExactMembershipGraph,
         exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
-        provider_admin: &'a crate::protocol::provider::ProviderAdminState,
+        provider_admin: &'a coven_protocol::provider::ProviderAdminState,
         pending_resolution: Option<
             &'a crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
         >,
@@ -611,11 +611,11 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             .await
             .map_err(map_membership_object_error)?;
         let founder_registration_ref =
-            crate::protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
+            coven_protocol::store_commit::StoreDeviceRegistrationRef::from_registration(
                 &founder_registration.value,
                 founder_registration.object,
             );
-        let provider_admin = crate::protocol::provider::ProviderAdminState::founder_from_root(
+        let provider_admin = coven_protocol::provider::ProviderAdminState::founder_from_root(
             root.clone(),
             founder_registration_ref,
             &root_value.descriptor.founder_provider_admin,
@@ -649,10 +649,10 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
 
     async fn load_registration(
         &self,
-        reference: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<
-            crate::protocol::store_commit::StoreDeviceRegistration,
+        coven_protocol::objects::VerifiedObject<
+            coven_protocol::store_commit::StoreDeviceRegistration,
         >,
         StoreObjectError,
     > {
@@ -664,9 +664,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         entries: &[MembershipEntry],
     ) -> Result<(), AnchoredChainError> {
         for entry in entries {
-            let Some(crate::protocol::provider::ProviderAdminMembershipChange {
+            let Some(coven_protocol::provider::ProviderAdminMembershipChange {
                 change:
-                    crate::protocol::provider::ProviderAdminChange::Set {
+                    coven_protocol::provider::ProviderAdminChange::Set {
                         administrator,
                         provider,
                         capability,
@@ -699,8 +699,8 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
     async fn load_founder_registration(
         &self,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<
-            crate::protocol::store_commit::StoreDeviceRegistration,
+        coven_protocol::objects::VerifiedObject<
+            coven_protocol::store_commit::StoreDeviceRegistration,
         >,
         StoreObjectError,
     > {
@@ -714,7 +714,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         }
     }
 
-    fn verified_root(&self) -> &crate::protocol::store_commit::StoreProtocolRoot {
+    fn verified_root(&self) -> &coven_protocol::store_commit::StoreProtocolRoot {
         match self {
             Self::History { history } => history.root.protocol(),
             Self::VerifiedPrefix { root, .. } => root.protocol(),
@@ -756,8 +756,8 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
 
     async fn load_membership_entry(
         &self,
-        reference: &crate::protocol::membership::MembershipEntryRef,
-    ) -> Result<crate::protocol::objects::VerifiedObject<MembershipEntry>, StoreObjectError> {
+        reference: &coven_protocol::membership::MembershipEntryRef,
+    ) -> Result<coven_protocol::objects::VerifiedObject<MembershipEntry>, StoreObjectError> {
         self.commit_verifier()
             .membership_objects()
             .load_entry(reference)
@@ -768,7 +768,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &self,
         reference: &StoreMembershipConflictResolutionRef,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<StoreMembershipConflictResolution>,
+        coven_protocol::objects::VerifiedObject<StoreMembershipConflictResolution>,
         StoreObjectError,
     > {
         self.commit_verifier()
@@ -779,12 +779,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
 
     async fn load_membership_head_at_slot(
         &self,
-        slot: &crate::protocol::objects::ObjectSlot,
+        slot: &coven_protocol::objects::ObjectSlot,
         author: &str,
         grant: &MembershipGrantId,
-        stream_id: crate::protocol::membership::AuthorStreamId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
         sequence: u64,
-    ) -> Result<crate::protocol::objects::VerifiedObject<AuthorHead>, StoreObjectError> {
+    ) -> Result<coven_protocol::objects::VerifiedObject<AuthorHead>, StoreObjectError> {
         self.commit_verifier()
             .membership_objects()
             .load_head_at_slot(slot, author, grant, stream_id, sequence)
@@ -801,10 +801,10 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             membership_entry_requires_store_activation(entry),
             &head.activation,
         ) {
-            (false, crate::protocol::membership::MembershipHeadActivation::Direct) => Ok(true),
+            (false, coven_protocol::membership::MembershipHeadActivation::Direct) => Ok(true),
             (
                 true,
-                crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit },
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit },
             ) => match self {
                 MembershipActivationAuthority::VerifiedPrefix {
                     activations: verified_activations,
@@ -833,12 +833,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                         .map_err(AnchoredChainError::LoadFailed)
                 }
             },
-            (true, crate::protocol::membership::MembershipHeadActivation::Direct) => {
+            (true, coven_protocol::membership::MembershipHeadActivation::Direct) => {
                 Err(AnchoredChainError::LoadFailed(
                     "membership authority change has no exact Store activation".to_string(),
                 ))
             }
-            (false, crate::protocol::membership::MembershipHeadActivation::StoreCommit { .. }) => {
+            (false, coven_protocol::membership::MembershipHeadActivation::StoreCommit { .. }) => {
                 Err(AnchoredChainError::LoadFailed(
                     "direct membership change carries an unrelated Store activation".to_string(),
                 ))
@@ -850,7 +850,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &mut self,
         author: &str,
         grant: &MembershipGrantId,
-        stream_id: crate::protocol::membership::AuthorStreamId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
         anchor: &GrantStreamAnchor,
         cursor: Option<&MembershipHeadRef>,
     ) -> Result<ExactMembershipStream, AnchoredChainError> {
@@ -903,7 +903,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 )));
             }
             if head.body.successor.activation
-                != crate::protocol::store_commit::StreamActivation::grant_authorized(
+                != coven_protocol::store_commit::StreamActivation::grant_authorized(
                     self.root().store_root_hash,
                     head.body.author_registration.clone(),
                     grant.clone(),

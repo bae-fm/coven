@@ -40,7 +40,7 @@ pub trait DeviceJoinWriteRevocationExecutor: Send + Sync {
         &self,
         producer: DeviceJoinProducer,
         authority: &ProviderWriteAuthorityRef,
-        locator: &crate::protocol::provider::ProviderAccessLocator,
+        locator: &coven_protocol::provider::ProviderAccessLocator,
         protected_slots: &[ObjectSlot],
     ) -> Result<ProviderAccessWithdrawal, DeviceJoinError>;
 }

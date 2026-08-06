@@ -28,22 +28,22 @@ fn circle_routing_migrations() -> Vec<crate::Migration> {
 /// `documents` is scoped by its audience column; `document_files` carries a blob
 /// and inherits its document's audience, so moving a document between audiences
 /// republishes its file's ciphertext under the destination audience's locator.
-fn circle_routing_tables() -> Vec<crate::protocol::synced_schema::SyncedTable> {
+fn circle_routing_tables() -> Vec<coven_protocol::synced_schema::SyncedTable> {
     vec![
-        crate::protocol::synced_schema::SyncedTable::new(
+        coven_protocol::synced_schema::SyncedTable::new(
             "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience"),
-        crate::protocol::synced_schema::SyncedTable::new(
+        coven_protocol::synced_schema::SyncedTable::new(
             "document_files",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .inherits_audience_through("document_id")
-        .carries_blob(crate::protocol::synced_schema::BlobDecl::new(
+        .carries_blob(coven_protocol::synced_schema::BlobDecl::new(
             "files",
-            crate::protocol::blob::Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheEager,
+            coven_protocol::blob::Provenance::HostProvided,
+            coven_protocol::blob::CacheFill::CacheEager,
         )),
     ]
 }
@@ -91,7 +91,7 @@ impl RotationMemberDevice {
     }
 
     async fn publish_acknowledgements(&self, stamp: &str) {
-        let frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+        let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             self.device
                 .materialized_frontier()
                 .await
@@ -239,7 +239,7 @@ impl RotationFixture {
             .collect()
     }
 
-    async fn circles(&self) -> Vec<crate::protocol::circle::CircleInfo> {
+    async fn circles(&self) -> Vec<coven_protocol::circle::CircleInfo> {
         let members = self.active_store_members().await;
         StoreDatabase::new(&self.db)
             .get_circles(&keys::public_key_hex(&self.signer), members)
@@ -348,7 +348,7 @@ impl RotationFixture {
             .expect("move the document to another audience");
     }
 
-    async fn stored_blobs(&self) -> Vec<crate::protocol::blob::locator::StoredBlobRef> {
+    async fn stored_blobs(&self) -> Vec<coven_protocol::blob::locator::StoredBlobRef> {
         StoreDatabase::new(&self.db)
             .stored_blob_reclaim_candidates_for_test()
             .await
@@ -368,8 +368,8 @@ impl RotationFixture {
     async fn owner_circle_snapshot_stream(
         &self,
     ) -> Vec<(
-        crate::protocol::store_commit::CircleSnapshotRef,
-        crate::protocol::store_commit::CircleSnapshotMeta,
+        coven_protocol::store_commit::CircleSnapshotRef,
+        coven_protocol::store_commit::CircleSnapshotMeta,
     )> {
         let control = StoreDatabase::new(&self.db)
             .current_circle_control(self.circle_id)
@@ -394,7 +394,7 @@ impl RotationFixture {
 
     async fn bootstrap_image_present(
         &self,
-        image: &crate::protocol::objects::ExactObjectRef,
+        image: &coven_protocol::objects::ExactObjectRef,
     ) -> bool {
         self.db
             .remote_object_exists_for_test(image.clone())
@@ -405,7 +405,7 @@ impl RotationFixture {
     async fn member_seed_image(
         &self,
         circle_id: CircleId,
-    ) -> crate::protocol::objects::ExactObjectRef {
+    ) -> coven_protocol::objects::ExactObjectRef {
         StoreDatabase::new(&self.member_db)
             .circle_bootstrap_coverage_ref(circle_id)
             .await
@@ -418,18 +418,18 @@ impl RotationFixture {
 
     async fn bootstrap_image_owner_count(
         &self,
-        image: &crate::protocol::objects::ExactObjectRef,
+        image: &coven_protocol::objects::ExactObjectRef,
     ) -> usize {
         let record = self
             .db
             .remote_object_for_test(image.clone())
             .await
             .expect("load bootstrap image ownership");
-        let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
+        let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) = record
         else {
             panic!("a live bootstrap image is a shared object");
         };
-        let crate::protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
+        let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
             shared.state
         else {
             panic!("a live bootstrap image is verified");
@@ -440,33 +440,31 @@ impl RotationFixture {
             .filter(|owner| {
                 matches!(
                     owner,
-                    crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+                    coven_protocol::remote_object::SharedObjectOwner::StoreCommit(_)
                 )
             })
             .count()
     }
 
-    async fn live_bootstrap_images(
-        &self,
-    ) -> Vec<(crate::protocol::objects::ExactObjectRef, usize)> {
+    async fn live_bootstrap_images(&self) -> Vec<(coven_protocol::objects::ExactObjectRef, usize)> {
         self.db
             .remote_objects_for_test()
             .await
             .expect("read remote object records")
             .into_iter()
             .filter_map(|record| {
-                let crate::protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) =
+                let coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(shared) =
                     record
                 else {
                     return None;
                 };
                 if !matches!(
                     shared.identity.domain,
-                    crate::protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
+                    coven_protocol::remote_object::SharedLiveSetObjectDomain::CircleBootstrapImage { .. }
                 ) {
                     return None;
                 }
-                let crate::protocol::remote_object::OwnedObjectState::UploadedVerified {
+                let coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                     ownership,
                 } = shared.state
                 else {
@@ -478,7 +476,7 @@ impl RotationFixture {
                     .filter(|owner| {
                         matches!(
                             owner,
-                            crate::protocol::remote_object::SharedObjectOwner::StoreCommit(_)
+                            coven_protocol::remote_object::SharedObjectOwner::StoreCommit(_)
                         )
                     })
                     .count();
@@ -492,8 +490,8 @@ impl RotationFixture {
         member: &RotationMemberDevice,
         row_id: &str,
     ) -> (
-        crate::protocol::store_commit::CirclePackageRef,
-        crate::protocol::store_commit::StoreBatchCommitRef,
+        coven_protocol::store_commit::CirclePackageRef,
+        coven_protocol::store_commit::StoreBatchCommitRef,
     ) {
         let write_id = self
             .capture_document(row_id, Some(self.circle_id), "2026-07-23T00:10:00Z")
@@ -964,7 +962,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         .db
         .test_sql(|database| {
             let refs = database.materialized_frontier()?;
-            crate::protocol::store_commit::CommitFrontier::from_refs(refs)
+            coven_protocol::store_commit::CommitFrontier::from_refs(refs)
                 .map_err(|error| DbError::Message(error.to_string()))
         })
         .await
@@ -1235,7 +1233,7 @@ async fn publish_acknowledged_store_snapshot(
     routing: &EncryptionService,
     cut_stamp: &str,
     acknowledged_at: &str,
-) -> crate::protocol::membership::MembershipChain {
+) -> coven_protocol::membership::MembershipChain {
     let loaded_store = store
         .bind_device(db, signer)
         .await
@@ -1296,14 +1294,14 @@ impl RestoreTarget {
 async fn restore_store_snapshot<'a>(
     store: &'a TestStore,
     db: &Database,
-    membership: &crate::protocol::membership::MembershipChain,
+    membership: &coven_protocol::membership::MembershipChain,
     restorer: &UserKeypair,
     target: &'a RestoreTarget,
     device_id: &str,
 ) -> Result<crate::sync::store::RestoringStore<'a>, crate::sync::store::SnapshotError> {
     store
         .prepare_snapshot_bootstrap(
-            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &target.database_path,
             restorer,
@@ -1313,8 +1311,8 @@ async fn restore_store_snapshot<'a>(
         .install(
             &target.store_dir,
             db.synced_tables().to_vec(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &circle_routing_migrations(),
@@ -1330,8 +1328,8 @@ struct ActiveMemberCircleSnapshot {
     signer: UserKeypair,
     member: UserKeypair,
     routing: EncryptionService,
-    circle_id: crate::protocol::circle::CircleId,
-    membership: crate::protocol::membership::MembershipChain,
+    circle_id: coven_protocol::circle::CircleId,
+    membership: coven_protocol::membership::MembershipChain,
 }
 
 /// How much Circle history the fixture builds before the Store snapshot cut.
@@ -1539,7 +1537,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
     let target = RestoreTarget::new();
     let outcome = store
         .prepare_snapshot_bootstrap(
-            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             db.schema_version(),
             &target.database_path,
             &member,
@@ -1550,8 +1548,8 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
         .install(
             &target.store_dir,
             db.synced_tables().to_vec(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "crash-restore-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &circle_routing_migrations(),
@@ -2406,7 +2404,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     );
     let tombstone_key = format!(
         "blob_tombstones/{}{}",
-        crate::protocol::remote_object::remote_object_id(stored.object()),
+        coven_protocol::remote_object::remote_object_id(stored.object()),
         crate::storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])).suffix(),
     );
     assert!(
@@ -2415,7 +2413,7 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
     );
 
     let past = coven_foundation::clock::FixedClock(
-        deleted_at + crate::protocol::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
+        deleted_at + coven_protocol::blob::BLOB_TOMBSTONE_GRACE + chrono::Duration::seconds(1),
     );
     let collected = writer
         .gc_tombstones(&cipher, &past)

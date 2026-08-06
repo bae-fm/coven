@@ -5,9 +5,9 @@ use crate::database::{
     install_store_founder_state_on, required_store_root_authority_on, DbError,
     VerifiedMergeMaterialization,
 };
-use crate::protocol::circle_activation::VerifiedCircleActivations;
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::store_commit::{
+use coven_protocol::circle_activation::VerifiedCircleActivations;
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
@@ -16,11 +16,11 @@ impl StoreDatabase {
     pub(crate) async fn apply_received_merge_materialization(
         &self,
         materialization: crate::database::PreparedMergeMaterialization,
-        retractions: Vec<crate::protocol::remote_object::VerifiedCandidateNonactivation>,
-        local_store_membership: crate::protocol::membership::LocalStoreMembership,
-        routing_key: Option<crate::protocol::circle::RowRoutingKey>,
+        retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
+        local_store_membership: coven_protocol::membership::LocalStoreMembership,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<crate::protocol::membership::ApplyOutcome, DbError> {
+    ) -> Result<coven_protocol::membership::ApplyOutcome, DbError> {
         let root = materialization.root.clone();
         let blob_decls = self.blob_decls();
         let gates = self.gates();
@@ -37,7 +37,7 @@ impl StoreDatabase {
                     .is_some_and(|epoch| {
                         matches!(
                             &epoch.common.origin,
-                            crate::protocol::circle::CircleEpochOrigin::Closed { .. }
+                            coven_protocol::circle::CircleEpochOrigin::Closed { .. }
                         )
                     })
             });
@@ -51,7 +51,7 @@ impl StoreDatabase {
         let applied = self
             .with_retained_merge_materializations(move |conn, retained_cache| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let materialized_frontier = crate::protocol::store_commit::CommitFrontier::from_refs(
+                let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
                     Self::materialized_frontier_on(&tx, None)?,
                 )
                 .map_err(|error| DbError::Message(error.to_string()))?;
@@ -79,7 +79,7 @@ impl StoreDatabase {
                     )?;
                 if matches!(
                     applied.outcome,
-                    crate::protocol::membership::ApplyOutcome::Applied(_)
+                    coven_protocol::membership::ApplyOutcome::Applied(_)
                 ) {
                     let mut transaction_cache = retained_cache.clone();
                     let retained = applied.retained.take().ok_or_else(|| {
@@ -222,7 +222,7 @@ impl StoreDatabase {
                                 &intent,
                             )?;
                         }
-                        if let crate::protocol::membership::ApplyOutcome::Applied(rows) =
+                        if let coven_protocol::membership::ApplyOutcome::Applied(rows) =
                             &mut applied.outcome
                         {
                             rows.extend(new_projection);
@@ -246,18 +246,18 @@ impl StoreDatabase {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn materialize_published_store_operation(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         verified_commit: VerifiedStoreBatchCommit,
         registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         circle_activations: VerifiedCircleActivations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<crate::database::VerifiedMergeMembershipObjects>,
-        operation_object_ids: Option<Vec<crate::protocol::store_commit::ObjectHash>>,
+        operation_object_ids: Option<Vec<coven_protocol::store_commit::ObjectHash>>,
         membership_completion: Option<
-            crate::protocol::membership_mutation::StoreMembershipJournalCompletion,
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
@@ -308,13 +308,13 @@ impl StoreDatabase {
 
     pub(crate) async fn materialize_device_join_activation(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         verified_commit: VerifiedStoreBatchCommit,
         registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
     ) -> Result<(), DbError> {
         let expected_ref = verified_commit.reference().clone();
         let stream_id = expected_ref.coord.stream_id.to_string();
@@ -365,7 +365,7 @@ impl StoreDatabase {
 
     pub(crate) async fn install_device_join_bootstrap(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         plan: crate::database::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         self.connection.call(move |conn| {
@@ -386,7 +386,7 @@ impl StoreDatabase {
             )?;
             crate::database::set_protocol_state_on(
                 &tx,
-                crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
+                coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
                 &plan.founder.author_pubkey,
             )?;
             plan.membership.install_on(&tx)?;
@@ -494,7 +494,7 @@ impl StoreDatabase {
         verified_commit: VerifiedStoreBatchCommit,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
         self.connection

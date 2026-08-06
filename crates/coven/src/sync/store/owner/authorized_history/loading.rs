@@ -3,8 +3,8 @@ use super::*;
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn stage_verified_blob_plaintext(
         &self,
-        authority: &crate::protocol::blob::RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        authority: &coven_protocol::blob::RowBlobAuthority,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.blob_source
@@ -14,8 +14,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn verify_blob_plaintext(
         &self,
-        authority: &crate::protocol::blob::RowBlobAuthority,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
+        authority: &coven_protocol::blob::RowBlobAuthority,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
         self.blob_source
@@ -29,7 +29,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn verified_root_object(
         &self,
-    ) -> &crate::protocol::objects::VerifiedObject<StoreProtocolRoot> {
+    ) -> &coven_protocol::objects::VerifiedObject<StoreProtocolRoot> {
         self.history_verifier.verified_root().object()
     }
 
@@ -38,8 +38,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         reference: &StoreBatchCommitRef,
         bytes: &[u8],
     ) -> Result<
-        crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .authenticate_bytes(reference, bytes)
@@ -50,7 +50,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         candidate: &crate::database::BlockedMergeCandidate,
     ) -> Result<
-        crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        coven_protocol::store_commit::VerifiedStoreBatchCommit,
         crate::sync::store::StoreError,
     > {
         self.history_verifier
@@ -61,7 +61,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn load_commit(
         &mut self,
         reference: &StoreBatchCommitRef,
-    ) -> Result<crate::protocol::store_commit::VerifiedStoreBatchCommit, pull::StorePullError> {
+    ) -> Result<coven_protocol::store_commit::VerifiedStoreBatchCommit, pull::StorePullError> {
         self.history_verifier.load_ref(reference).await
     }
 
@@ -69,17 +69,17 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<
-            crate::protocol::store_commit::StoreDeviceRegistration,
+        coven_protocol::objects::VerifiedObject<
+            coven_protocol::store_commit::StoreDeviceRegistration,
         >,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history_verifier.load_registration(reference).await
     }
 
     pub(crate) async fn verify_membership_control(
         &mut self,
-        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<crate::sync::store::circle_controls::activation::VerifiedCircleActivations, String>
     {
         let root = self.history_verifier.verified_root().reference().clone();
@@ -139,11 +139,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn load_local_device_operations(
         &mut self,
-        verified_commit: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         membership: &MembershipChain,
         state_ref: &StoreDeviceStateRef,
         state: ResolvedStoreDeviceState,
-    ) -> Result<crate::protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
+    ) -> Result<coven_protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
     {
         let resolver =
             crate::sync::store::owner::verification::DeviceStateResolver::Database(&self.database);
@@ -161,11 +161,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn retain_acknowledgement(
         &self,
         activating_commit: &StoreBatchCommitRef,
-        activating_commit_value: &crate::protocol::store_commit::StoreBatchCommit,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        reference: crate::protocol::store_commit::StoreAckRef,
-        value: crate::protocol::store_commit::StoreAck,
-    ) -> Result<crate::protocol::store_commit::RetainedVerifiedActivatedAck, pull::StorePullError>
+        activating_commit_value: &coven_protocol::store_commit::StoreBatchCommit,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        reference: coven_protocol::store_commit::StoreAckRef,
+        value: coven_protocol::store_commit::StoreAck,
+    ) -> Result<coven_protocol::store_commit::RetainedVerifiedActivatedAck, pull::StorePullError>
     {
         self.history_verifier
             .retain_acknowledgement(
@@ -180,10 +180,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn derive_local_post_device_state(
         &self,
-        commit: &crate::protocol::store_commit::StoreBatchCommit,
+        commit: &coven_protocol::store_commit::StoreBatchCommit,
         predecessor_state: ResolvedStoreDeviceState,
-        registrations: &[crate::protocol::store_commit::ActivatedStoreDeviceRegistration],
-        device_operations: crate::protocol::store_commit::VerifiedStoreDeviceOperations,
+        registrations: &[coven_protocol::store_commit::ActivatedStoreDeviceRegistration],
+        device_operations: coven_protocol::store_commit::VerifiedStoreDeviceOperations,
     ) -> Result<ResolvedStoreDeviceState, pull::StorePullError> {
         self.history_verifier
             .derive_local_post_device_state(
@@ -197,15 +197,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn load_store_snapshot(
         &self,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        reference: &crate::protocol::store_commit::StoreSnapshotRef,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        reference: &coven_protocol::store_commit::StoreSnapshotRef,
     ) -> Result<
         (
-            crate::protocol::store_commit::StoreSnapshotRef,
-            crate::protocol::store_commit::SnapshotMeta,
+            coven_protocol::store_commit::StoreSnapshotRef,
+            coven_protocol::store_commit::SnapshotMeta,
         ),
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .load_store_snapshot(registration_ref, registration, reference)
@@ -214,8 +214,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn load_store_snapshot_stream(
         &self,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<Vec<crate::database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
         self.history_verifier
             .load_store_snapshot_stream(registration_ref, registration)
@@ -235,7 +235,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         frontier: &CommitFrontier,
         device_state: &StoreDeviceStateRef,
-    ) -> Result<Option<crate::protocol::store_commit::StoreSnapshotLocator>, writer::StoreAckError>
+    ) -> Result<Option<coven_protocol::store_commit::StoreSnapshotLocator>, writer::StoreAckError>
     {
         let registrations = self
             .database
@@ -265,7 +265,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .map_err(|error| snapshot::SnapshotError::UnauthorizedAuthor(error.to_string()))?;
         Ok(
             snapshot::select_maximal_store_snapshot(candidates).map(|snapshot| {
-                crate::protocol::store_commit::StoreSnapshotLocator {
+                coven_protocol::store_commit::StoreSnapshotLocator {
                     author_registration: snapshot.meta.author_registration.clone(),
                     snapshot: snapshot.reference,
                 }
@@ -351,7 +351,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         if founder_registration.author_pubkey != owner_pubkey
             || !matches!(
                 founder_registration.origin,
-                crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
+                coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
             )
         {
             return Err(
@@ -367,7 +367,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 ),
             );
         }
-        let founder_genesis = crate::protocol::store_commit::ResolvedStoreDeviceState::founder(
+        let founder_genesis = coven_protocol::store_commit::ResolvedStoreDeviceState::founder(
             &root,
             founder_registration_ref.clone(),
             &protocol_root.descriptor.founder_pubkey,

@@ -1,13 +1,13 @@
-use crate::protocol::objects::{PreparedExactObject, ProtocolObjectDomain, StoreObjectError};
-use crate::protocol::store_commit::StoreDeviceRegistration;
 use crate::storage::SyncStorage;
+use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain, StoreObjectError};
+use coven_protocol::store_commit::StoreDeviceRegistration;
 
 use super::StoreRegistrationError;
 
 pub(super) fn prepare_registration_object(
     storage: &dyn SyncStorage,
     registration: &StoreDeviceRegistration,
-    slot: crate::protocol::objects::ObjectSlot,
+    slot: coven_protocol::objects::ObjectSlot,
 ) -> Result<PreparedExactObject, StoreRegistrationError> {
     let semantic_prefix = slot
         .logical_key()
@@ -18,7 +18,7 @@ pub(super) fn prepare_registration_object(
             )
         })?
         .to_string();
-    let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         registration.store_root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );

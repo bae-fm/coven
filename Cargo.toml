@@ -3,6 +3,7 @@ members = [
     "crates/coven",
     "crates/coven-foundation",
     "crates/coven-keys",
+    "crates/coven-protocol",
     "tools/owner-construction-check",
 ]
 resolver = "2"
@@ -57,6 +58,7 @@ windows-native-keyring-store = "0.5"
 
 coven-foundation = { path = "crates/coven-foundation", version = "1.0.0-rc.1" }
 coven-keys = { path = "crates/coven-keys", version = "1.0.0-rc.1" }
+coven-protocol = { path = "crates/coven-protocol", version = "1.0.0-rc.1" }
 
 [workspace.lints.rust]
 # Every `pub` not reachable from the crate's own root must be `pub(crate)` (or

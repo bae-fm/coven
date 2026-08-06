@@ -1,19 +1,19 @@
 use crate::database::RetainedReplaySnapshotAuthority;
 use crate::database::*;
-use crate::protocol::audience_package::AudiencePackage;
-use crate::protocol::circle_activation::VerifiedCircleActivations;
-use crate::protocol::membership::{
+use coven_protocol::audience_package::AudiencePackage;
+use coven_protocol::circle_activation::VerifiedCircleActivations;
+use coven_protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
     StoreMembershipConflictResolutionRef,
 };
-use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
-use crate::protocol::remote_object::{remote_object_id, SharedLiveSetObjectDomain};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::remote_object::{remote_object_id, SharedLiveSetObjectDomain};
+use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, ObjectHash, RetainedStoreDeviceOperations,
     RetainedStoreDeviceRegistrationActivations, StoreBatchCommit, StoreBatchCommitRef,
     StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     RetainedVerifiedMergeHistorySummary, StoreRootRef, VerifiedStoreBatchCommit,
 };
 
@@ -22,7 +22,7 @@ use crate::protocol::store_commit::{
 pub(crate) struct RetainedMergeMaterializationInput {
     pub(crate) commit: PreparedExactObject,
     pub(crate) activation_head: PreparedExactObject,
-    pub(crate) history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub(crate) history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
     pub(crate) membership_objects: Option<VerifiedMergeMembershipObjects>,
     pub(crate) packages: Vec<RetainedAudiencePackage>,
     pub(crate) activation: RetainedCommitActivationInput,
@@ -56,7 +56,7 @@ impl VerifiedMergeMembershipObjects {
         head_value: &AuthorHead,
         head: MembershipHeadRef,
     ) -> Result<Self, DbError> {
-        let Some(crate::protocol::store_commit::StoreControl { transition }) = commit.control()
+        let Some(coven_protocol::store_commit::StoreControl { transition }) = commit.control()
         else {
             return Err(DbError::Message(
                 "Merge membership object closure accompanies another Store control".to_string(),
@@ -66,7 +66,7 @@ impl VerifiedMergeMembershipObjects {
             || !transition.matches_head(head_value, &head)
             || !matches!(
                 &head_value.activation,
-                crate::protocol::membership::MembershipHeadActivation::StoreCommit { commit }
+                coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }
                     if commit == commit_ref
             )
         {
@@ -76,7 +76,7 @@ impl VerifiedMergeMembershipObjects {
             ));
         }
         let resolution = match &entry.change {
-            crate::protocol::membership::MembershipChange::ResolutionActivation { resolution } => {
+            coven_protocol::membership::MembershipChange::ResolutionActivation { resolution } => {
                 Some(resolution.clone())
             }
             _ => None,
@@ -140,7 +140,7 @@ impl RetainedAudiencePackage {
             .validate_blob_uploader(&commit.author_registration)
             .map_err(|error| DbError::Message(error.to_string()))?;
         match package.audience() {
-            crate::protocol::audience_package::PackageAudience::Store => {
+            coven_protocol::audience_package::PackageAudience::Store => {
                 let reference = commit.store_package().ok_or_else(|| {
                     DbError::Message(
                         "retained Store package is absent from its exact commit".to_string(),
@@ -160,7 +160,7 @@ impl RetainedAudiencePackage {
                     package,
                 })
             }
-            crate::protocol::audience_package::PackageAudience::Circle {
+            coven_protocol::audience_package::PackageAudience::Circle {
                 circle_id,
                 control,
                 key_fingerprint,
@@ -241,12 +241,12 @@ pub(crate) struct RetainedMergeMaterializationKey {
 }
 
 pub(crate) struct VerifiedMergeMaterialization<'a> {
-    verified_commit: &'a crate::protocol::store_commit::VerifiedStoreBatchCommit,
+    verified_commit: &'a coven_protocol::store_commit::VerifiedStoreBatchCommit,
     device_operations: &'a VerifiedStoreDeviceOperations,
     circle_activations: &'a VerifiedCircleActivations,
     activation_head: &'a StoreDeviceHead,
     activation_head_object: &'a ExactObjectRef,
-    history_summary: &'a crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    history_summary: &'a coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
     packages: &'a [AudiencePackage],
     package_application: Option<RetainedPackageApplication>,
@@ -255,14 +255,14 @@ pub(crate) struct VerifiedMergeMaterialization<'a> {
 
 #[derive(Clone)]
 pub(crate) struct OwnedVerifiedMergeMaterialization {
-    root: crate::protocol::store_commit::StoreRootRef,
-    verified_commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
+    root: coven_protocol::store_commit::StoreRootRef,
+    verified_commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
     registrations: Vec<ActivatedStoreDeviceRegistration>,
     device_operations: VerifiedStoreDeviceOperations,
     circle_activations: VerifiedCircleActivations,
     activation_head: StoreDeviceHead,
     activation_head_object: ExactObjectRef,
-    history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
     membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<AudiencePackage>,
     package_application: Option<RetainedPackageApplication>,
@@ -271,14 +271,14 @@ pub(crate) struct OwnedVerifiedMergeMaterialization {
 
 impl OwnedVerifiedMergeMaterialization {
     pub(crate) fn verify(
-        root: crate::protocol::store_commit::StoreRootRef,
-        verified_commit: crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        root: coven_protocol::store_commit::StoreRootRef,
+        verified_commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
         registrations: Vec<ActivatedStoreDeviceRegistration>,
         device_operations: VerifiedStoreDeviceOperations,
         circle_activations: VerifiedCircleActivations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<VerifiedMergeMembershipObjects>,
         packages: Vec<AudiencePackage>,
         package_application: Option<RetainedPackageApplication>,
@@ -317,7 +317,7 @@ impl OwnedVerifiedMergeMaterialization {
         self.input_hash
     }
 
-    pub(crate) fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+    pub(crate) fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
         &self.root
     }
 
@@ -331,7 +331,7 @@ impl OwnedVerifiedMergeMaterialization {
 
     pub(crate) fn verified_commit(
         &self,
-    ) -> &crate::protocol::store_commit::VerifiedStoreBatchCommit {
+    ) -> &coven_protocol::store_commit::VerifiedStoreBatchCommit {
         &self.verified_commit
     }
 
@@ -349,9 +349,9 @@ impl OwnedVerifiedMergeMaterialization {
 
     pub(crate) fn circle_activation(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
-    ) -> Result<crate::protocol::circle_activation::VerifiedCircleReference, DbError> {
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<coven_protocol::circle_activation::VerifiedCircleReference, DbError> {
         let mut matches = self
             .circle_activations
             .circles()
@@ -382,7 +382,7 @@ impl OwnedVerifiedMergeMaterialization {
 
     pub(crate) fn history_summary(
         &self,
-    ) -> &crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary {
+    ) -> &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary {
         &self.history_summary
     }
 
@@ -410,7 +410,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
 
     pub(crate) fn verified_commit(
         &self,
-    ) -> &crate::protocol::store_commit::VerifiedStoreBatchCommit {
+    ) -> &coven_protocol::store_commit::VerifiedStoreBatchCommit {
         self.verified_commit
     }
 
@@ -436,7 +436,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
 
     pub(crate) fn history_summary(
         &self,
-    ) -> &crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary {
+    ) -> &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary {
         self.history_summary
     }
 
@@ -453,14 +453,14 @@ impl<'a> VerifiedMergeMaterialization<'a> {
     }
 
     pub(crate) fn verify(
-        root: &crate::protocol::store_commit::StoreRootRef,
-        verified_commit: &'a crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        verified_commit: &'a coven_protocol::store_commit::VerifiedStoreBatchCommit,
         registrations: &'a [ActivatedStoreDeviceRegistration],
         device_operations: &'a VerifiedStoreDeviceOperations,
         circle_activations: &'a VerifiedCircleActivations,
         activation_head: &'a StoreDeviceHead,
         activation_head_object: &'a ExactObjectRef,
-        history_summary: &'a crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: &'a coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
         packages: &'a [AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
@@ -519,7 +519,7 @@ pub(crate) struct PreparedMergeMaterialization {
     pub(crate) activation_head_object: ExactObjectRef,
     pub(crate) history_summary: RetainedVerifiedMergeHistorySummary,
     pub(crate) membership_objects: Option<VerifiedMergeMembershipObjects>,
-    pub(crate) membership_remote_objects: Vec<crate::protocol::remote_object::RemoteObjectRecord>,
+    pub(crate) membership_remote_objects: Vec<coven_protocol::remote_object::RemoteObjectRecord>,
     pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub(crate) packages: Vec<PreparedMergeMaterializationPackage>,
     pub(crate) device_operations: VerifiedStoreDeviceOperations,
@@ -539,18 +539,18 @@ impl MembershipAuthorityBytes {
 }
 
 pub(crate) fn activated_merge_membership_remote_objects(
-    family: crate::protocol::store_commit::CandidateFamilyId,
+    family: coven_protocol::store_commit::CandidateFamilyId,
     objects: &VerifiedMergeMembershipObjects,
     entry_bytes: MembershipAuthorityBytes,
     head_bytes: MembershipAuthorityBytes,
     resolution_bytes: Option<MembershipAuthorityBytes>,
     commit_ref: &StoreBatchCommitRef,
 ) -> Result<
-    Vec<crate::protocol::remote_object::RemoteObjectRecord>,
-    crate::protocol::remote_object::RemoteObjectRecordError,
+    Vec<coven_protocol::remote_object::RemoteObjectRecord>,
+    coven_protocol::remote_object::RemoteObjectRecordError,
 > {
     let mut remotes = vec![
-        crate::protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
+        coven_protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
             family,
             objects.entry().clone(),
             entry_bytes.canonical,
@@ -558,7 +558,7 @@ pub(crate) fn activated_merge_membership_remote_objects(
             commit_ref.clone(),
         )?
         .into_observed_activated(commit_ref)?,
-        crate::protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
+        coven_protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
             family,
             objects.head().clone(),
             head_bytes.canonical,
@@ -569,10 +569,10 @@ pub(crate) fn activated_merge_membership_remote_objects(
     ];
     if let Some(resolution) = objects.resolution() {
         let bytes = resolution_bytes.ok_or(
-            crate::protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
+            coven_protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
         )?;
         remotes.push(
-            crate::protocol::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
+            coven_protocol::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
                 resolution.clone(),
                 bytes.canonical,
                 bytes.stored,
@@ -582,7 +582,7 @@ pub(crate) fn activated_merge_membership_remote_objects(
         );
     } else if resolution_bytes.is_some() {
         return Err(
-            crate::protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
+            coven_protocol::remote_object::RemoteObjectRecordError::StoredReferenceMismatch,
         );
     }
     Ok(remotes)

@@ -212,10 +212,10 @@ async fn exact_slot_observation_identifies_present_bytes_and_absence() {
 
     assert_eq!(
         h.observe_at(&slot).await.unwrap(),
-        Some(crate::protocol::objects::ExactObjectRef::new(
+        Some(coven_protocol::objects::ExactObjectRef::new(
             slot,
             8,
-            crate::protocol::store_commit::ObjectHash::digest(b"observed"),
+            coven_protocol::store_commit::ObjectHash::digest(b"observed"),
         ))
     );
 }
@@ -244,15 +244,15 @@ async fn exact_slot_delete_confirms_present_and_already_absent_slots() {
 #[tokio::test]
 async fn google_drive_exact_slots_with_one_logical_key_remain_independent() {
     let h = InMemoryCloudHome::new().with_provider_binding(
-        crate::protocol::objects::ResolvedProviderBinding {
-            store: crate::protocol::objects::StoreProviderBinding::GoogleDrive {
-                corpus: crate::protocol::objects::GoogleDriveCorpus::SharedDrive {
+        coven_protocol::objects::ResolvedProviderBinding {
+            store: coven_protocol::objects::StoreProviderBinding::GoogleDrive {
+                corpus: coven_protocol::objects::GoogleDriveCorpus::SharedDrive {
                     drive_id: "drive-id".to_string(),
                     folder_id: "folder-id".to_string(),
                 },
             },
-            device: crate::protocol::objects::ProviderDeviceBinding {
-                principal: crate::protocol::objects::ProviderPrincipalId::GoogleDrive {
+            device: coven_protocol::objects::ProviderDeviceBinding {
+                principal: coven_protocol::objects::ProviderPrincipalId::GoogleDrive {
                     permission_id: "permission-id".to_string(),
                 },
             },
@@ -288,15 +288,15 @@ async fn google_drive_exact_slots_with_one_logical_key_remain_independent() {
 #[tokio::test]
 async fn google_drive_exact_slots_with_different_logical_keys_have_distinct_file_ids() {
     let h = InMemoryCloudHome::new().with_provider_binding(
-        crate::protocol::objects::ResolvedProviderBinding {
-            store: crate::protocol::objects::StoreProviderBinding::GoogleDrive {
-                corpus: crate::protocol::objects::GoogleDriveCorpus::SharedDrive {
+        coven_protocol::objects::ResolvedProviderBinding {
+            store: coven_protocol::objects::StoreProviderBinding::GoogleDrive {
+                corpus: coven_protocol::objects::GoogleDriveCorpus::SharedDrive {
                     drive_id: "drive-id".to_string(),
                     folder_id: "folder-id".to_string(),
                 },
             },
-            device: crate::protocol::objects::ProviderDeviceBinding {
-                principal: crate::protocol::objects::ProviderPrincipalId::GoogleDrive {
+            device: coven_protocol::objects::ProviderDeviceBinding {
+                principal: coven_protocol::objects::ProviderPrincipalId::GoogleDrive {
                     permission_id: "permission-id".to_string(),
                 },
             },

@@ -3,12 +3,12 @@ use super::*;
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn sign_owner_promotion_acceptance(
         &self,
-        request: crate::protocol::store_commit::OwnerPromotionRequest,
-        activation: crate::protocol::store_commit::OwnerPromotionRequestActivation,
-        anchors: crate::protocol::store_commit::OwnerPromotionAnchors,
+        request: coven_protocol::store_commit::OwnerPromotionRequest,
+        activation: coven_protocol::store_commit::OwnerPromotionRequestActivation,
+        anchors: coven_protocol::store_commit::OwnerPromotionAnchors,
     ) -> Result<
-        crate::protocol::store_commit::OwnerPromotionAcceptance,
-        crate::protocol::store_commit::StoreProtocolError,
+        coven_protocol::store_commit::OwnerPromotionAcceptance,
+        coven_protocol::store_commit::StoreProtocolError,
     > {
         self.writer
             .sign_owner_promotion_acceptance(request, activation, anchors)
@@ -21,7 +21,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
         keyring: &coven_keys::encryption::EncryptionService,
     ) -> Result<
-        crate::protocol::wrapped_store_key::WrappedStoreKey,
+        coven_protocol::wrapped_store_key::WrappedStoreKey,
         coven_keys::encryption::EncryptionError,
     > {
         self.writer
@@ -30,15 +30,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn sign_finalize_owner_promotion(
         &self,
-        membership: &crate::protocol::membership::MembershipChain,
-        root: &crate::protocol::store_commit::StoreRootRef,
-        candidate: &crate::protocol::store_commit::StoreDeviceRegistration,
-        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
-        wrapped_key: crate::protocol::wrapped_store_key::WrappedStoreKeyRef,
+        membership: &coven_protocol::membership::MembershipChain,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        candidate: &coven_protocol::store_commit::StoreDeviceRegistration,
+        acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
+        wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
         timestamp: String,
     ) -> Result<
-        crate::protocol::membership::MembershipEntry,
-        crate::protocol::membership::MembershipError,
+        coven_protocol::membership::MembershipEntry,
+        coven_protocol::membership::MembershipError,
     > {
         self.writer.sign_finalize_owner_promotion(
             membership,
@@ -72,7 +72,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         stream_id: membership::AuthorStreamId,
         revokee_pubkey: String,
         wrapped_keys: Vec<WrappedStoreKeyRef>,
-        device_state: crate::protocol::store_commit::StoreDeviceStateRef,
+        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         timestamp: String,
     ) -> Result<MembershipEntry, InviteError> {
         self.writer

@@ -1,17 +1,17 @@
 use super::*;
-use crate::protocol::causal_grants::AuthorStreamId;
-use crate::protocol::circle::{
+use crate::sync::test_helpers::user_keypair_from_seed;
+use coven_protocol::causal_grants::AuthorStreamId;
+use coven_protocol::circle::{
     CircleControlValue, CircleRole, CircleRosterChain, CircleRosterConflict, CircleRosterEntry,
     CircleRosterHead, CircleRosterHeadRef, CircleRosterStatus, ExactCircleRosterHead,
     MergeCircleOwnerAuthorityRef,
 };
-use crate::protocol::membership::MembershipGrantId;
-use crate::sync::test_helpers::user_keypair_from_seed;
+use coven_protocol::membership::MembershipGrantId;
 
 fn exact_ref(label: &str) -> ExactObjectRef {
     let bytes = label.as_bytes();
     ExactObjectRef::new(
-        crate::protocol::objects::ObjectSlot::logical(format!(
+        coven_protocol::objects::ObjectSlot::logical(format!(
             "store-v1/test-circle-objects/{label}.json"
         ))
         .unwrap(),
@@ -28,12 +28,12 @@ fn roster_head(
     let head = CircleRosterHead::signed(
         entry,
         exact_ref(&format!("{label}-tip")),
-        crate::protocol::store_commit::SuccessorLink {
-            activation: crate::protocol::store_commit::StreamActivationId::from_digest(
+        coven_protocol::store_commit::SuccessorLink {
+            activation: coven_protocol::store_commit::StreamActivationId::from_digest(
                 ObjectHash::digest(format!("{label}-activation").as_bytes()),
             ),
             predecessor: (entry.seq > 1).then(|| exact_ref(&format!("{label}-predecessor"))),
-            next_slot: crate::protocol::objects::ObjectSlot::logical(format!(
+            next_slot: coven_protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test-circle-successors/{label}.json"
             ))
             .unwrap(),
@@ -391,7 +391,7 @@ fn control_authority_uses_the_pre_transition_roster_for_self_demotion() {
         .expect("load post-demotion roster")
         .resolved();
     let authority = MergeCircleOwnerAuthorityRef::Roster {
-        roster: crate::protocol::circle::MergeCircleRosterStateRef {
+        roster: coven_protocol::circle::MergeCircleRosterStateRef {
             heads: Vec::new(),
             resolutions: Vec::new(),
             state_hash: before.state_hash,
@@ -417,8 +417,8 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
     fn control_head_ref(
         label: &str,
         control: &CircleCurrentControl,
-    ) -> crate::protocol::circle::MergeCircleControlHeadRef {
-        crate::protocol::circle::MergeCircleControlHeadRef {
+    ) -> coven_protocol::circle::MergeCircleControlHeadRef {
+        coven_protocol::circle::MergeCircleControlHeadRef {
             coord: control.coordinate().clone(),
             head_hash: ObjectHash::digest(format!("{label}-head").as_bytes()),
             object: exact_ref(&format!("{label}-head")),
@@ -520,7 +520,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         })
         .await
         .expect("load founder current state");
-    let owner = crate::protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
+    let owner = coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
     let first = branch(
         founder.clone(),
         &owner,

@@ -3,17 +3,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     CircleActivationVerifier, CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
 };
-use crate::protocol::circle::{
+use crate::sync::store::circle_controls::CircleOperationError;
+use coven_keys::encryption::EncryptionService;
+use coven_protocol::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleMetadata,
     CircleMetadataHeadRef, CircleSemanticSlot,
 };
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, StoreBatchCommit, StoreBatchCommitRef,
     StreamActivationId,
 };
-use crate::sync::store::circle_controls::CircleOperationError;
-use coven_keys::encryption::EncryptionService;
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(super) async fn load_circle_metadata_state(
@@ -21,7 +21,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         verified_prefix: &VerifiedStreamActivationPrefix,
         commit: &StoreBatchCommit,
         circle_id: CircleId,
-        state: &crate::protocol::circle::CircleMetadataStateRef,
+        state: &coven_protocol::circle::CircleMetadataStateRef,
         encryption: EncryptionService,
         objects: &CircleActivationObjects,
         commit_ref: &StoreBatchCommitRef,
@@ -88,13 +88,13 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&context, &object.object, &prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            let head: crate::protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+            let head: coven_protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse exact Circle metadata head: {error}"
-                    ))
-                })?;
+                CircleOperationError::InvalidState(format!(
+                    "parse exact Circle metadata head: {error}"
+                ))
+            })?;
             let declared_ref =
                 CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
             let authority = self
@@ -192,7 +192,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&exact_context, &object.object, &prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let entry: CircleMetadata = serde_json::from_slice(&bytes).map_err(|error| {
                 CircleOperationError::InvalidState(format!(
                     "parse exact Circle metadata entry: {error}"
@@ -274,11 +274,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
 }
 
 fn verify_metadata_history(
-    entries: &BTreeMap<crate::protocol::circle::CircleMetadataCoord, CircleMetadata>,
-    expected_heads: Option<&[crate::protocol::circle::CircleMetadataCoord]>,
+    entries: &BTreeMap<coven_protocol::circle::CircleMetadataCoord, CircleMetadata>,
+    expected_heads: Option<&[coven_protocol::circle::CircleMetadataCoord]>,
 ) -> Result<(), CircleOperationError> {
     let mut streams = BTreeMap::<
-        crate::protocol::circle::CircleAuthorStreamKey,
+        coven_protocol::circle::CircleAuthorStreamKey,
         BTreeMap<u64, &CircleMetadata>,
     >::new();
     for (coord, entry) in entries {

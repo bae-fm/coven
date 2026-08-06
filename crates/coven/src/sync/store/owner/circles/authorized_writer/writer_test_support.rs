@@ -13,8 +13,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) async fn publish_prepared_operation_for_test(
         &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        operation_id: &coven_protocol::circle::CircleOperationId,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
         self.publisher().publish(operation_id, routing_key).await
     }
@@ -22,11 +22,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) async fn prepare_circle_object_for_test(
         &mut self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
+        context: &coven_protocol::objects::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         bytes: Vec<u8>,
-    ) -> Result<crate::protocol::objects::PreparedExactObject, CircleOperationError> {
+    ) -> Result<coven_protocol::objects::PreparedExactObject, CircleOperationError> {
         self.preparer()
             .prepare_circle_object(context, semantic_prefix, extension, bytes)
             .await
@@ -35,11 +35,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) fn prepare_circle_object_at_for_test(
         &mut self,
-        context: &crate::protocol::objects::ProtocolObjectContext,
-        slot: crate::protocol::objects::ObjectSlot,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        slot: coven_protocol::objects::ObjectSlot,
         semantic_prefix: &str,
         bytes: Vec<u8>,
-    ) -> Result<crate::protocol::objects::PreparedExactObject, CircleOperationError> {
+    ) -> Result<coven_protocol::objects::PreparedExactObject, CircleOperationError> {
         self.preparer()
             .prepare_circle_object_at(context, slot, semantic_prefix, bytes)
     }
@@ -48,8 +48,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn resign_merge_journal_with_reference_for_test(
         &mut self,
         journal: &mut CircleOperationJournal,
-        reference: crate::protocol::store_commit::CircleControlRef,
-        mutate_commit: impl FnOnce(&mut crate::protocol::store_commit::StoreBatchCommit),
+        reference: coven_protocol::store_commit::CircleControlRef,
+        mutate_commit: impl FnOnce(&mut coven_protocol::store_commit::StoreBatchCommit),
     ) -> Result<(), CircleOperationError> {
         let old_commit = journal.commit()?;
         let coord = journal.operation().commit_ref.coord.clone();
@@ -61,7 +61,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         )?;
         mutate_commit(&mut commit);
         self.local_writer.resign_store_commit_for_test(&mut commit);
-        let crate::protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
+        let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = coord.clone();
         let commit_prepared = self
             .preparer()
             .prepare_circle_object(
@@ -69,7 +69,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     commit.store_root_hash,
                     ProtocolObjectDomain::StoreCommit,
                 ),
-                &crate::protocol::store_commit::commit_semantic_prefix(
+                &coven_protocol::store_commit::commit_semantic_prefix(
                     commit.candidate_family(),
                     &stream_id.to_string(),
                     commit.seq(),
@@ -79,7 +79,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 commit.to_bytes(),
             )
             .await?;
-        let commit_ref = crate::protocol::store_commit::StoreBatchCommitRef::from_commit(
+        let commit_ref = coven_protocol::store_commit::StoreBatchCommitRef::from_commit(
             &commit,
             coord,
             commit_prepared.reference().clone(),
@@ -122,7 +122,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 ProtocolObjectDomain::StoreHead,
             ),
             head_slot,
-            &crate::protocol::store_commit::head_slot_prefix(
+            &coven_protocol::store_commit::head_slot_prefix(
                 &commit.author_registration.device_id.to_string(),
                 commit.seq(),
             ),
@@ -148,11 +148,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) fn sign_circle_commit_for_test(
         &self,
-        old_commit: &crate::protocol::store_commit::StoreBatchCommit,
-        coord: crate::protocol::store_commit::StoreCommitCoord,
-        reference: crate::protocol::store_commit::CircleControlRef,
-        stream_activations: Vec<crate::protocol::store_commit::StreamActivation>,
-    ) -> Result<crate::protocol::store_commit::StoreBatchCommit, CircleOperationError> {
+        old_commit: &coven_protocol::store_commit::StoreBatchCommit,
+        coord: coven_protocol::store_commit::StoreCommitCoord,
+        reference: coven_protocol::store_commit::CircleControlRef,
+        stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
+    ) -> Result<coven_protocol::store_commit::StoreBatchCommit, CircleOperationError> {
         self.local_writer.sign_circle_commit_for_test(
             old_commit,
             coord,
@@ -164,16 +164,16 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) async fn prepare_circle_activation_objects_for_test(
         &mut self,
-        draft: crate::protocol::circle::CircleTransitionDraft,
+        draft: coven_protocol::circle::CircleTransitionDraft,
         history: &CircleTransitionHistory,
-        candidate_family: crate::protocol::store_commit::CandidateFamilyId,
+        candidate_family: coven_protocol::store_commit::CandidateFamilyId,
     ) -> Result<
         (
-            crate::protocol::circle::PreparedCircleTransition,
-            crate::protocol::store_commit::CircleActivationObjects,
-            std::collections::BTreeMap<String, crate::protocol::objects::PreparedExactObject>,
-            Option<crate::protocol::objects::ExactObjectRef>,
-            Vec<crate::protocol::store_commit::StreamActivation>,
+            coven_protocol::circle::PreparedCircleTransition,
+            coven_protocol::store_commit::CircleActivationObjects,
+            std::collections::BTreeMap<String, coven_protocol::objects::PreparedExactObject>,
+            Option<coven_protocol::objects::ExactObjectRef>,
+            Vec<coven_protocol::store_commit::StreamActivation>,
         ),
         CircleOperationError,
     > {
@@ -185,12 +185,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     #[cfg(test)]
     pub(crate) async fn load_complete_circle_epoch_close_responses_for_test(
         &mut self,
-        control: &crate::protocol::circle::PreparedCircleControl,
+        control: &coven_protocol::circle::PreparedCircleControl,
     ) -> Result<
         Option<
             Vec<(
-                crate::protocol::circle::CircleEpochCloseSettlement,
-                crate::protocol::circle::CircleEpochCloseResponseSlotValue,
+                coven_protocol::circle::CircleEpochCloseSettlement,
+                coven_protocol::circle::CircleEpochCloseResponseSlotValue,
             )>,
         >,
         CircleOperationError,
@@ -203,8 +203,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn resolution_request_for_test(
         &self,
         circle_id: CircleId,
-        chosen: &crate::protocol::circle::CircleControlCoord,
-        conflicting_branches: Vec<crate::protocol::circle::CircleControlCoord>,
+        chosen: &coven_protocol::circle::CircleControlCoord,
+        conflicting_branches: Vec<coven_protocol::circle::CircleControlCoord>,
     ) -> Result<CircleOperationRequest, CircleOperationError> {
         let retained_branches = self
             .database
@@ -219,7 +219,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn begin_circle_epoch_close_cancellation_for_test(
         &mut self,
         circle_id: CircleId,
-    ) -> Result<crate::protocol::circle::CircleOperationId, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleOperationId, CircleOperationError> {
         self.begin_circle_epoch_close_cancellation(circle_id).await
     }
 }

@@ -71,9 +71,9 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
     crate::database::StoreDatabase::new(&db)
         .block_circle_operation(
             &first.operation_id,
-            crate::protocol::circle::CircleOperationBlock::AuthorityLost {
-                grant_id: crate::protocol::membership::MembershipGrantId(
-                    crate::protocol::store_commit::ObjectHash::digest(b"revoked grant"),
+            coven_protocol::circle::CircleOperationBlock::AuthorityLost {
+                grant_id: coven_protocol::membership::MembershipGrantId(
+                    coven_protocol::store_commit::ObjectHash::digest(b"revoked grant"),
                 ),
             },
         )

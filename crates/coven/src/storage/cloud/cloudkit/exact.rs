@@ -151,8 +151,8 @@ pub(super) fn read_exact_cloudkit_range(
 impl ExactSlotStorage for CloudKitCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
-        use crate::protocol::objects::{
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use coven_protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };
@@ -202,9 +202,9 @@ impl ExactSlotStorage for CloudKitCloudHome {
 
     async fn cross_principal_evidence(
         &self,
-    ) -> Result<crate::protocol::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
-        use crate::protocol::provider::{CloudKitAcceptedShare, CrossPrincipalProviderEvidence};
-        use crate::protocol::store_commit::ObjectHash;
+    ) -> Result<coven_protocol::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
+        use coven_protocol::provider::{CloudKitAcceptedShare, CrossPrincipalProviderEvidence};
+        use coven_protocol::store_commit::ObjectHash;
 
         let CloudKitScope::Shared {
             owner_name,
@@ -219,7 +219,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         let scope = self.scope.clone();
         let accepted = blocking(move || ops.accepted_read_write_share(&scope)).await?;
         let binding = self.provider_binding().await?;
-        let crate::protocol::objects::ProviderPrincipalId::CloudKitSharedZoneParticipant {
+        let coven_protocol::objects::ProviderPrincipalId::CloudKitSharedZoneParticipant {
             record_name,
         } = binding.device.principal
         else {
@@ -246,7 +246,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
         ))?;
         Ok(CrossPrincipalProviderEvidence::CloudKit(
             CloudKitAcceptedShare {
-                share: crate::protocol::objects::ExactObjectRef::new(
+                share: coven_protocol::objects::ExactObjectRef::new(
                     share_slot,
                     accepted.canonical_record.len() as u64,
                     ObjectHash::digest(&accepted.canonical_record),

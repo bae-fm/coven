@@ -10,11 +10,11 @@ use super::*;
 
 pub(super) fn validate_snapshot_object_owners_on(
     conn: &Connection,
-    root: &crate::protocol::store_commit::StoreRootRef,
+    root: &coven_protocol::store_commit::StoreRootRef,
     meta: &SnapshotMeta,
 ) -> Result<(), DbError> {
     let registration = load_activated_registration_on(conn, root, &meta.author_registration)?;
-    let expected = crate::protocol::remote_object::SnapshotObjectOwner {
+    let expected = coven_protocol::remote_object::SnapshotObjectOwner {
         activation: registration
             .store_snapshot_activation(&meta.author_registration)
             .map_err(|error| DbError::Message(error.to_string()))?
@@ -46,7 +46,7 @@ pub(crate) async fn verify_snapshot_blob_spools(
                     .verify_stored_facts(
                         spool_path,
                         size,
-                        crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                        coven_protocol::store_commit::ObjectHash::from_digest(digest),
                     )
                     .map_err(|error| {
                         DbError::context(format!("{label} snapshot blob spool"), error)
@@ -94,7 +94,7 @@ pub(crate) fn validate_snapshot_blob_plans_on(
     conn: &Connection,
     gates: &Gates,
     synced_tables: &[SyncedTable],
-    owner: &crate::protocol::remote_object::SnapshotObjectOwner,
+    owner: &coven_protocol::remote_object::SnapshotObjectOwner,
     blobs: &[PreparedSnapshotBlob],
 ) -> Result<(), DbError> {
     for blob in blobs {
@@ -168,7 +168,7 @@ pub(crate) fn validate_snapshot_blob_plans_on(
 pub(crate) fn persist_snapshot_image_on(
     conn: &Connection,
     image: &SnapshotImageRef,
-    owner: crate::protocol::remote_object::SnapshotObjectOwner,
+    owner: coven_protocol::remote_object::SnapshotObjectOwner,
     label: &str,
 ) -> Result<(), DbError> {
     let image = RemoteObjectRecord::snapshot_activated_image(image, owner)
@@ -183,7 +183,7 @@ pub(crate) fn snapshot_generation_as_i64(generation: u64, label: &str) -> Result
 
 pub(super) fn validate_snapshot_object_owner_records_on(
     conn: &Connection,
-    expected: &crate::protocol::remote_object::SnapshotObjectOwner,
+    expected: &coven_protocol::remote_object::SnapshotObjectOwner,
 ) -> Result<(), DbError> {
     let mut statement = conn
         .prepare("SELECT object_id FROM remote_objects ORDER BY object_id")

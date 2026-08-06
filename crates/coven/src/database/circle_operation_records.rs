@@ -8,7 +8,7 @@ pub(crate) struct PreparedCircleOperationRow {
 
 impl PreparedCircleOperationRow {
     pub(crate) fn from_journal(
-        journal: crate::protocol::circle_journal::CircleOperationJournal,
+        journal: coven_protocol::circle_journal::CircleOperationJournal,
     ) -> Result<Self, DbError> {
         journal
             .validate_identity()
@@ -29,8 +29,8 @@ pub(crate) fn parse_circle_operation_row(
     stored_operation_id: &str,
     stored_circle_id: &str,
     payload: &[u8],
-) -> Result<crate::protocol::circle_journal::CircleOperationJournal, DbError> {
-    let journal: crate::protocol::circle_journal::CircleOperationJournal =
+) -> Result<coven_protocol::circle_journal::CircleOperationJournal, DbError> {
+    let journal: coven_protocol::circle_journal::CircleOperationJournal =
         serde_json::from_slice(payload)
             .map_err(|error| DbError::context("parse circle operation journal", error))?;
     journal
@@ -54,7 +54,7 @@ pub(crate) fn parse_circle_operation_row(
 pub(crate) fn load_circle_operation_on(
     conn: &Connection,
     operation_id: &str,
-) -> Result<Option<crate::protocol::circle_journal::CircleOperationJournal>, DbError> {
+) -> Result<Option<coven_protocol::circle_journal::CircleOperationJournal>, DbError> {
     conn.query_row(
         "SELECT operation_id, circle_id, payload
          FROM circle_operations

@@ -1,6 +1,6 @@
 use super::*;
-use crate::protocol::circle_activation::VerifiedStreamActivations;
-use crate::protocol::store_commit::StreamActivationId;
+use coven_protocol::circle_activation::VerifiedStreamActivations;
+use coven_protocol::store_commit::StreamActivationId;
 use rusqlite::{Connection, OptionalExtension};
 
 impl StoreDatabase {
@@ -57,7 +57,7 @@ impl StoreDatabase {
     pub(crate) async fn registered_stream_activation(
         &self,
         activation_id: StreamActivationId,
-    ) -> Result<Option<crate::protocol::store_commit::RegisteredStreamActivation>, DbError> {
+    ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
         let key = activation_id.as_hash().to_string();
         self.connection
             .call(move |conn| {
@@ -96,7 +96,7 @@ impl StoreDatabase {
                     serde_json::from_str(&activating_commit).map_err(|error| {
                         DbError::context("stored stream activation commit ref", error)
                     })?;
-                crate::protocol::store_commit::RegisteredStreamActivation::from_stored(
+                coven_protocol::store_commit::RegisteredStreamActivation::from_stored(
                     activation_id,
                     author_stream_id,
                     activation,

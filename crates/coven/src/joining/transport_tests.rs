@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
 use crate::joining::encode;
-use crate::protocol::objects::ObjectSlot;
 use crate::storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
 use crate::sync::store::{
     DeviceJoinAction, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinTransport,
@@ -20,6 +19,7 @@ use crate::sync::test_helpers::*;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::objects::ObjectSlot;
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -52,7 +52,7 @@ struct TransportFixture {
     invite_code: String,
     join_request: String,
     layout: coven_foundation::store_dir::StoreLayout,
-    tables: Vec<crate::protocol::synced_schema::SyncedTable>,
+    tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     /// The cloud home the joining device sees. Same principal as the owner's
     /// in the ordinary case; a different account for the cross-principal one,
     /// which is what makes the admission run its provider probe.
@@ -137,7 +137,7 @@ impl TransportFixture {
                 &owner,
                 &member_pubkey,
                 None,
-                crate::protocol::membership::MemberRole::Member,
+                coven_protocol::membership::MemberRole::Member,
                 &EncryptionService::from_key([42; 32]),
                 "Device Join Transport Store",
             )
@@ -154,7 +154,7 @@ impl TransportFixture {
             .capture_snapshot_image_for_test(store.root.clone(), snapshot_path, None)
             .await
             .expect("create join snapshot");
-        let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
+        let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
         owner_device
             .publish_snapshot(snapshot, snapshot_coverage.clone())
             .await
@@ -212,7 +212,7 @@ impl TransportFixture {
     async fn publish_owner_row(
         &self,
         id: &str,
-    ) -> crate::protocol::store_commit::StoreBatchCommitRef {
+    ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         self.owner_db
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
@@ -486,7 +486,7 @@ async fn run_transport_carries_a_cross_principal_join() {
         Some(DeviceJoinAction::TransferProviderAdmissionApproval(approval)) => assert!(
             matches!(
                 approval.admission,
-                crate::protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
             ),
             "separate provider accounts must admit through the cross-principal probe",
         ),

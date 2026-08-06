@@ -4,8 +4,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     #[cfg(test)]
     pub(super) async fn load_own_snapshot_for_test(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<crate::protocol::store_commit::SnapshotMeta, snapshot::SnapshotError> {
+        reference: &coven_protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<coven_protocol::store_commit::SnapshotMeta, snapshot::SnapshotError> {
         self.writer
             .load_own_snapshot(&mut self.history, reference)
             .await
@@ -15,10 +15,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     #[cfg(test)]
     pub(crate) fn sign_device_head_for_test(
         &self,
-        commit: crate::protocol::store_commit::StoreBatchCommitRef,
-        history_summary: crate::protocol::store_commit::ObjectHash,
-        successor: crate::protocol::store_commit::SuccessorLink,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceHead, StoreError> {
+        commit: coven_protocol::store_commit::StoreBatchCommitRef,
+        history_summary: coven_protocol::store_commit::ObjectHash,
+        successor: coven_protocol::store_commit::SuccessorLink,
+    ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
         self.writer.sign_device_head(
             self.store_root().store_root_hash,
             commit,
@@ -30,8 +30,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     #[cfg(test)]
     pub(crate) fn resign_snapshot_meta_for_test(
         &self,
-        meta: crate::protocol::store_commit::SnapshotMeta,
-    ) -> Result<crate::protocol::store_commit::SnapshotMeta, StoreError> {
+        meta: coven_protocol::store_commit::SnapshotMeta,
+    ) -> Result<coven_protocol::store_commit::SnapshotMeta, StoreError> {
         if meta.store_root_hash != self.store_root().store_root_hash
             || !self
                 .writer
@@ -50,8 +50,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn parse_snapshot_meta_for_test(
         &self,
         bytes: &[u8],
-        reference: &crate::protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<crate::protocol::store_commit::SnapshotMeta, StoreError> {
+        reference: &coven_protocol::store_commit::StoreSnapshotRef,
+    ) -> Result<coven_protocol::store_commit::SnapshotMeta, StoreError> {
         self.writer
             .parse_snapshot(bytes, self.store_root().store_root_hash, reference)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
@@ -60,7 +60,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     #[cfg(test)]
     pub(crate) fn local_registration_ref_for_test(
         &self,
-    ) -> crate::protocol::store_commit::StoreDeviceRegistrationRef {
+    ) -> coven_protocol::store_commit::StoreDeviceRegistrationRef {
         self.writer.registration_reference_for_test()
     }
 

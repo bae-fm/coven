@@ -2,12 +2,12 @@ use crate::database::{
     DurablePreparedProtocolObject, PreparedAudienceObjects, StoreBatchCompletion,
     StoreBatchLocalCleanup,
 };
-use crate::protocol::objects::PreparedProtocolObject;
-use crate::protocol::remote_object::RemoteObjectRecord;
-use crate::protocol::store_commit::{
+use coven_protocol::objects::PreparedProtocolObject;
+use coven_protocol::remote_object::RemoteObjectRecord;
+use coven_protocol::store_commit::{
     StoreBatchCommitRef, StoreDeviceHead, StoreRootRef, VerifiedStoreBatchCommit,
 };
-use crate::write::WriteId;
+use coven_protocol::write::WriteId;
 
 pub(crate) struct StoreWritePreparation {
     pub root: StoreRootRef,
@@ -16,7 +16,7 @@ pub(crate) struct StoreWritePreparation {
     pub audiences: PreparedAudienceObjects,
     pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
-    pub history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
     pub local_cleanup: StoreBatchLocalCleanup,
     pub completion: StoreBatchCompletion,
 }
@@ -25,7 +25,7 @@ pub(crate) struct MergeCandidateAbandonmentPreparation {
     pub write_id: WriteId,
     pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
-    pub history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,7 +34,7 @@ pub(crate) enum PreparedStoreWriteState {
     Publication {
         commit: DurablePreparedProtocolObject,
         head: DurablePreparedProtocolObject,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
@@ -42,11 +42,11 @@ pub(crate) enum PreparedStoreWriteState {
         candidate_commit: DurablePreparedProtocolObject,
         candidate_head: DurablePreparedProtocolObject,
         candidate_history_summary:
-            crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+            coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         authority_commit: DurablePreparedProtocolObject,
         authority_head: DurablePreparedProtocolObject,
         authority_history_summary:
-            crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+            coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         outcome: MergeAbandonmentOutcome,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
@@ -62,7 +62,7 @@ pub(crate) enum MergeAbandonmentOutcome {
     },
     Lost {
         winner_commit: StoreBatchCommitRef,
-        winner_head: crate::protocol::store_commit::StoreDeviceHeadRef,
+        winner_head: coven_protocol::store_commit::StoreDeviceHeadRef,
     },
     AuthorExcluded,
 }

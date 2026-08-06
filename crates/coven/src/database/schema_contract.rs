@@ -28,7 +28,7 @@ impl DurablePreparedProtocolObject {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreBatchLocalCleanup {
-    pub drops: Vec<crate::protocol::blob::DeferredLocalBlobDrop>,
+    pub drops: Vec<coven_protocol::blob::DeferredLocalBlobDrop>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -128,7 +128,7 @@ pub(super) fn validate_existing_row_identities(
     conn: &Connection,
     table: &SyncedTable,
 ) -> Result<(), DbError> {
-    if table.row_identity() == crate::protocol::synced_schema::RowIdentity::SharedKey {
+    if table.row_identity() == coven_protocol::synced_schema::RowIdentity::SharedKey {
         return Ok(());
     }
     let sql = format!(
@@ -157,7 +157,7 @@ pub(super) struct ColumnInfo {
     pk: i64,
 }
 
-/// Enforce the synced-table contract ([`crate::protocol::synced_schema::SyncedTable`]) on
+/// Enforce the synced-table contract ([`coven_protocol::synced_schema::SyncedTable`]) on
 /// `table`'s live schema: the table declared STRICT; a single primary key
 /// column, named `id`, declared TEXT, at column 0; and an `_updated_at` column
 /// declared TEXT NOT NULL. A violation is an open error naming the table and the

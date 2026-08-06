@@ -10,8 +10,8 @@ use crate::database::{
     replace_prepared_merge_head_remote_on, store_reclaim_journal_error, update_remote_object_on,
     update_store_reclaim_operation_on,
 };
-use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
-use crate::protocol::store_commit::{StoreBatchCommitRef, StoreCommitCoord, StorePackageRef};
+use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
+use coven_protocol::store_commit::{StoreBatchCommitRef, StoreCommitCoord, StorePackageRef};
 
 pub(crate) mod journal;
 
@@ -56,7 +56,7 @@ impl StoreDatabase {
 
     pub(crate) async fn store_package_is_retained_for_replay(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         target: StorePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
@@ -107,8 +107,8 @@ impl StoreDatabase {
 
     pub(crate) async fn circle_package_is_retained_for_replay(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
-        target: crate::protocol::store_commit::CirclePackageRef,
+        root: coven_protocol::store_commit::StoreRootRef,
+        target: coven_protocol::store_commit::CirclePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
         self.connection
@@ -163,7 +163,7 @@ impl StoreDatabase {
     /// before deletion so a seed installed since authoring fails the delete loud.
     pub(crate) async fn circle_bootstrap_image_is_retained_for_replay(
         &self,
-        coverage: crate::protocol::circle::CircleBootstrapCoverageRef,
+        coverage: coven_protocol::circle::CircleBootstrapCoverageRef,
     ) -> Result<bool, DbError> {
         self.circle_image_is_retained_for_replay(
             coverage.circle_id,
@@ -179,8 +179,8 @@ impl StoreDatabase {
     /// same question against the same row.
     pub(crate) async fn circle_image_is_retained_for_replay(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        image: crate::protocol::store_commit::SnapshotImageRef,
+        circle_id: coven_protocol::circle::CircleId,
+        image: coven_protocol::store_commit::SnapshotImageRef,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {
@@ -195,7 +195,7 @@ impl StoreDatabase {
                 let Some(bootstrap_ref) = row else {
                     return Ok(false);
                 };
-                let bootstrap: crate::protocol::circle::CircleBootstrapRef =
+                let bootstrap: coven_protocol::circle::CircleBootstrapRef =
                     serde_json::from_slice(&bootstrap_ref).map_err(|error| {
                         DbError::context("parse retained Circle bootstrap reference", error)
                     })?;
@@ -212,7 +212,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<
         Vec<(
-            crate::protocol::blob::locator::StoredBlobRef,
+            coven_protocol::blob::locator::StoredBlobRef,
             Vec<StoreBatchCommitRef>,
         )>,
         DbError,
@@ -237,13 +237,13 @@ impl StoreDatabase {
                     if !remote.is_activated_stored_blob() {
                         continue;
                     }
-                    let locator = crate::protocol::blob::locator::BlobLocator::parse(
+                    let locator = coven_protocol::blob::locator::BlobLocator::parse(
                         remote.bytes().canonical_semantic_bytes(),
                     )
                     .map_err(|error| {
                         DbError::context(format!("stored blob {object_id} locator"), error)
                     })?;
-                    let stored = crate::protocol::blob::locator::StoredBlobRef::new(
+                    let stored = coven_protocol::blob::locator::StoredBlobRef::new(
                         locator,
                         remote.object().clone(),
                     )
@@ -264,7 +264,7 @@ impl StoreDatabase {
     /// than counting as an orphan.
     pub(crate) async fn stored_blob_is_row_orphaned(
         &self,
-        stored: crate::protocol::blob::locator::StoredBlobRef,
+        stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         let gates = self.gates();
         let tables = self.synced_tables().to_vec();
@@ -298,7 +298,7 @@ impl StoreDatabase {
     /// a restore now needs.
     pub(crate) async fn audience_blob_is_retained_for_replay(
         &self,
-        stored: crate::protocol::blob::locator::StoredBlobRef,
+        stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {
@@ -330,7 +330,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?;
                 drop(statement);
                 for bytes in coverages {
-                    let bootstrap: crate::protocol::circle::CircleBootstrapRef =
+                    let bootstrap: coven_protocol::circle::CircleBootstrapRef =
                         serde_json::from_slice(&bytes).map_err(|error| {
                             DbError::context("parse retained Circle bootstrap reference", error)
                         })?;
@@ -381,7 +381,7 @@ impl StoreDatabase {
         &self,
         expected: DurableStoreReclaimOperation,
         object: DurableStoreReclaimObject,
-        candidate: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let DurableStoreReclaimOperation::AbsentVerified {
             authorization,
@@ -433,7 +433,7 @@ impl StoreDatabase {
     pub(crate) async fn mark_store_reclaim_target_absent(
         &self,
         expected: DurableStoreReclaimOperation,
-        target: crate::protocol::reclaim::ReclaimTarget,
+        target: coven_protocol::reclaim::ReclaimTarget,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let DurableStoreReclaimOperation::Authorized {
             authorization,
@@ -481,7 +481,7 @@ impl StoreDatabase {
     pub(crate) async fn replace_store_reclaim_candidate(
         &self,
         expected: DurableStoreReclaimOperation,
-        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
+        replacement: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let current_candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store reclaim state has no replaceable candidate".to_string())
@@ -554,8 +554,8 @@ impl StoreDatabase {
     pub(crate) async fn begin_store_reclaim_candidate_replacement(
         &self,
         expected: DurableStoreReclaimOperation,
-        replacement: crate::protocol::prepared_commit::PreparedStoreOperationCommit,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        replacement: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
         let object = expected.object().cloned().ok_or_else(|| {
             DbError::Message("Store reclaim operation has no replaceable object".to_string())
@@ -628,9 +628,9 @@ impl StoreDatabase {
                     RemoteObjectRecord::RetainedAuthority(record)
                         if matches!(
                             record.identity.domain,
-                            crate::protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
-                                | crate::protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
-                                | crate::protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
+                            coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
                         )
                 ))
                 .map(RemoteObjectRecord::object_id)
@@ -796,7 +796,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) async fn stored_blob_has_snapshot_owner_for_test(
         &self,
-        stored: crate::protocol::blob::locator::StoredBlobRef,
+        stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         self.connection
             .call(move |conn| {
@@ -812,7 +812,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<
         Vec<(
-            crate::protocol::blob::locator::StoredBlobRef,
+            coven_protocol::blob::locator::StoredBlobRef,
             Vec<StoreBatchCommitRef>,
         )>,
         DbError,

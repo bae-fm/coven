@@ -10,10 +10,10 @@
 
 use std::sync::Arc;
 
-use crate::protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
-use crate::protocol::membership::MemberRole;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
+use coven_protocol::membership::MemberRole;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version.
@@ -451,8 +451,8 @@ async fn register_seeds_from_persisted_high_water() {
     let before_restart = crate::database::Database::open(
         &path,
         test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "dev-a".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
@@ -467,8 +467,8 @@ async fn register_seeds_from_persisted_high_water() {
     let db = crate::database::Database::open_with_hlc(
         &path,
         test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         Arc::new(Hlc::new(
             "dev-a".into(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
@@ -749,8 +749,8 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let db = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "dev-self".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,

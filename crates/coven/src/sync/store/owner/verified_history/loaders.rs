@@ -168,7 +168,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreSnapshotImage,
         );
-        let semantic_prefix = crate::protocol::store_commit::snapshot_image_semantic_prefix(
+        let semantic_prefix = coven_protocol::store_commit::snapshot_image_semantic_prefix(
             &snapshot.meta.author_registration.device_id.to_string(),
             snapshot.meta.image.image_hash,
         );
@@ -266,7 +266,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn load_reclaim_authorization(
         &self,
-        reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
+        reference: &coven_protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<super::verification::VerifiedReclaimAuthorization, StoreObjectError> {
         self.commit_verifier
             .load_reclaim_authorization(reference)
@@ -275,7 +275,7 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn load_reclaim_receipt(
         &self,
-        reference: &crate::protocol::reclaim::ReclaimReceiptRef,
+        reference: &coven_protocol::reclaim::ReclaimReceiptRef,
     ) -> Result<super::verification::VerifiedReclaimReceipt, StoreObjectError> {
         self.commit_verifier.load_reclaim_receipt(reference).await
     }
@@ -298,10 +298,10 @@ impl<'a> MergeHistoryVerifier<'a> {
 
     pub(crate) async fn load_provider_access_grant(
         &self,
-        reference: &crate::protocol::provider::StoreMemberProviderAccessGrantRef,
+        reference: &coven_protocol::provider::StoreMemberProviderAccessGrantRef,
         administrator: &StoreDeviceRegistration,
     ) -> Result<
-        VerifiedObject<crate::protocol::provider::StoreMemberProviderAccessGrant>,
+        VerifiedObject<coven_protocol::provider::StoreMemberProviderAccessGrant>,
         StoreObjectError,
     > {
         self.commit_verifier
@@ -316,7 +316,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         previous: Option<&VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::protocol::objects::ObjectSlot,
+            coven_protocol::objects::ObjectSlot,
             Option<StoreDeviceHeadRef>,
         ),
         StoreError,
@@ -398,13 +398,13 @@ impl<'a> MergeHistoryVerifier<'a> {
             // which authority published the target.
             let target = evidence.claim.target();
             match target.activation() {
-                crate::protocol::reclaim::ReclaimActivation::Commit(activating_commit) => {
+                coven_protocol::reclaim::ReclaimActivation::Commit(activating_commit) => {
                     accepted.validate_commit_activated_reclaim_target(&target, activating_commit)
                 }
-                crate::protocol::reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
+                coven_protocol::reclaim::ReclaimActivation::CircleSnapshotMetadata(activation) => {
                     validate_circle_snapshot_activated_reclaim_target(&target, &activation)
                 }
-                crate::protocol::reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
+                coven_protocol::reclaim::ReclaimActivation::PackageBlobBinding(activation) => {
                     accepted.validate_package_bound_reclaim_target(&target, &activation)
                 }
             }?;

@@ -31,7 +31,7 @@ impl PendingRotation {
     pub(crate) fn mark_candidate(
         &self,
         generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
+        mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
         *recorded = Some(RotationGate::with_candidate(
@@ -45,7 +45,7 @@ impl PendingRotation {
     pub(crate) fn mark_committed_mutation(
         &self,
         generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
+        mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
         *recorded = Some(RotationGate::commit_candidate(
@@ -59,7 +59,7 @@ impl PendingRotation {
     pub(crate) fn remove_candidate(
         &self,
         generation: u64,
-        mutation: crate::protocol::store_commit::ObjectHash,
+        mutation: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
         let gate = recorded.clone().ok_or_else(|| {
@@ -72,8 +72,8 @@ impl PendingRotation {
     pub(crate) fn replace_candidate_mutation(
         &self,
         generation: u64,
-        previous: crate::protocol::store_commit::ObjectHash,
-        replacement: crate::protocol::store_commit::ObjectHash,
+        previous: coven_protocol::store_commit::ObjectHash,
+        replacement: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), String> {
         let mut recorded = self.0.write().unwrap();
         let gate = recorded.clone().ok_or_else(|| {

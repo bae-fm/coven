@@ -1,6 +1,6 @@
 use crate::database::local_store_identity::local_store_authority_on;
-use crate::protocol::circle::CircleId;
-use crate::protocol::store_commit::{
+use coven_protocol::circle::CircleId;
+use coven_protocol::store_commit::{
     CircleSnapshotMeta, CircleSnapshotRef, ObjectHash, SnapshotImageRef,
 };
 
@@ -51,7 +51,7 @@ pub(crate) fn load_published_circle_snapshot_on(
             author,
         )
         .map_err(|error| DbError::context("published Circle snapshot", error))?;
-        let cut: crate::protocol::store_commit::CommitFrontier = serde_json::from_str(&cut)
+        let cut: coven_protocol::store_commit::CommitFrontier = serde_json::from_str(&cut)
             .map_err(|error| DbError::context("published Circle snapshot cut", error))?;
         if &meta.author_registration != author_ref
             || meta.circle_id != circle_id

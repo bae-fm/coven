@@ -55,7 +55,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             &owner,
             &member_pubkey,
             None,
-            crate::protocol::membership::MemberRole::Member,
+            coven_protocol::membership::MemberRole::Member,
             &EncryptionService::from_key([42; 32]),
             "Device Join Client Store",
         )
@@ -72,7 +72,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .capture_snapshot_image_for_test(store.root.clone(), snapshot_path, None)
         .await
         .expect("create join snapshot");
-    let snapshot_coverage = crate::protocol::store_commit::CommitFrontier(BTreeMap::new());
+    let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
     owner_device
         .publish_snapshot(snapshot, snapshot_coverage.clone())
         .await

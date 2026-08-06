@@ -1,5 +1,5 @@
 use crate::database::*;
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     SnapshotMeta, StoreAck, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreSnapshotRef,
 };
@@ -21,7 +21,7 @@ impl StoreDatabase {
     pub(crate) async fn export_activated_device_continuation(
         &self,
         identity_signer: &coven_keys::keys::UserKeypair,
-    ) -> Result<crate::protocol::recovery::ActivatedContinuation, DbError> {
+    ) -> Result<coven_protocol::recovery::ActivatedContinuation, DbError> {
         let durable = self
             .latest_local_store_device_registration()
             .await?
@@ -58,12 +58,12 @@ impl StoreDatabase {
             .await?
             .ok_or_else(|| DbError::Message("local Store acknowledgement is absent".into()))?;
         let announcement_stream_id =
-            crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+            coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
                 &registration_ref,
-                crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+                coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
             );
-        Ok(crate::protocol::recovery::ActivatedContinuation {
+        Ok(coven_protocol::recovery::ActivatedContinuation {
             identity_signing_secret: hex::encode(identity_signer.to_keypair_bytes()),
             device_signing_secret: hex::encode(device_signer.to_keypair_bytes()),
             registration: registration_ref,
@@ -86,7 +86,7 @@ impl StoreDatabase {
 
     pub(crate) async fn install_activated_device_continuation(
         &self,
-        continuation: crate::protocol::recovery::ActivatedContinuation,
+        continuation: coven_protocol::recovery::ActivatedContinuation,
         identity_signer: &coven_keys::keys::UserKeypair,
         device_signer: &coven_keys::keys::UserKeypair,
         ack_chain: Vec<(StoreAckRef, StoreAck)>,
@@ -192,7 +192,7 @@ impl StoreDatabase {
                         |row| row.get(0),
                     )
                     .map_err(DbError::from)?;
-                let stored_authority: crate::protocol::store_commit::StoreDeviceRegistrationActivation =
+                let stored_authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation =
                     serde_json::from_str(&stored_authority).map_err(|error| {
                         DbError::context("continued activation authority", error)
                     })?;

@@ -3,7 +3,7 @@ use super::*;
 impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn stage_acknowledgements(
         &self,
-        frontier: &crate::protocol::store_commit::CommitFrontier,
+        frontier: &coven_protocol::store_commit::CommitFrontier,
         sync_time: &str,
     ) -> Result<(), StoreAckError> {
         let inputs = self
@@ -104,7 +104,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) async fn publish_acknowledgement_objects(
         &self,
         outbound: &crate::database::OutboundStoreAck,
-        candidate: &crate::protocol::prepared_commit::PreparedStoreOperationCommit,
+        candidate: &coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<(), StoreAckError> {
         for circle in &outbound.circle_acknowledgements {
             if let Err(error) = self
@@ -114,7 +114,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             {
                 if matches!(
                     error,
-                    crate::protocol::objects::StorageError::SlotCollision(_)
+                    coven_protocol::objects::StorageError::SlotCollision(_)
                 ) {
                     return Err(StoreAckError::InvalidOutbound(format!(
                         "Circle acknowledgement slot {} holds different bytes",

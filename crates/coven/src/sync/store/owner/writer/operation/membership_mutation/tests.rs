@@ -1,6 +1,6 @@
-use crate::protocol::membership::MemberRole;
-use crate::protocol::store_commit::ObjectHash;
 use coven_keys::keys::{self, UserKeypair};
+use coven_protocol::membership::MemberRole;
+use coven_protocol::store_commit::ObjectHash;
 
 #[tokio::test]
 async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
@@ -47,7 +47,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     prepared.validate().expect("validate prepared transition");
 
     let mut redirected_head = prepared.clone();
-    redirected_head.transition.head_slot = crate::protocol::objects::ObjectSlot::logical(
+    redirected_head.transition.head_slot = coven_protocol::objects::ObjectSlot::logical(
         "store-v1/tests/redirected-membership-head.json".to_string(),
     )
     .expect("valid redirected head slot");
@@ -55,7 +55,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
 
     let mut redirected_successor = prepared.clone();
     redirected_successor.transition.body.successor.next_slot =
-        crate::protocol::objects::ObjectSlot::logical(
+        coven_protocol::objects::ObjectSlot::logical(
             "store-v1/tests/redirected-membership-successor.json".to_string(),
         )
         .expect("valid redirected successor slot");
@@ -63,12 +63,12 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
 
     let mut substituted_entry = prepared.clone();
     let substituted_bytes = b"substituted exact membership entry".to_vec();
-    let substituted_ref = crate::protocol::objects::ExactObjectRef::new(
+    let substituted_ref = coven_protocol::objects::ExactObjectRef::new(
         substituted_entry.entry_object.reference().slot().clone(),
         substituted_bytes.len() as u64,
         ObjectHash::digest(&substituted_bytes),
     );
-    substituted_entry.entry_object = crate::protocol::objects::PreparedExactObject::new(
+    substituted_entry.entry_object = coven_protocol::objects::PreparedExactObject::new(
         substituted_ref.clone(),
         substituted_bytes,
     )
@@ -80,17 +80,17 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     let mut substituted_head = writer
         .finish_membership_transition(
             prepared,
-            crate::protocol::membership::MembershipHeadActivation::Direct,
+            coven_protocol::membership::MembershipHeadActivation::Direct,
         )
         .await
         .expect("finish membership transition");
     let substituted_bytes = b"substituted exact membership head".to_vec();
-    let substituted_ref = crate::protocol::objects::ExactObjectRef::new(
+    let substituted_ref = coven_protocol::objects::ExactObjectRef::new(
         substituted_head.head_object.reference().slot().clone(),
         substituted_bytes.len() as u64,
         ObjectHash::digest(&substituted_bytes),
     );
-    substituted_head.head_object = crate::protocol::objects::PreparedExactObject::new(
+    substituted_head.head_object = coven_protocol::objects::PreparedExactObject::new(
         substituted_ref.clone(),
         substituted_bytes,
     )

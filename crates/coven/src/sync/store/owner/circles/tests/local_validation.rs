@@ -53,13 +53,13 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .prepared_objects
         .get("metadata")
         .expect("operation carries exact metadata object");
-    let substituted_slot = crate::protocol::objects::ObjectSlot::opaque(
+    let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
         original.reference().slot().logical_key().to_string(),
         "substituted-metadata-object".to_string(),
     )
     .expect("construct alternate provider object slot");
     let substituted = PreparedExactObject::new(
-        crate::protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ExactObjectRef::new(
             substituted_slot,
             original.reference().stored_size(),
             original.reference().stored_hash(),
@@ -205,7 +205,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
                 reference.clone(),
                 move |commit| {
                     let activations = match &mut commit.body_mut().body {
-                        crate::protocol::store_commit::StoreCommitBody::Operations(operations) => {
+                        coven_protocol::store_commit::StoreCommitBody::Operations(operations) => {
                             &mut operations.stream_activations
                         }
                         _ => panic!("Circle commit body carries operations"),
@@ -229,7 +229,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
                         unreachable!()
                     };
                     if wrong_grant {
-                        *grant_id = crate::protocol::membership::MembershipGrantId(
+                        *grant_id = coven_protocol::membership::MembershipGrantId(
                             ObjectHash::digest(b"another Circle grant"),
                         );
                     } else {
@@ -295,7 +295,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .expect("load acknowledgement Store");
     device
         .stage_acknowledgement(
-            crate::protocol::store_commit::CommitFrontier::from_refs(
+            coven_protocol::store_commit::CommitFrontier::from_refs(
                 crate::database::StoreDatabase::new(&db)
                     .materialized_frontier()
                     .await
@@ -326,7 +326,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
             &mut journal,
             reference.clone(),
             move |commit| {
-                let crate::protocol::store_commit::StoreCommitBody::Operations(operations) =
+                let coven_protocol::store_commit::StoreCommitBody::Operations(operations) =
                     &mut commit.body_mut().body
                 else {
                     panic!("Circle commit body carries operations")
@@ -431,8 +431,8 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
     let creation = &mut journal.operation_mut().creation;
     let CircleTransitionPolicyObjects { control_head, .. } = &mut creation.policy_objects;
     control_head.body_mut().successor.predecessor =
-        Some(crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        Some(coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/test-circle-controls/unreserved-predecessor.json".to_string(),
             )
             .expect("construct arbitrary predecessor slot"),
@@ -524,13 +524,13 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .prepared_objects
         .get("store-head")
         .expect("Merge operation carries an exact Store head");
-    let substituted_slot = crate::protocol::objects::ObjectSlot::opaque(
+    let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
         original.reference().slot().logical_key().to_string(),
         "substituted-store-head".to_string(),
     )
     .expect("construct alternate Store head slot");
     let substituted = PreparedExactObject::new(
-        crate::protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ExactObjectRef::new(
             substituted_slot,
             original.reference().stored_size(),
             original.reference().stored_hash(),
@@ -637,8 +637,8 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .expect("open the founder roster entry where it belongs");
 
     let resolution =
-        crate::protocol::circle_roster::CircleRosterConflictResolution::unsigned_for_test(
-            crate::protocol::circle_roster::CircleRosterConflictResolutionBody {
+        coven_protocol::circle_roster::CircleRosterConflictResolution::unsigned_for_test(
+            coven_protocol::circle_roster::CircleRosterConflictResolutionBody {
                 store_root_hash,
                 circle_id,
                 conflict_hash: ObjectHash::digest(b"roster kind crossing conflict"),
@@ -646,14 +646,14 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
                 retired_owner_grants: Default::default(),
                 resolver_pubkey: author.clone(),
                 resolver_branch_heads: Vec::new(),
-                replacement_grant: crate::protocol::membership::MembershipGrantId(
+                replacement_grant: coven_protocol::membership::MembershipGrantId(
                     ObjectHash::digest(b"roster kind crossing grant"),
                 ),
             },
         );
     let resolution_plaintext =
         serde_json::to_vec(&resolution).expect("serialize the roster resolution");
-    let resolution_ref = crate::protocol::circle_roster::CircleRosterConflictResolutionRef {
+    let resolution_ref = coven_protocol::circle_roster::CircleRosterConflictResolutionRef {
         conflict_hash: resolution.conflict_hash,
         resolver_pubkey: author,
         resolution_hash: ObjectHash::digest(&resolution_plaintext),
@@ -733,17 +733,17 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
             .await
             .expect_err("sealed roster bytes must not open under another kind");
         assert!(
-            matches!(error, crate::protocol::objects::StorageError::Decryption(_)),
+            matches!(error, coven_protocol::objects::StorageError::Decryption(_)),
             "moving roster bytes across kinds must fail the sealing context: {error}",
         );
     }
 
     // The plaintexts themselves, for the member who seals correctly.
-    serde_json::from_slice::<crate::protocol::circle_roster::CircleRosterConflictResolution>(
+    serde_json::from_slice::<coven_protocol::circle_roster::CircleRosterConflictResolution>(
         &entry_plaintext,
     )
     .expect_err("a roster entry must not parse as a roster resolution");
-    serde_json::from_slice::<crate::protocol::circle_roster::CircleRosterEntry>(
+    serde_json::from_slice::<coven_protocol::circle_roster::CircleRosterEntry>(
         &resolution_plaintext,
     )
     .expect_err("a roster resolution must not parse as a roster entry");

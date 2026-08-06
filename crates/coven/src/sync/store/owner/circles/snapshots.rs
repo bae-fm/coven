@@ -1,12 +1,12 @@
-use crate::protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
-    circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
-    CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
-};
 use crate::storage::SyncStorage;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
+    circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
+    CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
+};
 use tracing::warn;
 
 use super::bootstrap_blobs::CircleBootstrapBlobVerification;
@@ -32,8 +32,8 @@ pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
 impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
     async fn verify_stored_blob(
         &self,
-        stored: &crate::protocol::blob::locator::StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }
 }
@@ -61,8 +61,8 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         &self,
         circle_id: CircleId,
         encryption: EncryptionService,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
         let context = ProtocolObjectContext::circle(
             self.root().store_root_hash,
@@ -82,12 +82,12 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     pub(crate) async fn load_stream_refs(
         &self,
         circle_id: CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<
         Vec<(
-            crate::protocol::store_commit::CircleSnapshotRef,
+            coven_protocol::store_commit::CircleSnapshotRef,
             CircleSnapshotMeta,
         )>,
         SnapshotError,
@@ -104,11 +104,11 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         &self,
         circle_id: CircleId,
         context: ProtocolObjectContext,
-        registration_ref: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<
         Vec<(
-            crate::protocol::store_commit::CircleSnapshotRef,
+            coven_protocol::store_commit::CircleSnapshotRef,
             CircleSnapshotMeta,
         )>,
         SnapshotError,
@@ -121,7 +121,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             ));
         }
         let device_id = registration.device_id.to_string();
-        let mut slot = crate::protocol::objects::ObjectSlot::logical(format!(
+        let mut slot = coven_protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             circle_snapshot_slot_prefix(circle_id, &device_id, 0)
         ))
@@ -133,12 +133,12 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             let prefix = circle_snapshot_slot_prefix(circle_id, &device_id, generation);
             let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
                 Ok(value) => value,
-                Err(crate::protocol::objects::StorageError::NotFound(_)) => break,
+                Err(coven_protocol::objects::StorageError::NotFound(_)) => break,
                 Err(error) => return Err(SnapshotError::Bucket(error)),
             };
             let semantic_hash = CircleSnapshotMeta::semantic_hash_from_bytes(&bytes)
                 .map_err(|error| SnapshotError::Parse(error.to_string()))?;
-            let reference = crate::protocol::store_commit::CircleSnapshotRef {
+            let reference = coven_protocol::store_commit::CircleSnapshotRef {
                 generation,
                 snapshot_hash: semantic_hash,
                 object,
@@ -169,7 +169,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         &mut self,
         store_frontier: &CommitFrontier,
         restorer_identity: &UserKeypair,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<Vec<crate::database::StagedCircleDecision>, SnapshotError> {
         use crate::database::StagedCircleDecision;
         let root = self.root().clone();
@@ -276,10 +276,10 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     async fn resolve_restorer_access(
         &mut self,
         restorer_identity: &UserKeypair,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         circle_id: CircleId,
         head_control: &CircleControlCoord,
-        head_commit: &crate::protocol::store_commit::StoreBatchCommitRef,
+        head_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<super::activation::LocalCircleAccess, SnapshotError> {
         let commit_lookup = head_commit.clone();
         let root = self.root().clone();
@@ -319,12 +319,12 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         circle_id: CircleId,
         head_control: &CircleControlCoord,
         encryption: &EncryptionService,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
-        device_registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        device_registrations: &[coven_protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<Option<StagedCircleImageCandidate>, SnapshotError> {
         let mut installable: Vec<(
             CircleSnapshotMeta,
-            crate::protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::store_commit::StoreBatchCommitRef,
         )> = Vec::new();
         for registration in device_registrations {
             let stream = self
@@ -450,7 +450,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(crate) async fn capture_circle_snapshot_cut(
         &self,
         routing_encryption: &coven_keys::encryption::EncryptionService,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
     ) -> Result<SnapshotCut, crate::database::DbError> {
         let (snapshot, coverage) = self
             .database
@@ -468,12 +468,12 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(crate) async fn capture_circle_snapshot_at_cutoff(
         &self,
         routing_encryption: &coven_keys::encryption::EncryptionService,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         cutoff: CommitFrontier,
     ) -> Result<SnapshotCut, crate::database::DbError> {
         let tables = self.database.synced_tables().to_vec();
         let routing_encryption = routing_encryption.clone();
-        let routing_key = crate::protocol::circle::derive_row_routing_key(
+        let routing_key = coven_protocol::circle::derive_row_routing_key(
             &routing_encryption,
             self.root.store_root_hash,
         )
@@ -640,7 +640,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         circle_id: CircleId,
         control: CircleControlCoord,
         epoch_id: CircleEpochId,
-        access: crate::protocol::circle_activation::CircleEpochAccess,
+        access: coven_protocol::circle_activation::CircleEpochAccess,
         snapshot: CreatedSnapshot,
         coverage: CommitFrontier,
         schema_version: u32,
@@ -696,7 +696,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         // Generation zero occupies a deterministic slot a reader can compute (there
         // is no registration snapshot anchor for a per-Circle stream); later
         // generations occupy the predecessor's create-once successor slot.
-        let stream_first_slot = crate::protocol::objects::ObjectSlot::logical(format!(
+        let stream_first_slot = coven_protocol::objects::ObjectSlot::logical(format!(
             "{}.json",
             self.local_writer
                 .circle_snapshot_semantic_prefix(circle_id, 0)
@@ -789,11 +789,11 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(crate) async fn load_circle_snapshot_refs_for_test(
         &mut self,
         circle_id: CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
         Vec<(
-            crate::protocol::store_commit::CircleSnapshotRef,
-            crate::protocol::store_commit::CircleSnapshotMeta,
+            coven_protocol::store_commit::CircleSnapshotRef,
+            coven_protocol::store_commit::CircleSnapshotMeta,
         )>,
         SnapshotError,
     > {
@@ -808,7 +808,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(crate) async fn load_circle_snapshot_metas_for_test(
         &mut self,
         circle_id: CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<Vec<CircleSnapshotMeta>, SnapshotError> {
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let mut history = self.writer.circle_history();
@@ -821,7 +821,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(crate) async fn verify_standalone_circle_snapshot_image_for_test(
         &mut self,
         circle_id: CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
         store_routing: &EncryptionService,
     ) -> Result<(), SnapshotError> {
         let stream = self
@@ -848,7 +848,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             )
             .await
             .map_err(SnapshotError::Bucket)?;
-        let routing_key = crate::protocol::circle::derive_row_routing_key(
+        let routing_key = coven_protocol::circle::derive_row_routing_key(
             store_routing,
             self.root.store_root_hash,
         )
@@ -920,7 +920,7 @@ pub(crate) fn select_maximal_circle_snapshot(
 /// One image the restoring identity could stage for a Circle: the exact commit
 /// that activates its control, and the verified image bound to that control.
 struct StagedCircleImageCandidate {
-    activation_commit: crate::protocol::store_commit::StoreBatchCommitRef,
+    activation_commit: coven_protocol::store_commit::StoreBatchCommitRef,
     image: crate::sync::store::circle_controls::VerifiedCircleImage,
 }
 

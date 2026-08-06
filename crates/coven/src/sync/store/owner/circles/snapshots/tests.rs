@@ -17,8 +17,8 @@ impl CircleSnapshotFixture {
         let database = Database::open(
             &directory.path().join("store.sqlite3"),
             crate::sync::test_helpers::test_synced_tables(),
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             local_device_id.to_string(),
             Arc::new(coven_foundation::clock::SystemClock),
             &crate::sync::test_helpers::test_migrations(),
@@ -51,8 +51,8 @@ impl CircleSnapshotFixture {
     async fn install_active_circle(
         &self,
     ) -> (
-        crate::protocol::circle::CircleId,
-        crate::protocol::circle::CircleControlCoord,
+        coven_protocol::circle::CircleId,
+        coven_protocol::circle::CircleControlCoord,
     ) {
         self.database
             .test_sql(|database| Ok(database.install_test_active_circle("snap")))
@@ -75,9 +75,9 @@ impl CircleSnapshotFixture {
 
     async fn publication_context(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        control: crate::protocol::circle::CircleControlCoord,
-    ) -> crate::protocol::circle_activation::CircleEpochAccess {
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
+    ) -> coven_protocol::circle_activation::CircleEpochAccess {
         self.store_database
             .circle_publication_context(circle_id, control)
             .await
@@ -86,8 +86,8 @@ impl CircleSnapshotFixture {
 
     async fn load_snapshot_metas(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        circle_id: coven_protocol::circle::CircleId,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Vec<CircleSnapshotMeta> {
         self.store
             .load_circle_snapshot_metas(&self.database, circle_id, access)
@@ -98,7 +98,7 @@ impl CircleSnapshotFixture {
     async fn read_snapshot_image(
         &self,
         selected: &CircleSnapshotMeta,
-        access: &crate::protocol::circle_activation::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Vec<u8> {
         self.store
             .read_circle_snapshot_image(selected, access)
@@ -108,7 +108,7 @@ impl CircleSnapshotFixture {
 
     async fn outsider_cannot_read_snapshot_meta(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
+        circle_id: coven_protocol::circle::CircleId,
         encryption: coven_keys::encryption::EncryptionService,
     ) -> bool {
         self.store
@@ -116,7 +116,7 @@ impl CircleSnapshotFixture {
             .await
     }
 
-    fn store_root_hash(&self) -> crate::protocol::store_commit::ObjectHash {
+    fn store_root_hash(&self) -> coven_protocol::store_commit::ObjectHash {
         self.store.store_root_hash()
     }
 }
@@ -142,7 +142,7 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
     assert_eq!(selected.key_fingerprint, key_fingerprint);
 
     let image = fixture.read_snapshot_image(&selected, &access).await;
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
+    let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         fixture.store_root_hash(),
     )

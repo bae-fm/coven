@@ -116,7 +116,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 ));
             };
             if close.close_id
-                != crate::protocol::circle::CircleEpochCloseId::from_operation_id(
+                != coven_protocol::circle::CircleEpochCloseId::from_operation_id(
                     &journal.operation_id,
                 )
             {
@@ -169,8 +169,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     ))
                 })?;
             let keyring = match &current.access.disposition {
-                crate::protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
-                crate::protocol::circle::CircleAccessDisposition::Inactive => {
+                coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } => keyring,
+                coven_protocol::circle::CircleAccessDisposition::Inactive => {
                     return Err(CircleOperationError::InvalidState(
                         "Circle close finalization lost its retained keyring".to_string(),
                     ));
@@ -225,7 +225,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.database
                 .begin_circle_operation_finalization(journal.clone())
                 .await?;
-            let routing_key = crate::protocol::circle::derive_row_routing_key(
+            let routing_key = coven_protocol::circle::derive_row_routing_key(
                 routing_encryption,
                 self.root.store_root_hash,
             )

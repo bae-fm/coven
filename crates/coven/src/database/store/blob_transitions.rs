@@ -2,7 +2,7 @@ use super::*;
 
 use crate::database::{CloudOutboxRecords, ExternalBlobRecords, MakeRemoteIntentState};
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
-use crate::protocol::blob::{Provenance, RowBlobRef};
+use coven_protocol::blob::{Provenance, RowBlobRef};
 
 pub(crate) enum PostUpload {
     Waiting,
@@ -13,7 +13,7 @@ pub(crate) enum PostUpload {
 #[derive(Clone)]
 pub(crate) struct MaterializedLocalBlob {
     pub(crate) remote: RowBlobRef,
-    pub(crate) stored: crate::protocol::blob::locator::StoredBlobRef,
+    pub(crate) stored: coven_protocol::blob::locator::StoredBlobRef,
     pub(crate) destination: Option<std::path::PathBuf>,
 }
 
@@ -425,7 +425,7 @@ impl StoreDatabase {
                                     != materialized.remote.plaintext_size()
                                 || local.plaintext_hash()
                                     != materialized.remote.plaintext_hash()
-                                || local.authority() != &crate::protocol::blob::RowBlobAuthority::Local
+                                || local.authority() != &coven_protocol::blob::RowBlobAuthority::Local
                                 || local.stored().is_some()
                             {
                                 return Err(DbError::Message(format!(

@@ -13,11 +13,11 @@ use tracing::warn;
 
 use crate::database::DbError;
 use crate::database::{OutboxEntry, OutboxOperation, OutboxUploadState};
-use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use crate::protocol::blob::{
+use coven_keys::encryption::EncryptionService;
+use coven_protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use coven_protocol::blob::{
     BlobTransitionObserver, DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
 };
-use coven_keys::encryption::EncryptionService;
 
 use super::AuthorizedWriterOperation;
 
@@ -25,7 +25,7 @@ const PROGRESS_TICK: Duration = Duration::from_millis(300);
 
 struct BlobUploadAttempt<'operation, 'storage, 'authority> {
     writer: &'operation AuthorizedWriterOperation<'storage>,
-    authority: &'operation crate::protocol::objects::BlobWriteAuthority<'authority>,
+    authority: &'operation coven_protocol::objects::BlobWriteAuthority<'authority>,
     routing_encryption: Option<&'operation EncryptionService>,
     observer: Option<&'operation dyn BlobTransitionObserver>,
     now: chrono::DateTime<chrono::Utc>,
@@ -54,7 +54,7 @@ impl AuthorizedWriterOperation<'_> {
         self.database
             .validate_store_write_routing(routing_encryption)?;
         let registration = self.database.local_blob_write_authority().await?;
-        let authority = crate::protocol::objects::BlobWriteAuthority::new(&registration);
+        let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
         let uploads = self.database.pending_blob_uploads().await?;
         if uploads.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
@@ -169,7 +169,7 @@ impl AuthorizedWriterOperation<'_> {
 
     fn blob_upload_protection(
         &self,
-    ) -> Result<crate::protocol::objects::BlobSpoolProtection, crate::protocol::objects::StorageError>
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
     {
         self.storage.store_blob_protection()
     }
@@ -177,10 +177,10 @@ impl AuthorizedWriterOperation<'_> {
     async fn prepare_blob_upload(
         &self,
         locator: &BlobLocator,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
-        protection: crate::protocol::objects::BlobSpoolProtection,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+        protection: coven_protocol::objects::BlobSpoolProtection,
         source_path: &std::path::Path,
-    ) -> Result<(StoredBlobRef, std::path::PathBuf), crate::protocol::objects::StorageError> {
+    ) -> Result<(StoredBlobRef, std::path::PathBuf), coven_protocol::objects::StorageError> {
         let spool_path = self
             .store_dir
             .outbound_blob_spool_path(locator.locator_hash());
@@ -204,7 +204,7 @@ impl AuthorizedWriterOperation<'_> {
         self.database
             .mark_blob_upload_prepared(
                 entry,
-                crate::protocol::audience_package::PackageAudience::Store,
+                coven_protocol::audience_package::PackageAudience::Store,
                 stored,
                 spool_path,
             )
@@ -214,10 +214,10 @@ impl AuthorizedWriterOperation<'_> {
     async fn create_blob_upload_object(
         &self,
         blob: &StoredBlobRef,
-        authority: &crate::protocol::objects::BlobWriteAuthority<'_>,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         spool_path: &std::path::Path,
         progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage
             .create_blob_object_from_file(blob, authority, spool_path, progress)
             .await
@@ -226,7 +226,7 @@ impl AuthorizedWriterOperation<'_> {
     async fn verify_blob_upload_object(
         &self,
         stored: &StoredBlobRef,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.verify_blob_object(stored).await
     }
 
@@ -364,7 +364,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     Err(error) => return self.storage_failure(&file_id, error).await,
                 };
                 let locator = match &protection {
-                    crate::protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
+                    coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
                         BlobLocator::opaque(
                             row.blob().namespace.clone(),
                             row.blob().id.clone(),
@@ -376,7 +376,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                             row.plaintext_hash(),
                         )
                     }
-                    crate::protocol::objects::BlobSpoolProtection::Browsable => {
+                    coven_protocol::objects::BlobSpoolProtection::Browsable => {
                         let Some(cloud_path) = row.blob().cloud_path.clone() else {
                             let message = format!(
                                 "Browsable blob {}/{} has no readable path",
@@ -422,7 +422,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                         .await;
                 }
                 self.set_state(OutboxUploadState::Prepared {
-                    authority: crate::protocol::audience_package::PackageAudience::Store,
+                    authority: coven_protocol::audience_package::PackageAudience::Store,
                     stored: stored.clone(),
                     spool_path: spool_path.clone(),
                 });
@@ -438,7 +438,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 stored,
                 spool_path,
             } => {
-                if authority != crate::protocol::audience_package::PackageAudience::Store {
+                if authority != coven_protocol::audience_package::PackageAudience::Store {
                     return self
                         .local_failure(
                             &file_id,
@@ -474,7 +474,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     .await;
             }
             self.set_state(OutboxUploadState::Created {
-                authority: crate::protocol::audience_package::PackageAudience::Store,
+                authority: coven_protocol::audience_package::PackageAudience::Store,
                 stored: stored.clone(),
                 spool_path: spool_path.clone(),
             });
@@ -517,7 +517,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             Ok(crate::database::PostUpload::Cancelled) => {
                 self.finish_cancelled(
                     &OutboxUploadState::Created {
-                        authority: crate::protocol::audience_package::PackageAudience::Store,
+                        authority: coven_protocol::audience_package::PackageAudience::Store,
                         stored,
                         spool_path,
                     },
@@ -538,7 +538,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         blob: &StoredBlobRef,
         spool_path: &std::path::Path,
         file_id: &str,
-    ) -> Result<(), crate::protocol::objects::StorageError> {
+    ) -> Result<(), coven_protocol::objects::StorageError> {
         let total = blob.object().stored_size();
         let sent = Arc::new(AtomicU64::new(0));
         let progress = {
@@ -612,7 +612,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
     async fn storage_failure(
         &self,
         file_id: &str,
-        error: crate::protocol::objects::StorageError,
+        error: coven_protocol::objects::StorageError,
     ) -> EntryOutcome {
         let message = error.to_string();
         warn!("Upload failed for {}: {message}", self.label());

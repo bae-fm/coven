@@ -1,21 +1,21 @@
-use crate::protocol::store_commit::DeviceJoinAttemptId;
+use coven_protocol::store_commit::DeviceJoinAttemptId;
 
 use super::DeviceJoinError;
 use crate::database::StoreDatabase;
-use crate::protocol::store_commit::device_join_exchange::{
+use coven_protocol::store_commit::device_join_exchange::{
     DeviceJoinActivation, DeviceJoinCleanupActivation, DeviceJoinReadiness,
 };
-use crate::protocol::store_commit::DeviceJoinAttemptRef;
-use crate::protocol::store_commit::DeviceJoinOutcomeRef;
+use coven_protocol::store_commit::DeviceJoinAttemptRef;
+use coven_protocol::store_commit::DeviceJoinOutcomeRef;
 
 pub(crate) use crate::database::device_join_journal::validate_initial_progress;
 use crate::database::device_join_journal::validate_successor;
-pub(crate) use crate::protocol::store_commit::device_join_journal::attempt_key;
-pub(crate) use crate::protocol::store_commit::device_join_journal::{
+pub(crate) use coven_protocol::store_commit::device_join_journal::attempt_key;
+pub(crate) use coven_protocol::store_commit::device_join_journal::{
     device_join_action, DeviceJoinRoleProgress, DeviceJoinRoleProgressKind, JoinerJoinProgress,
     OwnerJoinProgress, PreparedDeviceJoinObject, ProviderAdminJoinProgress,
 };
-pub use crate::protocol::store_commit::device_join_journal::{
+pub use coven_protocol::store_commit::device_join_journal::{
     DeviceJoinAction, DeviceJoinJournalRecord, DeviceJoinRole, DeviceJoinStatus,
 };
 

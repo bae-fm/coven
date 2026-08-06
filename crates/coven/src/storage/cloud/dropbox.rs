@@ -22,7 +22,7 @@ use super::{
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::oauth::OAuthConfig;
-use crate::protocol::objects::ObjectSlot;
+use coven_protocol::objects::ObjectSlot;
 use tracing::warn;
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
@@ -1068,8 +1068,8 @@ impl CloudHome for DropboxCloudHome {
 impl ExactSlotStorage for DropboxCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
-        use crate::protocol::objects::{
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+        use coven_protocol::objects::{
             ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
             StoreProviderBinding,
         };

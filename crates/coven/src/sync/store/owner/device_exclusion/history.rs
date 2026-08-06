@@ -1,4 +1,4 @@
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     StoreAck, StoreAckRef, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposalRef,
     StoreDeviceRegistration,
 };
@@ -16,7 +16,7 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreDeviceExclusionProposalRef,
     ) -> Result<
-        crate::protocol::store_commit::VerifiedDeviceExclusionProposal,
+        coven_protocol::store_commit::VerifiedDeviceExclusionProposal,
         super::StoreDeviceExclusionError,
     > {
         self.history
@@ -28,9 +28,9 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
     pub(super) async fn load_outcome(
         &mut self,
         reference: &StoreDeviceExclusionOutcomeRef,
-        proposal: &crate::protocol::store_commit::VerifiedDeviceExclusionProposal,
+        proposal: &coven_protocol::store_commit::VerifiedDeviceExclusionProposal,
     ) -> Result<
-        crate::protocol::store_commit::VerifiedDeviceExclusionOutcome,
+        coven_protocol::store_commit::VerifiedDeviceExclusionOutcome,
         super::StoreDeviceExclusionError,
     > {
         self.history
@@ -43,7 +43,7 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<crate::protocol::objects::VerifiedObject<StoreAck>, super::StoreDeviceExclusionError>
+    ) -> Result<coven_protocol::objects::VerifiedObject<StoreAck>, super::StoreDeviceExclusionError>
     {
         self.history
             .load_store_ack(reference, registration)

@@ -5,10 +5,10 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::database::{Database, SnapshotDatabaseImage};
-use crate::protocol::objects::StorageError;
-use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::SyncStorage;
 use crate::Migration;
+use coven_protocol::objects::StorageError;
+use coven_protocol::synced_schema::SyncedTable;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -28,7 +28,7 @@ pub enum SnapshotError {
     #[error("storage error: {0}")]
     Bucket(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
-    StoreObject(#[source] crate::protocol::objects::StoreObjectError),
+    StoreObject(#[source] coven_protocol::objects::StoreObjectError),
     #[error("Store history: {0}")]
     StoreHistory(#[from] crate::sync::store::owner::pull::StorePullError),
     /// The snapshot's author is not authorized to publish a catalog image: not a
@@ -123,14 +123,14 @@ pub(crate) struct PreparedSnapshotBootstrap<'storage> {
     db_hash: String,
     history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
     storage: &'storage std::sync::Arc<dyn SyncStorage>,
-    founder_registration: crate::protocol::objects::VerifiedObject<
-        crate::protocol::store_commit::StoreDeviceRegistration,
+    founder_registration: coven_protocol::objects::VerifiedObject<
+        coven_protocol::store_commit::StoreDeviceRegistration,
     >,
     restorer_identity: coven_keys::keys::UserKeypair,
     snapshot: crate::database::PublishedStoreSnapshot,
-    coverage: crate::protocol::store_commit::CommitFrontier,
+    coverage: coven_protocol::store_commit::CommitFrontier,
     stability: crate::database::VerifiedStoreSnapshotStability,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
     #[cfg(test)]
     fail_circle_install: bool,
 }
@@ -154,7 +154,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         mut history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
             'storage,
         >,
-        membership_floor: &crate::protocol::membership::MembershipFloor,
+        membership_floor: &coven_protocol::membership::MembershipFloor,
         binary_schema_version: u32,
         target_path: &Path,
         restorer_identity: &coven_keys::keys::UserKeypair,
@@ -202,7 +202,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .await
             .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
             .ok_or_else(|| {
-                SnapshotError::Bucket(crate::protocol::objects::StorageError::NotFound(
+                SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
                     "Store snapshot stream".to_string(),
                 ))
             })?;
@@ -217,7 +217,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .load_snapshot_image(&snapshot)
             .await
             .map_err(SnapshotError::StoreObject)?;
-        if crate::protocol::store_commit::ObjectHash::digest(&plaintext)
+        if coven_protocol::store_commit::ObjectHash::digest(&plaintext)
             != snapshot.meta.image.image_hash
         {
             return Err(SnapshotError::Parse(
@@ -276,7 +276,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
-        transfer_limits: crate::protocol::blob::TransferLimits,
+        transfer_limits: coven_protocol::blob::TransferLimits,
         device_id: String,
         clock: coven_foundation::clock::ClockRef,
         migrations: &[Migration],
@@ -322,7 +322,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 // Circles exist only in a scoped (Circle-routing) Store; without
                 // routing encryption there are no Circle images to stage.
                 Some(encryption) => {
-                    let routing_key = crate::protocol::circle::derive_row_routing_key(
+                    let routing_key = coven_protocol::circle::derive_row_routing_key(
                         encryption,
                         root_ref.store_root_hash,
                     )
@@ -435,14 +435,14 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     #[cfg(test)]
     pub(crate) fn selected_snapshot_hash_for_test(
         &self,
-    ) -> crate::protocol::store_commit::ObjectHash {
+    ) -> coven_protocol::store_commit::ObjectHash {
         self.snapshot.reference.snapshot_hash
     }
 
     #[cfg(test)]
     pub(crate) fn selected_snapshot_object_hash_for_test(
         &self,
-    ) -> crate::protocol::store_commit::ObjectHash {
+    ) -> coven_protocol::store_commit::ObjectHash {
         self.snapshot.reference.object.stored_hash()
     }
 

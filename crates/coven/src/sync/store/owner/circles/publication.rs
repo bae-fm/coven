@@ -1,14 +1,4 @@
 use crate::database::StoreDatabase;
-use crate::protocol::circle::{
-    circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,
-    CircleSemanticSlot, CircleTransitionPolicyObjects, PreparedCircleTransition,
-};
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::protocol::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
-    commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
-};
 use crate::storage::SyncStorage;
 use crate::sync::store::circle_controls::{
     read_exact_circle_object, verify_control_context_for_verified_commit, CircleOperationError,
@@ -16,12 +6,22 @@ use crate::sync::store::circle_controls::{
     VerifiedCircleReference,
 };
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
+use coven_protocol::circle::{
+    circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,
+    CircleSemanticSlot, CircleTransitionPolicyObjects, PreparedCircleTransition,
+};
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use coven_protocol::store_commit::{
+    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
+    commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
+};
 use std::collections::BTreeSet;
 
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
@@ -30,7 +30,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) fn new(
         database: StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
-        membership: crate::protocol::membership::MembershipChain,
+        membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
     ) -> Self {
@@ -46,7 +46,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) async fn publish(
         &mut self,
         operation_id: &CircleOperationId,
-        routing_key: Option<&crate::protocol::circle::RowRoutingKey>,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
         let mut journal = self
             .database
@@ -87,7 +87,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         };
         verify_control_context_for_verified_commit(reference, &creation.control, &verified_commit)?;
         if !commit.operations().is_some_and(
-            crate::protocol::store_commit::StoreCommitOperations::is_circle_control_activation_only,
+            coven_protocol::store_commit::StoreCommitOperations::is_circle_control_activation_only,
         ) {
             return Err(CircleOperationError::InvalidState(
                 "Circle Store commit is not an exact control-only batch".to_string(),
@@ -114,7 +114,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         if let CurrentMergeAuthority::Revoked { grant_id } =
             self.current_merge_authority(commit, &author)?
         {
-            let block = crate::protocol::circle::CircleOperationBlock::AuthorityLost { grant_id };
+            let block = coven_protocol::circle::CircleOperationBlock::AuthorityLost { grant_id };
             self.database
                 .block_circle_operation(operation_id, block.clone())
                 .await?;
@@ -134,7 +134,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         "Merge Circle operation lacks its prepared Store head".to_string(),
                     )
                 })?;
-            let head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+            let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
                 object: prepared_head.reference().clone(),
             };
@@ -280,7 +280,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     .map_err(|error| {
                         CircleOperationError::InvalidState(format!(
                             "verify Circle bootstrap blob {}: {error}",
-                            crate::protocol::remote_object::remote_object_id(stored.object())
+                            coven_protocol::remote_object::remote_object_id(stored.object())
                         ))
                     })?;
             }
@@ -302,7 +302,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     "Circle bootstrap image has more than one upload step".to_string(),
                 ));
             }
-            let prefix = crate::protocol::store_commit::circle_bootstrap_image_semantic_prefix(
+            let prefix = coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
                 access.leaf.value.circle_id,
                 commit.candidate_family(),
                 &access.leaf.value.owner_pubkey,
@@ -336,7 +336,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         ProtocolObjectDomain::CircleEpochCloseIntent,
                         circle_encryption.clone(),
                     ),
-                    &crate::protocol::circle::circle_epoch_close_intent_semantic_prefix(
+                    &coven_protocol::circle::circle_epoch_close_intent_semantic_prefix(
                         creation.circle_id,
                         intent.close_id,
                         intent.intent_hash(),
@@ -365,11 +365,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         store_root_hash,
                         ProtocolObjectDomain::CircleEpochCloseOutcome,
                     ),
-                    &crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+                    &coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                         creation.circle_id,
                         outcome.close_id,
                     ),
-                    &crate::protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone())
+                    &coven_protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome.clone())
                         .to_bytes(),
                 )
                 .await?;
@@ -396,11 +396,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         store_root_hash,
                         ProtocolObjectDomain::CircleEpochCloseOutcome,
                     ),
-                    &crate::protocol::circle::circle_epoch_close_outcome_semantic_prefix(
+                    &coven_protocol::circle::circle_epoch_close_outcome_semantic_prefix(
                         creation.circle_id,
                         cancellation.close_id,
                     ),
-                    &crate::protocol::circle::CircleEpochCloseSlotValue::Cancellation(
+                    &coven_protocol::circle::CircleEpochCloseSlotValue::Cancellation(
                         cancellation.clone(),
                     )
                     .to_bytes(),
@@ -567,7 +567,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     )
                     .await?
                 {
-                    let block = crate::protocol::circle::CircleOperationBlock::PositionLost {
+                    let block = coven_protocol::circle::CircleOperationBlock::PositionLost {
                         winner_commit: winner.winner().commit.commit_hash,
                     };
                     self.database
@@ -607,7 +607,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 "Circle commit has no Store membership authority".to_string(),
             )
         })?;
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) =
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
             self.membership.status()
         else {
             return Err(CircleOperationError::InvalidState(
@@ -619,8 +619,8 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             record.member_pubkey == author.author_pubkey
                 && matches!(
                     record.role,
-                    crate::protocol::membership::StoreMembershipRoleGrant::Owner { .. }
-                        | crate::protocol::membership::StoreMembershipRoleGrant::Member
+                    coven_protocol::membership::StoreMembershipRoleGrant::Owner { .. }
+                        | coven_protocol::membership::StoreMembershipRoleGrant::Member
                 )
                 && &record.creation_authority == authority
         });
@@ -635,10 +635,10 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             ));
         }
         Ok(match state {
-            crate::protocol::causal_grants::GrantState::Active { .. } => {
+            coven_protocol::causal_grants::GrantState::Active { .. } => {
                 CurrentMergeAuthority::Active
             }
-            crate::protocol::causal_grants::GrantState::Tombstoned { .. } => {
+            coven_protocol::causal_grants::GrantState::Tombstoned { .. } => {
                 CurrentMergeAuthority::Revoked {
                     grant_id: grant_id.clone(),
                 }
@@ -674,12 +674,12 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         step: &str,
         context: &ProtocolObjectContext,
         semantic_prefix: &str,
-        expected_hash: crate::protocol::store_commit::ObjectHash,
+        expected_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), CircleOperationError> {
         let persisted = self
             .create_or_read_step(journal, step, context, semantic_prefix)
             .await?;
-        if crate::protocol::store_commit::ObjectHash::digest(&persisted) != expected_hash {
+        if coven_protocol::store_commit::ObjectHash::digest(&persisted) != expected_hash {
             return Err(CircleOperationError::InvalidState(format!(
                 "circle upload step {step:?} differs from its signed image hash"
             )));
@@ -711,7 +711,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             self.storage
                 .create_protocol_object(&prepared)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
         }
         read_exact_circle_object(
             self.storage.as_ref(),
@@ -725,11 +725,11 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
 
 fn verify_prepared_objects_are_signed(
     journal: &CircleOperationJournal,
-    reference: &crate::protocol::store_commit::CircleControlRef,
+    reference: &coven_protocol::store_commit::CircleControlRef,
 ) -> Result<(), CircleOperationError> {
     let operation = journal.operation();
     let objects = reference.objects();
-    let mut signed = BTreeSet::<crate::protocol::objects::ExactObjectRef>::from([
+    let mut signed = BTreeSet::<coven_protocol::objects::ExactObjectRef>::from([
         operation.commit_ref.object.clone(),
         objects.control.clone(),
     ]);
@@ -777,7 +777,7 @@ fn verify_prepared_objects_are_signed(
 
 fn expected_local_circle_activation(
     creation: &PreparedCircleTransition,
-    reference: &crate::protocol::store_commit::CircleControlRef,
+    reference: &coven_protocol::store_commit::CircleControlRef,
     author_pubkey: &str,
 ) -> Result<VerifiedCircleReference, CircleOperationError> {
     if creation.control.value.state().is_deleted() {
@@ -821,6 +821,6 @@ fn expected_local_circle_activation(
 enum CurrentMergeAuthority {
     Active,
     Revoked {
-        grant_id: crate::protocol::membership::MembershipGrantId,
+        grant_id: coven_protocol::membership::MembershipGrantId,
     },
 }

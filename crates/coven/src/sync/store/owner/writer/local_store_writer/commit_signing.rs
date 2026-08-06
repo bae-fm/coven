@@ -4,7 +4,7 @@ impl LocalStoreWriter {
     pub(crate) async fn pull(
         &self,
         history: &mut crate::sync::store::owner::writer::AuthorizedStoreHistory<'_>,
-        membership: &crate::protocol::membership::MembershipChain,
+        membership: &coven_protocol::membership::MembershipChain,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<
         crate::sync::store::owner::writer::pull::StorePullExecution,
@@ -17,19 +17,19 @@ impl LocalStoreWriter {
 
     pub(crate) fn sign_device_acknowledgement(
         &self,
-        store_root_hash: crate::protocol::store_commit::ObjectHash,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
         sequence: u64,
-        history_cut: crate::protocol::store_commit::StoreHistoryCut,
-        device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-        snapshot: Option<crate::protocol::store_commit::StoreSnapshotLocator>,
-        exclusions: crate::protocol::store_commit::StoreAckExclusionState,
+        history_cut: coven_protocol::store_commit::StoreHistoryCut,
+        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
+        snapshot: Option<coven_protocol::store_commit::StoreSnapshotLocator>,
+        exclusions: coven_protocol::store_commit::StoreAckExclusionState,
         sync_time: String,
-        successor: crate::protocol::store_commit::SuccessorLink,
+        successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<
-        crate::protocol::store_commit::StoreAck,
-        crate::protocol::store_commit::StoreProtocolError,
+        coven_protocol::store_commit::StoreAck,
+        coven_protocol::store_commit::StoreProtocolError,
     > {
-        crate::protocol::store_commit::StoreAck::signed(
+        coven_protocol::store_commit::StoreAck::signed(
             store_root_hash,
             self.registration.reference().clone(),
             sequence,
@@ -46,19 +46,19 @@ impl LocalStoreWriter {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_store_write_commit(
         &self,
-        store_root_hash: crate::protocol::store_commit::ObjectHash,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
         write_id: crate::WriteId,
-        coord: crate::protocol::store_commit::StoreCommitCoord,
-        order: crate::protocol::store_commit::StoreCommitOrder,
-        membership_state: crate::protocol::circle_control::StoreMembershipStateRef,
-        device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-        membership_authority: crate::protocol::store_commit::StoreOperationMembershipAuthority,
-        operations: crate::protocol::store_commit::StoreCommitOperationsInput<'_>,
+        coord: coven_protocol::store_commit::StoreCommitCoord,
+        order: coven_protocol::store_commit::StoreCommitOrder,
+        membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
+        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
+        membership_authority: coven_protocol::store_commit::StoreOperationMembershipAuthority,
+        operations: coven_protocol::store_commit::StoreCommitOperationsInput<'_>,
     ) -> Result<
-        crate::protocol::store_commit::StoreBatchCommit,
-        crate::protocol::store_commit::StoreProtocolError,
+        coven_protocol::store_commit::StoreBatchCommit,
+        coven_protocol::store_commit::StoreProtocolError,
     > {
-        crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+        coven_protocol::store_commit::StoreBatchCommit::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -76,18 +76,18 @@ impl LocalStoreWriter {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_candidate_abandonment(
         &self,
-        store_root_hash: crate::protocol::store_commit::ObjectHash,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
         write_id: crate::WriteId,
-        coord: crate::protocol::store_commit::StoreCommitCoord,
-        order: crate::protocol::store_commit::StoreCommitOrder,
-        membership_state: crate::protocol::circle_control::StoreMembershipStateRef,
-        device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-        cleanup: Vec<crate::protocol::store_commit::CandidateCleanupManifest>,
+        coord: coven_protocol::store_commit::StoreCommitCoord,
+        order: coven_protocol::store_commit::StoreCommitOrder,
+        membership_state: coven_protocol::circle_control::StoreMembershipStateRef,
+        device_state: coven_protocol::store_commit::StoreDeviceStateRef,
+        cleanup: Vec<coven_protocol::store_commit::CandidateCleanupManifest>,
     ) -> Result<
-        crate::protocol::store_commit::StoreBatchCommit,
-        crate::protocol::store_commit::StoreProtocolError,
+        coven_protocol::store_commit::StoreBatchCommit,
+        coven_protocol::store_commit::StoreProtocolError,
     > {
-        crate::protocol::store_commit::StoreBatchCommit::signed_with_candidate_abandonment(
+        coven_protocol::store_commit::StoreBatchCommit::signed_with_candidate_abandonment(
             store_root_hash,
             write_id,
             coord,
@@ -104,14 +104,14 @@ impl LocalStoreWriter {
     pub(crate) fn verify_prepared_commit(
         &self,
         bytes: &[u8],
-        store_root_hash: crate::protocol::store_commit::ObjectHash,
-        coord: crate::protocol::store_commit::StoreCommitCoord,
-        object: crate::protocol::objects::ExactObjectRef,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
+        coord: coven_protocol::store_commit::StoreCommitCoord,
+        object: coven_protocol::objects::ExactObjectRef,
     ) -> Result<
-        crate::protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::protocol::store_commit::StoreProtocolError,
+        coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        coven_protocol::store_commit::StoreProtocolError,
     > {
-        crate::protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
+        coven_protocol::store_commit::VerifiedStoreBatchCommit::parse_prepared(
             bytes,
             store_root_hash,
             coord,
@@ -123,21 +123,21 @@ impl LocalStoreWriter {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign_snapshot(
         &self,
-        store_root_hash: crate::protocol::store_commit::ObjectHash,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
         generation: u64,
-        predecessor: Option<crate::protocol::store_commit::StoreSnapshotRef>,
-        image: crate::protocol::store_commit::SnapshotImageRef,
-        coverage: crate::protocol::store_commit::CommitFrontier,
-        state: crate::protocol::store_commit::StoreSnapshotState,
-        history_summary: crate::protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        predecessor: Option<coven_protocol::store_commit::StoreSnapshotRef>,
+        image: coven_protocol::store_commit::SnapshotImageRef,
+        coverage: coven_protocol::store_commit::CommitFrontier,
+        state: coven_protocol::store_commit::StoreSnapshotState,
+        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         schema_version: u32,
         created_at: String,
-        successor: crate::protocol::store_commit::SnapshotSuccessorLink,
+        successor: coven_protocol::store_commit::SnapshotSuccessorLink,
     ) -> Result<
-        crate::protocol::store_commit::SnapshotMeta,
-        crate::protocol::store_commit::StoreProtocolError,
+        coven_protocol::store_commit::SnapshotMeta,
+        coven_protocol::store_commit::StoreProtocolError,
     > {
-        crate::protocol::store_commit::SnapshotMeta::signed(
+        coven_protocol::store_commit::SnapshotMeta::signed(
             store_root_hash,
             self.registration.reference().clone(),
             generation,
@@ -183,29 +183,29 @@ impl LocalStoreWriter {
         batch: crate::sync::store::owner::writer::operation::operations::StoreOperationBatch,
     ) -> Result<
         (
-            crate::protocol::store_commit::StoreBatchCommit,
-            Option<crate::protocol::store_commit::ActivatedStoreDeviceRegistration>,
+            coven_protocol::store_commit::StoreBatchCommit,
+            Option<coven_protocol::store_commit::ActivatedStoreDeviceRegistration>,
         ),
         crate::sync::store::StoreError,
     > {
-        use crate::protocol::store_commit::{
+        use crate::sync::store::owner::writer::operation::operations::StoreOperationBatch;
+        use coven_protocol::store_commit::{
             DeviceJoinAttemptDecisionRef, StoreBatchCommit, StoreCommitOperationsInput,
             StoreControl,
         };
-        use crate::sync::store::owner::writer::operation::operations::StoreOperationBatch;
 
         fn sign_ops(
             context: StoreOperationSigningContext,
             write_id: crate::WriteId,
-            registration_ref: crate::protocol::store_commit::StoreDeviceRegistrationRef,
-            registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+            registration_ref: coven_protocol::store_commit::StoreDeviceRegistrationRef,
+            registration: &coven_protocol::store_commit::StoreDeviceRegistration,
             signer: &coven_keys::keys::UserKeypair,
-            input: crate::protocol::store_commit::StoreCommitOperationsInput<'_>,
+            input: coven_protocol::store_commit::StoreCommitOperationsInput<'_>,
         ) -> Result<
-            crate::protocol::store_commit::StoreBatchCommit,
-            crate::protocol::store_commit::StoreProtocolError,
+            coven_protocol::store_commit::StoreBatchCommit,
+            coven_protocol::store_commit::StoreProtocolError,
         > {
-            crate::protocol::store_commit::StoreBatchCommit::signed_operations(
+            coven_protocol::store_commit::StoreBatchCommit::signed_operations(
                 context.root.store_root_hash,
                 write_id,
                 context.coord,

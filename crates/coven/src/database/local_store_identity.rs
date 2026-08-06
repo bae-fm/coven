@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn local_store_authority_on(
     conn: &Connection,
-) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
     let root = required_store_root_authority_on(conn)?;
     let reference = local_activated_registration_ref_on(conn)?.ok_or_else(|| {
         DbError::Message("local Store device has no activated registration".to_string())
@@ -27,7 +27,7 @@ pub(crate) fn local_store_authority_on(
     reference
         .verify_registration(&registration)
         .map_err(|error| DbError::Message(error.to_string()))?;
-    crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+    coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
         reference,
         registration,
     )
@@ -70,10 +70,10 @@ pub(crate) fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<Strin
     };
     let registration = local_store_authority_on(conn)?;
     Ok(Some(
-        crate::protocol::store_commit::StreamActivation::device_authorized_stream_id(
+        coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
             registration.value().store_root.store_root_hash,
             registration.reference(),
-            crate::protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
+            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
         )
         .to_string(),
     ))

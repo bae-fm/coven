@@ -8,7 +8,7 @@ impl<'a> StoreCommitVerifier<'a> {
         previous: Option<&VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::protocol::objects::ObjectSlot,
+            coven_protocol::objects::ObjectSlot,
             Option<StoreDeviceHeadRef>,
         ),
         StoreError,
@@ -162,7 +162,7 @@ impl<'a> StoreCommitVerifier<'a> {
         candidate: &VerifiedStoreBatchCommit,
         candidate_head: &StoreDeviceHead,
         candidate_head_object: &ExactObjectRef,
-    ) -> Result<crate::protocol::remote_object::VerifiedCandidateHead, StorePullError> {
+    ) -> Result<coven_protocol::remote_object::VerifiedCandidateHead, StorePullError> {
         let storage = self.storage;
         let root = self.root.reference().clone();
         let candidate_ref = candidate.reference();
@@ -221,7 +221,7 @@ impl<'a> StoreCommitVerifier<'a> {
             .await
         {
             Err(StorageError::NotFound(_)) => Ok(
-                crate::protocol::remote_object::VerifiedCandidateHead::ExactCandidateAbsent {
+                coven_protocol::remote_object::VerifiedCandidateHead::ExactCandidateAbsent {
                     object: candidate_head_object.clone(),
                 },
             ),
@@ -229,7 +229,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 if bytes == candidate_head.to_bytes() && object == *candidate_head_object =>
             {
                 Ok(
-                    crate::protocol::remote_object::VerifiedCandidateHead::ExactLateCandidate {
+                    coven_protocol::remote_object::VerifiedCandidateHead::ExactLateCandidate {
                         object: candidate_head_object.clone(),
                     },
                 )
@@ -269,7 +269,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     ));
                 }
                 Ok(
-                    crate::protocol::remote_object::VerifiedCandidateHead::ExactCandidateAbsent {
+                    coven_protocol::remote_object::VerifiedCandidateHead::ExactCandidateAbsent {
                         object: candidate_head_object.clone(),
                     },
                 )
@@ -289,8 +289,7 @@ impl<'a> StoreCommitVerifier<'a> {
         candidate: &VerifiedStoreBatchCommit,
         candidate_head: &StoreDeviceHead,
         candidate_head_object: &ExactObjectRef,
-    ) -> Result<crate::protocol::remote_object::VerifiedCandidateNonactivation, StorePullError>
-    {
+    ) -> Result<coven_protocol::remote_object::VerifiedCandidateNonactivation, StorePullError> {
         let activation_commit_ref = activation_commit.reference();
         let activation_commit_value = activation_commit.value();
         let candidate_ref = candidate.reference();
@@ -335,17 +334,17 @@ impl<'a> StoreCommitVerifier<'a> {
         let verified_candidate_head = self
             .verify_terminal_candidate_head(candidate, candidate_head, candidate_head_object)
             .await?;
-        let durable = crate::protocol::remote_object::CandidateNonactivation::from_durable_parts(
+        let durable = coven_protocol::remote_object::CandidateNonactivation::from_durable_parts(
             candidate_ref,
             candidate_commit,
-            crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+            coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                 exclusion: locator.exclusion().clone(),
                 accepted_cut: locator.accepted_cut().clone(),
                 activation_head: verified_activation_head,
             },
         )
         .map_err(StorePullError::RemoteObject)?;
-        crate::protocol::remote_object::VerifiedCandidateNonactivation::from_verified_author_exclusion(
+        coven_protocol::remote_object::VerifiedCandidateNonactivation::from_verified_author_exclusion(
             durable,
             candidate_ref.clone(),
             verified_candidate_head,

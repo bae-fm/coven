@@ -1,12 +1,12 @@
 //! Exact-reference access to Store protocol objects.
 
 use super::SyncStorage;
-use crate::protocol::membership::{MembershipEntry, MembershipEntryRef};
-use crate::protocol::objects::{
+use coven_protocol::membership::{MembershipEntry, MembershipEntryRef};
+use coven_protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
     StoreObjectError,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     membership_entry_semantic_prefix, ObjectHash, StoreProtocolError,
 };
 

@@ -1,23 +1,23 @@
 use super::*;
 use crate::database::VerifiedMergeMembershipObjects;
-use crate::protocol::membership::{
-    self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
-};
-use crate::protocol::membership_mutation::{
-    PreparedMembershipPublication, PreparedMembershipTransition,
-};
-use crate::protocol::objects::{
-    ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
-};
-use crate::protocol::store_commit::{
-    self, commit_semantic_prefix, head_slot_prefix, membership_head_slot_prefix,
-    StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
-};
-use crate::protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKeyRef};
 use crate::storage as store_objects;
 use crate::sync::store::membership::InviteError;
 use crate::sync::store::owner::load_wrapped_store_key;
 use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
+use coven_protocol::membership::{
+    self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
+};
+use coven_protocol::membership_mutation::{
+    PreparedMembershipPublication, PreparedMembershipTransition,
+};
+use coven_protocol::objects::{
+    ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
+};
+use coven_protocol::store_commit::{
+    self, commit_semantic_prefix, head_slot_prefix, membership_head_slot_prefix,
+    StoreBatchCommitDeletionTarget, StoreDeviceHeadRef,
+};
+use coven_protocol::wrapped_store_key::{PreparedWrappedStoreKey, WrappedStoreKeyRef};
 use std::sync::Arc;
 
 mod abandonment;
@@ -52,12 +52,12 @@ use membership_mutation_journal::{
 pub(crate) struct MergeConflictResolutionCommitPlan {
     authorship: crate::database::store::OwnStreamAuthorship,
     writer: Arc<LocalStoreWriter>,
-    root: crate::protocol::store_commit::StoreRootRef,
-    coord: crate::protocol::store_commit::StoreCommitCoord,
-    order: crate::protocol::store_commit::StoreCommitOrder,
-    membership: crate::protocol::membership::MembershipChain,
-    device_state: crate::protocol::store_commit::StoreDeviceStateRef,
-    device_state_value: crate::protocol::store_commit::ResolvedStoreDeviceState,
+    root: coven_protocol::store_commit::StoreRootRef,
+    coord: coven_protocol::store_commit::StoreCommitCoord,
+    order: coven_protocol::store_commit::StoreCommitOrder,
+    membership: coven_protocol::membership::MembershipChain,
+    device_state: coven_protocol::store_commit::StoreDeviceStateRef,
+    device_state_value: coven_protocol::store_commit::ResolvedStoreDeviceState,
 }
 
 impl MergeConflictResolutionCommitPlan {
@@ -65,9 +65,9 @@ impl MergeConflictResolutionCommitPlan {
     fn new(
         authorship: crate::database::store::OwnStreamAuthorship,
         writer: Arc<LocalStoreWriter>,
-        root: crate::protocol::store_commit::StoreRootRef,
-        coord: crate::protocol::store_commit::StoreCommitCoord,
-        order: crate::protocol::store_commit::StoreCommitOrder,
+        root: coven_protocol::store_commit::StoreRootRef,
+        coord: coven_protocol::store_commit::StoreCommitCoord,
+        order: coven_protocol::store_commit::StoreCommitOrder,
         authorization: super::history::MergeConflictResolutionAuthorization,
     ) -> Self {
         Self {
@@ -82,31 +82,31 @@ impl MergeConflictResolutionCommitPlan {
         }
     }
 
-    pub(super) fn root(&self) -> &crate::protocol::store_commit::StoreRootRef {
+    pub(super) fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
         &self.root
     }
 
-    pub(super) fn membership(&self) -> &crate::protocol::membership::MembershipChain {
+    pub(super) fn membership(&self) -> &coven_protocol::membership::MembershipChain {
         &self.membership
     }
 
     pub(super) fn grant_authorized_stream_id(
         &self,
-        grant: &crate::protocol::membership::MembershipGrantId,
-        domain: crate::protocol::store_commit::StreamAnchorDomain,
-    ) -> crate::protocol::membership::AuthorStreamId {
+        grant: &coven_protocol::membership::MembershipGrantId,
+        domain: coven_protocol::store_commit::StreamAnchorDomain,
+    ) -> coven_protocol::membership::AuthorStreamId {
         self.writer
             .grant_authorized_stream_id(self.root.store_root_hash, grant, domain)
     }
 
     pub(super) fn sign_conflict_resolution(
         &self,
-        chain: &crate::protocol::membership::MembershipChain,
-        selection: crate::protocol::membership::MembershipConflictSelection,
-        replacement_grant: crate::protocol::membership::MembershipGrantId,
-        membership: crate::protocol::store_commit::GrantStreamAnchor,
-        recovery: crate::protocol::store_commit::GrantStreamAnchor,
-    ) -> Result<crate::protocol::membership::StoreMembershipConflictResolution, InviteError> {
+        chain: &coven_protocol::membership::MembershipChain,
+        selection: coven_protocol::membership::MembershipConflictSelection,
+        replacement_grant: coven_protocol::membership::MembershipGrantId,
+        membership: coven_protocol::store_commit::GrantStreamAnchor,
+        recovery: coven_protocol::store_commit::GrantStreamAnchor,
+    ) -> Result<coven_protocol::membership::StoreMembershipConflictResolution, InviteError> {
         self.writer.sign_conflict_resolution(
             chain,
             self.root.store_root_hash,
@@ -120,14 +120,14 @@ impl MergeConflictResolutionCommitPlan {
 
     pub(super) fn sign_conflict_resolution_activation(
         &self,
-        chain: &crate::protocol::membership::MembershipChain,
-        stream_id: crate::protocol::membership::AuthorStreamId,
-        reference: crate::protocol::membership::StoreMembershipConflictResolutionRef,
-        resolution: &crate::protocol::membership::StoreMembershipConflictResolution,
+        chain: &coven_protocol::membership::MembershipChain,
+        stream_id: coven_protocol::membership::AuthorStreamId,
+        reference: coven_protocol::membership::StoreMembershipConflictResolutionRef,
+        resolution: &coven_protocol::membership::StoreMembershipConflictResolution,
         created_at: String,
     ) -> Result<
-        crate::protocol::membership::MembershipEntry,
-        crate::protocol::membership::MembershipError,
+        coven_protocol::membership::MembershipEntry,
+        coven_protocol::membership::MembershipError,
     > {
         self.writer.sign_conflict_resolution_activation(
             chain,
@@ -141,10 +141,10 @@ impl MergeConflictResolutionCommitPlan {
 
     pub(super) fn finish(
         self,
-        membership: &crate::protocol::membership::MembershipChain,
-        resolution: &crate::protocol::membership::StoreMembershipConflictResolutionRef,
+        membership: &coven_protocol::membership::MembershipChain,
+        resolution: &coven_protocol::membership::StoreMembershipConflictResolutionRef,
     ) -> Result<operations::StoreOperationCommitPlan, StoreError> {
-        let crate::protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
+        let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(StoreError::InvalidOutbound(
                 "conflict-resolution candidate membership remains conflicted".to_string(),
@@ -159,12 +159,12 @@ impl MergeConflictResolutionCommitPlan {
                 "conflict-resolution candidate membership omits its exact resolution".to_string(),
             ));
         }
-        let replacement_grant = crate::protocol::membership::derive_store_resolution_grant(
+        let replacement_grant = coven_protocol::membership::derive_store_resolution_grant(
             &resolution.conflict_hash,
             &resolution.resolver_pubkey,
         );
         let authority =
-            crate::protocol::membership::MembershipGrantCreationAuthority::ConflictResolution(
+            coven_protocol::membership::MembershipGrantCreationAuthority::ConflictResolution(
                 resolution.clone(),
             );
         if membership
@@ -179,14 +179,13 @@ impl MergeConflictResolutionCommitPlan {
                     .to_string(),
             ));
         }
-        let membership_state =
-            crate::protocol::circle_control::StoreMembershipStateRef::from_parts(
-                membership.head_refs().to_vec(),
-                membership.resolution_refs().to_vec(),
-                self.device_state.recovery().to_vec(),
-                resolved.state_hash,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let membership_state = coven_protocol::circle_control::StoreMembershipStateRef::from_parts(
+            membership.head_refs().to_vec(),
+            membership.resolution_refs().to_vec(),
+            self.device_state.recovery().to_vec(),
+            resolved.state_hash,
+        )
+        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let common = operations::StoreOperationPlanCommon::new(
             self.authorship,
             self.writer,
@@ -195,7 +194,7 @@ impl MergeConflictResolutionCommitPlan {
             self.order,
             membership_state,
             self.device_state,
-            crate::protocol::store_commit::StoreOperationMembershipAuthority {
+            coven_protocol::store_commit::StoreOperationMembershipAuthority {
                 predecessor: authority,
             },
             Some(replacement_grant),
@@ -219,7 +218,7 @@ pub(crate) enum StoreWriterAuthorizationError {
 #[derive(Debug, thiserror::Error)]
 enum AuthorizationRefreshError {
     #[error("select this device's wrapped-key authority: {0}")]
-    Membership(#[source] crate::protocol::membership::MembershipError),
+    Membership(#[source] coven_protocol::membership::MembershipError),
     #[error("read this device's wrapped key: {0}")]
     WrappedKey(#[source] crate::sync::store::membership::InviteError),
     #[error("refresh state is invalid: {0}")]

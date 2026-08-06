@@ -4,12 +4,12 @@ use super::{
     StoreDatabase,
 };
 use crate::database::*;
-use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
-use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
-use crate::protocol::store_commit::{
+use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
+use coven_protocol::store_commit::{
     StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
 };
-use crate::write::{WriteId, WriteResolution, WriteStatus};
+use coven_protocol::write::{WriteId, WriteResolution, WriteStatus};
 use rusqlite::OptionalExtension;
 
 mod abandonment;

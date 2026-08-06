@@ -1,7 +1,7 @@
 use crate::database::StoreDatabase;
-use crate::protocol::membership::MemberRole;
 use crate::store_membership::StoreMembership;
 use crate::store_sync::{StoreSync, SyncError};
+use coven_protocol::membership::MemberRole;
 
 /// The two parts of device joining that are not a plain sync command: minting
 /// an invite, which pairs a membership invite with the attempt's transport
@@ -68,7 +68,7 @@ impl StoreJoining {
             .await
             .map_err(|error| error.to_string())?;
         let coverage =
-            crate::protocol::store_commit::CommitFrontier(std::collections::BTreeMap::new());
+            coven_protocol::store_commit::CommitFrontier(std::collections::BTreeMap::new());
         owner_device
             .publish_snapshot(snapshot, coverage.clone())
             .await?;

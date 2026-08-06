@@ -67,28 +67,28 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
-use crate::protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use crate::protocol::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
-use crate::protocol::circle::Audience;
-use crate::protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
-use crate::protocol::membership::{
+use coven_keys::encryption::EncryptionService;
+use coven_protocol::audience_package::{AudiencePackage, RowBlobLocatorBinding};
+use coven_protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use coven_protocol::blob::{BlobRef, RowBlobAuthority, RowBlobRef};
+use coven_protocol::circle::Audience;
+use coven_protocol::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
+use coven_protocol::membership::{
     AuthorHead, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
 };
-use crate::protocol::objects::{ExactObjectRef, PreparedExactObject};
-use crate::protocol::remote_object::{
+use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::remote_object::{
     remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, RetainedReplayOwner,
     SharedLiveSetObjectDomain,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     ack_slot_prefix, CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef,
     SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
     StoreSnapshotRef,
 };
-use crate::protocol::synced_schema::SyncedTable;
-use crate::write::{WriteId, WriteStatus};
-use coven_keys::encryption::EncryptionService;
+use coven_protocol::synced_schema::SyncedTable;
+use coven_protocol::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
 
 pub use rusqlite;
@@ -153,7 +153,6 @@ pub(crate) use test_transaction::DatabaseTestTransaction;
 mod write_lifecycle;
 mod write_models;
 
-pub(crate) use crate::protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
 #[cfg(test)]
 pub(crate) use blob_declarations::{from_tables_call_count, reset_from_tables_call_count};
 pub(crate) use blob_declarations::{BlobDeclError, BlobDecls, PublicationBlob};
@@ -165,6 +164,7 @@ pub(crate) use changeset_identity::ChangesetIdentityError;
 pub(crate) use circle_operation_records::{
     load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
 };
+pub(crate) use coven_protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
 pub(crate) use database_connection::DatabaseConnection;
 use database_open::CovenMetadataOpen;
 pub use external_blob_records::ExternalBlob;
@@ -417,23 +417,23 @@ pub enum DbError {
     /// does not match, a signature that does not verify, an object in the wrong
     /// slot. The database read them back intact; the protocol refused them.
     #[error("{0}")]
-    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("{0}")]
-    RemoteObject(#[from] crate::protocol::remote_object::RemoteObjectRecordError),
+    RemoteObject(#[from] coven_protocol::remote_object::RemoteObjectRecordError),
     #[error("{0}")]
-    AudiencePackage(#[from] crate::protocol::audience_package::AudiencePackageError),
+    AudiencePackage(#[from] coven_protocol::audience_package::AudiencePackageError),
     #[error("{0}")]
     ObjectHash(#[from] coven_foundation::object_hash::InvalidObjectHash),
     #[error("{0}")]
-    BlobLocator(#[from] crate::protocol::blob::locator::BlobLocatorError),
+    BlobLocator(#[from] coven_protocol::blob::locator::BlobLocatorError),
     #[error("{0}")]
-    CircleId(#[from] crate::protocol::circle::CircleIdError),
+    CircleId(#[from] coven_protocol::circle::CircleIdError),
     #[error("{0}")]
-    RowRoutingKey(#[from] crate::protocol::circle::RowRoutingKeyError),
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
     #[error("{0}")]
     Gate(#[from] crate::database::gate::GateError),
     #[error("{0}")]
-    Storage(#[from] crate::protocol::objects::StorageError),
+    Storage(#[from] coven_protocol::objects::StorageError),
     #[error("unsafe blob path: {0}")]
     BlobPath(#[from] coven_foundation::store_dir::PathTokenError),
     #[error("{0}")]
@@ -456,7 +456,7 @@ pub enum DbError {
     #[error("{0}")]
     FromSql(#[from] rusqlite::types::FromSqlError),
     #[error("{0}")]
-    BlobOpeningAuthority(#[from] crate::protocol::blob::BlobOpeningAuthorityError),
+    BlobOpeningAuthority(#[from] coven_protocol::blob::BlobOpeningAuthorityError),
     #[error("{0}")]
     CommitNewFile(#[from] coven_foundation::local_file::CommitNewFileError),
     /// Staging a write's audience-move blobs failed. The implementation of
@@ -514,8 +514,8 @@ pub enum DbError {
         "device excluded from circle {circle_id} close {close_id} must reset before publishing"
     )]
     ExcludedDeviceMustReset {
-        circle_id: crate::protocol::circle::CircleId,
-        close_id: crate::protocol::circle::CircleEpochCloseId,
+        circle_id: coven_protocol::circle::CircleId,
+        close_id: coven_protocol::circle::CircleEpochCloseId,
     },
 }
 
@@ -583,7 +583,7 @@ struct DatabaseState {
     /// How many blob transfers each transfer loop runs at once, read by the upload
     /// drain and the pin loop (both hold `&Database`). Open-time host config carried
     /// here for the same single-owner reason as `blob_tombstone_grace`.
-    transfer_limits: crate::protocol::blob::TransferLimits,
+    transfer_limits: coven_protocol::blob::TransferLimits,
     store_runtime: crate::database::StoreDatabaseRuntime,
     ids: coven_foundation::id_provider::IdRef,
     write_statuses:
@@ -786,7 +786,7 @@ struct DatabaseCore {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
-    transfer_limits: crate::protocol::blob::TransferLimits,
+    transfer_limits: coven_protocol::blob::TransferLimits,
 }
 
 /// One Circle's staged restore outcome, decided by selection against the
@@ -797,18 +797,18 @@ struct DatabaseCore {
 pub(crate) enum StagedCircleDecision {
     Install {
         activation_commit: StoreBatchCommitRef,
-        image: crate::protocol::circle_activation::VerifiedCircleImage,
+        image: coven_protocol::circle_activation::VerifiedCircleImage,
     },
-    ClearCoverage(crate::protocol::circle::CircleId),
+    ClearCoverage(coven_protocol::circle::CircleId),
 }
 
 pub(crate) struct VerifiedSnapshotBootstrapInstall {
     snapshot: PublishedStoreSnapshot,
-    store_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
-    founder: crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+    store_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
+    founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
     stability: RetainedReplaySnapshotAuthority,
     membership: InitialStoreMembershipAuthority,
-    routing_key: Option<crate::protocol::circle::RowRoutingKey>,
+    routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     circle_decisions: Vec<StagedCircleDecision>,
     /// Fail the Circle-decision step of the install transaction, after the Store
     /// image has been installed within it — a test's stand-in for a crash between
@@ -820,8 +820,8 @@ pub(crate) struct VerifiedSnapshotBootstrapInstall {
 impl VerifiedSnapshotBootstrapInstall {
     pub(crate) fn new(
         snapshot: PublishedStoreSnapshot,
-        store_root: crate::protocol::objects::VerifiedObject<StoreProtocolRoot>,
-        founder: crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        store_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
         stability: crate::database::VerifiedStoreSnapshotStability,
         membership: InitialStoreMembershipAuthority,
         routing_encryption: Option<&EncryptionService>,
@@ -834,7 +834,7 @@ impl VerifiedSnapshotBootstrapInstall {
                 "bootstrap Store root differs from its verified object".to_string(),
             ));
         }
-        let root = crate::protocol::store_commit::StoreRootRef {
+        let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: store_root.value.descriptor.store_root_id(),
             store_root_hash: store_root.semantic_hash,
             object: store_root.object.clone(),
@@ -860,7 +860,7 @@ impl VerifiedSnapshotBootstrapInstall {
         }
         let routing_key = routing_encryption
             .map(|encryption| {
-                crate::protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
+                coven_protocol::circle::derive_row_routing_key(encryption, root.store_root_hash)
                     .map_err(|error| DbError::context("derive bootstrap row-routing key", error))
             })
             .transpose()?;
@@ -896,7 +896,7 @@ impl VerifiedSnapshotBootstrapInstall {
         routing_hash: ObjectHash,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
-        let root = crate::protocol::store_commit::StoreRootRef {
+        let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: self.store_root.value.descriptor.store_root_id(),
             store_root_hash: self.store_root.semantic_hash,
             object: self.store_root.object.clone(),
@@ -925,7 +925,7 @@ impl VerifiedSnapshotBootstrapInstall {
         )?;
         crate::database::set_protocol_state_on(
             conn,
-            crate::protocol::membership::OWNER_PUBKEY_STATE_KEY,
+            coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
             &self.store_root.value.descriptor.founder_pubkey,
         )?;
         self.membership.install_on(conn)?;
@@ -964,7 +964,7 @@ impl VerifiedSnapshotBootstrapInstall {
     fn install_circle_decisions_on(
         &self,
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
         use crate::database::StoreDatabase;

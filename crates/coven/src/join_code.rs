@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use coven_foundation::code_envelope::{self, EnvelopeError};
 
-#[cfg(test)]
-use crate::protocol::membership::{MembershipCoord, MembershipGrantId};
-#[cfg(test)]
-use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::CloudHomeJoinInfo;
+#[cfg(test)]
+use coven_protocol::membership::{MembershipCoord, MembershipGrantId};
+#[cfg(test)]
+use coven_protocol::store_commit::ObjectHash;
 
 pub(crate) const INVITE_CODE_VERSION: u8 = 4;
 
-use crate::protocol::membership::MembershipFloor;
+use coven_protocol::membership::MembershipFloor;
 
 /// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
@@ -27,8 +27,8 @@ pub(crate) struct InviteCode {
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
-    pub wrapped_key: crate::protocol::wrapped_store_key::WrappedStoreKeyRef,
-    pub store_root: crate::protocol::store_commit::StoreRootRef,
+    pub wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+    pub store_root: coven_protocol::store_commit::StoreRootRef,
     /// The exact causal membership heads the joiner must observe.
     pub membership_floor: MembershipFloor,
 }
@@ -134,7 +134,7 @@ pub struct InviteCodeInfo {
     pub store_id: String,
     pub store_name: String,
     pub owner_pubkey: String,
-    pub store_root_hash: crate::protocol::store_commit::ObjectHash,
+    pub store_root_hash: coven_protocol::store_commit::ObjectHash,
     pub cloud_provider: coven_foundation::config::CloudProvider,
     /// Whether the joining device must run an OAuth flow before joining, so the
     /// host fetches the token first — mirrors `RestoreCodeInfo::needs_oauth`.
@@ -200,9 +200,9 @@ impl From<EnvelopeError> for JoinCodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::membership::MembershipHeadRef;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use coven_protocol::membership::MembershipHeadRef;
 
     fn test_owner_pubkey() -> String {
         hex::encode([0xAB_u8; 32])
@@ -212,7 +212,7 @@ mod tests {
         let coord = MembershipCoord {
             author_pubkey: test_owner_pubkey(),
             author_owner_grant: MembershipGrantId(ObjectHash::digest(b"test owner grant")),
-            stream_id: crate::protocol::membership::AuthorStreamId::from_bytes([1; 32]),
+            stream_id: coven_protocol::membership::AuthorStreamId::from_bytes([1; 32]),
             seq: 1,
             entry_hash: ObjectHash::digest(b"test membership entry"),
         };
@@ -220,8 +220,8 @@ mod tests {
         vec![MembershipHeadRef {
             coord,
             head_hash: ObjectHash::digest(b"test membership head semantic bytes"),
-            object: crate::protocol::objects::ExactObjectRef::new(
-                crate::protocol::objects::ObjectSlot::logical(
+            object: coven_protocol::objects::ExactObjectRef::new(
+                coven_protocol::objects::ObjectSlot::logical(
                     "store-v1/membership/heads/test-owner/1.json".to_string(),
                 )
                 .expect("valid test membership-head slot"),
@@ -231,17 +231,17 @@ mod tests {
         }]
     }
 
-    fn test_wrapped_key() -> crate::protocol::wrapped_store_key::WrappedStoreKeyRef {
+    fn test_wrapped_key() -> coven_protocol::wrapped_store_key::WrappedStoreKeyRef {
         let owner = test_owner_pubkey();
         let recipient = hex::encode([0xCD_u8; 32]);
         let wrap_hash = ObjectHash::digest(b"invite wrapped key");
-        crate::protocol::wrapped_store_key::WrappedStoreKeyRef {
+        coven_protocol::wrapped_store_key::WrappedStoreKeyRef {
             owner_pubkey: owner.clone(),
             recipient_pubkey: recipient.clone(),
             generation: 1,
             wrap_hash,
-            object: crate::protocol::objects::ExactObjectRef::new(
-                crate::protocol::objects::ObjectSlot::logical(format!(
+            object: coven_protocol::objects::ExactObjectRef::new(
+                coven_protocol::objects::ObjectSlot::logical(format!(
                     "keys/{owner}/{recipient}/1/{wrap_hash}.json"
                 ))
                 .expect("valid test wrapped-key slot"),
@@ -266,13 +266,13 @@ mod tests {
             },
             owner_pubkey: test_owner_pubkey(),
             wrapped_key: test_wrapped_key(),
-            store_root: crate::protocol::store_commit::StoreRootRef {
-                store_root_id: crate::protocol::store_commit::ObjectHash::digest(
+            store_root: coven_protocol::store_commit::StoreRootRef {
+                store_root_id: coven_protocol::store_commit::ObjectHash::digest(
                     b"invite store protocol root",
                 ),
                 store_root_hash: ObjectHash::digest(b"root"),
-                object: crate::protocol::objects::ExactObjectRef::new(
-                    crate::protocol::objects::ObjectSlot::logical(
+                object: coven_protocol::objects::ExactObjectRef::new(
+                    coven_protocol::objects::ObjectSlot::logical(
                         "store-v1/protocol/root/test.json".to_string(),
                     )
                     .expect("valid test Store-root slot"),
@@ -478,8 +478,8 @@ mod tests {
     #[test]
     fn decode_rejects_a_relocated_wrapped_key_reference() {
         let mut code = sample_s3_code("lib-relocated-wrap");
-        code.wrapped_key.object = crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        code.wrapped_key.object = coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "keys/attacker/recipient/1/different.json".to_string(),
             )
             .expect("syntactically valid but semantically relocated slot"),

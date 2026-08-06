@@ -1,9 +1,9 @@
 use super::*;
-use crate::protocol::store_commit::StoreCommitOperationsInput;
-use crate::protocol::store_commit::StoreDeviceHead;
-use crate::protocol::store_commit::StorePackageInput;
-use crate::protocol::store_commit::SuccessorLink;
-use crate::protocol::store_commit::{commit_semantic_prefix, package_semantic_prefix};
+use coven_protocol::store_commit::StoreCommitOperationsInput;
+use coven_protocol::store_commit::StoreDeviceHead;
+use coven_protocol::store_commit::StorePackageInput;
+use coven_protocol::store_commit::SuccessorLink;
+use coven_protocol::store_commit::{commit_semantic_prefix, package_semantic_prefix};
 
 pub(super) struct PreparedWriteFixture {
     home: InMemoryCloudHome,
@@ -16,8 +16,8 @@ pub(super) struct PreparedWriteFixture {
     pub(super) device_id: String,
     pub(super) write_id: crate::WriteId,
     pub(super) commit_ref: StoreBatchCommitRef,
-    pub(super) package_object: crate::protocol::objects::ExactObjectRef,
-    pub(super) head_object: crate::protocol::objects::ExactObjectRef,
+    pub(super) package_object: coven_protocol::objects::ExactObjectRef,
+    pub(super) head_object: coven_protocol::objects::ExactObjectRef,
 }
 
 impl PreparedWriteFixture {
@@ -39,7 +39,7 @@ impl PreparedWriteFixture {
 
     pub(super) fn contains_exact_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
+        object: &coven_protocol::objects::ExactObjectRef,
     ) -> bool {
         self.home.contains_exact_object(object)
     }
@@ -69,7 +69,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn exact_materialized_ref(
         &self,
-    ) -> Option<crate::protocol::store_commit::StoreBatchCommitRef> {
+    ) -> Option<coven_protocol::store_commit::StoreBatchCommitRef> {
         self.database
             .exact_materialized_ref(&commit_stream(&self.commit_ref), 1)
             .await
@@ -125,7 +125,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn publish_prepared_object(
         &self,
-        prepared: &crate::protocol::objects::PreparedExactObject,
+        prepared: &coven_protocol::objects::PreparedExactObject,
     ) {
         self.storage
             .create_protocol_object(prepared)
@@ -190,7 +190,7 @@ impl PreparedWriteFixture {
     pub(super) async fn candidate_author(
         &self,
         batch: &crate::database::PreparedStoreWriteCommit,
-    ) -> crate::protocol::store_commit::StoreDeviceRegistration {
+    ) -> coven_protocol::store_commit::StoreDeviceRegistration {
         self.database
             .activated_store_device_registration(batch.commit.value.author_registration.clone())
             .await
@@ -315,7 +315,7 @@ impl PreparedWriteFixture {
             .device_signer(&self.keypair)
             .expect("derive Merge device signer");
         let stream_id = batch.head.value.commit.coord.stream_id;
-        let package = crate::protocol::audience_package::AudiencePackage::store(
+        let package = coven_protocol::audience_package::AudiencePackage::store(
             self.root.store_root_hash,
             candidate.candidate_family(),
             candidate.write_id.clone(),
@@ -475,7 +475,7 @@ impl PreparedWriteFixture {
             ProtocolObjectDomain::StoreHead,
         );
         let next_prefix = head_slot_prefix(&self.device_id, batch.commit.value.seq() + 1);
-        let alternate_next = crate::protocol::objects::ObjectSlot::opaque(
+        let alternate_next = coven_protocol::objects::ObjectSlot::opaque(
             format!("{next_prefix}.json"),
             "alternate-successor".to_string(),
         )
@@ -515,8 +515,8 @@ impl PreparedWriteFixture {
 
     pub(super) async fn stored_remote_object(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
-    ) -> crate::protocol::remote_object::RemoteObjectRecord {
+        object: &coven_protocol::objects::ExactObjectRef,
+    ) -> coven_protocol::remote_object::RemoteObjectRecord {
         self.db
             .remote_object_for_test(object.clone())
             .await
@@ -525,7 +525,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn remote_object_exists(
         &self,
-        object: &crate::protocol::objects::ExactObjectRef,
+        object: &coven_protocol::objects::ExactObjectRef,
     ) -> bool {
         self.db
             .remote_object_exists_for_test(object.clone())

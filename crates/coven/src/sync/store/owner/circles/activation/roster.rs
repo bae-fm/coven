@@ -3,18 +3,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     CircleActivationVerifier, CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
 };
-use crate::protocol::circle::{
+use crate::sync::store::circle_controls::CircleOperationError;
+use coven_keys::encryption::EncryptionService;
+use coven_protocol::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleRosterHeadRef,
     CircleSemanticSlot, MergeCircleOwnerAuthorityRef, PreparedCircleControl, ResolvedCircleRoster,
 };
-use crate::protocol::circle_roster::CircleMaterializedRoster;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use coven_protocol::circle_roster::CircleMaterializedRoster;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     CircleActivationObjects, GrantStreamAnchor, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
     StreamActivationId,
 };
-use crate::sync::store::circle_controls::CircleOperationError;
-use coven_keys::encryption::EncryptionService;
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(super) async fn load_circle_roster_state(
@@ -23,7 +23,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
         circle_id: CircleId,
-        state: &crate::protocol::circle::MergeCircleRosterStateRef,
+        state: &coven_protocol::circle::MergeCircleRosterStateRef,
         encryption: EncryptionService,
         objects: &CircleActivationObjects,
         consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
@@ -50,11 +50,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
         circle_id: CircleId,
-        state: &crate::protocol::circle::MergeCircleRosterStateRef,
+        state: &coven_protocol::circle::MergeCircleRosterStateRef,
         encryption: EncryptionService,
         objects: &CircleActivationObjects,
         consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
-    ) -> Result<crate::protocol::circle::CircleRosterChain, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleRosterChain, CircleOperationError> {
         let store_root_hash = commit.store_root_hash;
         if state.heads.is_empty()
             || !state
@@ -118,7 +118,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             )
             .await?;
         let chain = if loaded_resolutions.is_empty() {
-            crate::protocol::circle::CircleRosterChain::from_entries_with_heads(
+            coven_protocol::circle::CircleRosterChain::from_entries_with_heads(
                 entries.clone(),
                 loaded_heads,
             )
@@ -164,9 +164,9 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         store_root_hash: ObjectHash,
         circle_id: CircleId,
         context: &ProtocolObjectContext,
-        heads: &[crate::protocol::circle::ExactCircleRosterHead],
+        heads: &[coven_protocol::circle::ExactCircleRosterHead],
         objects: &CircleActivationObjects,
-    ) -> Result<Vec<crate::protocol::circle::CircleRosterEntry>, CircleOperationError> {
+    ) -> Result<Vec<coven_protocol::circle::CircleRosterEntry>, CircleOperationError> {
         let mut pending = heads
             .iter()
             .map(|head| head.head().entry_coord())
@@ -190,13 +190,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(context, object, &prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            let entry: crate::protocol::circle::CircleRosterEntry = serde_json::from_slice(&bytes)
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+            let entry: coven_protocol::circle::CircleRosterEntry = serde_json::from_slice(&bytes)
                 .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse Circle roster entry: {error}"
-                    ))
-                })?;
+                CircleOperationError::InvalidState(format!("parse Circle roster entry: {error}"))
+            })?;
             let declared_coord = entry.coord();
             if declared_coord.entry_hash != coord.entry_hash {
                 return Err(CircleOperationError::InvalidState(
@@ -230,10 +228,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         &self,
         store_root_hash: ObjectHash,
         circle_id: CircleId,
-        resolutions: &[crate::protocol::circle::CircleRosterConflictResolutionRef],
+        resolutions: &[coven_protocol::circle::CircleRosterConflictResolutionRef],
         encryption: &EncryptionService,
         objects: &CircleActivationObjects,
-    ) -> Result<Vec<crate::protocol::circle::CircleRosterConflictResolution>, CircleOperationError>
+    ) -> Result<Vec<coven_protocol::circle::CircleRosterConflictResolution>, CircleOperationError>
     {
         let mut loaded_resolutions = Vec::with_capacity(resolutions.len());
         for reference in resolutions {
@@ -261,8 +259,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(&context, object, &prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            let resolution: crate::protocol::circle::CircleRosterConflictResolution =
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+            let resolution: coven_protocol::circle::CircleRosterConflictResolution =
                 serde_json::from_slice(&bytes).map_err(|error| {
                     CircleOperationError::InvalidState(format!(
                         "parse Circle roster resolution: {error}"
@@ -288,7 +286,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         references: &[CircleRosterHeadRef],
         objects: &CircleActivationObjects,
         consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
-    ) -> Result<Vec<crate::protocol::circle::ExactCircleRosterHead>, CircleOperationError> {
+    ) -> Result<Vec<coven_protocol::circle::ExactCircleRosterHead>, CircleOperationError> {
         let store_root_hash = commit.store_root_hash;
         let mut loaded_heads = Vec::with_capacity(references.len());
         for reference in references {
@@ -310,8 +308,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .storage
                 .read_protocol_object(context, &object.object, &prefix)
                 .await
-                .map_err(crate::protocol::objects::StoreObjectError::from)?;
-            let head: crate::protocol::circle::CircleRosterHead = serde_json::from_slice(&bytes)
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
+            let head: coven_protocol::circle::CircleRosterHead = serde_json::from_slice(&bytes)
                 .map_err(|error| {
                     CircleOperationError::InvalidState(format!("parse Circle roster head: {error}"))
                 })?;
@@ -377,7 +375,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 consumed_stream_activations.insert(authority.activation_id);
             }
             loaded_heads.push(
-                crate::protocol::circle::ExactCircleRosterHead::bind(head, reference.clone())
+                coven_protocol::circle::ExactCircleRosterHead::bind(head, reference.clone())
                     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
             );
         }
@@ -391,22 +389,20 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         commit: &StoreBatchCommit,
         circle_id: CircleId,
         context: &ProtocolObjectContext,
-        entries: &[crate::protocol::circle::CircleRosterEntry],
-        current_heads: &[crate::protocol::circle::ExactCircleRosterHead],
-        resolutions: &[crate::protocol::circle::CircleRosterConflictResolution],
+        entries: &[coven_protocol::circle::CircleRosterEntry],
+        current_heads: &[coven_protocol::circle::ExactCircleRosterHead],
+        resolutions: &[coven_protocol::circle::CircleRosterConflictResolution],
         objects: &CircleActivationObjects,
         consumed_stream_activations: &mut BTreeSet<StreamActivationId>,
-    ) -> Result<crate::protocol::circle::CircleRosterChain, CircleOperationError> {
+    ) -> Result<coven_protocol::circle::CircleRosterChain, CircleOperationError> {
         let store_root_hash = commit.store_root_hash;
         let known_resolution_refs = resolutions
             .iter()
             .map(|resolution| resolution.resolution_ref())
             .collect::<BTreeSet<_>>();
-        let current_head_refs = crate::protocol::circle::CircleRosterChain::validate_exact_heads(
-            entries,
-            current_heads,
-        )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let current_head_refs =
+            coven_protocol::circle::CircleRosterChain::validate_exact_heads(entries, current_heads)
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let current_by_coord = entries
             .iter()
             .cloned()
@@ -464,7 +460,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     objects,
                 )
                 .await?;
-            crate::protocol::circle::CircleRosterChain::validate_exact_heads(
+            coven_protocol::circle::CircleRosterChain::validate_exact_heads(
                 &conflict_entries,
                 &heads,
             )
@@ -495,12 +491,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             );
         }
         let mut resolved_by_ref = BTreeMap::<
-            crate::protocol::circle::CircleRosterConflictResolutionRef,
-            crate::protocol::circle::CircleRosterChain,
+            coven_protocol::circle::CircleRosterConflictResolutionRef,
+            coven_protocol::circle::CircleRosterChain,
         >::new();
         let mut applied = BTreeSet::new();
         while !prepared.is_empty() {
-            let next = crate::protocol::causal_grants::canonical_ready_checkpoint(
+            let next = coven_protocol::causal_grants::canonical_ready_checkpoint(
                 prepared
                     .iter()
                     .map(|(reference, (_, _, _, dependencies))| (reference, dependencies)),
@@ -543,7 +539,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     .map(|entry| (entry.coord(), entry)),
             );
             let mut conflict_chain = if dependency_chains.is_empty() {
-                crate::protocol::circle::CircleRosterChain::from_entries_with_heads(
+                coven_protocol::circle::CircleRosterChain::from_entries_with_heads(
                     prefix.into_values().collect(),
                     conflict_heads,
                 )
@@ -553,7 +549,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     .iter()
                     .map(|head| head.reference().clone())
                     .collect();
-                crate::protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
+                coven_protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
                 &dependency_chains,
                 prefix.into_values().collect(),
                 conflict_head_refs,
@@ -646,13 +642,13 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .cloned()
                 .collect::<Vec<_>>();
             let mut branch = if dependencies.is_empty() {
-                crate::protocol::circle::CircleRosterChain::from_entries_with_heads(
+                coven_protocol::circle::CircleRosterChain::from_entries_with_heads(
                     branch_history.into_values().collect(),
                     branch_exact_heads,
                 )
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
             } else {
-                crate::protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
+                coven_protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
                 &dependencies,
                 branch_history.into_values().collect(),
                 branch_heads,
@@ -678,7 +674,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     .map(|entry| (entry.coord(), entry)),
             );
         }
-        crate::protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
+        coven_protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
             &branch_refs,
             history.into_values().collect(),
             current_head_refs,

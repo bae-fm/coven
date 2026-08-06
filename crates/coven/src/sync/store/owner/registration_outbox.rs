@@ -1,12 +1,12 @@
 use super::registration::StoreRegistrationError;
 use crate::database::StoreDatabase;
-use crate::protocol::objects::ProtocolObjectDomain;
-use crate::protocol::objects::StorageError;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::store_commit::{
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
+use coven_protocol::objects::ProtocolObjectDomain;
+use coven_protocol::objects::StorageError;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::store_commit::{
     ack_slot_prefix, registration_semantic_prefix, StoreDeviceRegistration,
 };
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 
 pub(super) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,
@@ -43,7 +43,7 @@ impl<'storage> RegistrationOutbox<'storage> {
                     "durable registration columns differ from its exact signed bytes".to_string(),
                 ));
             }
-            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 store_root.store_root_hash,
                 ProtocolObjectDomain::StoreDeviceRegistration,
             );
@@ -57,7 +57,7 @@ impl<'storage> RegistrationOutbox<'storage> {
                 )
                 .await
                 .map_err(publication_error)?;
-            let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 store_root.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
             );
@@ -76,7 +76,7 @@ impl<'storage> RegistrationOutbox<'storage> {
                 .map_err(publication_error)?;
             self.database
                 .mark_local_store_device_registration_created(
-                    crate::protocol::objects::ExactProtocolObject {
+                    coven_protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes: outbound.registration_bytes,
                         object: outbound.prepared.reference().clone(),

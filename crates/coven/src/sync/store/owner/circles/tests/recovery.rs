@@ -9,7 +9,7 @@ struct RevokedOperation {
     founder: UserKeypair,
     successor: UserKeypair,
     operation_id: CircleOperationId,
-    author_grant_id: crate::protocol::membership::MembershipGrantId,
+    author_grant_id: coven_protocol::membership::MembershipGrantId,
 }
 
 impl RevokedOperation {
@@ -121,12 +121,12 @@ async fn operation_inspection_surface_reports_the_typed_block() {
         .expect("the blocked operation is inspectable");
     assert_eq!(
         info.kind,
-        crate::protocol::circle::CircleOperationKind::Create
+        coven_protocol::circle::CircleOperationKind::Create
     );
     assert_eq!(
         info.state,
         CircleOperationState::Blocked {
-            block: crate::protocol::circle::CircleOperationBlock::AuthorityLost {
+            block: coven_protocol::circle::CircleOperationBlock::AuthorityLost {
                 grant_id: revoked.author_grant_id.clone(),
             },
         },
@@ -187,7 +187,7 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
     assert_eq!(
         blocked.state(),
         CircleOperationState::Blocked {
-            block: crate::protocol::circle::CircleOperationBlock::AuthorityLost {
+            block: coven_protocol::circle::CircleOperationBlock::AuthorityLost {
                 grant_id: revoked.author_grant_id.clone(),
             },
         },
@@ -201,7 +201,7 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
     assert!(operations.iter().any(|info| matches!(
         &info.state,
         CircleOperationState::Blocked {
-            block: crate::protocol::circle::CircleOperationBlock::AuthorityLost { grant_id }
+            block: coven_protocol::circle::CircleOperationBlock::AuthorityLost { grant_id }
         } if *grant_id == revoked.author_grant_id
     )));
 }
@@ -253,7 +253,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     crate::database::StoreDatabase::new(&db)
         .block_circle_operation(
             &operation_id,
-            crate::protocol::circle::CircleOperationBlock::AuthorityLost {
+            coven_protocol::circle::CircleOperationBlock::AuthorityLost {
                 grant_id: author_grant_id,
             },
         )
@@ -648,7 +648,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         matches!(
             second_after.state(),
             CircleOperationState::Blocked {
-                block: crate::protocol::circle::CircleOperationBlock::PositionLost { .. },
+                block: coven_protocol::circle::CircleOperationBlock::PositionLost { .. },
             }
         ),
         "the queue advanced to and classified the next operation: {:?}",
@@ -663,7 +663,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         matches!(
             blocked.state(),
             CircleOperationState::Blocked {
-                block: crate::protocol::circle::CircleOperationBlock::PositionLost { .. },
+                block: coven_protocol::circle::CircleOperationBlock::PositionLost { .. },
             }
         ),
         "the lost position blocks the operation: {:?}",
@@ -684,7 +684,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         matches!(
             &loser.state,
             CircleOperationState::Blocked {
-                block: crate::protocol::circle::CircleOperationBlock::PositionLost { .. },
+                block: coven_protocol::circle::CircleOperationBlock::PositionLost { .. },
             }
         ),
         "the initiator can see why the operation stopped: {:?}",
@@ -713,7 +713,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         matches!(
             &retried,
             CircleOperationError::Blocked {
-                block: crate::protocol::circle::CircleOperationBlock::PositionLost { .. },
+                block: coven_protocol::circle::CircleOperationBlock::PositionLost { .. },
                 ..
             }
         ),
@@ -728,7 +728,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
                 .expect("the retried operation stays durable")
                 .state(),
             CircleOperationState::Blocked {
-                block: crate::protocol::circle::CircleOperationBlock::PositionLost { .. },
+                block: coven_protocol::circle::CircleOperationBlock::PositionLost { .. },
             }
         ),
         "the retried operation is left blocked, not pending",

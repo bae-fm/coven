@@ -3,7 +3,7 @@
 mod history;
 pub(super) use history::DeviceExclusionHistory;
 
-use crate::protocol::device_exclusion_journal::{
+use coven_protocol::device_exclusion_journal::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
@@ -15,15 +15,15 @@ use super::verified_history::MergeHistoryVerifier;
 use super::{AuthorizedWriterOperation, Store, StoreError};
 use crate::database::DbError;
 use crate::database::StoreDatabase;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{
+use crate::storage::{SyncStorage, VerifiedObjectWrites};
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{
     device_exclusion_outcome_semantic_prefix, device_exclusion_proposal_semantic_prefix,
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef,
     StoreDeviceExclusionProof, StoreDeviceExclusionProposal, StoreDeviceExclusionProposalId,
     StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError,
 };
-use crate::storage::{SyncStorage, VerifiedObjectWrites};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StoreDeviceExclusionResult {
@@ -72,13 +72,13 @@ pub(crate) enum StoreDeviceExclusionError {
     #[error("Store-device exclusion database state: {0}")]
     Database(#[from] DbError),
     #[error("Store-device exclusion object: {0}")]
-    Object(#[from] crate::protocol::objects::StoreObjectError),
+    Object(#[from] coven_protocol::objects::StoreObjectError),
     #[error("Store-device exclusion protocol: {0}")]
     Protocol(#[from] StoreProtocolError),
     #[error("Store-device exclusion publication: {0}")]
     Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
-    Storage(#[from] crate::protocol::objects::StorageError),
+    Storage(#[from] coven_protocol::objects::StorageError),
     #[error("Store-device exclusion journal: {0}")]
     Journal(String),
     #[error("Store-device exclusion state is invalid: {0}")]
@@ -88,7 +88,7 @@ pub(crate) enum StoreDeviceExclusionError {
 impl Store {
     pub(crate) async fn propose_device_exclusion_for_device(
         &self,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
         let target = self
             .database
@@ -129,7 +129,7 @@ impl Store {
 
     pub(crate) async fn propose_device_exclusion(
         &self,
-        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
         let mut authority = self
             .authorize_writer()
@@ -290,7 +290,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
 
     async fn propose(
         &mut self,
-        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
         let database = self.database.clone();
         let _lock = database.device_exclusion_permit().await;
@@ -301,7 +301,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
 
     async fn prepare_proposal(
         &mut self,
-        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
         let database = self.database.clone();
         let plan = Box::new(self.writer.prepare_plan().await?);
@@ -327,7 +327,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
     async fn stage_proposal(
         &mut self,
         plan: Box<crate::sync::store::operations::StoreOperationCommitPlan>,
-        target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
         proposal_id: StoreDeviceExclusionProposalId,
     ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {
         let database = self.database.clone();
@@ -480,7 +480,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             prepared.reference().clone(),
         )?;
         let retained_proposal =
-            crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
+            coven_protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
                 &proposal,
             );
         let retained =
@@ -602,7 +602,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
     async fn replace_candidate(
         &mut self,
         operation: &mut Box<DurableStoreDeviceExclusionOperation>,
-        nonactivation: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), StoreDeviceExclusionError> {
         let database = self.database.clone();
         let replacement = self
@@ -625,7 +625,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         match Box::pin(self.create_exact_object(operation)).await {
             Ok(()) => {}
             Err(StoreDeviceExclusionJournalError::Storage(
-                crate::protocol::objects::StorageError::SlotCollision(_),
+                coven_protocol::objects::StorageError::SlotCollision(_),
             )) => {
                 if let Some(completed) = self.resolve_object_collision(operation.clone()).await? {
                     return completion_result(&completed).map(Some);
@@ -731,7 +731,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .await?;
         let retained = plan.retain_device_exclusion_outcome(
             reference,
-            crate::protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
+            coven_protocol::store_commit::RetainedStoreDeviceExclusionProposal::from_verified(
                 &proposal,
             ),
             value,
@@ -887,7 +887,7 @@ enum OutcomeIntent {
 enum DeviceExclusionPublicationProgress {
     Completed(StoreDeviceExclusionResult),
     Continue,
-    ReplacementRequired(crate::protocol::remote_object::VerifiedCandidateNonactivation),
+    ReplacementRequired(coven_protocol::remote_object::VerifiedCandidateNonactivation),
 }
 
 fn completion_result(
@@ -943,8 +943,8 @@ fn completion_result(
 }
 
 fn require_active_target(
-    state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
-    target: &crate::protocol::store_commit::StoreDeviceRegistrationRef,
+    state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+    target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
 ) -> Result<(), StoreDeviceExclusionError> {
     if !matches!(
         state.devices.get(&target.device_id),
@@ -957,7 +957,7 @@ fn require_active_target(
 }
 
 fn require_pending_proposal(
-    state: &crate::protocol::store_commit::ResolvedStoreDeviceState,
+    state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
     proposal: &StoreDeviceExclusionProposalRef,
 ) -> Result<(), StoreDeviceExclusionError> {
     require_active_target(state, &proposal.target)?;

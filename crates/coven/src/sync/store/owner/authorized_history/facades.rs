@@ -22,7 +22,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn discard_circle_operation(
         &mut self,
-        operation_id: &crate::protocol::circle::CircleOperationId,
+        operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
         use crate::sync::store::circle_controls::CircleOperationError;
 
@@ -134,10 +134,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn reclaim_circle_epoch_access(
         &self,
-        circle_id: crate::protocol::circle::CircleId,
-        control: &crate::protocol::circle::CircleControlCoord,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<
-        Option<crate::protocol::circle_activation::CircleEpochAccess>,
+        Option<coven_protocol::circle_activation::CircleEpochAccess>,
         crate::database::DbError,
     > {
         self.database
@@ -151,7 +151,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<
         Vec<(
             StoreBatchCommitRef,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
         )>,
         crate::sync::store::owner::pull::StorePullError,
     > {
@@ -170,10 +170,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn reclaim_authorization(
         &mut self,
-        reference: &crate::protocol::reclaim::ReclaimAuthorizationRef,
+        reference: &coven_protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<
         crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .load_reclaim_authorization(reference)
@@ -182,12 +182,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) async fn reclaim_device_head(
         &mut self,
-        reference: &crate::protocol::store_commit::StoreDeviceHeadRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
+        reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
         commit: &StoreBatchCommitRef,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<crate::protocol::store_commit::StoreDeviceHead>,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::StoreDeviceHead>,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history_verifier
             .load_head(reference, registration, commit)
@@ -197,12 +197,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn reclaim_next_announcement_slot(
         &mut self,
         registration_ref: &StoreDeviceRegistrationRef,
-        registration: &crate::protocol::store_commit::StoreDeviceRegistration,
-        previous: Option<&crate::protocol::store_commit::VerifiedStoreBatchCommit>,
+        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
+        previous: Option<&coven_protocol::store_commit::VerifiedStoreBatchCommit>,
     ) -> Result<
         (
-            crate::protocol::objects::ObjectSlot,
-            Option<crate::protocol::store_commit::StoreDeviceHeadRef>,
+            coven_protocol::objects::ObjectSlot,
+            Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
         ),
         crate::sync::store::StoreError,
     > {
@@ -243,7 +243,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn bind_restore(
         self,
-        membership: crate::protocol::membership::MembershipChain,
+        membership: coven_protocol::membership::MembershipChain,
         identity: UserKeypair,
     ) -> crate::sync::store::owner::RestoringStore<'storage> {
         let database = self.database.clone();
@@ -258,8 +258,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn provider_binding(
         &self,
     ) -> Result<
-        crate::protocol::objects::ResolvedProviderBinding,
-        crate::protocol::objects::StorageError,
+        coven_protocol::objects::ResolvedProviderBinding,
+        coven_protocol::objects::StorageError,
     > {
         self.storage.provider_binding().await
     }

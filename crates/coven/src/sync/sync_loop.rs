@@ -15,12 +15,12 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info};
 
-use crate::protocol::blob::BlobTransitionObserver;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 #[cfg(test)]
 use coven_foundation::store_dir::StoreDir;
 use coven_foundation::store_dir::StoreOpenGuard;
+use coven_protocol::blob::BlobTransitionObserver;
 
 use super::cycle::SyncComponents;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
@@ -431,8 +431,7 @@ impl SyncLoopHandle {
 
     pub(crate) async fn members(
         &self,
-    ) -> Result<Vec<crate::protocol::membership::MemberInfo>, super::store::MembershipOpsError>
-    {
+    ) -> Result<Vec<coven_protocol::membership::MemberInfo>, super::store::MembershipOpsError> {
         self.inner.components.members().await
     }
 
@@ -458,7 +457,7 @@ impl SyncLoopHandle {
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<crate::protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
+    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
         self.inner
             .components
             .propose_device_exclusion(device_id)
@@ -467,7 +466,7 @@ impl SyncLoopHandle {
 
     pub(crate) async fn cancel_device_exclusion(
         &self,
-        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), String> {
         self.inner
             .components
@@ -477,7 +476,7 @@ impl SyncLoopHandle {
 
     pub(crate) async fn finalize_device_exclusion(
         &self,
-        proposal: &crate::protocol::store_commit::StoreDeviceExclusionProposalRef,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), String> {
         self.inner
             .components
@@ -488,20 +487,20 @@ impl SyncLoopHandle {
     pub(crate) async fn begin_owner_promotion(
         &self,
         device_id: crate::StoreDeviceId,
-    ) -> Result<crate::protocol::store_commit::OwnerPromotionRequest, String> {
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, String> {
         self.inner.components.begin_owner_promotion(device_id).await
     }
 
     pub(crate) async fn accept_owner_promotion(
         &self,
-        request: crate::protocol::store_commit::OwnerPromotionRequest,
-    ) -> Result<crate::protocol::store_commit::OwnerPromotionAcceptance, String> {
+        request: coven_protocol::store_commit::OwnerPromotionRequest,
+    ) -> Result<coven_protocol::store_commit::OwnerPromotionAcceptance, String> {
         self.inner.components.accept_owner_promotion(request).await
     }
 
     pub(crate) async fn finalize_owner_promotion(
         &self,
-        acceptance: crate::protocol::store_commit::OwnerPromotionAcceptance,
+        acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<(), String> {
         self.inner
             .components
@@ -691,7 +690,7 @@ impl SyncLoopHandle {
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
-        role: crate::protocol::membership::MemberRole,
+        role: coven_protocol::membership::MemberRole,
         store_name: &str,
     ) -> Result<crate::join_code::InviteCode, super::store::MembershipOpsError> {
         self.inner
@@ -722,7 +721,7 @@ impl SyncLoopHandle {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<crate::protocol::blob::DrainOutcome, crate::database::DbError> {
+    ) -> Result<coven_protocol::blob::DrainOutcome, crate::database::DbError> {
         self.inner
             .components
             .drain_uploads(self.inner.clock.as_ref(), self.inner.observer.as_deref())
@@ -1061,7 +1060,7 @@ fn reply_circle_command<T>(
     }
 }
 
-fn storage_check_failure_status(error: &crate::protocol::objects::StorageError) -> SyncLoopStatus {
+fn storage_check_failure_status(error: &coven_protocol::objects::StorageError) -> SyncLoopStatus {
     if error.is_transport() {
         SyncLoopStatus::Offline
     } else {

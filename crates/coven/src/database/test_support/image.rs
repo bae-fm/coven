@@ -186,7 +186,7 @@ impl DatabaseImageTest {
             String,
             String,
             String,
-            crate::protocol::remote_object::RemoteObjectRecord,
+            coven_protocol::remote_object::RemoteObjectRecord,
         ),
         DbError,
     > {
@@ -220,8 +220,8 @@ impl DatabaseImageTest {
 
     pub(crate) fn install_snapshot_blob_binding(
         &self,
-        binding: &crate::protocol::audience_package::RowBlobLocatorBinding,
-        remote: &crate::protocol::remote_object::RemoteObjectRecord,
+        binding: &coven_protocol::audience_package::RowBlobLocatorBinding,
+        remote: &coven_protocol::remote_object::RemoteObjectRecord,
     ) -> Result<(), DbError> {
         let object_id = remote.object_id().to_string();
         self.connection
@@ -254,7 +254,7 @@ impl DatabaseImageTest {
                     binding.column(),
                     binding.row_stamp(),
                     serde_json::to_string(
-                        &crate::protocol::audience_package::PackageAudience::Store
+                        &coven_protocol::audience_package::PackageAudience::Store
                     )
                     .map_err(|error| DbError::Message(error.to_string()))?,
                     object_id,

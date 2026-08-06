@@ -80,7 +80,7 @@ impl StoreSync {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<crate::protocol::blob::DrainOutcome, SyncError> {
+    ) -> Result<coven_protocol::blob::DrainOutcome, SyncError> {
         self.active()
             .ok_or(SyncError::LoopNotRunning)?
             .drain_uploads()

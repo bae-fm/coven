@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 use super::outbound::{query_column_text, resolve_root};
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
 use crate::database::{foreign_key_edges, quote_ident, ForeignKeyEdge};
-use crate::protocol::synced_schema::{RowIdentity, SyncedTable};
+use coven_protocol::synced_schema::{RowIdentity, SyncedTable};
 
 /// How a synced table relates to the gate.
 pub(super) enum TableGate {

@@ -1,8 +1,5 @@
 use super::*;
 
-use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
-use crate::protocol::objects::ObjectSlot;
-use crate::protocol::synced_schema::BlobDecl;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
@@ -15,6 +12,9 @@ use async_trait::async_trait;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::test_keyring;
+use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
+use coven_protocol::objects::ObjectSlot;
+use coven_protocol::synced_schema::BlobDecl;
 use rusqlite::{params, OptionalExtension};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -957,7 +957,7 @@ async fn write_inserts_row_and_host_provided_blob() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new(tmp.path());
     let bytes = b"piece-bytes".to_vec();
-    let hash = crate::protocol::blob::content_hash(&bytes);
+    let hash = coven_protocol::blob::content_hash(&bytes);
     handle
         .write(
             {
@@ -1012,7 +1012,7 @@ async fn orphaned_final_blob_is_replaced_by_next_write() {
                         "file-orphan",
                         "orphaaaa",
                         15i64,
-                        crate::protocol::blob::content_hash(b"committed bytes"),
+                        coven_protocol::blob::content_hash(b"committed bytes"),
                         sql.stamp()
                     ],
                 )?;
@@ -1046,7 +1046,7 @@ async fn put_blob_rejects_id_already_referenced_by_a_row() {
                         "file-original",
                         "dupeaaaa",
                         8i64,
-                        crate::protocol::blob::content_hash(b"original"),
+                        coven_protocol::blob::content_hash(b"original"),
                         sql.stamp()
                     ],
                 )?;
@@ -1070,7 +1070,7 @@ async fn put_blob_rejects_id_already_referenced_by_a_row() {
                         "file-replacement",
                         "dupeaaaa",
                         11i64,
-                        crate::protocol::blob::content_hash(b"replacement"),
+                        coven_protocol::blob::content_hash(b"replacement"),
                         sql.stamp()
                     ],
                 )?;
@@ -1110,7 +1110,7 @@ async fn remote_root_host_provided_write_reads_staging_through_handle_before_upl
     let (_tmp, handle) = open_remote_root_files_handle();
     let expected = b"remote-root-host-provided-staging-bytes".to_vec();
     let bytes = expected.clone();
-    let hash = crate::protocol::blob::content_hash(&bytes);
+    let hash = coven_protocol::blob::content_hash(&bytes);
 
     handle
         .write(
@@ -1234,7 +1234,7 @@ impl RemoteOnlyStoreBlob {
             .expect("install Circle authority");
 
         let bytes = b"remote-only-circle-blob".to_vec();
-        let hash = crate::protocol::blob::content_hash(&bytes);
+        let hash = coven_protocol::blob::content_hash(&bytes);
         handle
             .write(
                 {
@@ -1498,7 +1498,7 @@ async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() 
             .await
             .expect("load blob after failed Local move")
             .authority(),
-        crate::protocol::blob::RowBlobAuthority::Remote(_)
+        coven_protocol::blob::RowBlobAuthority::Remote(_)
     ));
 
     fixture
@@ -1549,7 +1549,7 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
         .handle
         .invite_member(
             &coven_keys::keys::public_key_hex(
-                &crate::protocol::circle_activation_test_fixtures::test_circle_owner_keypair(),
+                &coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair(),
             ),
             None,
             crate::MemberRole::Member,
@@ -1652,7 +1652,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
 
                 let expected = b"public materialized blob".to_vec();
                 let bytes = expected.clone();
-                let hash = crate::protocol::blob::content_hash(&bytes);
+                let hash = coven_protocol::blob::content_hash(&bytes);
                 let receipt = handle
                     .write(
                         {
@@ -1803,7 +1803,7 @@ async fn replacement_deletes_old_blob_after_sql_drops_reference() {
                 params![
                     "file-1",
                     "oldaaaa",
-                    crate::protocol::blob::content_hash(b"old"),
+                    coven_protocol::blob::content_hash(b"old"),
                     sql.stamp()
                 ],
             )?;
@@ -1836,7 +1836,7 @@ async fn replacement_deletes_old_blob_after_sql_drops_reference() {
                          _updated_at = ?3 WHERE id = 'file-1'",
                     params![
                         "newaaaa",
-                        crate::protocol::blob::content_hash(b"new"),
+                        coven_protocol::blob::content_hash(b"new"),
                         sql.stamp()
                     ],
                 )?;
@@ -1873,7 +1873,7 @@ impl PendingReplacement {
                     sql.execute(
                         "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                          VALUES ('owned-file', 'ownedaaa', 5, ?1, ?2)",
-                        params![crate::protocol::blob::content_hash(b"first"), sql.stamp()],
+                        params![coven_protocol::blob::content_hash(b"first"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -1903,7 +1903,7 @@ impl PendingReplacement {
                         "UPDATE files SET blob_id = 'ownedbbb', size = 6, hash = ?1, \
                          _updated_at = ?2 \
                          WHERE id = 'owned-file'",
-                        params![crate::protocol::blob::content_hash(b"second"), sql.stamp()],
+                        params![coven_protocol::blob::content_hash(b"second"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -1999,7 +1999,7 @@ async fn pending_write_owns_blob_bytes_until_its_publication() {
                                 "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                          VALUES ('overwrite', 'ownedaaa', 11, ?1, ?2)",
                                 params![
-                                    crate::protocol::blob::content_hash(b"overwritten"),
+                                    coven_protocol::blob::content_hash(b"overwritten"),
                                     sql.stamp()
                                 ],
                             )?;
@@ -2064,7 +2064,7 @@ async fn author_delete_drops_all_local_blob_copies() {
                 params![
                     "file-1",
                     "oldcccc",
-                    crate::protocol::blob::content_hash(b"old"),
+                    coven_protocol::blob::content_hash(b"old"),
                     sql.stamp()
                 ],
             )?;
@@ -2152,7 +2152,7 @@ async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
                 params![
                     "file-1",
                     "oldddddd",
-                    crate::protocol::blob::content_hash(b"old"),
+                    coven_protocol::blob::content_hash(b"old"),
                     sql.stamp()
                 ],
             )?;
@@ -2257,7 +2257,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
     let blob_id = "shared01";
     handle
         .sql(move |sql| {
-            let hash = crate::protocol::blob::content_hash(b"live");
+            let hash = coven_protocol::blob::content_hash(b"live");
             for id in ["remote-deletes", "still-live"] {
                 sql.execute(
                     "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
@@ -2299,7 +2299,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
                 sql.execute(
                     "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                          VALUES ('remote-deletes', 'shared01', 4, ?1, ?2)",
-                    params![crate::protocol::blob::content_hash(b"live"), sql.stamp()],
+                    params![coven_protocol::blob::content_hash(b"live"), sql.stamp()],
                 )?;
                 Ok(())
             },
@@ -2415,7 +2415,7 @@ async fn replacement_is_rejected_while_sql_still_references_old_blob() {
                 params![
                     "file-1",
                     "oldbbbb",
-                    crate::protocol::blob::content_hash(b"old"),
+                    coven_protocol::blob::content_hash(b"old"),
                     sql.stamp()
                 ],
             )?;
@@ -2539,7 +2539,7 @@ async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
                             "winner",
                             "raceblob",
                             9i64,
-                            crate::protocol::blob::content_hash(b"committed"),
+                            coven_protocol::blob::content_hash(b"committed"),
                             sql.stamp()
                         ],
                     )?;
@@ -2674,7 +2674,7 @@ impl CloudHome for GateCloudHome {
 impl ExactSlotStorage for GateCloudHome {
     async fn provider_binding(
         &self,
-    ) -> Result<crate::protocol::objects::ResolvedProviderBinding, CloudHomeError> {
+    ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
         self.gate().await;
         ExactSlotStorage::provider_binding(&self.inner).await
     }
@@ -3013,7 +3013,7 @@ async fn read_only_handle_reads_a_host_provided_blob() {
         .expect("open writer");
 
     let bytes = b"read-only-handle-serves-these-blob-bytes".to_vec();
-    let hash = crate::protocol::blob::content_hash(&bytes);
+    let hash = coven_protocol::blob::content_hash(&bytes);
     writer
         .write(
             {
@@ -3081,7 +3081,7 @@ async fn concurrent_same_blob_cache_writes_never_tear() {
     let dest = dir
         .cache_blob_path(
             "media-files",
-            crate::protocol::store_commit::ObjectHash::digest(b"raceblob"),
+            coven_protocol::store_commit::ObjectHash::digest(b"raceblob"),
         )
         .expect("cache path");
     if let Some(parent) = dest.parent() {

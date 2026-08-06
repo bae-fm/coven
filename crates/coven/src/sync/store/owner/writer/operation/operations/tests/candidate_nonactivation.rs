@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::store_commit::StoreBatchCommitDeletionTarget;
+use coven_protocol::store_commit::StoreBatchCommitDeletionTarget;
 
 #[tokio::test]
 async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
@@ -44,7 +44,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
 
     let mut wrong_slot = observation.clone();
     wrong_slot.set_expected_slot_for_test(
-        crate::protocol::objects::ObjectSlot::logical("store-v1/heads/wrong-slot.json".to_string())
+        coven_protocol::objects::ObjectSlot::logical("store-v1/heads/wrong-slot.json".to_string())
             .expect("valid wrong slot"),
     );
     assert!(wrong_slot
@@ -69,7 +69,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         let bytes = commit.to_bytes();
         StoreBatchCommitDeletionTarget {
             coord: candidate.coord.clone(),
-            object: crate::protocol::objects::ExactObjectRef::new(
+            object: coven_protocol::objects::ExactObjectRef::new(
                 candidate.object.slot().clone(),
                 bytes.len() as u64,
                 ObjectHash::digest(&bytes),
@@ -108,7 +108,7 @@ async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
         .is_err());
     let mut noncanonical = candidate;
     noncanonical.canonical_signed_bytes.push(b' ');
-    noncanonical.object = crate::protocol::objects::ExactObjectRef::new(
+    noncanonical.object = coven_protocol::objects::ExactObjectRef::new(
         noncanonical.object.slot().clone(),
         noncanonical.canonical_signed_bytes.len() as u64,
         ObjectHash::digest(&noncanonical.canonical_signed_bytes),

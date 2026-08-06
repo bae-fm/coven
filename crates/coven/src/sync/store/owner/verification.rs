@@ -5,21 +5,24 @@ use super::verified_history::registration::{
     registration_attempt_error, RegistrationLoadError,
 };
 use crate::database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
-use crate::protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
-use crate::protocol::objects::{
+use crate::storage::run_blocking_object_verification;
+use crate::storage::SyncStorage;
+use crate::sync::store::StoreError;
+use coven_protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
+use coven_protocol::objects::{
     decode_protocol_object, verify_store_root, StoreObjectError, VerifiedObject,
 };
-use crate::protocol::objects::{
+use coven_protocol::objects::{
     ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
 };
-use crate::protocol::reclaim::{
+use coven_protocol::reclaim::{
     reclaim_authorization_semantic_prefix, reclaim_evidence_semantic_prefix,
     reclaim_receipt_semantic_prefix, ReclaimAuthorization, ReclaimAuthorizationRef,
     ReclaimEvidence, ReclaimReceipt, ReclaimReceiptRef,
 };
-use crate::protocol::remote_object;
-use crate::protocol::store_commit::*;
-use crate::protocol::store_commit::{
+use coven_protocol::remote_object;
+use coven_protocol::store_commit::*;
+use coven_protocol::store_commit::{
     ack_slot_prefix, device_exclusion_outcome_semantic_prefix,
     device_exclusion_proposal_semantic_prefix, device_join_attempt_semantic_prefix,
     device_join_outcome_semantic_prefix, founder_registration_semantic_prefix,
@@ -29,9 +32,6 @@ use crate::protocol::store_commit::{
     StoreDeviceExclusionProposal, StoreDeviceExclusionProposalRef, StoreDeviceHeadRef,
     StoreSnapshotRef,
 };
-use crate::storage::run_blocking_object_verification;
-use crate::storage::SyncStorage;
-use crate::sync::store::StoreError;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod membership;
@@ -117,7 +117,7 @@ impl VerifiedMergeMembershipClosure {
 }
 
 pub(crate) struct ExactAnnouncementPath {
-    next_slot: crate::protocol::objects::ObjectSlot,
+    next_slot: coven_protocol::objects::ObjectSlot,
     accepted_head: Option<StoreDeviceHeadRef>,
     commits: Vec<StoreBatchCommitRef>,
 }

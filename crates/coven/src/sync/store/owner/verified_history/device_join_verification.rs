@@ -31,7 +31,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         activation: LoadedDeviceJoinCleanupActivation,
     ) -> Result<
-        crate::protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
+        coven_protocol::store_commit::device_join_exchange::JoinerJoinTerminal,
         StorePullError,
     > {
         let membership = self

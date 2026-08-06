@@ -1,11 +1,11 @@
-use crate::protocol::membership::{
+use crate::sync::store::membership::AnchoredChainError;
+use coven_protocol::membership::{
     MembershipChain, MembershipHeadRef, StoreMembershipConflictResolutionRef,
 };
-use crate::protocol::store_commit::{
+use coven_protocol::store_commit::{
     OwnerPromotionAcceptance, OwnerPromotionRequest, StoreDeviceRegistration,
     StoreDeviceRegistrationRef,
 };
-use crate::sync::store::membership::AnchoredChainError;
 
 use super::{MergeHistoryVerifier, StorePullError, VerifiedOwnerPromotionRequestActivation};
 
@@ -50,8 +50,8 @@ impl<'operation, 'storage> OwnerPromotionHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<
-        crate::protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        crate::protocol::objects::StoreObjectError,
+        coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        coven_protocol::objects::StoreObjectError,
     > {
         self.history.load_registration(reference).await
     }

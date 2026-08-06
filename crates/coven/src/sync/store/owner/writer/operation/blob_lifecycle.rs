@@ -191,7 +191,7 @@ impl AuthorizedWriterOperation<'_> {
 
             let blob_present = match self.storage.verify_blob_object(&tombstone.stored).await {
                 Ok(()) => true,
-                Err(crate::protocol::objects::StorageError::NotFound(_)) => false,
+                Err(coven_protocol::objects::StorageError::NotFound(_)) => false,
                 Err(error) => {
                     return Err(format!(
                         "Failed to check blob presence for {tombstone_cloud_key} before reclaim: {error}"

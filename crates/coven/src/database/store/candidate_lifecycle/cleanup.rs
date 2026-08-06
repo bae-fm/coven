@@ -60,11 +60,11 @@ impl StoreDatabase {
                 Ok(matches!(
                     remote,
                     RemoteObjectRecord::CandidateCommit(
-                        crate::protocol::remote_object::CandidateCommitRecord {
+                        coven_protocol::remote_object::CandidateCommitRecord {
                             state:
-                                crate::protocol::remote_object::CandidateCommitState::CleanupPending {
-                                    proof: crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                                        | crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
+                                coven_protocol::remote_object::CandidateCommitState::CleanupPending {
+                                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                                        | coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
                                 },
                             ..
                         }
@@ -295,7 +295,7 @@ impl StoreDatabase {
 
     pub(crate) async fn merge_retraction_cleanup_verification(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
         self.connection.call(move |conn| {
@@ -310,13 +310,13 @@ impl StoreDatabase {
                     )
                 })?;
             let authority = match proof {
-                crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                     exclusion,
                     ..
                 } => TerminalCandidateAuthority::AuthorExclusion(
                     load_author_exclusion_activation_locator_on(conn, &root, exclusion)?,
                 ),
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
                     grant_id,
                     membership,
                     activation_commit,
@@ -327,8 +327,8 @@ impl StoreDatabase {
                     activation_commit: activation_commit.clone(),
                     activation_head: activation_head.clone(),
                 },
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
-                    let durable = crate::protocol::remote_object::CandidateNonactivation::from_durable_parts(
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeDependencyRetraction { .. } => {
+                    let durable = coven_protocol::remote_object::CandidateNonactivation::from_durable_parts(
                         &candidate,
                         &prepared.commit,
                         proof.clone(),
@@ -336,11 +336,11 @@ impl StoreDatabase {
                     .map_err(|error| DbError::Message(error.to_string()))?;
                     validate_terminal_nonactivation_authority_on(conn, &root, &durable)?;
                     TerminalCandidateAuthority::DependencyRetraction(
-                        crate::protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
+                        coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                             .map_err(|error| DbError::Message(error.to_string()))?,
                     )
                 }
-                crate::protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
+                coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
                     return Err(DbError::Message(
                         "Merge retraction cleanup has nonterminal proof".to_string(),
                     ));
@@ -376,9 +376,9 @@ impl StoreDatabase {
 
     pub(crate) async fn confirm_merge_retraction_cleanup_nonactivation(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
-        verified: crate::protocol::remote_object::VerifiedCandidateNonactivation,
+        verified: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
@@ -398,7 +398,7 @@ impl StoreDatabase {
                         "verified Merge retraction cleanup names another candidate".to_string(),
                     ));
                 }
-                if let crate::protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                if let coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                     exclusion,
                     accepted_cut,
                     activation_head,

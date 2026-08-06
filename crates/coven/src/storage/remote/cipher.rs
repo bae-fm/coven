@@ -199,7 +199,7 @@ impl CloudCipher {
         // This is exactly the master-scoped blob path: `encryption_for_scope`
         // maps `Master` to the store key itself.
         self.seal_scoped(
-            crate::protocol::blob::BlobScope::Master,
+            coven_protocol::blob::BlobScope::Master,
             plaintext,
             aad_context,
         )
@@ -211,11 +211,7 @@ impl CloudCipher {
         stored: Vec<u8>,
         aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
-        self.open_scoped(
-            crate::protocol::blob::BlobScope::Master,
-            stored,
-            aad_context,
-        )
+        self.open_scoped(coven_protocol::blob::BlobScope::Master, stored, aad_context)
     }
 
     /// Protect a blob under its scope. Encrypted blobs carry the current
@@ -223,7 +219,7 @@ impl CloudCipher {
     /// generation to open with.
     pub(crate) fn seal_scoped(
         &self,
-        scope: crate::protocol::blob::BlobScope,
+        scope: coven_protocol::blob::BlobScope,
         plaintext: Vec<u8>,
         aad_context: &[u8],
     ) -> Vec<u8> {
@@ -238,7 +234,7 @@ impl CloudCipher {
     /// Recover a blob under its resolved scope. Inverse of [`Self::seal_scoped`].
     pub(crate) fn open_scoped(
         &self,
-        scope: crate::protocol::blob::BlobScope,
+        scope: coven_protocol::blob::BlobScope,
         stored: Vec<u8>,
         aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
@@ -281,7 +277,7 @@ impl CloudCipher {
     /// used by the upload drain.
     pub(crate) async fn open_body(
         &self,
-        scope: crate::protocol::blob::BlobScope,
+        scope: coven_protocol::blob::BlobScope,
         file_path: &std::path::Path,
         aad_context: &[u8],
         chunk_size: std::num::NonZeroU32,
@@ -308,17 +304,17 @@ impl CloudCipher {
 
 /// The `EncryptionService` a blob's `scope` selects, against `master`: the
 /// store master itself, or a per-scope key derived from it. The blob storage
-/// methods and the outbox drain both turn a [`crate::protocol::blob::BlobScope`] into a
+/// methods and the outbox drain both turn a [`coven_protocol::blob::BlobScope`] into a
 /// key the same way, so they share this one mapping. Only an encrypted home has
 /// per-scope keys, so this is reached only from the [`CloudCipher::Encrypted`]
 /// branches.
 pub(crate) fn encryption_for_scope(
-    scope: crate::protocol::blob::BlobScope,
+    scope: coven_protocol::blob::BlobScope,
     master: &EncryptionService,
 ) -> EncryptionService {
     match scope {
-        crate::protocol::blob::BlobScope::Master => master.clone(),
-        crate::protocol::blob::BlobScope::Derived(s) => master.derive_scoped(&s),
+        coven_protocol::blob::BlobScope::Master => master.clone(),
+        coven_protocol::blob::BlobScope::Derived(s) => master.derive_scoped(&s),
     }
 }
 
@@ -361,7 +357,7 @@ pub(super) struct ScopedBlobSealing {
 }
 
 impl ScopedBlobSealing {
-    fn new(scope: crate::protocol::blob::BlobScope, master: &EncryptionService) -> Self {
+    fn new(scope: coven_protocol::blob::BlobScope, master: &EncryptionService) -> Self {
         Self {
             encryption: encryption_for_scope(scope, master),
             key_tag: KeyTag::write(&master.seal_fingerprint()),
@@ -402,20 +398,20 @@ impl ScopedBlobSealing {
 }
 
 pub(super) fn opening_encryption_for_scope(
-    scope: crate::protocol::blob::BlobScope,
+    scope: coven_protocol::blob::BlobScope,
     master: &EncryptionService,
     fingerprint: &[u8; 32],
 ) -> Result<EncryptionService, EncryptionError> {
     match scope {
-        crate::protocol::blob::BlobScope::Master => master.service_for_fingerprint(fingerprint),
-        crate::protocol::blob::BlobScope::Derived(scope_id) => {
+        coven_protocol::blob::BlobScope::Master => master.service_for_fingerprint(fingerprint),
+        coven_protocol::blob::BlobScope::Derived(scope_id) => {
             master.derive_scoped_for_fingerprint(fingerprint, &scope_id)
         }
     }
 }
 
 pub(super) fn open_scoped_encrypted(
-    scope: crate::protocol::blob::BlobScope,
+    scope: coven_protocol::blob::BlobScope,
     master: &EncryptionService,
     stored: &[u8],
     aad_context: &[u8],

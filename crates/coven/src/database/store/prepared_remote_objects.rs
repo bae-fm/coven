@@ -1,9 +1,9 @@
 use crate::database::*;
 #[cfg(test)]
-use crate::protocol::objects::ExactObjectRef;
-use crate::protocol::remote_object::{remote_object_id, RemoteObjectRecord};
-use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
-use crate::write::WriteId;
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
+use coven_protocol::write::WriteId;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 
@@ -302,12 +302,12 @@ impl StoreDatabase {
                 RemoteObjectRecord::RetainedAuthority(record)
                     if matches!(
                         &record.identity.domain,
-                        crate::protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
+                        coven_protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
                             reference
                         } if reference == &commit
                     ) && matches!(
                         &record.state,
-                        crate::protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                        coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
                             ownership
                         } if ownership.activated.contains(&commit)
                     )
@@ -328,7 +328,7 @@ impl StoreDatabase {
 
     pub(crate) async fn mark_store_head_uploaded(
         &self,
-        head: crate::protocol::store_commit::StoreDeviceHeadRef,
+        head: coven_protocol::store_commit::StoreDeviceHeadRef,
     ) -> Result<(), DbError> {
         self.connection
             .call(move |conn| {
@@ -339,7 +339,7 @@ impl StoreDatabase {
                     RemoteObjectRecord::RetainedAuthority(record)
                         if matches!(
                             &record.identity.domain,
-                            crate::protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
+                            coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                                 reference
                             } if reference == &head
                         )
@@ -380,7 +380,7 @@ impl StoreDatabase {
                         .verify_stored_facts(
                             spool_path,
                             size,
-                            crate::protocol::store_commit::ObjectHash::from_digest(digest),
+                            coven_protocol::store_commit::ObjectHash::from_digest(digest),
                         )
                         .map_err(|error| DbError::context("prepared blob spool", error))?;
                 }
@@ -397,7 +397,7 @@ impl StoreDatabase {
     pub(crate) async fn protocol_inert_object(
         &self,
         object: ExactObjectRef,
-    ) -> Result<Option<crate::protocol::remote_object::ProtocolInertObject>, DbError> {
+    ) -> Result<Option<coven_protocol::remote_object::ProtocolInertObject>, DbError> {
         self.connection
             .call(move |conn| {
                 let object_id = remote_object_id(&object);
@@ -422,19 +422,19 @@ fn remote_object_is_uploaded(remote: &RemoteObjectRecord) -> bool {
     match remote {
         RemoteObjectRecord::CandidateCommit(record) => matches!(
             &record.state,
-            crate::protocol::remote_object::CandidateCommitState::UploadedVerified
+            coven_protocol::remote_object::CandidateCommitState::UploadedVerified
         ),
         RemoteObjectRecord::CandidateExclusive(record) => matches!(
             &record.state,
-            crate::protocol::remote_object::CandidateObjectState::UploadedVerified { .. }
+            coven_protocol::remote_object::CandidateObjectState::UploadedVerified { .. }
         ),
         RemoteObjectRecord::RetainedAuthority(record) => matches!(
             &record.state,
-            crate::protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified { .. }
+            coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified { .. }
         ),
         RemoteObjectRecord::SharedLiveSet(record) => matches!(
             &record.state,
-            crate::protocol::remote_object::OwnedObjectState::UploadedVerified { .. }
+            coven_protocol::remote_object::OwnedObjectState::UploadedVerified { .. }
         ),
     }
 }

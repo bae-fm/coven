@@ -10,16 +10,16 @@
 use super::cache::BlobCacheError;
 use super::StoreBlobCache;
 use crate::database::{Database, StoreDatabase};
-use crate::protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
-use crate::protocol::store_commit::ObjectHash;
-use crate::protocol::synced_schema::BlobDecl;
-use crate::protocol::synced_schema::SyncedTable;
 use crate::storage::SyncStorage;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, photo_decl, read_test_db,
     read_test_db_with_download_limit, remote_root_db, temp_store_dir, test_migrations, TestStore,
 };
+use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
+use coven_protocol::store_commit::ObjectHash;
+use coven_protocol::synced_schema::BlobDecl;
+use coven_protocol::synced_schema::SyncedTable;
 
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
@@ -56,7 +56,7 @@ fn blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
     }
 }
 
-fn locator_hash(reference: &crate::protocol::blob::RowBlobRef) -> ObjectHash {
+fn locator_hash(reference: &coven_protocol::blob::RowBlobRef) -> ObjectHash {
     reference
         .stored()
         .expect("Remote row blob reference has exact storage")
@@ -66,7 +66,7 @@ fn locator_hash(reference: &crate::protocol::blob::RowBlobRef) -> ObjectHash {
 
 fn cache_path(
     store_dir: &coven_foundation::store_dir::StoreDir,
-    reference: &crate::protocol::blob::RowBlobRef,
+    reference: &coven_protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     store_dir
         .cache_blob_path(&reference.blob().namespace, locator_hash(reference))
@@ -75,7 +75,7 @@ fn cache_path(
 
 fn pinned_path(
     store_dir: &coven_foundation::store_dir::StoreDir,
-    reference: &crate::protocol::blob::RowBlobRef,
+    reference: &coven_protocol::blob::RowBlobRef,
 ) -> std::path::PathBuf {
     store_dir
         .pinned_blob_path(&reference.blob().namespace, locator_hash(reference))
@@ -102,15 +102,15 @@ fn plain_blob_db(decl: BlobDecl) -> Database {
         vec![
             SyncedTable::new(
                 "notes",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
             SyncedTable::new(
                 "note_tags",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             ),
             SyncedTable::new(
                 "note_photos",
-                crate::protocol::synced_schema::RowIdentity::SharedKey,
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
             )
             .carries_blob(decl),
         ],
@@ -147,7 +147,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
         id: &str,
         namespace: &str,
         bytes: &[u8],
-    ) -> crate::protocol::blob::RowBlobRef {
+    ) -> coven_protocol::blob::RowBlobRef {
         self.install_for_row("note_photos", id, namespace, bytes)
             .await
     }
@@ -158,7 +158,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
         id: &str,
         namespace: &str,
         bytes: &[u8],
-    ) -> crate::protocol::blob::RowBlobRef {
+    ) -> coven_protocol::blob::RowBlobRef {
         self.bind_for_row(table, id, namespace, bytes).await;
         self.database
             .row_blob_ref(table, id)
@@ -199,7 +199,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
         id: &str,
         namespace: &str,
         bytes: &[u8],
-        owner: crate::protocol::store_commit::StoreBatchCommitRef,
+        owner: coven_protocol::store_commit::StoreBatchCommitRef,
     ) {
         let stored = self
             .store
@@ -214,7 +214,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
     async fn install_many(
         &self,
         count: usize,
-    ) -> (Vec<crate::protocol::blob::RowBlobRef>, Vec<Vec<u8>>) {
+    ) -> (Vec<coven_protocol::blob::RowBlobRef>, Vec<Vec<u8>>) {
         let mut blobs = Vec::new();
         let mut all_bytes = Vec::new();
         for i in 0..count {
@@ -429,7 +429,7 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     let first_path = cache_path(&store_dir, &first);
 
     let second_bytes = b"second exact version with different bytes";
-    let second_hash = crate::protocol::blob::content_hash(second_bytes);
+    let second_hash = coven_protocol::blob::content_hash(second_bytes);
     let second_size = second_bytes.len() as i64;
     let id_for_update = id.to_string();
     db.test_sql(move |conn| {
@@ -746,7 +746,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('ph01abcd', 'n1', 'attach', {}, '{}', '0000000001000-0000-dev1', '2026-01-01')",
             cover.len(),
-            crate::protocol::blob::content_hash(cover),
+            coven_protocol::blob::content_hash(cover),
         ),
     )
     .await;
@@ -1034,7 +1034,7 @@ async fn cache_lazy_fetches_on_first_read() {
              VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('aud01234', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        crate::protocol::blob::content_hash(&bytes),
+        coven_protocol::blob::content_hash(&bytes),
     ))
     .await;
     crate::database::StoreDatabase::new(&db1)
@@ -1961,7 +1961,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
 
     // Missing file: a ref pointing at a path that does not exist.
     let missing = blob_ref("extm-aaaa", "audio", CacheFill::CacheLazy);
-    let missing_hash = crate::protocol::blob::content_hash(&vec![0; 1234]);
+    let missing_hash = coven_protocol::blob::content_hash(&vec![0; 1234]);
     db.plant_blob_row_with_facts_for_test(&missing.id, false, 1234, Some(&missing_hash))
         .await;
     storage
@@ -1991,7 +1991,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
         .create_exact_opaque_blob(&mism.namespace, &mism.id, &cloud_bytes)
         .await;
     let actual = ramp(2000);
-    let mism_hash = crate::protocol::blob::content_hash(&actual);
+    let mism_hash = coven_protocol::blob::content_hash(&actual);
     db.plant_blob_row_with_facts_for_test(
         &mism.id,
         false,
@@ -2390,7 +2390,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
              VALUES ('n1', 'RemoteRoot', NULL, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('lazy0001', 'n1', 'cover', 16, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        crate::protocol::blob::content_hash(b"LAZY-REMOTE-ROOT"),
+        coven_protocol::blob::content_hash(b"LAZY-REMOTE-ROOT"),
     ))
     .await;
     assert!(
@@ -2471,7 +2471,7 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
     let blob = blob_ref("extn-aaaa", "audio", CacheFill::CacheLazy);
     // Gate Local + the BlobRef's user-provided provenance ⇒ the external arm, but no
     // ref is registered. A cloud copy exists as a decoy a store-probing read would serve.
-    let declared_hash = crate::protocol::blob::content_hash(b"CLOUD-DECOY");
+    let declared_hash = coven_protocol::blob::content_hash(b"CLOUD-DECOY");
     db.plant_blob_row_with_facts_for_test(&blob.id, false, 11, Some(&declared_hash))
         .await;
     storage
@@ -2519,7 +2519,7 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
     let (_tmp, ld) = temp_store_dir();
 
     let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
-    let declared_hash = crate::protocol::blob::content_hash(b"CLOUD-DECOY");
+    let declared_hash = coven_protocol::blob::content_hash(b"CLOUD-DECOY");
     db.plant_blob_row_with_facts_for_test(&blob.id, false, 11, Some(&declared_hash))
         .await;
 
@@ -2626,8 +2626,8 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     // One id carried by a row in each table, under different gates: note_photos
     // (ns_local) below a Local note, note_covers (ns_remote) below a Remote note.
     let id = "dup0aaaa";
-    let local_hash = crate::protocol::blob::content_hash(b"LOCAL-STORE-BYTES");
-    let remote_hash = crate::protocol::blob::content_hash(b"REMOTE-CLOUD-BYTES");
+    let local_hash = coven_protocol::blob::content_hash(b"LOCAL-STORE-BYTES");
+    let remote_hash = coven_protocol::blob::content_hash(b"REMOTE-CLOUD-BYTES");
     db.test_sql(move |conn| {
         conn.execute(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
@@ -2975,7 +2975,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
              VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('mir0aaaa', 'n1', 'attach', 500, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            crate::protocol::blob::content_hash(&[9u8; 500]),
+            coven_protocol::blob::content_hash(&[9u8; 500]),
         ),
     )
     .await;
@@ -3015,7 +3015,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     // Also user-pin a CacheLazy blob (a different namespace) into pinned/.
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
     let lazy_bytes = [7u8; 500];
-    let lazy_hash = crate::protocol::blob::content_hash(&lazy_bytes);
+    let lazy_hash = coven_protocol::blob::content_hash(&lazy_bytes);
     db2.test_sql(move |conn| {
         conn.execute(
             "INSERT INTO note_covers \

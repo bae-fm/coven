@@ -6,21 +6,19 @@ use std::sync::Arc;
 use crate::database::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation, StoreDatabase,
 };
-use crate::protocol::circle::{
-    CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId,
-};
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
-use crate::protocol::reclaim::*;
-use crate::protocol::store_commit::{
-    snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
-    StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
-};
 use crate::storage::{SyncStorage, VerifiedObjectWrites};
 use crate::sync::store::owner::history::{
     CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
 };
 use crate::sync::store::AuthorizedWriterOperation;
+use coven_protocol::circle::{CircleControlCoord, CircleControlState, CircleEpochOrigin, CircleId};
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use coven_protocol::reclaim::*;
+use coven_protocol::store_commit::{
+    snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
+    StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StoreReclaimResult {
@@ -88,7 +86,7 @@ pub(super) struct AuthorizedReclaim<'operation, 'storage> {
     database: StoreDatabase,
     storage: Arc<dyn SyncStorage>,
     root: StoreRootRef,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
 }
 
 impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
@@ -97,7 +95,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
         root: StoreRootRef,
-        membership: crate::protocol::membership::MembershipChain,
+        membership: coven_protocol::membership::MembershipChain,
     ) -> Self {
         Self {
             writer,
@@ -278,7 +276,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             }
             let Some((package, activation)) = binding else {
                 tracing::debug!(
-                    blob = %crate::protocol::remote_object::remote_object_id(blob.object()),
+                    blob = %coven_protocol::remote_object::remote_object_id(blob.object()),
                     "skip orphaned blob whose owning commits name no package for its audience",
                 );
                 continue;
@@ -344,7 +342,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
 
     async fn prepare_circle_authorizations(
         &mut self,
-        registrations: &[crate::protocol::store_commit::ReferencedStoreDeviceRegistration],
+        registrations: &[coven_protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
         for input in database.circle_acknowledgement_publication_inputs().await? {

@@ -1,16 +1,16 @@
 use super::*;
-use crate::protocol::membership::{AuthorHead, MembershipHeadRef};
-use crate::protocol::objects::{ProtocolObjectDomain, StoreObjectError};
-use crate::protocol::store_commit::{
+use crate::sync::store::protocol_root::*;
+use crate::sync::store::registration_object::prepare_registration_object;
+use coven_protocol::membership::{AuthorHead, MembershipHeadRef};
+use coven_protocol::objects::{ProtocolObjectDomain, StoreObjectError};
+use coven_protocol::store_commit::{
     ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
     StoreAckExclusionState, StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
     SuccessorLink,
 };
-use crate::protocol::store_creation::*;
-use crate::sync::store::protocol_root::*;
-use crate::sync::store::registration_object::prepare_registration_object;
+use coven_protocol::store_creation::*;
 use std::sync::Arc;
 
 use super::authorized_history::AuthorizedStoreHistory;
@@ -117,23 +117,22 @@ impl<'operation> FounderStoreCreation<'operation> {
             .await
             .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let probes =
-            StoreCreationProbeIds::new(crate::protocol::provider::ProviderProbeId::from_bytes(
+            StoreCreationProbeIds::new(coven_protocol::provider::ProviderProbeId::from_bytes(
                 coven_keys::encryption::generate_random_key(),
             ));
         let access =
-            crate::protocol::provider::ProviderAccessLocator::for_current_administrator(&binding)
+            coven_protocol::provider::ProviderAccessLocator::for_current_administrator(&binding)
                 .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let initialized = StoreCreationAttempt::Initialized(StoreCreationAuthority {
             creation_id: StoreCreationId::from_random_bytes(
                 coven_keys::encryption::generate_random_key(),
             ),
-            founder_grant: crate::protocol::membership::MembershipGrantId(ObjectHash::from_digest(
+            founder_grant: coven_protocol::membership::MembershipGrantId(ObjectHash::from_digest(
                 coven_keys::encryption::generate_random_key(),
             )),
-            provider_admin_grant:
-                crate::protocol::provider::ProviderAdminGrantId::from_random_bytes(
-                    coven_keys::encryption::generate_random_key(),
-                ),
+            provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId::from_random_bytes(
+                coven_keys::encryption::generate_random_key(),
+            ),
             probes,
             binding: binding.clone(),
             access,
@@ -157,7 +156,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 "durable Store creation authority differs from this creation request".to_string(),
             ));
         }
-        let allocation_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let allocation_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             ObjectHash::digest(authority.creation_id.to_string().as_bytes()),
             ProtocolObjectDomain::StoreProtocolRoot,
         );
@@ -165,7 +164,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             let root_slot = storage
                 .allocate_protocol_slot(
                     &allocation_context,
-                    crate::protocol::store_commit::store_protocol_root_logical_key(),
+                    coven_protocol::store_commit::store_protocol_root_logical_key(),
                     ".json",
                 )
                 .await
@@ -180,10 +179,10 @@ impl<'operation> FounderStoreCreation<'operation> {
             attempt = next;
         }
         if let StoreCreationAttempt::RootReserved(root) = &attempt {
-            let prefix = crate::protocol::store_commit::founder_registration_semantic_prefix(
+            let prefix = coven_protocol::store_commit::founder_registration_semantic_prefix(
                 root.authority.creation_id,
             );
-            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 allocation_context.store_root_hash(),
                 ProtocolObjectDomain::StoreDeviceRegistration,
             );
@@ -202,12 +201,12 @@ impl<'operation> FounderStoreCreation<'operation> {
             attempt = next;
         }
         if let StoreCreationAttempt::FounderRegistrationReserved(founder) = &attempt {
-            let prefix = crate::protocol::store_commit::founder_membership_head_semantic_prefix(
+            let prefix = coven_protocol::store_commit::founder_membership_head_semantic_prefix(
                 founder.root.authority.creation_id,
             );
-            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 allocation_context.store_root_hash(),
-                crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
+                coven_protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
             );
             let first_slot = storage
                 .allocate_protocol_slot(&context, &prefix, ".json")
@@ -230,7 +229,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 authority.founder_grant.clone(),
                 1,
             );
-            let context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 allocation_context.store_root_hash(),
                 ProtocolObjectDomain::OwnerRecoveryNode,
             );
@@ -296,9 +295,8 @@ impl<'operation> FounderStoreCreation<'operation> {
         let origin = StoreDeviceRegistrationOrigin::Founder {
             creation_id: authority.creation_id,
         };
-        let device =
-            crate::protocol::store_commit::StoreDeviceId::derive(root, &origin).to_string();
-        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let device = coven_protocol::store_commit::StoreDeviceId::derive(root, &origin).to_string();
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -312,11 +310,11 @@ impl<'operation> FounderStoreCreation<'operation> {
             let store_commits = DeviceStreamAnchor::StoreAnnouncements {
                 first_slot: storage
                     .allocate_protocol_slot(
-                        &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                        &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                             root.store_root_hash,
                             ProtocolObjectDomain::StoreHead,
                         ),
-                        &crate::protocol::store_commit::head_slot_prefix(&device, 1),
+                        &coven_protocol::store_commit::head_slot_prefix(&device, 1),
                         ".json",
                     )
                     .await
@@ -360,11 +358,11 @@ impl<'operation> FounderStoreCreation<'operation> {
                     snapshots: DeviceStreamAnchor::StoreSnapshots {
                         first_slot: storage
                             .allocate_protocol_slot(
-                                &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                                &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                                     root.store_root_hash,
                                     ProtocolObjectDomain::StoreSnapshotMeta,
                                 ),
-                                &crate::protocol::store_commit::snapshot_slot_prefix(&device, 0),
+                                &coven_protocol::store_commit::snapshot_slot_prefix(&device, 0),
                                 ".json",
                             )
                             .await
@@ -390,7 +388,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             attempt = next;
         }
         if let StoreCreationAttempt::FounderNextAckReserved(current) = &attempt {
-            let founder_stream = crate::protocol::membership::derive_founder_stream_id(
+            let founder_stream = coven_protocol::membership::derive_founder_stream_id(
                 &root.store_root_id.to_string(),
                 &authority.founder_pubkey,
             );
@@ -403,9 +401,9 @@ impl<'operation> FounderStoreCreation<'operation> {
             let membership = FounderMembershipPublicationReservation {
                 next_head_slot: storage
                     .allocate_protocol_slot(
-                        &crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+                        &coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                             root.store_root_hash,
-                            crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
+                            coven_protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
                         ),
                         &prefix,
                         ".json",
@@ -459,11 +457,11 @@ impl<'operation> FounderStoreCreation<'operation> {
             .probe_exact_slots(db, authority.probes.exact_slots(), &authority.binding)
             .await
             .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
-        let provider_admin = crate::protocol::provider::FounderProviderAdminGrant {
+        let provider_admin = coven_protocol::provider::FounderProviderAdminGrant {
             grant_id: authority.provider_admin_grant.clone(),
             provider: authority.binding.device.clone(),
             access: authority.access.clone(),
-            capability: crate::protocol::provider::ProviderCapabilityProof { exact_slots },
+            capability: coven_protocol::provider::ProviderCapabilityProof { exact_slots },
         };
         let founder_anchor = GrantStreamAnchor::StoreMembership {
             first_slot: reservation.membership.first_slot.clone(),
@@ -471,7 +469,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let founder_recovery = GrantStreamAnchor::OwnerRecovery {
             first_slot: reservation.recovery_slot.clone(),
         };
-        let descriptor = crate::protocol::store_commit::StoreCreationDescriptor {
+        let descriptor = coven_protocol::store_commit::StoreCreationDescriptor {
             creation_id: authority.creation_id,
             provider: authority.binding.store.clone(),
             schema_version: authority.schema_version,
@@ -488,8 +486,8 @@ impl<'operation> FounderStoreCreation<'operation> {
             .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
         let root_id = root_value.descriptor.store_root_id();
         let root_hash = root_value.object_hash();
-        let root_prefix = crate::protocol::store_commit::store_protocol_root_logical_key();
-        let root_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let root_prefix = coven_protocol::store_commit::store_protocol_root_logical_key();
+        let root_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root_hash,
             ProtocolObjectDomain::StoreProtocolRoot,
         );
@@ -513,7 +511,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let origin = StoreDeviceRegistrationOrigin::Founder {
             creation_id: authority.creation_id,
         };
-        let registration_value = crate::protocol::store_commit::StoreDeviceRegistration::signed(
+        let registration_value = coven_protocol::store_commit::StoreDeviceRegistration::signed(
             root_ref.clone(),
             origin,
             authority.binding.device.clone(),
@@ -544,7 +542,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 "founder registration has no acknowledgement anchor".to_string(),
             ));
         };
-        let ack_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root_hash,
             ProtocolObjectDomain::StoreAck,
         );
@@ -605,7 +603,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let membership = {
             let founder_head_slot = reservation.membership.first_slot.clone();
             let founder_grant = authority.founder_grant.clone();
-            let founder = crate::protocol::membership::founder_entry_for_creation(
+            let founder = coven_protocol::membership::founder_entry_for_creation(
                 &root_id.to_string(),
                 root_value.descriptor.creation_id,
                 signer,
@@ -616,21 +614,21 @@ impl<'operation> FounderStoreCreation<'operation> {
             );
             let (entry_prepared, entry_ref) =
                 crate::storage::prepare_membership_entry(storage, root_hash, &founder).await?;
-            let head_context = crate::protocol::objects::ProtocolObjectContext::signed_plaintext(
+            let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 root_hash,
-                crate::protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
+                coven_protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
             );
             let next_head_slot = &graph_reservation.membership.next_head_slot;
             let head_value = AuthorHead::signed(
                 root_id.to_string(),
-                crate::protocol::membership::MembershipHeadBody {
+                coven_protocol::membership::MembershipHeadBody {
                     author_registration: registration_ref.clone(),
                     entry: entry_ref.clone(),
                     predecessor: None,
                     resolutions: Vec::new(),
                     successor: SuccessorLink {
                         activation:
-                            crate::protocol::store_commit::StreamActivation::grant_authorized(
+                            coven_protocol::store_commit::StreamActivation::grant_authorized(
                                 root_ref.store_root_hash,
                                 registration_ref.clone(),
                                 founder_grant.clone(),
@@ -641,13 +639,13 @@ impl<'operation> FounderStoreCreation<'operation> {
                         next_slot: next_head_slot.clone(),
                     },
                 },
-                crate::protocol::membership::MembershipHeadActivation::Direct,
+                coven_protocol::membership::MembershipHeadActivation::Direct,
                 &device_signer,
             );
             let head_bytes = serde_json::to_vec(&head_value)
                 .expect("founder membership head serialization cannot fail");
             let founder_head_prefix =
-                crate::protocol::store_commit::founder_membership_head_semantic_prefix(
+                coven_protocol::store_commit::founder_membership_head_semantic_prefix(
                     authority.creation_id,
                 );
             let head_prepared = storage
@@ -666,14 +664,14 @@ impl<'operation> FounderStoreCreation<'operation> {
             let founder_bytes = serde_json::to_vec(&founder)
                 .expect("founder membership entry serialization cannot fail");
             crate::database::DurableFounderMembership {
-                entry: crate::protocol::objects::ExactProtocolObject {
+                entry: coven_protocol::objects::ExactProtocolObject {
                     value: founder,
                     bytes: founder_bytes,
                     object: entry_prepared.reference().clone(),
                     prepared: entry_prepared,
                 },
                 entry_ref,
-                head: crate::protocol::objects::ExactProtocolObject {
+                head: coven_protocol::objects::ExactProtocolObject {
                     value: head_value,
                     bytes: head_bytes,
                     object: head_prepared.reference().clone(),
@@ -683,19 +681,19 @@ impl<'operation> FounderStoreCreation<'operation> {
             }
         };
         Ok(Box::new(crate::database::DurableFounderGraph {
-            root: crate::protocol::objects::ExactProtocolObject {
+            root: coven_protocol::objects::ExactProtocolObject {
                 value: root_value,
                 bytes: root_bytes,
                 object: root_prepared.reference().clone(),
                 prepared: root_prepared,
             },
-            registration: crate::protocol::objects::ExactProtocolObject {
+            registration: coven_protocol::objects::ExactProtocolObject {
                 value: registration_value,
                 bytes: registration_bytes,
                 object: registration_prepared.reference().clone(),
                 prepared: registration_prepared,
             },
-            initial_ack: crate::protocol::objects::ExactProtocolObject {
+            initial_ack: coven_protocol::objects::ExactProtocolObject {
                 value: initial_ack_value,
                 bytes: initial_ack_bytes,
                 object: initial_ack_prepared.reference().clone(),
@@ -723,7 +721,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let mut failures = Vec::new();
         for object in objects {
             match self.storage.delete_protocol_object(&object).await {
-                Ok(()) | Err(crate::protocol::objects::StorageError::SlotCollision(_)) => {}
+                Ok(()) | Err(coven_protocol::objects::StorageError::SlotCollision(_)) => {}
                 Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
             }
         }

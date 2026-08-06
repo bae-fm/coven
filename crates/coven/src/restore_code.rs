@@ -14,17 +14,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::membership::MembershipFloor;
-#[cfg(test)]
-use crate::protocol::membership::{MembershipCoord, MembershipGrantId, MembershipHeadRef};
-#[cfg(test)]
-use crate::protocol::store_commit::ObjectHash;
 use crate::storage::cloud::CloudHomeJoinInfo;
 use coven_foundation::code_envelope::{self, EnvelopeError};
+use coven_protocol::membership::MembershipFloor;
+#[cfg(test)]
+use coven_protocol::membership::{MembershipCoord, MembershipGrantId, MembershipHeadRef};
+#[cfg(test)]
+use coven_protocol::store_commit::ObjectHash;
 
 pub(crate) const RESTORE_CODE_VERSION: u8 = 4;
 
-use crate::protocol::recovery::RestoreAuthority;
+use coven_protocol::recovery::RestoreAuthority;
 
 /// Everything needed to restore a store from cloud storage.
 ///
@@ -51,7 +51,7 @@ pub struct RestoreCode {
     /// recovers your own zone, not one shared to you, so
     /// [`decode_restore_code`] rejects it.
     pub provider: CloudHomeJoinInfo,
-    pub store_root: crate::protocol::store_commit::StoreRootRef,
+    pub store_root: coven_protocol::store_commit::StoreRootRef,
     pub founder_pubkey: String,
     /// The exact causal membership heads the restorer must observe.
     pub membership_floor: MembershipFloor,
@@ -227,9 +227,9 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::recovery::OwnerRecoveryAuthority;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use coven_protocol::recovery::OwnerRecoveryAuthority;
 
     fn test_sk() -> String {
         hex::encode([0xAB_u8; 64])
@@ -242,13 +242,13 @@ mod tests {
         .to_serialized()
     }
 
-    fn test_store_root() -> crate::protocol::store_commit::StoreRootRef {
+    fn test_store_root() -> coven_protocol::store_commit::StoreRootRef {
         let stored = b"restore protocol root object";
-        crate::protocol::store_commit::StoreRootRef {
+        coven_protocol::store_commit::StoreRootRef {
             store_root_id: ObjectHash::digest(b"restore protocol root identity"),
             store_root_hash: ObjectHash::digest(stored),
-            object: crate::protocol::objects::ExactObjectRef::new(
-                crate::protocol::objects::ObjectSlot::logical(
+            object: coven_protocol::objects::ExactObjectRef::new(
+                coven_protocol::objects::ObjectSlot::logical(
                     "store-v1/protocol/root/restore-code-test.json".to_string(),
                 )
                 .expect("valid test Store-root slot"),
@@ -262,7 +262,7 @@ mod tests {
         let coord = MembershipCoord {
             author_pubkey: hex::encode([0xCDu8; 32]),
             author_owner_grant: MembershipGrantId(ObjectHash::digest(b"test owner grant")),
-            stream_id: crate::protocol::membership::AuthorStreamId::from_bytes([1; 32]),
+            stream_id: coven_protocol::membership::AuthorStreamId::from_bytes([1; 32]),
             seq: 1,
             entry_hash: ObjectHash::digest(b"test membership entry"),
         };
@@ -270,8 +270,8 @@ mod tests {
         MembershipFloor(vec![MembershipHeadRef {
             coord,
             head_hash: ObjectHash::digest(b"test restore membership head semantic bytes"),
-            object: crate::protocol::objects::ExactObjectRef::new(
-                crate::protocol::objects::ObjectSlot::logical(
+            object: coven_protocol::objects::ExactObjectRef::new(
+                coven_protocol::objects::ObjectSlot::logical(
                     "store-v1/membership/heads/test-restore-owner/1.json".to_string(),
                 )
                 .expect("valid restore membership-head slot"),
@@ -283,13 +283,13 @@ mod tests {
 
     fn test_authority() -> RestoreAuthority {
         let owner_grant = MembershipGrantId(ObjectHash::digest(b"test owner grant"));
-        let first_slot = crate::protocol::objects::ObjectSlot::logical(
+        let first_slot = coven_protocol::objects::ObjectSlot::logical(
             "store-v1/recovery/test-owner/first.json".to_string(),
         )
         .expect("valid recovery slot");
-        let anchor = crate::protocol::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot };
+        let anchor = coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot };
         let owner_pubkey = hex::encode([0xCDu8; 32]);
-        let activation = crate::protocol::store_commit::OwnerRecoveryActivationId::derive(
+        let activation = coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
             &test_store_root(),
             &owner_pubkey,
             &owner_grant,
@@ -299,9 +299,9 @@ mod tests {
         RestoreAuthority::OwnerRecovery(OwnerRecoveryAuthority {
             owner_identity_secret: test_sk(),
             owner_grant: owner_grant.clone(),
-            recovery: crate::protocol::store_commit::OwnerRecoveryCursor {
+            recovery: coven_protocol::store_commit::OwnerRecoveryCursor {
                 owner_grant,
-                position: crate::protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                position: coven_protocol::store_commit::OwnerRecoveryPosition::BeforeFirst {
                     activation,
                 },
             },

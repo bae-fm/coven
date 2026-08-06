@@ -27,11 +27,6 @@ use std::sync::Arc;
 
 use crate::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
 use crate::database::{Database, DbError, StoreDatabase};
-use crate::protocol::blob::DrainOutcome;
-use crate::protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
-use crate::protocol::membership::MemberInfo;
-use crate::protocol::membership::MemberRole;
-use crate::protocol::objects::StorageError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
@@ -54,6 +49,11 @@ use coven_keys::encryption::SealError;
 use coven_keys::keys::{
     DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
 };
+use coven_protocol::blob::DrainOutcome;
+use coven_protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
+use coven_protocol::membership::MemberInfo;
+use coven_protocol::membership::MemberRole;
+use coven_protocol::objects::StorageError;
 use tokio::sync::watch;
 
 /// A Remote blob read needs sync storage; if building it from config fails

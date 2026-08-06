@@ -1,8 +1,8 @@
 use crate::database::DbError;
-use crate::protocol::circle_activation::VerifiedCircleImage;
-use crate::protocol::remote_object;
-use crate::protocol::store_commit::StoreBatchCommitRef;
 use crate::SyncedTable;
+use coven_protocol::circle_activation::VerifiedCircleImage;
+use coven_protocol::remote_object;
+use coven_protocol::store_commit::StoreBatchCommitRef;
 
 /// Install one verified Circle image's rows, routes, and blob graph onto `conn`
 /// directly — no transaction of its own. `conn` is the caller's active
@@ -56,7 +56,7 @@ pub(crate) fn install_circle_bootstrap_image_on(
             DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
         })?;
         let object_id = remote_object::remote_object_id(stored.object());
-        let crate::protocol::blob::RowBlobAuthority::Remote(authority) = binding.authority() else {
+        let coven_protocol::blob::RowBlobAuthority::Remote(authority) = binding.authority() else {
             return Err(DbError::Message(
                 "Circle bootstrap row blob lacks remote package authority".to_string(),
             ));

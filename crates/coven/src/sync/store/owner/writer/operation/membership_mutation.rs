@@ -15,7 +15,7 @@ use super::{
 pub(super) fn validate_revoke_rotation_adoption(
     row: crate::database::DurableMembershipMutation,
     adopted_generation: u64,
-) -> Result<crate::protocol::store_commit::ObjectHash, InviteError> {
+) -> Result<coven_protocol::store_commit::ObjectHash, InviteError> {
     let intent_hash = row.intent_hash;
     let (plan, progress) = decode_membership_mutation(row)?;
     let MembershipMutationPlan::Revoke(plan) = plan else {

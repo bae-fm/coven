@@ -5,7 +5,7 @@ use crate::database::query_mapped_rows;
 impl StoreDatabase {
     pub(crate) fn open_retained_merge_materialization_input_with_authority_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         commit_ref: &StoreBatchCommitRef,
         input: &RetainedMergeMaterializationInput,
         input_hash: ObjectHash,
@@ -51,7 +51,7 @@ impl StoreDatabase {
         };
         let verified_commit = match authority {
             RetainedCommitAuthority::StoredBytes => {
-                crate::protocol::store_commit::VerifiedStoreBatchCommit::parse(
+                coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
                     input.commit.stored_bytes(),
                     root.store_root_hash,
                     commit_ref,
@@ -172,7 +172,7 @@ impl StoreDatabase {
             }
             if let Some(reference) = objects.resolution() {
                 let remote = load_remote_object_on(conn, remote_object_id(&reference.object))?;
-                let resolution: crate::protocol::membership::StoreMembershipConflictResolution =
+                let resolution: coven_protocol::membership::StoreMembershipConflictResolution =
                     serde_json::from_slice(remote.bytes().canonical_semantic_bytes()).map_err(
                         |error| DbError::context("retained membership resolution", error),
                     )?;
@@ -204,7 +204,7 @@ impl StoreDatabase {
 
     pub(crate) fn retain_merge_materialization_on(
         conn: &rusqlite::Transaction<'_>,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<
         (
@@ -223,7 +223,7 @@ impl StoreDatabase {
 
     pub(crate) fn retain_merge_materialization_with_authority_on(
         conn: &rusqlite::Transaction<'_>,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &VerifiedMergeMaterialization<'_>,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<
@@ -341,7 +341,7 @@ impl StoreDatabase {
 
     pub(crate) fn load_retained_merge_materialization_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
@@ -360,12 +360,12 @@ impl StoreDatabase {
 
     pub(crate) fn load_retained_merge_materialization_with_verified_commit_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
         expected_input_hash: &str,
-        verified: &crate::protocol::store_commit::VerifiedStoreBatchCommit,
+        verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         Self::load_retained_merge_materialization_with_authority_on(
             conn,
@@ -380,7 +380,7 @@ impl StoreDatabase {
 
     pub(crate) fn load_retained_merge_materialization_with_authority_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
@@ -443,7 +443,7 @@ impl StoreDatabase {
 
     pub(crate) fn load_retained_merge_materialization_by_ref_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let StoreCommitCoord {
@@ -478,9 +478,9 @@ impl StoreDatabase {
 
     pub(crate) fn load_retained_merge_history_checkpoint_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         reference: &StoreBatchCommitRef,
-    ) -> Result<crate::protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+    ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -528,7 +528,7 @@ impl StoreDatabase {
                 ));
             }
             let state = load_store_device_snapshot_on(conn, reference)?;
-            let expected_state = crate::protocol::store_commit::StoreDeviceStateRef::from_resolved(
+            let expected_state = coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
                 CommitFrontier(
                     summary
                         .frontier()
@@ -543,7 +543,7 @@ impl StoreDatabase {
                 ));
             }
             return Ok(
-                crate::protocol::store_commit::OpenedRetainedMergeHistorySummary {
+                coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
                     announcement_frontier: summary.announcement_frontier.clone(),
                     post_state: state,
                     summary,
@@ -580,13 +580,13 @@ impl StoreDatabase {
         conn: &Connection,
         reference: &StoreBatchCommitRef,
         retained: &OwnedVerifiedMergeMaterialization,
-    ) -> Result<crate::protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+    ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
         if retained.commit_ref() != reference {
             return Err(DbError::Message(
                 "retained Merge checkpoint materialization names another commit".to_string(),
             ));
         }
-        let head_ref = crate::protocol::store_commit::StoreDeviceHeadRef {
+        let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: retained.activation_head().head_hash(),
             object: retained.activation_head_object().clone(),
         };
@@ -773,7 +773,7 @@ impl StoreDatabase {
     #[cfg(test)]
     pub(crate) fn load_retained_merge_replay_inputs_on(
         conn: &Connection,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = query_mapped_rows(
             conn,

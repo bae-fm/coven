@@ -1,7 +1,7 @@
 use crate::database::query_mapped_rows;
 use crate::database::*;
-use crate::protocol::objects::PreparedExactObject;
-use crate::protocol::store_commit::{
+use coven_protocol::objects::PreparedExactObject;
+use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CommitFrontier, ReferencedStoreDeviceRegistration,
     ResolvedStoreDeviceState, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef,
     StoreDeviceProposalAck, StoreDeviceRegistration, StoreDeviceRegistrationRef,
@@ -27,7 +27,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_replay_inputs(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.with_retained_merge_materializations(move |conn, cache| {
             cache.replay_inputs_on(conn, &root)
@@ -68,7 +68,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_replay_inputs_with_verified_commits(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.with_retained_merge_materializations(move |conn, cache| {
@@ -79,7 +79,7 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_materialization(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.with_retained_merge_materializations(move |conn, cache| {
@@ -99,10 +99,9 @@ impl StoreDatabase {
 
     pub(crate) async fn retained_merge_history_frontier(
         &self,
-        root: crate::protocol::store_commit::StoreRootRef,
+        root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
-    ) -> Result<Vec<crate::protocol::store_commit::OpenedRetainedMergeHistorySummary>, DbError>
-    {
+    ) -> Result<Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
         self.with_retained_merge_materializations(move |conn, cache| {
             let retained = { cache.replay_inputs_on(conn, &root)? };
             references
@@ -271,7 +270,7 @@ impl StoreDatabase {
                 "materialized coordinate {stream_id}/{sequence} has no retained input hash"
             ))
         })?;
-        input_hash.parse::<crate::protocol::store_commit::ObjectHash>().map_err(
+        input_hash.parse::<coven_protocol::store_commit::ObjectHash>().map_err(
             |error| {
                 DbError::context(format!("materialized coordinate {stream_id}/{sequence} retained input hash is invalid"), error)
             },
@@ -371,7 +370,7 @@ impl StoreDatabase {
 
     pub(crate) async fn store_device_state_for_order(
         &self,
-        order: &crate::protocol::store_commit::StoreCommitOrder,
+        order: &coven_protocol::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
         let cut = order
             .predecessor_cut()
@@ -418,8 +417,7 @@ impl StoreDatabase {
 
     pub(crate) async fn activated_store_device_registration_records(
         &self,
-    ) -> Result<Vec<crate::protocol::store_commit::ReferencedStoreDeviceRegistration>, DbError>
-    {
+    ) -> Result<Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>, DbError> {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading activated devices".to_string())
         })?;
@@ -470,7 +468,7 @@ impl StoreDatabase {
                                 error,
                             )
                         })?;
-                    crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                    coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                         reference,
                         registration,
                     )
@@ -491,14 +489,14 @@ impl StoreDatabase {
     pub(crate) async fn activated_store_device_registration(
         &self,
         reference: StoreDeviceRegistrationRef,
-    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+    ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.connection
             .call(move |conn| {
                 let registration = load_activated_registration_on(conn, &root, &reference)?;
-                crate::protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                     reference,
                     registration,
                 )
@@ -520,13 +518,13 @@ impl StoreDatabase {
 
     pub(crate) async fn local_blob_write_authority(
         &self,
-    ) -> Result<crate::protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
+    ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         self.connection.call(local_store_authority_on).await
     }
 
     pub(crate) async fn activated_store_device_registration_with_authority(
         &self,
-        root: &crate::protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
         let root = root.clone();
@@ -558,7 +556,7 @@ impl StoreDatabase {
 
     pub(crate) async fn activated_store_device_registration_for_device(
         &self,
-        device_id: crate::protocol::store_commit::StoreDeviceId,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
         let root = self.local_store_root_ref().await?.ok_or_else(|| {
             DbError::Message("Store root is absent while loading an activated device".to_string())
@@ -645,33 +643,33 @@ pub(super) fn record_activated_store_device_registrations_on(
         }
         let expected_authority = match (&registration.origin, &signed.authority) {
             (
-                crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
+                coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Join {
                     attempt_id: origin_attempt,
                     outcome_slot,
                     ..
                 },
-                crate::protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
+                coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Join {
                     attempt_id,
                     outcome,
                 },
             ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
-                crate::protocol::store_commit::StoreDeviceRegistrationActivation::Join {
+                coven_protocol::store_commit::StoreDeviceRegistrationActivation::Join {
                     attempt_id: *attempt_id,
                     outcome: outcome.clone(),
                 }
             }
             (
-                crate::protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
                     recovery_id: origin_recovery,
                     recovery_slot,
                     ..
                 },
-                crate::protocol::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
                     recovery_id,
                     node,
                 },
             ) if origin_recovery == recovery_id && recovery_slot == node.slot() => {
-                crate::protocol::store_commit::StoreDeviceRegistrationActivation::Recovery {
+                coven_protocol::store_commit::StoreDeviceRegistrationActivation::Recovery {
                     recovery_id: *recovery_id,
                     node: node.clone(),
                 }

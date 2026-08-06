@@ -1,9 +1,9 @@
 use crate::database::local_blob_cleanup_intents::LocalBlobCleanupIntent;
 use crate::database::DbError;
-use crate::protocol::blob::BlobRef;
 use crate::WriteReceipt;
 use coven_foundation::store_dir::{PathTokenError, StoreDir};
 use coven_keys::encryption::EncryptionService;
+use coven_protocol::blob::BlobRef;
 
 use super::host_sql_transaction::HostSqlTransaction;
 use super::{SqlContext, StoreDatabase};
@@ -393,7 +393,7 @@ impl StoreRowWrites {
         let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
         let cleanup_store_dir = self.store_dir.clone();
-        let stamper = crate::protocol::hlc::UpdatedAtStamper::new(database.hlc.clone());
+        let stamper = coven_protocol::hlc::UpdatedAtStamper::new(database.hlc.clone());
 
         let outcome = database
             .connection

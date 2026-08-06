@@ -1,16 +1,16 @@
 use super::snapshot;
 use super::*;
-use crate::protocol::objects::StoreObjectError;
-use crate::protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use crate::protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
 use crate::storage::VerifiedObjectWrites;
+use coven_protocol::objects::StoreObjectError;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
+use coven_protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreAckError {
     #[error("database: {0}")]
     Database(#[from] crate::database::DbError),
     #[error("Store protocol: {0}")]
-    Protocol(#[from] crate::protocol::store_commit::StoreProtocolError),
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("published Store acknowledgement count has no representable successor")]
     PublishCountExhausted,
     #[error("{0}")]
@@ -61,7 +61,7 @@ impl AuthorizedWriterOperation<'_> {
         let device_id = self.local_device_id().to_string();
         let root = self.store_root().clone();
         let history_cut =
-            crate::protocol::store_commit::StoreHistoryCut::from_commits(commits.clone());
+            coven_protocol::store_commit::StoreHistoryCut::from_commits(commits.clone());
         let (device_state, _) = self
             .database
             .store_device_state_for_history_cut(&history_cut)
@@ -69,7 +69,7 @@ impl AuthorizedWriterOperation<'_> {
         let snapshot = self
             .select_acknowledgement_snapshot(&frontier, &device_state)
             .await?;
-        let exclusions = crate::protocol::store_commit::StoreAckExclusionState {
+        let exclusions = coven_protocol::store_commit::StoreAckExclusionState {
             proposal_freezes: self.database.store_device_exclusion_freezes().await?,
         };
         if self.database.oldest_outbound_store_ack().await?.is_some() {
@@ -212,7 +212,7 @@ impl AuthorizedWriterOperation<'_> {
             {
                 if !matches!(
                     error,
-                    crate::protocol::objects::StorageError::SlotCollision(_)
+                    coven_protocol::objects::StorageError::SlotCollision(_)
                 ) {
                     return Err(StoreObjectError::from(error).into());
                 }
@@ -292,8 +292,8 @@ impl AuthorizedWriterOperation<'_> {
 #[cfg(test)]
 mod tests;
 
-impl From<crate::protocol::prepared_commit::PreparedCommitError> for StoreAckError {
-    fn from(error: crate::protocol::prepared_commit::PreparedCommitError) -> Self {
+impl From<coven_protocol::prepared_commit::PreparedCommitError> for StoreAckError {
+    fn from(error: coven_protocol::prepared_commit::PreparedCommitError) -> Self {
         StoreAckError::InvalidOutbound(error.to_string())
     }
 }

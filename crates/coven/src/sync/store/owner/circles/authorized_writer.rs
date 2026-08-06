@@ -4,15 +4,15 @@ use super::commands::{
     CircleRenameRequest, CircleResolveControlRequest, CircleResolveLosingBranch,
 };
 use super::*;
-use crate::protocol::circle::{
+use coven_protocol::circle::{
     circle_epoch_close_response_semantic_prefix, CircleControlState, CircleEpochCloseExclusionRef,
     CircleEpochCloseResponseRef, CircleEpochCloseResponseSlotValue, CircleEpochCloseSettlement,
     CircleId, CircleRole, PreparedCircleControl,
 };
-use crate::protocol::objects::{
+use coven_protocol::objects::{
     ProtocolObjectContext, ProtocolObjectDomain, StorageError, StoreObjectError,
 };
-use crate::protocol::store_commit::CommitFrontier;
+use coven_protocol::store_commit::CommitFrontier;
 
 mod acknowledgements;
 mod commands;
@@ -24,8 +24,8 @@ pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     database: crate::database::StoreDatabase,
     storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
-    root: crate::protocol::store_commit::StoreRootRef,
-    membership: crate::protocol::membership::MembershipChain,
+    root: coven_protocol::store_commit::StoreRootRef,
+    membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
 }
 
@@ -36,8 +36,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         database: crate::database::StoreDatabase,
         storage: std::sync::Arc<dyn crate::storage::SyncStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
-        root: crate::protocol::store_commit::StoreRootRef,
-        membership: crate::protocol::membership::MembershipChain,
+        root: coven_protocol::store_commit::StoreRootRef,
+        membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
     ) -> Self {
         Self {
@@ -113,8 +113,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     ) -> Result<
         (
             CircleAuthoringState,
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
-            crate::protocol::store_commit::CircleControlRef,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::CircleControlRef,
         ),
         CircleOperationError,
     > {
@@ -136,7 +136,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     ) -> Result<
         (
             CircleAuthoringState,
-            crate::protocol::store_commit::CircleControlRef,
+            coven_protocol::store_commit::CircleControlRef,
         ),
         CircleOperationError,
     > {
@@ -158,11 +158,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         &mut self,
         circle_id: CircleId,
         current: &CircleAuthoringState,
-        activation_commit_ref: &crate::protocol::store_commit::StoreBatchCommitRef,
+        activation_commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<
         (
-            crate::protocol::store_commit::VerifiedStoreBatchCommit,
-            crate::protocol::store_commit::CircleControlRef,
+            coven_protocol::store_commit::VerifiedStoreBatchCommit,
+            coven_protocol::store_commit::CircleControlRef,
         ),
         CircleOperationError,
     > {
@@ -225,7 +225,7 @@ fn retained_branch_authoring_state(
 fn losing_branch_selected_metadata(
     circle_id: CircleId,
     activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
-) -> Result<crate::protocol::circle::CircleMetadata, CircleOperationError> {
+) -> Result<coven_protocol::circle::CircleMetadata, CircleOperationError> {
     activation
         .local_access
         .as_ref()

@@ -2,16 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::objects::PreparedExactObject;
-use crate::protocol::prepared_commit::PreparedStoreOperationCommit;
-use crate::protocol::reclaim::{
+use coven_protocol::objects::PreparedExactObject;
+use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
+use coven_protocol::reclaim::{
     ReclaimAuthorization, ReclaimAuthorizationRef, ReclaimEvidence, ReclaimEvidenceRef,
     ReclaimReceipt, ReclaimReceiptRef, ReclaimTarget,
 };
-use crate::protocol::remote_object::{
+use coven_protocol::remote_object::{
     CandidateNonactivationProof, RemoteObjectRecord, RemoteObjectRecordError,
 };
-use crate::protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
+use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreDeviceHeadRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -245,7 +245,7 @@ impl ReclaimedStorePackage {
     }
 
     pub(crate) fn object_id(&self) -> ObjectHash {
-        crate::protocol::remote_object::remote_object_id(self.authorization().target().object())
+        coven_protocol::remote_object::remote_object_id(self.authorization().target().object())
     }
 
     pub(crate) fn validate(&self) -> Result<(), StoreReclaimJournalError> {
@@ -504,7 +504,7 @@ fn validate_replacement(
         .reference
         .verify_commit(&losing.candidate.commit)
         .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
-    crate::protocol::remote_object::CandidateNonactivation::validate_durable_shape(
+    coven_protocol::remote_object::CandidateNonactivation::validate_durable_shape(
         &losing.candidate.reference,
         &losing.candidate.commit,
         losing.proof.clone(),
@@ -527,7 +527,7 @@ pub(crate) enum StoreReclaimJournalError {
     #[error(transparent)]
     RemoteObject(#[from] RemoteObjectRecordError),
     #[error(transparent)]
-    Outbound(#[from] crate::protocol::prepared_commit::PreparedCommitError),
+    Outbound(#[from] coven_protocol::prepared_commit::PreparedCommitError),
     #[error(transparent)]
-    Storage(#[from] crate::protocol::objects::StorageError),
+    Storage(#[from] coven_protocol::objects::StorageError),
 }

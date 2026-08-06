@@ -2,20 +2,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::database::{verify_circle_bootstrap_image, StoreDatabase};
-use crate::protocol::store_commit::CommitFrontier;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::store_commit::CommitFrontier;
 
 fn open_scoped_snapshot_test_db() -> Database {
     crate::sync::test_helpers::open_test_db_schema(
         vec![
             SyncedTable::new(
                 "documents",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "paragraphs",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .inherits_audience_through("document_id"),
         ],
@@ -38,7 +38,7 @@ fn open_scoped_snapshot_test_db() -> Database {
     )
 }
 
-async fn seed_scoped_snapshot_rows(source: &Database) -> crate::protocol::circle::CircleId {
+async fn seed_scoped_snapshot_rows(source: &Database) -> coven_protocol::circle::CircleId {
     let database = StoreDatabase::new(source);
     let circle = database
         .install_test_active_circle("snapshot-route-circle".to_string())
@@ -115,16 +115,16 @@ async fn seed_scoped_snapshot_rows(source: &Database) -> crate::protocol::circle
 fn circle_bootstrap_reference(
     source: &Database,
     image: &[u8],
-) -> crate::protocol::circle::CircleBootstrapRef {
-    let image_hash = crate::protocol::store_commit::ObjectHash::digest(image);
-    crate::protocol::circle::CircleBootstrapRef {
+) -> coven_protocol::circle::CircleBootstrapRef {
+    let image_hash = coven_protocol::store_commit::ObjectHash::digest(image);
+    coven_protocol::circle::CircleBootstrapRef {
         coverage: CommitFrontier(BTreeMap::new()),
         schema_version: source.schema_version(),
         sync_routing_hash: source.sync_routing_hash(),
-        image: crate::protocol::store_commit::SnapshotImageRef {
+        image: coven_protocol::store_commit::SnapshotImageRef {
             image_hash,
-            object: crate::protocol::objects::ExactObjectRef::new(
-                crate::protocol::objects::ObjectSlot::logical(
+            object: coven_protocol::objects::ExactObjectRef::new(
+                coven_protocol::objects::ObjectSlot::logical(
                     "circle-bootstrap-routing.db".to_string(),
                 )
                 .expect("construct Circle bootstrap routing slot"),
@@ -197,7 +197,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
         )
         .await
         .expect("create Circle projection for Store-row tampering");
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
+    let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
             .local_store_root_ref()
@@ -210,8 +210,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     let store_row_id = "00000000-0000-4000-8000-000000000008";
     let store_row_stamp = "0000000001008-0000-owner";
     let store_routing_id =
-        crate::protocol::circle::row_routing_id(&routing_key, "documents", store_row_id)
-            .to_string();
+        coven_protocol::circle::row_routing_id(&routing_key, "documents", store_row_id).to_string();
     let image = edit_snapshot_image(image_dir.path(), image, |connection| {
         connection
             .execute(
@@ -255,12 +254,12 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
         vec![
             SyncedTable::new(
                 "documents",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             )
             .scoped_by("audience"),
             SyncedTable::new(
                 "settings",
-                crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
             ),
         ],
         vec![Migration::sql(
@@ -322,7 +321,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
             .expect("insert unscoped row into Circle bootstrap");
     });
     let reference = circle_bootstrap_reference(&source, &image);
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
+    let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
             .local_store_root_ref()
@@ -361,7 +360,7 @@ enum ScopedSnapshotImage {
 struct PublishedScopedSnapshot {
     source: Database,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
-    membership: crate::protocol::membership::MembershipChain,
+    membership: coven_protocol::membership::MembershipChain,
     _store_dir_temp: tempfile::TempDir,
     store_dir: coven_foundation::store_dir::StoreDir,
 }
@@ -482,7 +481,7 @@ impl PublishedScopedSnapshot {
         let bootstrap = self
             .store
             .prepare_snapshot_bootstrap(
-                &crate::protocol::membership::MembershipFloor(self.membership.head_refs().to_vec()),
+                &coven_protocol::membership::MembershipFloor(self.membership.head_refs().to_vec()),
                 1,
                 database_path,
                 &restorer_identity,
@@ -493,8 +492,8 @@ impl PublishedScopedSnapshot {
             .install(
                 &self.store_dir,
                 self.source.synced_tables().to_vec(),
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
@@ -635,11 +634,11 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     let tables = vec![
         SyncedTable::new(
             "folders",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         ),
         SyncedTable::new(
             "documents",
-            crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
         )
         .scoped_by("audience"),
     ];
@@ -725,7 +724,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
         .await
         .expect("create Circle snapshot with Store parent");
     let reference = circle_bootstrap_reference(&source, &image);
-    let routing_key = crate::protocol::circle::derive_row_routing_key(
+    let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
         StoreDatabase::new(&source)
             .local_store_root_ref()
@@ -858,7 +857,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
          ) STRICT;";
     let source_tables = vec![SyncedTable::new(
         "documents",
-        crate::protocol::synced_schema::RowIdentity::IndependentUuid,
+        coven_protocol::synced_schema::RowIdentity::IndependentUuid,
     )
     .scoped_by("audience")];
     let source = crate::sync::test_helpers::open_test_db_schema(
@@ -944,7 +943,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
     let database_path = destination.path().join("store.db");
     let bootstrap = store
         .prepare_snapshot_bootstrap(
-            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             2,
             &database_path,
             &signer,
@@ -957,8 +956,8 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         .install(
             &store_dir,
             target_tables,
-            crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-            crate::protocol::blob::TransferLimits::one_at_a_time(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             "joining-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
             &target_migrations,
@@ -1182,7 +1181,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
         let database_path = destination.path().join("store.db");
         let bootstrap = store
             .prepare_snapshot_bootstrap(
-                &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+                &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
                 1,
                 &database_path,
                 &signer,
@@ -1194,8 +1193,8 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .install(
                 &store_dir,
                 tables,
-                crate::protocol::blob::BLOB_TOMBSTONE_GRACE,
-                crate::protocol::blob::TransferLimits::one_at_a_time(),
+                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
                 std::sync::Arc::new(coven_foundation::clock::SystemClock),
                 &crate::sync::test_helpers::test_migrations(),
@@ -1286,7 +1285,7 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
     let database_path = destination.path().join("store.db");
     let result = store
         .prepare_snapshot_bootstrap(
-            &crate::protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
+            &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             1,
             &database_path,
             &signer,
@@ -1365,10 +1364,10 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
 #[tokio::test]
 async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
     Box::pin(async {
-        let declaration = crate::protocol::synced_schema::BlobDecl::new(
+        let declaration = coven_protocol::synced_schema::BlobDecl::new(
             "photos",
-            crate::protocol::blob::Provenance::HostProvided,
-            crate::protocol::blob::CacheFill::CacheEager,
+            coven_protocol::blob::Provenance::HostProvided,
+            coven_protocol::blob::CacheFill::CacheEager,
         );
         let source = crate::sync::test_helpers::open_test_db_with_blob(declaration);
         let signer = UserKeypair::generate();
@@ -1393,7 +1392,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
                  (id, note_id, kind, size, hash, _updated_at, created_at)
                  VALUES ('photo1', 'n1', 'cover', 11, '{}',
                          '0000000001000-0000-owner', '2026-01-01')",
-                crate::protocol::blob::content_hash(b"cover-bytes"),
+                coven_protocol::blob::content_hash(b"cover-bytes"),
             ))
             .await;
         let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -1453,7 +1452,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         );
         assert!(matches!(
             graph.5.bytes().stored(),
-            crate::protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
+            coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
         ));
         for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
             let count = snapshot
@@ -1471,29 +1470,29 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
     .await;
 }
 
-fn blob_graph_activation(label: &str) -> crate::protocol::store_commit::StreamActivationId {
+fn blob_graph_activation(label: &str) -> coven_protocol::store_commit::StreamActivationId {
     let registration_bytes = format!("{label} snapshot registration");
-    let registration = crate::protocol::store_commit::StoreDeviceRegistrationRef {
+    let registration = coven_protocol::store_commit::StoreDeviceRegistrationRef {
         device_id: format!("{:0>64}", label.len())
             .parse()
             .expect("valid blob graph test device id"),
-        registration_hash: crate::protocol::store_commit::ObjectHash::digest(
+        registration_hash: coven_protocol::store_commit::ObjectHash::digest(
             registration_bytes.as_bytes(),
         ),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(format!(
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/snapshot-registration.json"
             ))
             .expect("valid blob graph registration slot"),
             registration_bytes.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(registration_bytes.as_bytes()),
+            coven_protocol::store_commit::ObjectHash::digest(registration_bytes.as_bytes()),
         ),
     };
-    crate::protocol::store_commit::StreamActivation::device_authorized(
-        crate::protocol::store_commit::ObjectHash::digest(format!("{label} Store root").as_bytes()),
+    coven_protocol::store_commit::StreamActivation::device_authorized(
+        coven_protocol::store_commit::ObjectHash::digest(format!("{label} Store root").as_bytes()),
         registration,
-        crate::protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
-            first_slot: crate::protocol::objects::ObjectSlot::logical(format!(
+        coven_protocol::store_commit::DeviceStreamAnchor::StoreSnapshots {
+            first_slot: coven_protocol::objects::ObjectSlot::logical(format!(
                 "store-v1/test/{label}/snapshots/1.json"
             ))
             .expect("valid blob graph activation slot"),
@@ -1506,22 +1505,22 @@ fn blob_graph_binding(
     row_id: &str,
     stamp: &str,
     bytes: &[u8],
-) -> crate::protocol::audience_package::RowBlobLocatorBinding {
-    let plaintext_hash = crate::protocol::store_commit::ObjectHash::digest(bytes);
+) -> coven_protocol::audience_package::RowBlobLocatorBinding {
+    let plaintext_hash = coven_protocol::store_commit::ObjectHash::digest(bytes);
     let uploader_bytes = b"blob graph test uploader registration";
-    let uploader = crate::protocol::store_commit::StoreDeviceRegistrationRef {
+    let uploader = coven_protocol::store_commit::StoreDeviceRegistrationRef {
         device_id: "aa".repeat(32).parse().expect("valid blob graph device id"),
-        registration_hash: crate::protocol::store_commit::ObjectHash::digest(uploader_bytes),
-        object: crate::protocol::objects::ExactObjectRef::new(
-            crate::protocol::objects::ObjectSlot::logical(
+        registration_hash: coven_protocol::store_commit::ObjectHash::digest(uploader_bytes),
+        object: coven_protocol::objects::ExactObjectRef::new(
+            coven_protocol::objects::ObjectSlot::logical(
                 "store-v1/devices/blob-graph-test-uploader.json".to_string(),
             )
             .expect("valid blob graph uploader slot"),
             uploader_bytes.len() as u64,
-            crate::protocol::store_commit::ObjectHash::digest(uploader_bytes),
+            coven_protocol::store_commit::ObjectHash::digest(uploader_bytes),
         ),
     };
-    let locator = crate::protocol::blob::locator::BlobLocator::browsable(
+    let locator = coven_protocol::blob::locator::BlobLocator::browsable(
         "images",
         row_id,
         uploader,
@@ -1530,19 +1529,19 @@ fn blob_graph_binding(
         plaintext_hash,
     )
     .expect("valid blob graph locator");
-    let slot = crate::protocol::objects::ObjectSlot::logical(locator.semantic_key())
+    let slot = coven_protocol::objects::ObjectSlot::logical(locator.semantic_key())
         .expect("valid blob graph object slot");
-    let object = crate::protocol::objects::ExactObjectRef::new(
+    let object = coven_protocol::objects::ExactObjectRef::new(
         slot,
         bytes.len() as u64,
-        crate::protocol::store_commit::ObjectHash::digest(bytes),
+        coven_protocol::store_commit::ObjectHash::digest(bytes),
     );
-    crate::protocol::audience_package::RowBlobLocatorBinding::new(
+    coven_protocol::audience_package::RowBlobLocatorBinding::new(
         "photos",
         row_id,
         stamp,
         "id",
-        crate::protocol::blob::locator::StoredBlobRef::new(locator, object)
+        coven_protocol::blob::locator::StoredBlobRef::new(locator, object)
             .expect("valid blob graph stored blob"),
     )
     .expect("valid blob graph row binding")
@@ -1557,7 +1556,7 @@ fn blob_graph_binding(
 fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
     let dir = tempfile::tempdir().expect("blob graph conflict directory");
     let image_path = dir.path().join("image.db");
-    let owner = crate::protocol::remote_object::SnapshotObjectOwner {
+    let owner = coven_protocol::remote_object::SnapshotObjectOwner {
         activation: blob_graph_activation("conflict"),
         generation: 0,
     };
@@ -1567,7 +1566,7 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
         b"existing blob bytes",
     );
     let existing_remote =
-        crate::protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+        coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
             existing.blob(),
             owner.clone(),
         )
@@ -1592,14 +1591,14 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
         b"replacement blob bytes",
     );
     let replacement_remote =
-        crate::protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+        coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
             replacement.blob(),
             owner,
         )
         .expect("activate replacement blob graph object");
     let prepared = crate::database::PreparedSnapshotBlob {
         bindings: vec![replacement],
-        authority: crate::protocol::audience_package::PackageAudience::Store,
+        authority: coven_protocol::audience_package::PackageAudience::Store,
         remote: replacement_remote,
         spool_path: None,
     };

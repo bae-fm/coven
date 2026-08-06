@@ -113,7 +113,7 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         path_patterns: &[],
         allowed: &[
             "crates/coven-keys/src/encryption.rs",
-            "crates/coven/src/protocol/circle.rs",
+            "crates/coven-protocol/src/circle.rs",
         ],
     },
     GatedCapability {
@@ -121,8 +121,8 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         crates: &["hmac"],
         path_patterns: &[],
         allowed: &[
-            "crates/coven/src/protocol/circle.rs",
-            "crates/coven/src/protocol/circle_control.rs",
+            "crates/coven-protocol/src/circle.rs",
+            "crates/coven-protocol/src/circle_control.rs",
         ],
     },
 ];
@@ -528,9 +528,9 @@ mod tests {
     #[test]
     fn protocol_circle_keys_keep_their_kdf_and_mac_homes() {
         let files = vec![
-            file("crates/coven/src/protocol/circle.rs", "use hkdf::Hkdf;"),
+            file("crates/coven-protocol/src/circle.rs", "use hkdf::Hkdf;"),
             file(
-                "crates/coven/src/protocol/circle_control.rs",
+                "crates/coven-protocol/src/circle_control.rs",
                 "use hmac::Mac;",
             ),
             file("crates/coven-keys/src/encryption.rs", "use hkdf::Hkdf;"),

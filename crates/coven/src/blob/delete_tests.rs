@@ -14,11 +14,6 @@ use async_trait::async_trait;
 use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
 use crate::database::Database;
 use crate::database::StoreDatabase;
-use crate::protocol::blob::BLOB_TOMBSTONE_GRACE;
-use crate::protocol::blob::{CacheFill, Provenance};
-use crate::protocol::membership::MemberRole;
-use crate::protocol::objects::StorageError;
-use crate::protocol::synced_schema::BlobDecl;
 use crate::storage::{CloudCipher, PendingRotation, SyncStorage};
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
@@ -29,6 +24,11 @@ use crate::sync::test_owner_graph::TestOwnerGraph;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
+use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
+use coven_protocol::blob::{CacheFill, Provenance};
+use coven_protocol::membership::MemberRole;
+use coven_protocol::objects::StorageError;
+use coven_protocol::synced_schema::BlobDecl;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -46,7 +46,7 @@ fn open_outbox_db() -> Database {
         std::path::Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
-        crate::protocol::blob::TransferLimits::one_at_a_time(),
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         "test-device".to_string(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &[],
@@ -164,7 +164,7 @@ async fn tombstone_exists(storage: &TestStore, key: &str) -> bool {
 
 fn signed_store_tombstone(
     storage: &TestStore,
-    stored: crate::protocol::blob::locator::StoredBlobRef,
+    stored: coven_protocol::blob::locator::StoredBlobRef,
     deleted_at: String,
     author: &UserKeypair,
 ) -> BlobTombstoneJson {
