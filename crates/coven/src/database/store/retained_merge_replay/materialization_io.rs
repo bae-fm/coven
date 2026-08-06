@@ -18,7 +18,7 @@ impl StoreDatabase {
             ));
         }
         let unverified: StoreBatchCommit = serde_json::from_slice(input.commit.stored_bytes())
-            .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?;
+            .map_err(|error| DbError::context("retained Merge commit", error))?;
         let registrations = input
             .activation
             .registrations
@@ -57,7 +57,7 @@ impl StoreDatabase {
                     commit_ref,
                     author,
                 )
-                .map_err(|error| DbError::Message(format!("retained Merge commit: {error}")))?
+                .map_err(|error| DbError::context("retained Merge commit", error))?
             }
             RetainedCommitAuthority::Operation(verified)
                 if verified.reference() == commit_ref
@@ -96,7 +96,7 @@ impl StoreDatabase {
             author,
             commit_ref,
         )
-        .map_err(|error| DbError::Message(format!("retained Merge activation head: {error}")))?;
+        .map_err(|error| DbError::context("retained Merge activation head", error))?;
         if head.to_bytes() != input.activation_head.stored_bytes() {
             return Err(DbError::Message(
                 "retained Merge activation head bytes are not canonical".to_string(),
@@ -150,16 +150,14 @@ impl StoreDatabase {
         if let Some(objects) = &input.membership_objects {
             let entry_remote =
                 load_remote_object_on(conn, remote_object_id(&objects.entry().object))?;
-            let entry: MembershipEntry = serde_json::from_slice(
-                entry_remote.bytes().canonical_semantic_bytes(),
-            )
-            .map_err(|error| DbError::Message(format!("retained membership entry: {error}")))?;
+            let entry: MembershipEntry =
+                serde_json::from_slice(entry_remote.bytes().canonical_semantic_bytes())
+                    .map_err(|error| DbError::context("retained membership entry", error))?;
             let head_remote =
                 load_remote_object_on(conn, remote_object_id(&objects.head().object))?;
-            let head_value: AuthorHead = serde_json::from_slice(
-                head_remote.bytes().canonical_semantic_bytes(),
-            )
-            .map_err(|error| DbError::Message(format!("retained membership head: {error}")))?;
+            let head_value: AuthorHead =
+                serde_json::from_slice(head_remote.bytes().canonical_semantic_bytes())
+                    .map_err(|error| DbError::context("retained membership head", error))?;
             let verified_objects = VerifiedMergeMembershipObjects::verify(
                 &commit,
                 commit_ref,
@@ -176,9 +174,7 @@ impl StoreDatabase {
                 let remote = load_remote_object_on(conn, remote_object_id(&reference.object))?;
                 let resolution: crate::protocol::membership::StoreMembershipConflictResolution =
                     serde_json::from_slice(remote.bytes().canonical_semantic_bytes()).map_err(
-                        |error| {
-                            DbError::Message(format!("retained membership resolution: {error}"))
-                        },
+                        |error| DbError::context("retained membership resolution", error),
                     )?;
                 if !resolution.verify_signature()
                     || resolution.resolution_ref(reference.object.clone()) != *reference
@@ -271,9 +267,8 @@ impl StoreDatabase {
                 package_application: materialization.package_application(),
             },
         };
-        let canonical_input = serde_json::to_vec(&input).map_err(|error| {
-            DbError::Message(format!("serialize retained Merge materialization: {error}"))
-        })?;
+        let canonical_input = serde_json::to_vec(&input)
+            .map_err(|error| DbError::context("serialize retained Merge materialization", error))?;
         let input_hash = ObjectHash::digest(&canonical_input);
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
             conn,
@@ -289,10 +284,8 @@ impl StoreDatabase {
         } = &materialization.commit_ref().coord;
         let stream_id = stream_id.to_string();
         let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let commit_ref_json =
-            serde_json::to_string(materialization.commit_ref()).map_err(|error| {
-                DbError::Message(format!("serialize retained Merge commit ref: {error}"))
-            })?;
+        let commit_ref_json = serde_json::to_string(materialization.commit_ref())
+            .map_err(|error| DbError::context("serialize retained Merge commit ref", error))?;
         let inserted = conn
             .execute(
                 "INSERT INTO retained_merge_materializations
@@ -404,9 +397,8 @@ impl StoreDatabase {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(DbError::from)?;
-        let expected_ref = serde_json::to_string(commit_ref).map_err(|error| {
-            DbError::Message(format!("serialize materialized Merge commit ref: {error}"))
-        })?;
+        let expected_ref = serde_json::to_string(commit_ref)
+            .map_err(|error| DbError::context("serialize materialized Merge commit ref", error))?;
         if stored_ref != expected_ref {
             return Err(DbError::Message(format!(
                 "retained Merge coordinate {stream_id}/{sequence} names another commit"
@@ -420,21 +412,20 @@ impl StoreDatabase {
             )));
         }
         let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical_input)
-            .map_err(|error| {
-                DbError::Message(format!("retained Merge materialization input: {error}"))
-            })?;
-        if serde_json::to_vec(&input).map_err(|error| {
-            DbError::Message(format!("serialize retained Merge materialization: {error}"))
-        })? != canonical_input
+            .map_err(|error| DbError::context("retained Merge materialization input", error))?;
+        if serde_json::to_vec(&input)
+            .map_err(|error| DbError::context("serialize retained Merge materialization", error))?
+            != canonical_input
         {
             return Err(DbError::Message(
                 "retained Merge materialization input is not canonical".to_string(),
             ));
         }
         let input_hash = stored_hash.parse().map_err(|error| {
-            DbError::Message(format!(
-                "retained Merge coordinate {stream_id}/{sequence} input hash is invalid: {error}"
-            ))
+            DbError::context(
+                format!("retained Merge coordinate {stream_id}/{sequence} input hash is invalid"),
+                error,
+            )
         })?;
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
             conn, root, commit_ref, &input, input_hash, authority,
@@ -506,9 +497,7 @@ impl StoreDatabase {
             .map_err(DbError::from)?;
         if let Some(snapshot_reference) = snapshot_reference {
             let snapshot_reference: StoreBatchCommitRef = serde_json::from_str(&snapshot_reference)
-                .map_err(|error| {
-                    DbError::Message(format!("snapshot Merge checkpoint commit ref: {error}"))
-                })?;
+                .map_err(|error| DbError::context("snapshot Merge checkpoint commit ref", error))?;
             if &snapshot_reference != reference {
                 return Err(DbError::Message(
                     "snapshot Merge checkpoint coordinate contains another commit".to_string(),
@@ -527,12 +516,10 @@ impl StoreDatabase {
             let summary = authority.metadata.history_summary.clone();
             summary
                 .validate_snapshot_baseline()
-                .map_err(|error| DbError::Message(format!("snapshot Merge checkpoint: {error}")))?;
+                .map_err(|error| DbError::context("snapshot Merge checkpoint", error))?;
             if summary
                 .frontier()
-                .map_err(|error| {
-                    DbError::Message(format!("snapshot Merge checkpoint frontier: {error}"))
-                })?
+                .map_err(|error| DbError::context("snapshot Merge checkpoint frontier", error))?
                 .get(stream_id)
                 != Some(reference)
             {
@@ -571,10 +558,8 @@ impl StoreDatabase {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(DbError::from)?;
-        let stored_ref: StoreBatchCommitRef =
-            serde_json::from_str(&stored_ref).map_err(|error| {
-                DbError::Message(format!("retained Merge checkpoint commit ref: {error}"))
-            })?;
+        let stored_ref: StoreBatchCommitRef = serde_json::from_str(&stored_ref)
+            .map_err(|error| DbError::context("retained Merge checkpoint commit ref", error))?;
         if &stored_ref != reference {
             return Err(DbError::Message(
                 "retained Merge checkpoint coordinate contains another commit".to_string(),
@@ -615,7 +600,7 @@ impl StoreDatabase {
                 &head_ref,
                 &state,
             )
-            .map_err(|error| DbError::Message(format!("retained Merge checkpoint: {error}")))
+            .map_err(|error| DbError::context("retained Merge checkpoint", error))
     }
 
     pub(crate) fn load_merge_replay_write_overlays_on(
@@ -646,9 +631,10 @@ impl StoreDatabase {
         for (encoded_write_id, raw_status, stored_store_changeset) in rows {
             let write_id = WriteId::from_generated(encoded_write_id.clone());
             let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                DbError::Message(format!(
-                    "retained replay write {encoded_write_id} status: {error}"
-                ))
+                DbError::context(
+                    format!("retained replay write {encoded_write_id} status"),
+                    error,
+                )
             })?;
             let partitions = StoreDatabase::store_write_partitions_on(
                 conn,
@@ -743,9 +729,8 @@ impl StoreDatabase {
         } = &candidate.coord;
         let stream_id = stream_id.to_string();
         let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let encoded_ref = serde_json::to_string(candidate).map_err(|error| {
-            DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
-        })?;
+        let encoded_ref = serde_json::to_string(candidate)
+            .map_err(|error| DbError::context("serialize Merge retraction cleanup ref", error))?;
         let (stored_hash, canonical_cleanup): (String, Vec<u8>) = conn
             .query_row(
                 "SELECT cleanup_hash, canonical_cleanup
@@ -761,12 +746,10 @@ impl StoreDatabase {
             ));
         }
         let input: MergeRetractionCleanupInput = serde_json::from_slice(&canonical_cleanup)
-            .map_err(|error| {
-                DbError::Message(format!("parse Merge retraction cleanup: {error}"))
-            })?;
-        if serde_json::to_vec(&input).map_err(|error| {
-            DbError::Message(format!("serialize Merge retraction cleanup: {error}"))
-        })? != canonical_cleanup
+            .map_err(|error| DbError::context("parse Merge retraction cleanup", error))?;
+        if serde_json::to_vec(&input)
+            .map_err(|error| DbError::context("serialize Merge retraction cleanup", error))?
+            != canonical_cleanup
         {
             return Err(DbError::Message(
                 "Merge retraction cleanup is not canonical".to_string(),

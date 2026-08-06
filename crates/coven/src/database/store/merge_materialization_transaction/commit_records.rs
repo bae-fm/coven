@@ -502,9 +502,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )
             .map_err(DbError::from)?;
         let stored_registration: StoreDeviceRegistrationRef =
-            serde_json::from_str(&stored_registration).map_err(|error| {
-                DbError::Message(format!("materialized author registration ref: {error}"))
-            })?;
+            serde_json::from_str(&stored_registration)
+                .map_err(|error| DbError::context("materialized author registration ref", error))?;
         if stored_registration != commit.author_registration {
             return Err(DbError::Message(
                 "materialized commit author registration differs from its activation".to_string(),
@@ -555,9 +554,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             .optional()
             .map_err(DbError::from)?
             .map(|reference| {
-                serde_json::from_str(&reference).map_err(|error| {
-                    DbError::Message(format!("snapshot coverage exact commit ref: {error}"))
-                })
+                serde_json::from_str(&reference)
+                    .map_err(|error| DbError::context("snapshot coverage exact commit ref", error))
             })
             .transpose()?
         };
@@ -575,9 +573,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         self.record_activated_store_ack(commit, commit_ref)?;
         self.record_activated_circle_acks(commit, commit_ref)?;
         let seq = Database::sequence_to_sqlite(&stream_id, commit.seq())?;
-        let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
-            DbError::Message(format!("serialize exact Store commit ref: {error}"))
-        })?;
+        let commit_ref_json = serde_json::to_string(commit_ref)
+            .map_err(|error| DbError::context("serialize exact Store commit ref", error))?;
         if retention.commit_ref != commit_ref_json {
             return Err(DbError::Message(
                 "retained input names another exact commit".to_string(),
@@ -590,9 +587,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             rusqlite::params![
                 &commit_ref_json,
                 serde_json::to_string(&device_state).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize materialized Store device state: {error}"
-                    ))
+                    DbError::context("serialize materialized Store device state", error)
                 })?,
             ],
         )

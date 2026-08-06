@@ -418,6 +418,10 @@ pub enum DbError {
     ChangesetIdentity(#[from] crate::database::ChangesetIdentityError),
     #[error("database error: {0}")]
     Encryption(#[from] crate::encryption::EncryptionError),
+    #[error("database error: {0}")]
+    SnapshotImage(#[from] crate::database::store::SnapshotImageError),
+    #[error("database error: {0}")]
+    FromSql(#[from] rusqlite::types::FromSqlError),
     /// A [`DbError`] with the operation that produced it named in front of it.
     /// Carries the cause as a [`DbError`] so callers keep matching on it after
     /// it crosses the layer that added the description.

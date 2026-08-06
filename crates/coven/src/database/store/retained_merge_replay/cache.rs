@@ -120,9 +120,12 @@ impl RetainedMergeMaterializationCache {
             let commit_ref =
                 StoreDatabase::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
             let input_hash = encoded_input_hash.parse::<ObjectHash>().map_err(|error| {
-                DbError::Message(format!(
-                    "retained Merge coordinate {stream_id}/{sequence} input hash is invalid: {error}"
-                ))
+                DbError::context(
+                    format!(
+                        "retained Merge coordinate {stream_id}/{sequence} input hash is invalid"
+                    ),
+                    error,
+                )
             })?;
             let key = (stream_id.clone(), sequence);
             let materialization = match self.verified.get(&key) {
@@ -201,14 +204,16 @@ impl RetainedMergeMaterializationCache {
         };
         for (encoded_circle_id, encoded_control) in rows {
             let circle_id = encoded_circle_id.parse().map_err(|error| {
-                DbError::Message(format!(
-                    "parse Circle replay index id {encoded_circle_id}: {error}"
-                ))
+                DbError::context(
+                    format!("parse Circle replay index id {encoded_circle_id}"),
+                    error,
+                )
             })?;
             let control = serde_json::from_str(&encoded_control).map_err(|error| {
-                DbError::Message(format!(
-                    "parse Circle replay index control for {circle_id}: {error}"
-                ))
+                DbError::context(
+                    format!("parse Circle replay index control for {circle_id}"),
+                    error,
+                )
             })?;
             let activation = self
                 .verified_circle_activation_on(conn, circle_id, &control)?
@@ -252,10 +257,10 @@ impl RetainedMergeMaterializationCache {
                 routing_key,
             )
             .map_err(|error| {
-                DbError::Message(format!(
-                    "verify retained Circle {} bootstrap: {error}",
-                    bootstrap.circle_id()
-                ))
+                DbError::context(
+                    format!("verify retained Circle {} bootstrap", bootstrap.circle_id()),
+                    error,
+                )
             })?;
             let tx = replay.unchecked_transaction().map_err(DbError::from)?;
             crate::database::install_circle_bootstrap_image_on(
@@ -431,9 +436,7 @@ impl RetainedMergeMaterializationCache {
                         let changeset =
                             ValidatedChangeset::new(package.changeset().to_vec(), schema.clone())
                                 .map_err(|error| {
-                                DbError::Message(format!(
-                                    "retained Merge replay changeset: {error}"
-                                ))
+                                DbError::context("retained Merge replay changeset", error)
                             })?;
                         Ok(PreparedMergeMaterializationPackage { package, changeset })
                     })
@@ -449,9 +452,12 @@ impl RetainedMergeMaterializationCache {
                     > {
                         let object_id = remote_object_id(object);
                         let remote = load_remote_object_on(live, object_id).map_err(|error| {
-                            DbError::Message(format!(
-                                "load retained Merge membership {kind} {object_id} for replay: {error}"
-                            ))
+                            DbError::context(
+                                format!(
+                                    "load retained Merge membership {kind} {object_id} for replay"
+                                ),
+                                error,
+                            )
                         })?;
                         if remote.object() != object {
                             return Err(DbError::Message(format!(
@@ -522,9 +528,12 @@ impl RetainedMergeMaterializationCache {
                         replay_materialization,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "apply retained Merge commit {reference:?} during canonical replay: {error}"
-                        ))
+                        DbError::context(
+                            format!(
+                                "apply retained Merge commit {reference:?} during canonical replay"
+                            ),
+                            error,
+                        )
                     })?;
                 match outcome.outcome {
                     ApplyOutcome::Applied(_) => {
@@ -563,10 +572,10 @@ impl RetainedMergeMaterializationCache {
             for partition in partitions {
                 let changeset = ValidatedChangeset::new(partition.changeset, schema.clone())
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "local replay write {} changeset: {error}",
-                            overlay.write_id
-                        ))
+                        DbError::context(
+                            format!("local replay write {} changeset", overlay.write_id),
+                            error,
+                        )
                     })?;
                 let applied = MergeMaterializationTransaction::new(&tx)
                     .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;

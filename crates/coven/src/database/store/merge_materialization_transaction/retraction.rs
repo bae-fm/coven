@@ -58,15 +58,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
         };
-        let canonical_cleanup = serde_json::to_vec(&input).map_err(|error| {
-            DbError::Message(format!("serialize Merge retraction cleanup: {error}"))
-        })?;
+        let canonical_cleanup = serde_json::to_vec(&input)
+            .map_err(|error| DbError::context("serialize Merge retraction cleanup", error))?;
         let cleanup_hash = ObjectHash::digest(&canonical_cleanup);
         let stream_id = stream_id.to_string();
         let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let encoded_ref = serde_json::to_string(&retained.commit_ref()).map_err(|error| {
-            DbError::Message(format!("serialize Merge retraction cleanup ref: {error}"))
-        })?;
+        let encoded_ref = serde_json::to_string(&retained.commit_ref())
+            .map_err(|error| DbError::context("serialize Merge retraction cleanup ref", error))?;
         self.transaction
             .execute(
                 "INSERT INTO merge_retraction_cleanups
@@ -90,9 +88,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         activation_commit: &StoreBatchCommitRef,
     ) -> Result<usize, DbError> {
         let encoded = serde_json::to_string(activation_commit).map_err(|error| {
-            DbError::Message(format!(
-                "serialize retracted Circle bootstrap activation: {error}"
-            ))
+            DbError::context("serialize retracted Circle bootstrap activation", error)
         })?;
         self.transaction
             .execute(
@@ -201,9 +197,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             } = &candidate.coord;
             let stream_id = stream_id.to_string();
             let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-            let encoded_ref = serde_json::to_string(&candidate).map_err(|error| {
-                DbError::Message(format!("serialize retracted Merge commit: {error}"))
-            })?;
+            let encoded_ref = serde_json::to_string(&candidate)
+                .map_err(|error| DbError::context("serialize retracted Merge commit", error))?;
             let input_hash: String = conn
                 .query_row(
                     "SELECT retained_input_hash FROM materialized_commits
@@ -247,9 +242,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .map(|row| {
                     let encoded = row.map_err(DbError::from)?;
                     encoded.parse().map_err(|error| {
-                        DbError::Message(format!(
-                            "retracted Merge replay object id {encoded}: {error}"
-                        ))
+                        DbError::context(
+                            format!("retracted Merge replay object id {encoded}"),
+                            error,
+                        )
                     })
                 })
                 .collect::<Result<BTreeSet<ObjectHash>, DbError>>()?;
@@ -270,9 +266,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 remote
                     .remove_retained_replay_owner(&replay_owner)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "remove retracted replay owner from {object_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("remove retracted replay owner from {object_id}"),
+                            error,
+                        )
                     })?;
                 update_remote_object_on(conn, *object_id, &remote)?;
             }
@@ -285,9 +282,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let mut remote = load_remote_object_on(conn, object_id)?
                     .into_observed_activated(&candidate)
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "record observed Merge activation for {object_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("record observed Merge activation for {object_id}"),
+                            error,
+                        )
                     })?;
                 let inert = remote
                     .retract_activated_candidate(
@@ -295,9 +293,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         (object_id == head_object_id).then_some(&head_nonactivation),
                     )
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "retract activated Merge object {object_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("retract activated Merge object {object_id}"),
+                            error,
+                        )
                     })?;
                 finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)?;
             }
@@ -351,10 +350,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .optional()
                 .map_err(DbError::from)?;
             if let Some(raw_status) = raw_status {
-                let stored_status: WriteStatus =
-                    serde_json::from_str(&raw_status).map_err(|error| {
-                        DbError::Message(format!("retracted Merge write status: {error}"))
-                    })?;
+                let stored_status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("retracted Merge write status", error))?;
                 let original = match stored_status {
                     WriteStatus::Published(original) if original.commit() == &candidate => {
                         *original

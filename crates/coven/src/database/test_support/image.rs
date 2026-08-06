@@ -214,7 +214,7 @@ impl DatabaseImageTest {
             )
             .map_err(DbError::from)?;
         let remote = serde_json::from_str(&remote_state)
-            .map_err(|error| DbError::Message(format!("parse snapshot remote blob: {error}")))?;
+            .map_err(|error| DbError::context("parse snapshot remote blob", error))?;
         Ok((table, row_id, column, row_stamp, locator_hash, remote))
     }
 

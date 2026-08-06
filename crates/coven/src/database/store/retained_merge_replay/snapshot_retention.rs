@@ -37,13 +37,11 @@ impl StoreDatabase {
         )?;
         let mut bootstrap_cuts = BTreeMap::new();
         for (circle_id, activation_commit, exact_cut) in bootstrap_rows {
-            let circle_id: crate::protocol::circle::CircleId =
-                circle_id.parse().map_err(|error| {
-                    DbError::Message(format!("snapshot Circle bootstrap id: {error}"))
-                })?;
-            let cut: CommitFrontier = serde_json::from_str(&exact_cut).map_err(|error| {
-                DbError::Message(format!("snapshot Circle bootstrap coverage: {error}"))
-            })?;
+            let circle_id: crate::protocol::circle::CircleId = circle_id
+                .parse()
+                .map_err(|error| DbError::context("snapshot Circle bootstrap id", error))?;
+            let cut: CommitFrontier = serde_json::from_str(&exact_cut)
+                .map_err(|error| DbError::context("snapshot Circle bootstrap coverage", error))?;
             if bootstrap_cuts.insert(circle_id, cut).is_some() {
                 return Err(DbError::Message(
                     "snapshot has duplicate Circle bootstrap coverage".to_string(),
@@ -58,10 +56,8 @@ impl StoreDatabase {
             |row| row.get::<_, String>(0),
         )?;
         for encoded in materialization_refs {
-            let reference: StoreBatchCommitRef =
-                serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::Message(format!("snapshot retained Circle commit: {error}"))
-                })?;
+            let reference: StoreBatchCommitRef = serde_json::from_str(&encoded)
+                .map_err(|error| DbError::context("snapshot retained Circle commit", error))?;
             let materialization =
                 Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
             let has_uncovered_circle_package = materialization.packages().iter().any(|package| {
@@ -91,9 +87,7 @@ impl StoreDatabase {
         for encoded in required {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::Message(format!(
-                        "snapshot author exclusion activation commit: {error}"
-                    ))
+                    DbError::context("snapshot author exclusion activation commit", error)
                 })?;
             Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
             let StoreCommitCoord {
@@ -120,9 +114,7 @@ impl StoreDatabase {
                 ));
             }
             let input: RetainedMergeMaterializationInput = serde_json::from_slice(&canonical_input)
-                .map_err(|error| {
-                    DbError::Message(format!("snapshot retained replay input: {error}"))
-                })?;
+                .map_err(|error| DbError::context("snapshot retained replay input", error))?;
             retained.push((reference, input_hash, canonical_input, input));
         }
         Self::remove_retained_replay_ownership_from_snapshot_on(conn)?;
@@ -136,9 +128,7 @@ impl StoreDatabase {
             let stream_id = stream_id.to_string();
             let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
             let encoded_ref = serde_json::to_string(&reference).map_err(|error| {
-                DbError::Message(format!(
-                    "serialize snapshot author exclusion activation: {error}"
-                ))
+                DbError::context("serialize snapshot author exclusion activation", error)
             })?;
             conn.execute(
                 "INSERT INTO retained_merge_materializations
@@ -154,9 +144,10 @@ impl StoreDatabase {
             )
             .map_err(DbError::from)?;
             let input_hash = input_hash.parse().map_err(|error| {
-                DbError::Message(format!(
-                    "snapshot author exclusion input hash {input_hash}: {error}"
-                ))
+                DbError::context(
+                    format!("snapshot author exclusion input hash {input_hash}"),
+                    error,
+                )
             })?;
             let owner = RetainedReplayOwner::Commit {
                 commit: reference,
@@ -183,7 +174,7 @@ impl StoreDatabase {
         for encoded in retained {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::Message(format!("snapshot retained device-state authority: {error}"))
+                    DbError::context("snapshot retained device-state authority", error)
                 })?;
             let materialization =
                 Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
@@ -206,9 +197,7 @@ impl StoreDatabase {
         .map_err(DbError::from)?;
         for reference in &required {
             let encoded = serde_json::to_string(reference).map_err(|error| {
-                DbError::Message(format!(
-                    "serialize snapshot device-state reference: {error}"
-                ))
+                DbError::context("serialize snapshot device-state reference", error)
             })?;
             let present = conn
                 .query_row(
@@ -250,7 +239,7 @@ impl StoreDatabase {
             .iter()
             .map(|reference| {
                 serde_json::to_string(reference).map_err(|error| {
-                    DbError::Message(format!("serialize expected snapshot device state: {error}"))
+                    DbError::context("serialize expected snapshot device state", error)
                 })
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
@@ -279,15 +268,12 @@ impl StoreDatabase {
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         for (encoded_exclusion, activation_commit) in stored {
-            let exclusion = serde_json::from_str(&encoded_exclusion).map_err(|error| {
-                DbError::Message(format!("snapshot author exclusion reference: {error}"))
-            })?;
+            let exclusion = serde_json::from_str(&encoded_exclusion)
+                .map_err(|error| DbError::context("snapshot author exclusion reference", error))?;
             let locator = load_author_exclusion_activation_locator_on(conn, root, &exclusion)?;
             let encoded_locator =
                 serde_json::to_string(locator.activation_commit()).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize snapshot author exclusion activation: {error}"
-                    ))
+                    DbError::context("serialize snapshot author exclusion activation", error)
                 })?;
             if encoded_locator != activation_commit {
                 return Err(DbError::Message(

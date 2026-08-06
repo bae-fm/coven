@@ -25,9 +25,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             .optional()
             .map_err(DbError::from)?
             .map(|raw| {
-                serde_json::from_str::<StoreAckRef>(&raw).map_err(|error| {
-                    DbError::Message(format!("activated Store acknowledgement ref: {error}"))
-                })
+                serde_json::from_str::<StoreAckRef>(&raw)
+                    .map_err(|error| DbError::context("activated Store acknowledgement ref", error))
             })
             .transpose()?;
         if current.as_ref().is_some_and(|current| {
@@ -45,12 +44,14 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                ack_ref = excluded.ack_ref, activating_commit = excluded.activating_commit",
             rusqlite::params![
                 device_id,
-                serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
-                    "serialize activated Store acknowledgement ref: {error}"
-                )))?,
-                serde_json::to_string(commit_ref).map_err(|error| DbError::Message(format!(
-                    "serialize acknowledgement activating commit ref: {error}"
-                )))?,
+                serde_json::to_string(reference).map_err(|error| DbError::context(
+                    "serialize activated Store acknowledgement ref",
+                    error
+                ))?,
+                serde_json::to_string(commit_ref).map_err(|error| DbError::context(
+                    "serialize acknowledgement activating commit ref",
+                    error
+                ))?,
             ],
         )
         .map(|_| ())
@@ -82,7 +83,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .map_err(DbError::from)?
                 .map(|raw| {
                     serde_json::from_str::<CircleAckRef>(&raw).map_err(|error| {
-                        DbError::Message(format!("activated Circle acknowledgement ref: {error}"))
+                        DbError::context("activated Circle acknowledgement ref", error)
                     })
                 })
                 .transpose()?;
@@ -105,9 +106,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 rusqlite::params![
                     circle_id,
                     device_id,
-                    serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
-                        "serialize activated Circle acknowledgement ref: {error}"
-                    )))?,
+                    serde_json::to_string(reference).map_err(|error| DbError::context(
+                        "serialize activated Circle acknowledgement ref",
+                        error
+                    ))?,
                     serde_json::to_string(commit_ref).map_err(|error| DbError::Message(
                         format!("serialize Circle acknowledgement activating commit: {error}")
                     ))?,
@@ -147,15 +149,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             &author,
             commit_ref,
         )
-        .map_err(|error| {
-            DbError::Message(format!("verify author exclusion activation head: {error}"))
-        })?;
+        .map_err(|error| DbError::context("verify author exclusion activation head", error))?;
         activation_head_object
             .verify(&activation_head.to_bytes())
             .map_err(|error| {
-                DbError::Message(format!(
-                    "verify author exclusion activation head object: {error}"
-                ))
+                DbError::context("verify author exclusion activation head object", error)
             })?;
         let expected_head_key = format!(
             "{}.json",
@@ -175,23 +173,18 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             object: activation_head_object.clone(),
         };
         let activation_commit = serde_json::to_string(commit_ref).map_err(|error| {
-            DbError::Message(format!(
-                "serialize author exclusion activation commit: {error}"
-            ))
+            DbError::context("serialize author exclusion activation commit", error)
         })?;
         for (exclusion, accepted_cut) in device_operations.exclusions() {
             let StoreHistoryCut(accepted_cut) = accepted_cut;
-            let exclusion_json = serde_json::to_string(exclusion).map_err(|error| {
-                DbError::Message(format!("serialize author exclusion reference: {error}"))
-            })?;
+            let exclusion_json = serde_json::to_string(exclusion)
+                .map_err(|error| DbError::context("serialize author exclusion reference", error))?;
             let accepted_cut_json = serde_json::to_string(accepted_cut).map_err(|error| {
-                DbError::Message(format!("serialize author exclusion accepted cut: {error}"))
+                DbError::context("serialize author exclusion accepted cut", error)
             })?;
             let activation_head_json =
                 serde_json::to_string(&activation_head).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize author exclusion activation head: {error}"
-                    ))
+                    DbError::context("serialize author exclusion activation head", error)
                 })?;
             let inserted = conn
                 .execute(
@@ -290,7 +283,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let bytes = bytes.map_err(DbError::from)?;
                 let control: crate::protocol::circle::CircleControl =
                     serde_json::from_slice(&bytes).map_err(|error| {
-                        DbError::Message(format!("parse activated circle control: {error}"))
+                        DbError::context("parse activated circle control", error)
                     })?;
                 existing_controls.push(control);
             }
@@ -338,13 +331,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     )));
                 }
             };
-            let current_state_payload = serde_json::to_vec(&current_state).map_err(|error| {
-                DbError::Message(format!("serialize Circle current state: {error}"))
-            })?;
-            let control_coord =
-                serde_json::to_string(&activation.control.coord).map_err(|error| {
-                    DbError::Message(format!("serialize circle control coordinate: {error}"))
-                })?;
+            let current_state_payload = serde_json::to_vec(&current_state)
+                .map_err(|error| DbError::context("serialize Circle current state", error))?;
+            let control_coord = serde_json::to_string(&activation.control.coord)
+                .map_err(|error| DbError::context("serialize circle control coordinate", error))?;
             conn.execute(
                 "INSERT INTO circle_control_activations
                  (circle_id, control_coord, stream_id, seq, commit_hash, control_bytes)

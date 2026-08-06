@@ -143,9 +143,10 @@ impl StoreDatabase {
             remote
                 .merge_retained_replay_owner(owner.clone())
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "pin retained package {object_id} for replay: {error}"
-                    ))
+                    DbError::context(
+                        format!("pin retained package {object_id} for replay"),
+                        error,
+                    )
                 })?;
             update_remote_object_on(conn, object_id, &remote)?;
             index_retained_replay_owner_on(conn, object_id, owner)?;
@@ -161,9 +162,7 @@ impl StoreDatabase {
                 remote
                     .merge_retained_replay_owner(owner.clone())
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "pin retained blob {object_id} for replay: {error}"
-                        ))
+                        DbError::context(format!("pin retained blob {object_id} for replay"), error)
                     })?;
                 update_remote_object_on(conn, object_id, &remote)?;
                 index_retained_replay_owner_on(conn, object_id, owner)?;
@@ -213,9 +212,8 @@ impl StoreDatabase {
         } = &commit.coord;
         let stream_id = stream_id.to_string();
         let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let commit_ref = serde_json::to_string(commit).map_err(|error| {
-            DbError::Message(format!("serialize retained replay commit ref: {error}"))
-        })?;
+        let commit_ref = serde_json::to_string(commit)
+            .map_err(|error| DbError::context("serialize retained replay commit ref", error))?;
         let input_hash = input_hash.to_string();
         let mut rows = conn
             .prepare(
@@ -233,7 +231,7 @@ impl StoreDatabase {
             .map(|row| {
                 let object_id = row.map_err(DbError::from)?;
                 object_id.parse().map_err(|error| {
-                    DbError::Message(format!("retained replay object id {object_id}: {error}"))
+                    DbError::context(format!("retained replay object id {object_id}"), error)
                 })
             })
             .collect::<Result<BTreeSet<_>, DbError>>()?;
@@ -255,16 +253,17 @@ impl StoreDatabase {
             |row| row.get::<_, String>(0),
         )?;
         for encoded in object_ids {
-            let object_id = encoded.parse().map_err(|error| {
-                DbError::Message(format!("snapshot retained replay object id: {error}"))
-            })?;
+            let object_id = encoded
+                .parse()
+                .map_err(|error| DbError::context("snapshot retained replay object id", error))?;
             let mut remote = load_remote_object_on(conn, object_id)?;
             remote
                 .remove_all_retained_replay_owners()
                 .map_err(|error| {
-                    DbError::Message(format!(
-                        "remove snapshot retained replay owner from {object_id}: {error}"
-                    ))
+                    DbError::context(
+                        format!("remove snapshot retained replay owner from {object_id}"),
+                        error,
+                    )
                 })?;
             update_remote_object_on(conn, object_id, &remote)?;
         }

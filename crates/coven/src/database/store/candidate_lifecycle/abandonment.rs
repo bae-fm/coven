@@ -15,7 +15,7 @@ impl StoreDatabase {
                     )));
                 }
                 remote.mark_absent_verified().map_err(|error| {
-                    DbError::Message(format!("mark candidate {object_id} absent: {error}"))
+                    DbError::context(format!("mark candidate {object_id} absent"), error)
                 })?;
                 update_remote_object_on(conn, object_id, &remote)
             })
@@ -39,9 +39,8 @@ impl StoreDatabase {
                 let Some((raw_status, raw_prepared)) = row else {
                     return Err(DbError::Message(format!("write {write_id} is absent")));
                 };
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("blocked Merge candidate status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("blocked Merge candidate status", error))?;
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(format!("write {write_id} is not blocked")));
                 }
@@ -50,7 +49,7 @@ impl StoreDatabase {
                 };
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("blocked Merge candidate preparation: {error}"))
+                        DbError::context("blocked Merge candidate preparation", error)
                     })?;
                 let PreparedStoreWriteState::Publication { .. } = &prepared else {
                     return Ok(None);
@@ -102,10 +101,8 @@ impl StoreDatabase {
                         |row| row.get(0),
                     )
                     .map_err(DbError::from)?;
-                let prepared: PreparedStoreWriteState =
-                    serde_json::from_str(&raw).map_err(|error| {
-                        DbError::Message(format!("blocked Merge history summary: {error}"))
-                    })?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw)
+                    .map_err(|error| DbError::context("blocked Merge history summary", error))?;
                 let PreparedStoreWriteState::Publication {
                     history_summary, ..
                 } = prepared
@@ -136,9 +133,7 @@ impl StoreDatabase {
                     return Ok(None);
                 };
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| {
-                        DbError::Message(format!("prepared Merge abandonment: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("prepared Merge abandonment", error))?;
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
@@ -200,9 +195,8 @@ impl StoreDatabase {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("blocked Merge candidate status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("blocked Merge candidate status", error))?;
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(format!(
                         "Merge candidate {write_id} is not blocked"
@@ -210,7 +204,7 @@ impl StoreDatabase {
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("blocked Merge candidate preparation: {error}"))
+                        DbError::context("blocked Merge candidate preparation", error)
                     })?;
                 let PreparedStoreWriteState::Publication { .. } = &prepared else {
                     return Err(DbError::Message(
@@ -255,9 +249,8 @@ impl StoreDatabase {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("blocked Merge abandonment status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("blocked Merge abandonment status", error))?;
                 if !matches!(status, WriteStatus::Publishing | WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(
                         "Merge abandonment candidates are not publishing or blocked".to_string(),
@@ -265,7 +258,7 @@ impl StoreDatabase {
                 }
                 let mut prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("blocked Merge abandonment preparation: {error}"))
+                        DbError::context("blocked Merge abandonment preparation", error)
                     })?;
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
@@ -309,9 +302,7 @@ impl StoreDatabase {
                 )?;
                 *outcome = MergeAbandonmentOutcome::AuthorExcluded;
                 let replacement = serde_json::to_string(&prepared).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize excluded Merge abandonment preparation: {error}"
-                    ))
+                    DbError::context("serialize excluded Merge abandonment preparation", error)
                 })?;
                 let updated = tx
                     .execute(
@@ -358,9 +349,7 @@ impl StoreDatabase {
                     return Ok(MergeAbandonmentState::None);
                 };
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| {
-                        DbError::Message(format!("prepared Merge abandonment: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("prepared Merge abandonment", error))?;
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
@@ -407,9 +396,8 @@ impl StoreDatabase {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("winning Merge candidate status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("winning Merge candidate status", error))?;
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(
                         "winning Merge candidate is not blocked".to_string(),
@@ -417,7 +405,7 @@ impl StoreDatabase {
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("winning Merge candidate preparation: {error}"))
+                        DbError::context("winning Merge candidate preparation", error)
                     })?;
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
@@ -459,12 +447,10 @@ impl StoreDatabase {
                     completion,
                 };
                 let replacement = serde_json::to_string(&replacement).map_err(|error| {
-                    DbError::Message(format!("serialize winning Merge candidate: {error}"))
+                    DbError::context("serialize winning Merge candidate", error)
                 })?;
-                let publishing =
-                    serde_json::to_string(&WriteStatus::Publishing).map_err(|error| {
-                        DbError::Message(format!("serialize winning Merge status: {error}"))
-                    })?;
+                let publishing = serde_json::to_string(&WriteStatus::Publishing)
+                    .map_err(|error| DbError::context("serialize winning Merge status", error))?;
                 let updated = tx
                     .execute(
                         "UPDATE store_writes SET prepared = ?2, status = ?3
@@ -499,9 +485,8 @@ impl StoreDatabase {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("lost Merge abandonment status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("lost Merge abandonment status", error))?;
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(
                         "lost Merge abandonment is not blocked".to_string(),
@@ -509,7 +494,7 @@ impl StoreDatabase {
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("lost Merge abandonment preparation: {error}"))
+                        DbError::context("lost Merge abandonment preparation", error)
                     })?;
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
@@ -550,9 +535,8 @@ impl StoreDatabase {
                     local_cleanup,
                     completion,
                 };
-                let replacement = serde_json::to_string(&replacement).map_err(|error| {
-                    DbError::Message(format!("serialize lost Merge candidate: {error}"))
-                })?;
+                let replacement = serde_json::to_string(&replacement)
+                    .map_err(|error| DbError::context("serialize lost Merge candidate", error))?;
                 let updated = tx
                     .execute(
                         "UPDATE store_writes SET prepared = ?2
@@ -585,7 +569,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("excluded Merge abandonment status: {error}"))
+                    DbError::context("excluded Merge abandonment status", error)
                 })?;
                 if !matches!(status, WriteStatus::Blocked(_)) {
                     return Err(DbError::Message(
@@ -594,7 +578,7 @@ impl StoreDatabase {
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| {
-                        DbError::Message(format!("excluded Merge abandonment preparation: {error}"))
+                        DbError::context("excluded Merge abandonment preparation", error)
                     })?;
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
@@ -640,9 +624,7 @@ impl StoreDatabase {
                     completion,
                 };
                 let replacement = serde_json::to_string(&replacement).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize cleaned excluded Merge abandonment: {error}"
-                    ))
+                    DbError::context("serialize cleaned excluded Merge abandonment", error)
                 })?;
                 let updated = tx
                     .execute(

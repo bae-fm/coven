@@ -16,7 +16,7 @@ impl StoreDatabase {
                 )
                 .map_err(DbError::from)?;
             let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                DbError::Message(format!("Merge cleanup status: {error}"))
+                DbError::context("Merge cleanup status", error)
             })?;
             if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
                 witness.validate().map_err(DbError::Message)?;
@@ -35,9 +35,7 @@ impl StoreDatabase {
                             stream_id.to_string(),
                             Database::sequence_to_sqlite(&stream_id.to_string(), *sequence)?,
                             serde_json::to_string(candidate).map_err(|error| {
-                                DbError::Message(format!(
-                                    "serialize Merge retraction cleanup ref: {error}"
-                                ))
+                                DbError::context("serialize Merge retraction cleanup ref", error)
                             })?,
                         ],
                         |row| row.get(0),
@@ -52,7 +50,7 @@ impl StoreDatabase {
                 return Ok(false);
             };
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                .map_err(|error| DbError::Message(format!("prepared Merge cleanup: {error}")))?;
+                .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
             let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
             let cleanup_pending = |candidate: &PreparedMergeCandidate| -> Result<bool, DbError> {
                 let remote = load_remote_object_on(
@@ -117,7 +115,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
+                    .map_err(|error| DbError::context("Merge cleanup status", error))?;
                 if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &status {
                     witness.validate().map_err(DbError::Message)?;
                     let candidate =
@@ -147,9 +145,7 @@ impl StoreDatabase {
                     DbError::Message("blocked Merge cleanup has no prepared candidate".to_string())
                 })?;
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| {
-                        DbError::Message(format!("prepared Merge cleanup: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
                 let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
                 match &prepared {
                     PreparedStoreWriteState::Publication { .. } => {
@@ -238,9 +234,8 @@ impl StoreDatabase {
                         |row| row.get(0),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("Merge retraction cleanup status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("Merge retraction cleanup status", error))?;
                 let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status else {
                     return Ok(());
                 };

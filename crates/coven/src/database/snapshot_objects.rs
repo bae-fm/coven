@@ -50,7 +50,7 @@ pub(crate) async fn verify_snapshot_blob_spools(
                         crate::protocol::store_commit::ObjectHash::from_digest(digest),
                     )
                     .map_err(|error| {
-                        DbError::Message(format!("{label} snapshot blob spool: {error}"))
+                        DbError::context(format!("{label} snapshot blob spool"), error)
                     })?;
             }
         }

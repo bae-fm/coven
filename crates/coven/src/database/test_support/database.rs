@@ -418,13 +418,11 @@ impl Database {
             .test_sql(move |database| database.retained_merge_input(&stream_id, sequence))
             .await?;
         let retained: serde_json::Value = serde_json::from_slice(&canonical_input)
-            .map_err(|error| DbError::Message(format!("parse retained package input: {error}")))?;
+            .map_err(|error| DbError::context("parse retained package input", error))?;
         let reference: crate::protocol::store_commit::StorePackageRef = serde_json::from_value(
             retained["packages"][0]["store"]["reference"].clone(),
         )
-        .map_err(|error| {
-            DbError::Message(format!("parse retained Store package reference: {error}"))
-        })?;
+        .map_err(|error| DbError::context("parse retained Store package reference", error))?;
         let remote = self
             .remote_object_for_test(reference.object.clone())
             .await?;
@@ -584,7 +582,7 @@ impl Database {
             .await?
             .ok_or_else(|| DbError::Message("local device id is not installed".to_string()))?
             .parse()
-            .map_err(|error| DbError::Message(format!("parse local device id: {error}")))
+            .map_err(|error| DbError::context("parse local device id", error))
     }
 
     pub(crate) async fn capture_document_for_test(

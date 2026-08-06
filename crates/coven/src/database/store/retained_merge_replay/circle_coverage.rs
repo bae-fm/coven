@@ -22,15 +22,12 @@ impl StoreDatabase {
                     Vec<crate::protocol::circle::CircleControlCoord>,
                 )> = Vec::new();
                 for (circle_id, control_coord) in rows {
-                    let circle_id: crate::protocol::circle::CircleId =
-                        circle_id.parse().map_err(|error| {
-                            DbError::Message(format!("parse retained Circle id: {error}"))
-                        })?;
+                    let circle_id: crate::protocol::circle::CircleId = circle_id
+                        .parse()
+                        .map_err(|error| DbError::context("parse retained Circle id", error))?;
                     let control: crate::protocol::circle::CircleControlCoord =
                         serde_json::from_str(&control_coord).map_err(|error| {
-                            DbError::Message(format!(
-                                "parse retained Circle control coordinate: {error}"
-                            ))
+                            DbError::context("parse retained Circle control coordinate", error)
                         })?;
                     match circles.last_mut() {
                         Some((last_circle, controls)) if *last_circle == circle_id => {
@@ -119,19 +116,15 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         {
             let circle_id = bootstrap.circle_id().to_string();
-            let control_coord = serde_json::to_string(bootstrap.control()).map_err(|error| {
-                DbError::Message(format!("serialize Circle bootstrap control: {error}"))
-            })?;
+            let control_coord = serde_json::to_string(bootstrap.control())
+                .map_err(|error| DbError::context("serialize Circle bootstrap control", error))?;
             let encoded_commit = serde_json::to_string(activation_commit).map_err(|error| {
-                DbError::Message(format!("serialize Circle bootstrap activation: {error}"))
+                DbError::context("serialize Circle bootstrap activation", error)
             })?;
-            let encoded_cut =
-                serde_json::to_string(&bootstrap.reference().coverage).map_err(|error| {
-                    DbError::Message(format!("serialize Circle bootstrap coverage: {error}"))
-                })?;
-            let encoded_ref = serde_json::to_vec(bootstrap.reference()).map_err(|error| {
-                DbError::Message(format!("serialize Circle bootstrap reference: {error}"))
-            })?;
+            let encoded_cut = serde_json::to_string(&bootstrap.reference().coverage)
+                .map_err(|error| DbError::context("serialize Circle bootstrap coverage", error))?;
+            let encoded_ref = serde_json::to_vec(bootstrap.reference())
+                .map_err(|error| DbError::context("serialize Circle bootstrap reference", error))?;
             let encoded_image_hash = bootstrap.reference().image.image_hash.to_string();
             // The stored image bytes are input to the replay verifier, not trusted
             // for being local: their digest binds the row's image hash at write and
@@ -164,17 +157,13 @@ impl StoreDatabase {
             {
                 let prior_reference: crate::protocol::circle::CircleBootstrapRef =
                     serde_json::from_slice(&prior_ref).map_err(|error| {
-                        DbError::Message(format!("parse prior Circle bootstrap reference: {error}"))
+                        DbError::context("parse prior Circle bootstrap reference", error)
                     })?;
                 if serde_json::to_vec(&prior_reference).map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize prior Circle bootstrap reference: {error}"
-                    ))
+                    DbError::context("serialize prior Circle bootstrap reference", error)
                 })? != prior_ref
                     || serde_json::to_string(&prior_reference.coverage).map_err(|error| {
-                        DbError::Message(format!(
-                            "serialize prior Circle bootstrap coverage: {error}"
-                        ))
+                        DbError::context("serialize prior Circle bootstrap coverage", error)
                     })? != prior_cut
                     || prior_reference.image.image_hash.to_string() != prior_image_hash
                 {
@@ -201,11 +190,11 @@ impl StoreDatabase {
                 }
                 let prior_control: crate::protocol::circle::CircleControlCoord =
                     serde_json::from_str(&prior_control).map_err(|error| {
-                        DbError::Message(format!("parse prior Circle bootstrap control: {error}"))
+                        DbError::context("parse prior Circle bootstrap control", error)
                     })?;
                 let prior_cut: CommitFrontier =
                     serde_json::from_str(&prior_cut).map_err(|error| {
-                        DbError::Message(format!("parse prior Circle bootstrap coverage: {error}"))
+                        DbError::context("parse prior Circle bootstrap coverage", error)
                     })?;
                 let prior_activation = Self::verified_circle_activation_on(
                     conn,
@@ -296,9 +285,7 @@ impl StoreDatabase {
         for encoded in encoded_refs {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::Message(format!(
-                        "parse retained materialization commit ref: {error}"
-                    ))
+                    DbError::context("parse retained materialization commit ref", error)
                 })?;
             let owned =
                 Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
@@ -327,18 +314,14 @@ impl StoreDatabase {
         let Some((control, activation_commit, bootstrap_ref)) = row else {
             return Ok(None);
         };
-        let control: crate::protocol::circle::CircleControlCoord = serde_json::from_str(&control)
-            .map_err(|error| {
-            DbError::Message(format!("parse Circle coverage control: {error}"))
-        })?;
+        let control: crate::protocol::circle::CircleControlCoord =
+            serde_json::from_str(&control)
+                .map_err(|error| DbError::context("parse Circle coverage control", error))?;
         let activation_commit: StoreBatchCommitRef = serde_json::from_str(&activation_commit)
-            .map_err(|error| {
-                DbError::Message(format!("parse Circle coverage activation: {error}"))
-            })?;
+            .map_err(|error| DbError::context("parse Circle coverage activation", error))?;
         let bootstrap: crate::protocol::circle::CircleBootstrapRef =
-            serde_json::from_slice(&bootstrap_ref).map_err(|error| {
-                DbError::Message(format!("parse Circle coverage bootstrap: {error}"))
-            })?;
+            serde_json::from_slice(&bootstrap_ref)
+                .map_err(|error| DbError::context("parse Circle coverage bootstrap", error))?;
         Ok(Some(crate::protocol::circle::CircleBootstrapCoverageRef {
             circle_id,
             control,
@@ -385,32 +368,25 @@ impl StoreDatabase {
             encoded_reference,
         ) in rows
         {
-            let circle_id: crate::protocol::circle::CircleId =
-                circle_id.parse().map_err(|error| {
-                    DbError::Message(format!("parse retained Circle bootstrap id: {error}"))
-                })?;
+            let circle_id: crate::protocol::circle::CircleId = circle_id
+                .parse()
+                .map_err(|error| DbError::context("parse retained Circle bootstrap id", error))?;
             let control = serde_json::from_str(&control).map_err(|error| {
-                DbError::Message(format!("parse retained Circle bootstrap control: {error}"))
+                DbError::context("parse retained Circle bootstrap control", error)
             })?;
             let activation_commit: StoreBatchCommitRef = serde_json::from_str(&activation_commit)
                 .map_err(|error| {
-                DbError::Message(format!(
-                    "parse retained Circle bootstrap activation: {error}"
-                ))
+                DbError::context("parse retained Circle bootstrap activation", error)
             })?;
             let exact_cut: CommitFrontier = serde_json::from_str(&exact_cut).map_err(|error| {
-                DbError::Message(format!("parse retained Circle bootstrap coverage: {error}"))
+                DbError::context("parse retained Circle bootstrap coverage", error)
             })?;
             let reference: crate::protocol::circle::CircleBootstrapRef =
                 serde_json::from_slice(&encoded_reference).map_err(|error| {
-                    DbError::Message(format!(
-                        "parse retained Circle bootstrap reference: {error}"
-                    ))
+                    DbError::context("parse retained Circle bootstrap reference", error)
                 })?;
             if serde_json::to_vec(&reference).map_err(|error| {
-                DbError::Message(format!(
-                    "serialize retained Circle bootstrap reference: {error}"
-                ))
+                DbError::context("serialize retained Circle bootstrap reference", error)
             })? != encoded_reference
                 || reference.coverage != exact_cut
                 || reference.image.image_hash.to_string() != image_hash

@@ -244,10 +244,8 @@ impl MergeMaterializationTransaction<'_, '_> {
         let had_fk_violations = fk_flag.load(Ordering::Relaxed);
         let constraint_conflict_tables = constraint_conflict_tables
             .lock()
-            .map_err(|error| {
-                DbError::Message(format!(
-                    "constraint conflict table collection poisoned: {error}"
-                ))
+            .map_err(|_| {
+                DbError::Message("constraint conflict table collection is poisoned".to_string())
             })?
             .clone();
         #[cfg(test)]
@@ -619,14 +617,16 @@ fn changeset_value(
     };
     match value {
         Ok(value) => Value::try_from(value).map(Some).map_err(|error| {
-            DbError::Message(format!(
-                "changeset {side:?} value conversion failed for column {column}: {error}"
-            ))
+            DbError::context(
+                format!("changeset {side:?} value conversion failed for column {column}"),
+                error,
+            )
         }),
         Err(rusqlite::Error::InvalidColumnIndex(_)) => Ok(None),
-        Err(error) => Err(DbError::Message(format!(
-            "changeset {side:?} value read failed for column {column}: {error}"
-        ))),
+        Err(error) => Err(DbError::context(
+            format!("changeset {side:?} value read failed for column {column}"),
+            error,
+        )),
     }
 }
 

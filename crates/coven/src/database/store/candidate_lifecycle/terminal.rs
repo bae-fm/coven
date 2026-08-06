@@ -16,7 +16,7 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
+                    .map_err(|error| DbError::context("Merge cleanup status", error))?;
                 let mut candidates = Vec::new();
                 if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
                     witness.validate().map_err(DbError::Message)?;
@@ -36,9 +36,7 @@ impl StoreDatabase {
                         DbError::Message("Merge cleanup has no prepared candidate".to_string())
                     })?;
                     let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                        .map_err(|error| {
-                            DbError::Message(format!("prepared Merge cleanup: {error}"))
-                        })?;
+                        .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
                     match &prepared {
                         PreparedStoreWriteState::Publication { .. } => {
                             candidates.push(parse_prepared_merge_candidate_on(conn, &prepared)?);
@@ -109,7 +107,7 @@ impl StoreDatabase {
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 let mut candidates = Vec::new();
                 let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::Message(format!("Merge cleanup status: {error}")))?;
+                    .map_err(|error| DbError::context("Merge cleanup status", error))?;
                 if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
                     witness.validate().map_err(DbError::Message)?;
                     if witness.original_position().commit() != &reference {
@@ -128,9 +126,7 @@ impl StoreDatabase {
                         DbError::Message("Merge cleanup has no prepared candidate".to_string())
                     })?;
                     let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                        .map_err(|error| {
-                            DbError::Message(format!("prepared Merge cleanup: {error}"))
-                        })?;
+                        .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
                     match &prepared {
                         PreparedStoreWriteState::Publication { commit, head, .. } => candidates
                             .push(parse_prepared_merge_candidate_parts_on(&tx, commit, head)?),
@@ -191,9 +187,10 @@ impl StoreDatabase {
                         &head_nonactivation,
                     )
                     .map_err(|error| {
-                        DbError::Message(format!(
-                            "reconcile excluded-author head {object_id}: {error}"
-                        ))
+                        DbError::context(
+                            format!("reconcile excluded-author head {object_id}"),
+                            error,
+                        )
                     })?;
                 finish_remote_candidate_nonactivation_on(&tx, object_id, remote, inert)?;
                 tx.commit().map_err(DbError::from)
@@ -217,18 +214,15 @@ impl StoreDatabase {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                    DbError::Message(format!("alternate Merge head status: {error}"))
-                })?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("alternate Merge head status", error))?;
                 if !matches!(status, WriteStatus::Publishing) {
                     return Err(DbError::Message(format!(
                         "Merge candidate {write_id} is not publishing"
                     )));
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| {
-                        DbError::Message(format!("prepared Merge candidate: {error}"))
-                    })?;
+                    .map_err(|error| DbError::context("prepared Merge candidate", error))?;
                 let publication = parse_prepared_merge_publication_on(&tx, &prepared)?;
                 let root = required_store_root_authority_on(&tx)?;
                 let registration = load_activated_registration_on(
@@ -243,9 +237,7 @@ impl StoreDatabase {
                     &registration,
                     &candidate,
                 )
-                .map_err(|error| {
-                    DbError::Message(format!("verify alternate Merge head: {error}"))
-                })?;
+                .map_err(|error| DbError::context("verify alternate Merge head", error))?;
                 if verified_winner != winner || winner.commit != candidate {
                     return Err(DbError::Message(
                         "alternate Merge head does not activate the prepared commit".to_string(),
@@ -297,7 +289,7 @@ impl StoreDatabase {
                     },
                 };
                 let replacement = serde_json::to_string(&replacement).map_err(|error| {
-                    DbError::Message(format!("serialize alternate Merge preparation: {error}"))
+                    DbError::context("serialize alternate Merge preparation", error)
                 })?;
                 let updated = tx
                     .execute(

@@ -16,9 +16,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 ));
             }
             let remote = load_remote_object_on(conn, *object_id).map_err(|error| {
-                DbError::Message(format!(
-                    "load Store operation remote object {object_id} for activation: {error}"
-                ))
+                DbError::context(
+                    format!("load Store operation remote object {object_id} for activation"),
+                    error,
+                )
             })?;
             let kind = match &remote {
                 RemoteObjectRecord::CandidateCommit(_) => "candidate commit",
@@ -27,9 +28,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 RemoteObjectRecord::SharedLiveSet(_) => "shared live-set object",
             };
             let remote = remote.into_activated(commit_ref).map_err(|error| {
-                DbError::Message(format!(
-                    "activate Store operation {kind} {object_id}: {error}"
-                ))
+                DbError::context(
+                    format!("activate Store operation {kind} {object_id}"),
+                    error,
+                )
             })?;
             update_remote_object_on(conn, *object_id, &remote)?;
         }
@@ -363,9 +365,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )?;
             for encoded in circles {
                 inactive_circles.insert(encoded.parse().map_err(|error| {
-                    DbError::Message(format!(
-                        "parse materialized Circle audience {encoded}: {error}"
-                    ))
+                    DbError::context(
+                        format!("parse materialized Circle audience {encoded}"),
+                        error,
+                    )
                 })?);
             }
             crate::database::StoreDatabase::remove_local_circle_access_on(conn)?;
