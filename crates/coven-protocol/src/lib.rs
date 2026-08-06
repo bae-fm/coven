@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Protocol: Coven's deterministic model of replicated state — signed values,
 //! their parsing, and their validation.
 //!
