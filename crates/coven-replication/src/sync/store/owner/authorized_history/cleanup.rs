@@ -28,32 +28,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         delete_candidate_cleanup_targets(self.storage.as_ref(), &self.database, targets).await
     }
 
-    pub(crate) async fn cleanup_circle_operation_candidate(
-        &mut self,
-        operation_id: &coven_protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        let root = self.history_verifier.verified_root().reference().clone();
-        for verification in self
-            .database
-            .circle_operation_discard_terminal_verifications(root, operation_id)
-            .await?
-        {
-            self.merge_conflict()
-                .apply_terminal_nonactivation(
-                    merge_conflict::TerminalNonactivationCandidate::CircleOperation {
-                        operation_id: operation_id.clone(),
-                        verification,
-                    },
-                )
-                .await?;
-        }
-        let targets = self
-            .database
-            .circle_operation_discard_cleanup_targets(operation_id)
-            .await?;
-        delete_candidate_cleanup_targets(self.storage.as_ref(), &self.database, targets).await
-    }
-
     pub(crate) async fn resume_merge_retraction_cleanups(
         &mut self,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
@@ -350,4 +324,32 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await?;
         Ok(())
     }
+}
+
+/// Retire the terminal nonactivations a discarded Circle operation's candidate
+/// left behind, then delete the objects that candidate staged.
+pub(crate) async fn cleanup_circle_operation_candidate<'storage>(
+    database: &StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    history: &mut MergeHistoryVerifier<'storage>,
+    operation_id: &coven_protocol::circle::CircleOperationId,
+) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    let root = history.verified_root().reference().clone();
+    for verification in database
+        .circle_operation_discard_terminal_verifications(root, operation_id)
+        .await?
+    {
+        merge_conflict::MergeConflictHistory::new(database, storage, history)
+            .apply_terminal_nonactivation(
+                merge_conflict::TerminalNonactivationCandidate::CircleOperation {
+                    operation_id: operation_id.clone(),
+                    verification,
+                },
+            )
+            .await?;
+    }
+    let targets = database
+        .circle_operation_discard_cleanup_targets(operation_id)
+        .await?;
+    delete_candidate_cleanup_targets(storage, database, targets).await
 }

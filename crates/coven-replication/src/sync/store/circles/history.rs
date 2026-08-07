@@ -1,34 +1,51 @@
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
+use crate::sync::store::owner::authorized_history::{cleanup, retained};
+use coven_database::StoreDatabase;
+use coven_storage::SyncStorage;
+
+/// The reads and history compositions the Circle subsystem performs, over the
+/// three capabilities they need.
 pub(crate) struct VerifiedCircleHistory<'operation, 'storage> {
-    history: &'operation mut crate::sync::store::owner::history::AuthorizedStoreHistory<'storage>,
+    database: StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
     pub(crate) fn new(
-        history: &'operation mut crate::sync::store::owner::history::AuthorizedStoreHistory<
-            'storage,
-        >,
+        database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
-        Self { history }
+        Self {
+            database,
+            storage,
+            history,
+        }
     }
 
     pub(crate) fn activations(
         &mut self,
     ) -> super::activation::CircleActivationVerifier<'_, 'storage> {
-        self.history.circle_activations()
+        super::activation::CircleActivationVerifier::new(&self.database, self.storage, self.history)
     }
 
     pub(crate) fn packages(&mut self) -> super::packages::CirclePackageReader<'_, 'storage> {
-        self.history.circle_packages()
+        super::packages::CirclePackageReader::new(&self.database, self.storage, self.history)
     }
 
     pub(crate) fn acknowledgements(
         &mut self,
     ) -> crate::sync::store::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
-        self.history.circle_acknowledgements()
+        crate::sync::store::acknowledgements::CircleAcknowledgementReader::new(
+            &self.database,
+            self.storage,
+            self.history.verified_root().reference(),
+        )
     }
 
     pub(crate) fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
-        self.history.root()
+        self.history.verified_root().reference()
     }
 
     pub(crate) async fn authenticate_commit_bytes(
@@ -39,9 +56,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         coven_protocol::store_commit::VerifiedStoreBatchCommit,
         coven_protocol::objects::StoreObjectError,
     > {
-        self.history
-            .authenticate_commit_bytes(reference, bytes)
-            .await
+        self.history.authenticate_bytes(reference, bytes).await
     }
 
     pub(crate) async fn load_commit(
@@ -51,7 +66,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         coven_protocol::store_commit::VerifiedStoreBatchCommit,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        self.history.load_commit(reference).await
+        self.history.load_ref(reference).await
     }
 
     pub(crate) async fn retained_device_state_for_order(
@@ -64,7 +79,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         ),
         crate::sync::store::owner::pull::StorePullError,
     > {
-        self.history.retained_device_state_for_order(order).await
+        retained::retained_device_state_for_order(&self.database, self.history, order).await
     }
 
     pub(crate) async fn observe_excluded_candidate_head(
@@ -76,19 +91,77 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation,
         crate::sync::store::StoreError,
     > {
-        self.history
-            .merge_conflict()
-            .observe_excluded_candidate_head(candidate, candidate_commit, candidate_object)
+        crate::sync::store::merge_conflict::MergeConflictHistory::new(
+            &self.database,
+            self.storage,
+            self.history,
+        )
+        .observe_excluded_candidate_head(candidate, candidate_commit, candidate_object)
+        .await
+    }
+
+    pub(crate) async fn discard_operation(
+        &mut self,
+        operation_id: &coven_protocol::circle::CircleOperationId,
+    ) -> Result<(), super::CircleOperationError> {
+        use super::CircleOperationError;
+
+        let journal = self
+            .database
+            .circle_operation(operation_id)
+            .await?
+            .ok_or_else(|| {
+                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+            })?;
+        if !journal.is_discarding() {
+            let discard_candidate = self
+                .database
+                .circle_operation_discard_candidate(operation_id)
+                .await?;
+            let Some(nonactivation) =
+                crate::sync::store::merge_conflict::MergeConflictHistory::new(
+                    &self.database,
+                    self.storage,
+                    self.history,
+                )
+                .discard_candidate_nonactivation(
+                    &discard_candidate.candidate,
+                    discard_candidate.revoked_grant.as_ref(),
+                )
+                .await?
+            else {
+                return Err(CircleOperationError::DiscardRequiresNonactivation {
+                    operation_id: operation_id.clone(),
+                });
+            };
+            self.database
+                .begin_circle_operation_discard(self.root().clone(), operation_id, nonactivation)
+                .await?;
+        }
+        self.cleanup_operation_candidate(operation_id)
             .await
+            .map_err(|error| {
+                CircleOperationError::InvalidState(format!(
+                    "Circle operation {operation_id} discard cleanup: {error}"
+                ))
+            })?;
+        self.database
+            .finish_circle_operation_discard(operation_id)
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn cleanup_operation_candidate(
         &mut self,
         operation_id: &coven_protocol::circle::CircleOperationId,
     ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        self.history
-            .cleanup_circle_operation_candidate(operation_id)
-            .await
+        cleanup::cleanup_circle_operation_candidate(
+            &self.database,
+            self.storage,
+            self.history,
+            operation_id,
+        )
+        .await
     }
 
     pub(crate) async fn prepare_successor(
@@ -102,21 +175,26 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        self.history
-            .prepare_merge_history_successor(
-                commit,
-                membership,
-                recovery_author,
-                state_after,
-                evidence,
-            )
-            .await
+        retained::prepare_merge_history_successor(
+            &self.database,
+            self.history,
+            commit,
+            membership,
+            recovery_author,
+            state_after,
+            evidence,
+        )
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn snapshots(
         &mut self,
     ) -> crate::sync::store::snapshots::CircleSnapshotReader<'_, 'storage> {
-        self.history.circle_snapshots()
+        crate::sync::store::snapshots::CircleSnapshotReader::new(
+            &self.database,
+            self.storage,
+            self.history,
+        )
     }
 }

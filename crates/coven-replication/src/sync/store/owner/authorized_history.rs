@@ -12,12 +12,12 @@ use crate::sync::store::owner_role_promotion::OwnerPromotionHistory;
 use crate::sync::store::restore::RestoreHistory;
 use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 
-mod cleanup;
+pub(crate) mod cleanup;
 mod construction;
 mod facades;
 mod loading;
 mod pull_interface;
-mod retained;
+pub(crate) mod retained;
 mod test_support;
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {

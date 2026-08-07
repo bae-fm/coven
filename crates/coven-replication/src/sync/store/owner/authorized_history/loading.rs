@@ -58,6 +58,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_commit(
         &mut self,
         reference: &StoreBatchCommitRef,
