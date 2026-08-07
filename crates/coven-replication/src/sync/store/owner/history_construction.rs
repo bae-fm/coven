@@ -2,8 +2,8 @@ use coven_protocol::store_commit::StoreRootRef;
 use coven_storage::SyncStorage;
 
 use super::pull::StorePullError;
-use super::verification::StoreCommitVerifier;
-use super::verified_history::MergeHistoryVerifier;
+use crate::sync::store::commit_verification::commit::StoreCommitVerifier;
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use crate::sync::store::protocol_root::VerifiedStoreRoot;
 
 #[derive(Clone, Copy)]

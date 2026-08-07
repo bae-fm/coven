@@ -5,11 +5,10 @@
 //! boundary. Durable role journals store one closed progress value and advance
 //! only from the exact adjacent predecessor.
 
-use super::verified_history::MergeHistoryVerifier;
-use super::{
-    prepare_registration_object, AuthorizedStoreHistory, AuthorizedWriterOperation,
-    RegistrationOutbox, StoreKeyrings,
-};
+use super::owner::authorized_history::AuthorizedStoreHistory;
+use super::owner::registration_outbox::RegistrationOutbox;
+use super::{prepare_registration_object, AuthorizedWriterOperation, StoreKeyrings};
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use crate::sync::store::{Store, StoreDatabase};
 use coven_database::DeviceJoinBootstrapPlan;
 use coven_keys::keys::UserKeypair;
@@ -34,6 +33,7 @@ mod error;
 pub(super) mod history;
 mod joiner;
 mod journal;
+pub(crate) mod transport;
 
 pub(super) use authorized_join::{AuthorizedJoin, AuthorizedProviderAdministratorJoin};
 

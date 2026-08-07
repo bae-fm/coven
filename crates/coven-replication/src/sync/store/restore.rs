@@ -514,7 +514,7 @@ impl<'storage> RestoringStore<'storage> {
                 membership,
                 Some(&registration_ref),
                 state_after,
-                crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence {
+                crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence {
                     registrations: vec![
                         coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                             registration_ref.clone(),

@@ -121,7 +121,8 @@ fn snapshot_db_hash(db_image: &[u8]) -> String {
 pub struct PreparedSnapshotBootstrap<'storage> {
     database_image: SnapshotDatabaseImage,
     db_hash: String,
-    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+    history_verifier:
+        crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
     storage: &'storage std::sync::Arc<dyn SyncStorage>,
     founder_registration: coven_protocol::objects::VerifiedObject<
         coven_protocol::store_commit::StoreDeviceRegistration,
@@ -151,7 +152,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     /// Authenticate and stage one snapshot image as installation authority.
     pub async fn prepare(
         storage: &'storage std::sync::Arc<dyn SyncStorage>,
-        mut history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        mut history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
         membership_floor: &coven_protocol::membership::MembershipFloor,

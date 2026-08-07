@@ -423,7 +423,7 @@ impl DeviceJoinRoles {
         }
     }
 
-    pub(super) fn any(self) -> bool {
+    pub(crate) fn any(self) -> bool {
         self.owner || self.provider_administrator || self.joiner
     }
 }
@@ -638,15 +638,15 @@ impl<'a> DeviceJoinTransport<'a> {
     }
 }
 
-pub(super) fn attempt_namespace(attempt_id: DeviceJoinAttemptId) -> String {
+pub(crate) fn attempt_namespace(attempt_id: DeviceJoinAttemptId) -> String {
     format!("{TRANSPORT_ROOT}/{attempt_id}")
 }
 
-pub(super) fn semantic_prefix(attempt_namespace: &str, kind: DeviceJoinTransportKind) -> String {
+pub(crate) fn semantic_prefix(attempt_namespace: &str, kind: DeviceJoinTransportKind) -> String {
     format!("{attempt_namespace}/{}", kind.slug())
 }
 
-pub(super) fn slot_context(store_root_hash: ObjectHash) -> ProtocolObjectContext {
+pub(crate) fn slot_context(store_root_hash: ObjectHash) -> ProtocolObjectContext {
     ProtocolObjectContext::recipient_sealed(
         store_root_hash,
         ProtocolObjectDomain::DeviceJoinTransport,
@@ -675,7 +675,7 @@ pub struct StoreDeviceJoinTransport<'store> {
 }
 
 impl<'store> StoreDeviceJoinTransport<'store> {
-    pub(super) fn new(store: &'store Store) -> Self {
+    pub(crate) fn new(store: &'store Store) -> Self {
         Self { store }
     }
 
@@ -1116,5 +1116,5 @@ impl From<coven_database::DeviceJoinJournalError> for DeviceJoinTransportError {
 }
 
 #[cfg(test)]
-#[path = "device_join_transport_tests.rs"]
+#[path = "transport_tests.rs"]
 mod tests;

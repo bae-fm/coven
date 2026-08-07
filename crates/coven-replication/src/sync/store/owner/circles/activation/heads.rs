@@ -366,10 +366,10 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 )
                 .await
                 .map_err(|error| match error {
-                    crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Object(error) => {
+                    crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Object(error) => {
                         CircleOperationError::Object(error)
                     }
-                    crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(error) => {
+                    crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Invalid(error) => {
                         CircleOperationError::InvalidState(error)
                     }
                 })?

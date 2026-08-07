@@ -323,8 +323,10 @@ impl<'storage> AuthorizedStore<'storage> {
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
         candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-    ) -> Result<super::verified_history::MergeOutboundAuthorization, crate::sync::store::StoreError>
-    {
+    ) -> Result<
+        crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
+        crate::sync::store::StoreError,
+    > {
         let author_registration = self
             .local_device
             .as_ref()
@@ -347,9 +349,9 @@ impl<'storage> AuthorizedStore<'storage> {
         &mut self,
         verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         recovery_author: Option<&StoreDeviceRegistrationRef>,
-        evidence: super::verified_history::MergeHistorySuccessorEvidence,
+        evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
-        super::verified_history::PreparedMergeHistorySuccessor,
+        crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         crate::sync::store::StoreError,
     > {
         self.history

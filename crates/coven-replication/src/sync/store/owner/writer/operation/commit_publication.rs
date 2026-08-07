@@ -450,7 +450,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             None => None,
         };
         let merge_history_evidence =
-            crate::sync::store::owner::writer::verified_history::MergeHistorySuccessorEvidence {
+            crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence {
                 registrations: retained_registration_evidence,
                 acknowledgement,
                 membership_proof: None,

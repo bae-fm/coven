@@ -437,7 +437,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         identity: Option<&UserKeypair>,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         verified_prefix: &VerifiedStreamActivationPrefix,
-        verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+        verified_membership_prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
         let commit = verified.value();
         if commit.circle_controls().is_empty() && commit.stream_activations().is_empty() {
@@ -488,7 +488,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         identity: Option<&UserKeypair>,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         verified_prefix: &VerifiedStreamActivationPrefix,
-        verified_membership_prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+        verified_membership_prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     ) -> Result<VerifiedCircleActivations, CircleOperationError> {
         let database = self.database;
         let commit_ref = verified.reference();

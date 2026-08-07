@@ -5,8 +5,8 @@ use coven_protocol::store_commit::{
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreSnapshotRef,
 };
 
-use crate::sync::store::owner::verified_history::registration::RegistrationLoadError;
-use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+use crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError;
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 
 pub(crate) struct RestoreHistory<'operation, 'storage> {
     history: &'operation MergeHistoryVerifier<'storage>,

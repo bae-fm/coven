@@ -8,17 +8,17 @@ use coven_protocol::store_commit::{
 };
 use coven_storage::{SyncStorage, VerifiedObjectWrites};
 
-pub(super) struct RegistrationOutbox<'storage> {
+pub(crate) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,
     storage: &'storage dyn SyncStorage,
 }
 
 impl<'storage> RegistrationOutbox<'storage> {
-    pub(super) fn new(database: StoreDatabase, storage: &'storage dyn SyncStorage) -> Self {
+    pub(crate) fn new(database: StoreDatabase, storage: &'storage dyn SyncStorage) -> Self {
         Self { database, storage }
     }
 
-    pub(super) async fn drain(&self) -> Result<u64, StoreRegistrationError> {
+    pub(crate) async fn drain(&self) -> Result<u64, StoreRegistrationError> {
         let store_root = self
             .database
             .local_store_root_ref()

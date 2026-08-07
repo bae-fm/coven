@@ -26,7 +26,7 @@ pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
     database: &'operation coven_database::StoreDatabase,
     storage: &'storage dyn SyncStorage,
     history:
-        &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+        &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
 }
 
 impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
@@ -42,7 +42,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation coven_database::StoreDatabase,
         storage: &'storage dyn SyncStorage,
-        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        history: &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
     ) -> Self {

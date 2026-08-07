@@ -13,7 +13,8 @@ pub struct PendingDeviceJoinAuthority<'storage> {
 pub struct PendingDeviceJoinObservation<'storage> {
     journal: PendingJoinJournal,
     storage: &'storage std::sync::Arc<dyn SyncStorage>,
-    history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+    history_verifier:
+        crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
 }
 
 #[doc(hidden)]
@@ -218,8 +219,8 @@ impl<'storage> JoiningStore<'storage> {
         let root = self.history.root().clone();
         let (attempt, owner) = self
             .history
-            .merge_history()
-            .load_verified_device_join_attempt_and_owner(&attempt_ref)
+            .device_join()
+            .load_verified_attempt_and_owner(&attempt_ref)
             .await?;
         self.history
             .materialize_device_join_activation(
@@ -230,8 +231,8 @@ impl<'storage> JoiningStore<'storage> {
             .await?;
         let outcome = self
             .history
-            .merge_history()
-            .load_device_join_outcome(&activation.outcome, &owner.value)
+            .device_join()
+            .load_outcome(&activation.outcome, &owner.value)
             .await?
             .value;
         let coven_protocol::store_commit::DeviceJoinDisposition::Activated { readiness } =
@@ -294,20 +295,20 @@ impl<'storage> JoiningStore<'storage> {
         }
         let attempt_owner = self
             .history
-            .merge_history()
+            .device_join()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
         let administrator = self
             .history
-            .merge_history()
+            .device_join()
             .load_registration(&offer.provider_admin.administrator)
             .await?
             .value;
         let (verified_attempt, bootstrap_plan) = Box::pin(
             self.history
-                .merge_history()
-                .verify_attempt_and_prepare_device_join_bootstrap(
+                .device_join()
+                .verify_attempt_and_prepare_bootstrap(
                     &bootstrap.bootstrap.publication_authorization.attempt,
                     &attempt_owner,
                     &bootstrap
@@ -513,7 +514,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
     pub(crate) fn new(
         pending: &DeviceJoinJournalDatabase,
         storage: &'storage std::sync::Arc<dyn SyncStorage>,
-        history_verifier: crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
         attempt_id: DeviceJoinAttemptId,

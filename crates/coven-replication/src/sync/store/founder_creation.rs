@@ -14,10 +14,10 @@ use coven_protocol::store_creation::*;
 use std::sync::Arc;
 
 use super::owner::authorized_history::AuthorizedStoreHistory;
-use super::owner::verification::StoreCommitVerifier;
-use super::owner::verified_history::MergeHistoryVerifier;
 use super::owner::InitializedStore;
 use super::{HistoryConstructionAuthority, StoreKeyrings};
+use crate::sync::store::commit_verification::commit::StoreCommitVerifier;
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_protocol::store_commit::StoreRootRef;
 
 pub(crate) struct FounderStoreCreation<'operation> {

@@ -97,9 +97,9 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         membership: &coven_protocol::membership::MembershipChain,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
         state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
-        evidence: crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence,
+        evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
-        crate::sync::store::owner::verified_history::PreparedMergeHistorySuccessor,
+        crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.history

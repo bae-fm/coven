@@ -32,15 +32,15 @@ type LayeredMembershipFuture<'a> =
 
 enum MembershipActivationAuthority<'operation, 'storage> {
     History {
-        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        history: &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
     },
     VerifiedPrefix {
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
-        commit_verifier: &'operation crate::sync::store::owner::StoreCommitVerifier<'storage>,
+        commit_verifier: &'operation crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage>,
         activations:
-            &'operation crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+            &'operation crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     },
 }
 
@@ -54,7 +54,7 @@ pub(super) struct VerifiedPrefixMembershipActivation<'operation, 'storage> {
 
 impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
     pub(super) fn new(
-        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        history: &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
     ) -> Self {
@@ -126,7 +126,7 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
         };
         let statuses = graph::membership_projection_statuses(
             &graph,
-            &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix::default(),
+            &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix::default(),
             &BTreeMap::new(),
         )
         .expect("project deep predecessor path");
@@ -141,8 +141,8 @@ impl<'operation, 'storage> HistoryMembershipActivation<'operation, 'storage> {
 impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'storage> {
     pub(super) fn new(
         root: &crate::sync::store::protocol_root::VerifiedStoreRoot,
-        commit_verifier: &'operation crate::sync::store::owner::StoreCommitVerifier<'storage>,
-        activations: &'operation crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+        commit_verifier: &'operation crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage>,
+        activations: &'operation crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     ) -> Self {
         Self {
             authority: MembershipActivationAuthority::VerifiedPrefix {
@@ -158,7 +158,7 @@ impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'stora
         exact_heads: &[MembershipHeadRef],
         exact_resolutions: &[StoreMembershipConflictResolutionRef],
         pending_resolution: Option<
-            &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
+            &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
         >,
     ) -> Result<MembershipChain, AnchoredChainError> {
         self.authority
@@ -342,7 +342,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         exact_heads: &[MembershipHeadRef],
         exact_resolutions: &[StoreMembershipConflictResolutionRef],
         pending_resolution: Option<
-            &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
+            &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
         >,
     ) -> Result<MembershipChain, AnchoredChainError> {
         Box::pin(self.load_anchored_chain_at_exact_heads(
@@ -451,7 +451,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         exact_resolutions: &'a [StoreMembershipConflictResolutionRef],
         provider_admin: &'a coven_protocol::provider::ProviderAdminState,
         pending_resolution: Option<
-            &'a crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
+            &'a crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
         >,
     ) -> LayeredMembershipFuture<'a> {
         Box::pin(async move {
@@ -594,7 +594,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         exact_heads: &[MembershipHeadRef],
         exact_resolutions: &[StoreMembershipConflictResolutionRef],
         pending_resolution: Option<
-            &crate::sync::store::owner::verified_history::VerifiedMergeConflictResolutionActivation,
+            &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
         >,
     ) -> Result<MembershipChain, AnchoredChainError> {
         validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
@@ -638,7 +638,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         Ok(chain)
     }
 
-    fn commit_verifier(&self) -> &crate::sync::store::owner::StoreCommitVerifier<'storage> {
+    fn commit_verifier(
+        &self,
+    ) -> &crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage> {
         match self {
             Self::History { history, .. } => &history.commit_verifier,
             Self::VerifiedPrefix {

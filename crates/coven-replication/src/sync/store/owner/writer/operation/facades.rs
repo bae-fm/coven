@@ -195,7 +195,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         order: &coven_protocol::store_commit::StoreCommitOrder,
         membership_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<
-        crate::sync::store::owner::writer::verified_history::MergeOutboundAuthorization,
+        crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
         crate::sync::store::owner::writer::pull::StorePullError,
     > {
         self.writer
@@ -209,9 +209,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership: &coven_protocol::membership::MembershipChain,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
         state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
-        evidence: crate::sync::store::owner::writer::verified_history::MergeHistorySuccessorEvidence,
+        evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
-        crate::sync::store::owner::writer::verified_history::PreparedMergeHistorySuccessor,
+        crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         crate::sync::store::owner::writer::pull::StorePullError,
     > {
         self.history
@@ -488,10 +488,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.circles()
     }
 
-    pub(crate) fn merge_history(
+    pub(crate) fn join_history(
         &mut self,
-    ) -> &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage> {
-        self.history.merge_history()
+    ) -> crate::sync::store::device_join::history::DeviceJoinHistory<'_, 'storage> {
+        self.history.device_join()
     }
 
     pub(crate) fn device_exclusion_history(

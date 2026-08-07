@@ -1,6 +1,6 @@
 use super::*;
+use crate::sync::store::commit_verification::merge_history::prepare_merge_abandonment_history_summary;
 use crate::sync::store::merge_conflict::MergeCandidateAbandonment;
-use crate::sync::store::owner::verified_history::prepare_merge_abandonment_history_summary;
 use coven_database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
 use coven_protocol::store_commit::{

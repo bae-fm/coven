@@ -1,3 +1,4 @@
+use super::history::DeviceJoinHistory;
 use super::journal::{database_error, provider_error};
 use super::*;
 use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
@@ -90,8 +91,8 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         })
     }
 
-    fn merge_history(&mut self) -> &mut MergeHistoryVerifier<'storage> {
-        self.writer.merge_history()
+    fn join_history(&mut self) -> DeviceJoinHistory<'_, 'storage> {
+        self.writer.join_history()
     }
 
     fn journal(&self, attempt_id: DeviceJoinAttemptId) -> StoreJoinJournal<OwnerJoinProgress> {
@@ -311,12 +312,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
         let administrator = self
-            .merge_history()
+            .join_history()
             .load_registration(&provider_admin.administrator)
             .await?
             .value;
         self.verify_device_admission_approval(&request.approval, &administrator)?;
-        self.merge_history()
+        self.join_history()
             .verify_accepted_provider_access_activation(
                 &request.approval.access_grant,
                 &provider_admin,
@@ -347,7 +348,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .await;
         let cut = plan.predecessor_cut()?;
         if !self
-            .merge_history()
+            .join_history()
             .history_cut_covers(&cut, &request.approval.access_grant.activation)
             .await?
         {
@@ -446,7 +447,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let attempt = local_writer
-            .load_verified_device_join_attempt(self.writer.merge_history(), &attempt_ref)
+            .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
             .await?
             .value;
         if !self
@@ -503,7 +504,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let verified_outcome = local_writer
-            .load_own_device_join_outcome(self.writer.merge_history(), &outcome_ref)
+            .load_own_device_join_outcome(&self.writer.join_history(), &outcome_ref)
             .await?;
         if verified_outcome.value != outcome {
             return Err(DeviceJoinError::AttemptMismatch);
@@ -570,17 +571,17 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         }
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let attempt = local_writer
-            .load_verified_device_join_attempt(self.writer.merge_history(), &attempt_ref)
+            .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
             .await?
             .value;
         let registration = self
-            .merge_history()
+            .join_history()
             .load_registration(&completion.readiness.proof.registration)
             .await?
             .value;
         let ack = self
-            .merge_history()
-            .load_store_ack(&completion.readiness.proof.initial_ack, &registration)
+            .join_history()
+            .load_acknowledgement(&completion.readiness.proof.initial_ack, &registration)
             .await?
             .value;
         completion.readiness.proof.verify(
@@ -604,7 +605,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                     return Err(DeviceJoinError::ProviderAdministratorRequired);
                 }
                 let administrator = self
-                    .merge_history()
+                    .join_history()
                     .load_registration(&provider_admin.administrator)
                     .await?
                     .value;
@@ -791,12 +792,12 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             return Err(DeviceJoinError::JournalConflict);
         }
         let (attempt, owner) = self
-            .merge_history()
-            .load_device_join_attempt_and_owner(&attempt_ref)
+            .join_history()
+            .load_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
-            .merge_history()
-            .load_device_join_outcome(&cancellation.outcome, &owner.value)
+            .join_history()
+            .load_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(

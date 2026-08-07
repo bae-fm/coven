@@ -11,8 +11,8 @@ use coven_protocol::device_exclusion_journal::{
 use super::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
-use super::owner::verified_history::MergeHistoryVerifier;
 use super::{AuthorizedWriterOperation, StoreError};
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_database::DbError;
 use coven_database::StoreDatabase;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};

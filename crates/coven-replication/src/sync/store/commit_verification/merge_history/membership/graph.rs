@@ -213,7 +213,7 @@ fn membership_resolution_activations(
 
 fn membership_projection_activation_status(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     coord: &MembershipCoord,
 ) -> Result<MembershipProjectionStatus, AnchoredChainError> {
     let node = graph.path_heads.get(coord).ok_or_else(|| {
@@ -231,10 +231,10 @@ fn membership_projection_activation_status(
         (true, coven_protocol::membership::MembershipHeadActivation::StoreCommit { commit }) => prefix
             .classify_head(&node.reference, &node.head, commit)
             .map(|status| match status {
-                crate::sync::store::owner::verified_history::VerifiedMergePrefixHeadStatus::Included => {
+                crate::sync::store::commit_verification::merge_history::VerifiedMergePrefixHeadStatus::Included => {
                     MembershipProjectionStatus::Included
                 }
-                crate::sync::store::owner::verified_history::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
+                crate::sync::store::commit_verification::merge_history::VerifiedMergePrefixHeadStatus::OutsidePrefix => {
                     MembershipProjectionStatus::OutsidePrefix
                 }
             })
@@ -294,7 +294,7 @@ fn membership_projection_dependencies(
 
 pub(super) fn membership_projection_statuses(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     resolution_activations: &BTreeMap<StoreMembershipConflictResolutionRef, MembershipCoord>,
 ) -> Result<BTreeMap<MembershipCoord, MembershipProjectionStatus>, AnchoredChainError> {
     let mut statuses = BTreeMap::new();
@@ -362,7 +362,7 @@ pub(super) fn membership_projection_statuses(
 
 pub(super) fn project_membership_cut_to_store_prefix(
     graph: &LoadedExactMembershipGraph,
-    prefix: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+    prefix: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
 ) -> Result<
     (
         Vec<MembershipHeadRef>,

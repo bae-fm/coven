@@ -7,39 +7,28 @@ pub(crate) mod authorized_history;
 mod authorized_store;
 mod candidate_cleanup;
 pub(crate) mod circles;
-pub(super) mod device_join;
-pub(crate) mod device_join_transport;
 pub(super) mod history;
 mod history_construction;
 pub(crate) mod keyring;
 pub(crate) use keyring::load_wrapped_store_key;
 pub(crate) mod pull;
 mod registration;
-mod registration_outbox;
-pub(crate) mod verification;
-pub(crate) mod verified_history;
+pub(crate) mod registration_outbox;
 pub(crate) mod writer;
 
 mod store_test_support;
 
-use super::prepare_registration_object;
-use super::protocol_root::VerifiedStoreRoot;
+use crate::sync::store::device_join::transport;
 use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use candidate_cleanup::delete_candidate_cleanup_targets;
 pub(crate) use circles::AuthorizedCircleWriter;
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
-pub use device_join_transport::StoreDeviceJoinTransport;
 pub use history_construction::HistoryConstructionAuthority;
 pub use keyring::StoreKeyrings;
 pub use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
-use verification::StoreCommitVerifier;
-pub use verified_history::MergeHistorySuccessorEvidence;
-pub use verified_history::MergeOutboundAuthorization;
-pub use verified_history::PreparedMergeHistorySuccessor;
-pub use verified_history::VerifiedMergeMembershipPrefix;
 pub(super) use writer::operations;
 pub use writer::AuthorizedWriterOperation;
 pub use writer::StoreWriterAuthorizationError;
@@ -76,37 +65,32 @@ pub(crate) enum StoreInitializationError {
 }
 
 impl Store {
-    pub(crate) fn device_join_transport(
-        &self,
-    ) -> device_join_transport::StoreDeviceJoinTransport<'_> {
-        device_join_transport::StoreDeviceJoinTransport::new(self)
+    pub(crate) fn device_join_transport(&self) -> transport::StoreDeviceJoinTransport<'_> {
+        transport::StoreDeviceJoinTransport::new(self)
     }
 
-    async fn allocate_device_join_transport_bundle(
+    pub(crate) async fn allocate_device_join_transport_bundle(
         &self,
         offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
-    ) -> Result<
-        device_join_transport::DeviceJoinOfferBundle,
-        device_join_transport::DeviceJoinTransportError,
-    > {
-        let attempt_namespace = device_join_transport::attempt_namespace(offer.attempt_id);
-        let context = device_join_transport::slot_context(offer.store_root.store_root_hash);
+    ) -> Result<transport::DeviceJoinOfferBundle, transport::DeviceJoinTransportError> {
+        let attempt_namespace = transport::attempt_namespace(offer.attempt_id);
+        let context = transport::slot_context(offer.store_root.store_root_hash);
         let mut slots = std::collections::BTreeMap::new();
-        for kind in device_join_transport::DeviceJoinTransportKind::ALL {
+        for kind in transport::DeviceJoinTransportKind::ALL {
             let slot = self
                 .storage
                 .allocate_protocol_slot(
                     &context,
-                    &device_join_transport::semantic_prefix(&attempt_namespace, kind),
+                    &transport::semantic_prefix(&attempt_namespace, kind),
                     ".json",
                 )
                 .await?;
             slots.insert(kind, slot);
         }
-        Ok(device_join_transport::DeviceJoinOfferBundle {
+        Ok(transport::DeviceJoinOfferBundle {
             version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
             offer,
-            transport: device_join_transport::DeviceJoinTransportParams {
+            transport: transport::DeviceJoinTransportParams {
                 version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
                 attempt_namespace,
                 slots,
@@ -115,53 +99,48 @@ impl Store {
         })
     }
 
-    async fn publish_device_join_transport_artifact(
+    pub(crate) async fn publish_device_join_transport_artifact(
         &self,
-        bundle: &device_join_transport::DeviceJoinOfferBundle,
-        roles: device_join_transport::DeviceJoinRoles,
+        bundle: &transport::DeviceJoinOfferBundle,
+        roles: transport::DeviceJoinRoles,
         action: &crate::sync::store::DeviceJoinAction,
-    ) -> Result<(), device_join_transport::DeviceJoinTransportError> {
-        device_join_transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
+    ) -> Result<(), transport::DeviceJoinTransportError> {
+        transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
             .publish(action)
             .await
     }
 
-    async fn await_device_join_transport_artifact<T: device_join_transport::DeviceJoinArtifact>(
+    pub(crate) async fn await_device_join_transport_artifact<T: transport::DeviceJoinArtifact>(
         &self,
-        bundle: &device_join_transport::DeviceJoinOfferBundle,
-        roles: device_join_transport::DeviceJoinRoles,
-        timing: device_join_transport::DeviceJoinTransportTiming,
-    ) -> Result<T, device_join_transport::DeviceJoinTransportError> {
-        device_join_transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
+        bundle: &transport::DeviceJoinOfferBundle,
+        roles: transport::DeviceJoinRoles,
+        timing: transport::DeviceJoinTransportTiming,
+    ) -> Result<T, transport::DeviceJoinTransportError> {
+        transport::DeviceJoinTransport::open(self.storage.as_ref(), bundle, roles)?
             .await_artifact::<T>(timing)
             .await
     }
 
-    async fn device_join_transport_status(
+    pub(crate) async fn device_join_transport_status(
         &self,
         attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
         role: crate::sync::store::DeviceJoinRole,
-    ) -> Result<
-        Option<crate::sync::store::DeviceJoinStatus>,
-        device_join_transport::DeviceJoinTransportError,
-    > {
+    ) -> Result<Option<crate::sync::store::DeviceJoinStatus>, transport::DeviceJoinTransportError>
+    {
         Ok(self.database.device_join_status(attempt_id, role).await?)
     }
 
-    async fn device_join_transport_roles(
+    pub(crate) async fn device_join_transport_roles(
         &self,
         offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
-    ) -> Result<
-        device_join_transport::DeviceJoinRoles,
-        device_join_transport::DeviceJoinTransportError,
-    > {
+    ) -> Result<transport::DeviceJoinRoles, transport::DeviceJoinTransportError> {
         let local = self
             .database
             .local_activated_registration_ref()
             .await
             .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?
             .ok_or(crate::sync::store::DeviceJoinError::ActiveDeviceRequired)?;
-        let roles = device_join_transport::DeviceJoinRoles::admitting(
+        let roles = transport::DeviceJoinRoles::admitting(
             local == offer.owner_registration,
             local == offer.provider_admin.administrator,
         );

@@ -99,8 +99,10 @@ impl LocalStoreWriter {
         history: &super::AuthorizedStoreHistory<'_>,
         order: &coven_protocol::store_commit::StoreCommitOrder,
         membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-    ) -> Result<super::verified_history::MergeOutboundAuthorization, super::pull::StorePullError>
-    {
+    ) -> Result<
+        crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
+        super::pull::StorePullError,
+    > {
         history
             .authorize_retained_outbound(order, membership_heads, self.registration.reference())
             .await

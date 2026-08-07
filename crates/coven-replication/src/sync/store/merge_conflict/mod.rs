@@ -16,7 +16,7 @@ pub(crate) use nonactivation::TerminalNonactivationCandidate;
 use coven_database::StoreDatabase;
 use coven_storage::SyncStorage;
 
-use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 
 /// The Merge-conflict operations, holding exactly the capabilities they use:
 /// the database that records candidate outcomes, the storage the contested

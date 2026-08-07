@@ -92,10 +92,10 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await
             .map_err(|error| match error {
-                crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Object(error) => {
+                crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Object(error) => {
                     StoreRegistrationError::Object(error)
                 }
-                crate::sync::store::owner::verified_history::registration::RegistrationLoadError::Invalid(error) => {
+                crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Invalid(error) => {
                     StoreRegistrationError::Invalid(error)
                 }
             })?

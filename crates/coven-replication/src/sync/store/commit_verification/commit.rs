@@ -1,9 +1,9 @@
-use super::pull::*;
-use super::verified_history::predecessor_verifies_owner;
-use super::verified_history::registration::{
+use super::merge_history::predecessor_verifies_owner;
+use super::merge_history::registration::{
     device_state_has_active_registration, device_state_has_pending_proposal,
     registration_attempt_error, RegistrationLoadError,
 };
+use crate::sync::store::owner::pull::*;
 use crate::sync::store::StoreError;
 use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
 use coven_protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};
@@ -96,7 +96,7 @@ impl DeviceStateResolver<'_> {
 
 pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn SyncStorage,
-    root: super::VerifiedStoreRoot,
+    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 }
 
@@ -107,11 +107,11 @@ pub(crate) struct VerifiedMergeMembershipClosure {
 }
 
 impl VerifiedMergeMembershipClosure {
-    pub(super) fn objects(&self) -> &coven_database::VerifiedMergeMembershipObjects {
+    pub(crate) fn objects(&self) -> &coven_database::VerifiedMergeMembershipObjects {
         &self.objects
     }
 
-    pub(super) fn into_remote_objects(self) -> Vec<remote_object::RemoteObjectRecord> {
+    pub(crate) fn into_remote_objects(self) -> Vec<remote_object::RemoteObjectRecord> {
         self.remote_objects
     }
 }
@@ -230,9 +230,9 @@ impl<'a> StoreCommitVerifier<'a> {
     }
 
     pub(crate) fn from_verified_root(
-        _authority: super::HistoryConstructionAuthority,
+        _authority: crate::sync::store::owner::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
-        root: super::VerifiedStoreRoot,
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     ) -> Self {
         Self {
             storage,

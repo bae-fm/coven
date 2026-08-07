@@ -13,7 +13,7 @@ impl LocalStoreWriter {
         provider_admin: coven_protocol::provider::ProviderAdminGrantRecord,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
-        crate::sync::store::owner::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer::signed(
             attempt_id,
@@ -28,16 +28,16 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_join_offer(
         &self,
         offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
-    ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
+    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
         offer
             .verify(self.registration.value())
-            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn sign_device_join_abandonment(
@@ -45,24 +45,24 @@ impl LocalStoreWriter {
         offer: &coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinAbandonmentObject,
-        crate::sync::store::owner::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceJoinAbandonmentObject::signed(
             offer,
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_join_abandonment(
         &self,
         reference: &coven_protocol::store_commit::DeviceJoinAbandonmentRef,
         value: &coven_protocol::store_commit::device_join_exchange::DeviceJoinAbandonmentObject,
-    ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
+    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
         reference
             .verify(value, self.registration.value())
-            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_admission_approval_as_owner(
@@ -72,10 +72,10 @@ impl LocalStoreWriter {
             coven_protocol::store_commit::StoreProtocolRoot,
         >,
         administrator: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
+    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
         approval
             .verify(root, self.registration.value(), administrator)
-            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -118,14 +118,14 @@ impl LocalStoreWriter {
 
     pub(crate) async fn load_verified_device_join_attempt(
         &self,
-        history: &mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
+        history: &mut crate::sync::store::device_join::history::DeviceJoinHistory<'_, '_>,
         reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
     ) -> Result<
         coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::DeviceJoinAttempt>,
         crate::sync::store::owner::pull::StorePullError,
     > {
         history
-            .load_verified_device_join_attempt(reference, self.registration.value())
+            .load_verified_attempt(reference, self.registration.value())
             .await
     }
 
@@ -150,14 +150,14 @@ impl LocalStoreWriter {
 
     pub(crate) async fn load_own_device_join_outcome(
         &self,
-        history: &crate::sync::store::owner::verified_history::MergeHistoryVerifier<'_>,
+        history: &crate::sync::store::device_join::history::DeviceJoinHistory<'_, '_>,
         reference: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
     ) -> Result<
         coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::DeviceJoinOutcome>,
         coven_protocol::objects::StoreObjectError,
     > {
         history
-            .load_device_join_outcome(reference, self.registration.value())
+            .load_outcome(reference, self.registration.value())
             .await
     }
 
@@ -181,7 +181,7 @@ impl LocalStoreWriter {
         provider_admin_grant: coven_protocol::provider::ProviderAdminGrantId,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject,
-        crate::sync::store::owner::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject::signed(
             attempt,
@@ -195,7 +195,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_join_cleanup_receipt(
@@ -203,11 +203,11 @@ impl LocalStoreWriter {
         reference: &coven_protocol::store_commit::DeviceJoinCleanupReceiptRef,
         receipt: &coven_protocol::store_commit::device_join_exchange::DeviceJoinCleanupReceiptObject,
         attempt: &coven_protocol::store_commit::DeviceJoinAttempt,
-    ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
+    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
         receipt.verify(attempt, self.registration.value())?;
         reference
             .verify(receipt, self.registration.value())
-            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_device_admission_approval_as_administrator(
@@ -217,10 +217,10 @@ impl LocalStoreWriter {
             coven_protocol::store_commit::StoreProtocolRoot,
         >,
         owner: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), crate::sync::store::owner::device_join::DeviceJoinError> {
+    ) -> Result<(), crate::sync::store::device_join::DeviceJoinError> {
         approval
             .verify(root, owner, self.registration.value())
-            .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+            .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn sign_device_admission_approval(
@@ -233,7 +233,7 @@ impl LocalStoreWriter {
         >,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
-        crate::sync::store::owner::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
             request,
@@ -243,7 +243,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     pub(crate) fn verify_cross_principal_challenge(
@@ -294,7 +294,7 @@ impl LocalStoreWriter {
         prior_state_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinClosure,
-        crate::sync::store::owner::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         coven_protocol::store_commit::device_join_exchange::ProviderAdminJoinClosure::signed(
             cancellation,
@@ -304,7 +304,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -319,7 +319,7 @@ impl LocalStoreWriter {
         executor_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation,
-        crate::sync::store::owner::device_join::DeviceJoinError,
+        crate::sync::store::device_join::DeviceJoinError,
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceJoinProducerWriteRevocation::signed(
             cancellation,
@@ -332,6 +332,6 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(crate::sync::store::owner::device_join::DeviceJoinError::from)
+        .map_err(crate::sync::store::device_join::DeviceJoinError::from)
     }
 }

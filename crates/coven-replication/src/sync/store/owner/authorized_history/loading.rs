@@ -146,7 +146,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     ) -> Result<coven_protocol::store_commit::VerifiedStoreDeviceOperations, pull::StorePullError>
     {
         let resolver =
-            crate::sync::store::owner::verification::DeviceStateResolver::Database(&self.database);
+            crate::sync::store::commit_verification::commit::DeviceStateResolver::Database(
+                &self.database,
+            );
         self.history_verifier
             .load_local_device_operations_with_resolver(
                 &resolver,

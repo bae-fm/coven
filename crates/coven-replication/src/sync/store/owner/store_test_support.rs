@@ -138,7 +138,10 @@ impl Store {
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
         candidate_membership_heads: &[coven_protocol::membership::MembershipHeadRef],
-    ) -> Result<verified_history::MergeOutboundAuthorization, StoreError> {
+    ) -> Result<
+        crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
+        StoreError,
+    > {
         let authorization = self
             .authorize()
             .await
@@ -303,7 +306,7 @@ impl Store {
         history
             .project_membership_to_verified_prefix(
                 candidate_heads,
-                &verified_history::VerifiedMergeMembershipPrefix::default(),
+                &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix::default(),
             )
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
@@ -475,7 +478,10 @@ impl Store {
         &self,
         references: impl IntoIterator<Item = coven_protocol::store_commit::StoreBatchCommitRef>,
         predecessors: impl IntoIterator<Item = coven_protocol::store_commit::StoreBatchCommitRef>,
-    ) -> Result<verified_history::VerifiedMergeMembershipPrefix, pull::StorePullError> {
+    ) -> Result<
+        crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
+        pull::StorePullError,
+    > {
         let mut history = self
             .authorize_history()
             .await
@@ -839,8 +845,11 @@ impl Store {
         &self,
         verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
-        evidence: verified_history::MergeHistorySuccessorEvidence,
-    ) -> Result<verified_history::PreparedMergeHistorySuccessor, StoreError> {
+        evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
+    ) -> Result<
+        crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
+        StoreError,
+    > {
         let mut authorized = self
             .authorize()
             .await

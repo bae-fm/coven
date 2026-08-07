@@ -125,7 +125,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "new",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/device_join/joiner.rs",
+        "crates/coven-replication/src/sync/store/device_join/joiner.rs",
         "PendingDeviceJoinObservation",
         "into_joining_store",
     ),

@@ -49,14 +49,14 @@ pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,
     storage: &'storage dyn SyncStorage,
     history:
-        &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<'storage>,
+        &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
         storage: &'storage dyn SyncStorage,
-        history: &'operation mut crate::sync::store::owner::verified_history::MergeHistoryVerifier<
+        history: &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
     ) -> Self {
@@ -87,7 +87,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     async fn verify_control_membership_at_verified_prefix(
         &self,
         control: &PreparedCircleControl,
-        verified_activations: &crate::sync::store::owner::verified_history::VerifiedMergeMembershipPrefix,
+        verified_activations: &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix,
     ) -> Result<Vec<(String, coven_protocol::membership::MemberRole)>, CircleOperationError> {
         let state = &control.value.access_epoch().store_membership;
         let chain = self

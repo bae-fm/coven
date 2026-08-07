@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use super::circles::CirclePackageReadError;
-use super::verification::VerifiedMergeMembershipClosure;
-use super::verified_history::registration::*;
-use super::verified_history::*;
 use super::*;
+use crate::sync::store::commit_verification::commit::VerifiedMergeMembershipClosure;
+use crate::sync::store::commit_verification::merge_history::registration::*;
+use crate::sync::store::commit_verification::merge_history::*;
 
 mod authorized;
 use crate::sync::store::circle_controls::activation::{
@@ -46,11 +46,11 @@ pub(super) struct MergeCandidate {
 }
 
 pub(crate) struct VerifiedPullCandidate {
-    pub(super) verified: VerifiedStoreBatchCommit,
-    pub(super) predecessor_membership: MembershipChain,
-    pub(super) registrations: Vec<ActivatedStoreDeviceRegistration>,
-    pub(super) operations: VerifiedStoreDeviceOperations,
-    pub(super) membership_control: Option<VerifiedCircleActivations>,
+    pub(crate) verified: VerifiedStoreBatchCommit,
+    pub(crate) predecessor_membership: MembershipChain,
+    pub(crate) registrations: Vec<ActivatedStoreDeviceRegistration>,
+    pub(crate) operations: VerifiedStoreDeviceOperations,
+    pub(crate) membership_control: Option<VerifiedCircleActivations>,
 }
 
 pub(crate) struct LoadedMergePredecessorMemberships {
@@ -120,7 +120,9 @@ pub(crate) struct StorePullExecution {
     pub membership: MembershipChain,
 }
 
-pub(crate) use super::verification::{CommitCoverageError, LoadedDeviceJoinAttemptEvidence};
+pub(crate) use crate::sync::store::commit_verification::commit::{
+    CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
+};
 pub(crate) use coven_protocol::membership::{HeldStorePositionReason, LocalStoreMembership};
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use discovery::*;

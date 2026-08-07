@@ -1,7 +1,10 @@
-use super::verification::{StoreMembershipObjectVerifier, VerifiedMergeMembershipClosure};
-use super::*;
+use super::commit::{
+    StoreCommitVerifier, StoreMembershipObjectVerifier, VerifiedMergeMembershipClosure,
+};
 use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
+use crate::sync::store::owner::pull;
 use crate::sync::store::owner::pull::*;
+use crate::sync::store::StoreError;
 use coven_database::VerifiedStoreSnapshotStability;
 use coven_database::{
     DeviceJoinBootstrapActivation, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
@@ -13,15 +16,15 @@ use coven_protocol::objects::{
 };
 use coven_protocol::objects::{StoreObjectError, VerifiedObject};
 use coven_protocol::store_commit::{
-    ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, DeviceJoinAttempt,
-    DeviceJoinAttemptDecisionRef, DeviceJoinDisposition, DeviceStreamAnchor, ObjectHash,
-    OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
+    ActivatedStoreDeviceRegistration, ActivatedStoreDeviceRegistrationRef, CommitFrontier,
+    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinDisposition, DeviceStreamAnchor,
+    ObjectHash, OpenedRetainedMergeHistorySummary, OwnerRecoveryNode, OwnerRecoveryNodeRef,
     ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
     RetainedVerifiedMergeHistorySummary, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceHead, StoreDeviceProposalState, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
-    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, VerifiedStoreBatchCommit,
+    StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
 use coven_protocol::store_commit::{
@@ -35,8 +38,8 @@ use coven_protocol::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::device_join;
-use super::verification::DeviceStateResolver;
+use super::commit::DeviceStateResolver;
+use crate::sync::store::device_join;
 
 mod device_join_verification;
 mod loaders;
@@ -96,7 +99,7 @@ pub(crate) struct VerifiedMergeHistoryAuthority {
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
-    pub(crate) fn verified_root(&self) -> &super::VerifiedStoreRoot {
+    pub(crate) fn verified_root(&self) -> &crate::sync::store::protocol_root::VerifiedStoreRoot {
         &self.root
     }
 
@@ -137,7 +140,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         })
     }
 
-    pub(super) async fn load_local_device_operations_with_resolver(
+    pub(crate) async fn load_local_device_operations_with_resolver(
         &mut self,
         resolver: &DeviceStateResolver<'_>,
         verified_commit: &VerifiedStoreBatchCommit,
@@ -205,8 +208,8 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(crate) async fn from_commit_verifier(
-        _authority: super::HistoryConstructionAuthority,
-        root: super::VerifiedStoreRoot,
+        _authority: crate::sync::store::owner::HistoryConstructionAuthority,
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
         let founder = commit_verifier.load_founder_registration().await?;
@@ -214,7 +217,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     fn from_commit_verifier_and_founder(
-        root: super::VerifiedStoreRoot,
+        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
         founder: &VerifiedObject<StoreDeviceRegistration>,
     ) -> Result<Self, StorePullError> {
@@ -255,7 +258,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         })
     }
 
-    pub(super) async fn covered_reference_status(
+    pub(crate) async fn covered_reference_status(
         &mut self,
         coverage: &CommitFrontier,
         stream_id: &str,
@@ -356,7 +359,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.remember(commit)
     }
 
-    pub(super) fn verified_predecessor_state(
+    pub(crate) fn verified_predecessor_state(
         &self,
         commit: &StoreBatchCommit,
     ) -> Result<ResolvedStoreDeviceState, StorePullError> {
@@ -369,14 +372,14 @@ impl<'a> MergeHistoryVerifier<'a> {
         verified_merge_predecessor_state(&self.history.genesis, &states, commit)
     }
 
-    pub(super) fn verified_membership_prefix(
+    pub(crate) fn verified_membership_prefix(
         &self,
         predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
         verified_merge_membership_prefix(&self.history.commits, predecessors)
     }
 
-    pub(super) fn retained_commit_proofs(
+    pub(crate) fn retained_commit_proofs(
         &self,
     ) -> BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit> {
         self.history
@@ -386,7 +389,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .collect()
     }
 
-    pub(super) fn verified_pull_candidate(
+    pub(crate) fn verified_pull_candidate(
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Option<pull::VerifiedPullCandidate> {
@@ -630,7 +633,7 @@ pub(crate) struct VerifiedMergeHistory {
 }
 
 pub struct MergeHistoryVerifier<'a> {
-    root: super::VerifiedStoreRoot,
+    root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
 }

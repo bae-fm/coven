@@ -541,7 +541,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         commit_ref: &StoreBatchCommitRef,
         commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<
-        Option<crate::sync::store::owner::verification::VerifiedMergeMembershipClosure>,
+        Option<crate::sync::store::commit_verification::commit::VerifiedMergeMembershipClosure>,
         pull::StorePullError,
     > {
         self.history_verifier

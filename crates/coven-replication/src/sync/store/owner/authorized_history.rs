@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use super::authorized_store::LocalStoreDevice;
 use super::pull;
-use super::verification::StoreMembershipObjectVerifier;
-use super::verified_history::registration::RegistrationLoadError;
-use super::verified_history::*;
+use crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifier;
+use crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError;
+use crate::sync::store::commit_verification::merge_history::*;
 use crate::sync::store::owner_role_promotion::OwnerPromotionHistory;
 use crate::sync::store::restore::RestoreHistory;
 use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};

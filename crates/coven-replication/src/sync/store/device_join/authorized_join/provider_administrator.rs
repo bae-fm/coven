@@ -3,8 +3,8 @@ use super::{provider_error, require_cancelled_outcome, *};
 impl<'operation, 'storage>
     AuthorizedJoin<'operation, 'storage, ProviderAdministratorJoinAuthority>
 {
-    fn merge_history(&mut self) -> &mut MergeHistoryVerifier<'storage> {
-        self.writer.merge_history()
+    fn join_history(&mut self) -> DeviceJoinHistory<'_, 'storage> {
+        self.writer.join_history()
     }
 
     fn journal(
@@ -80,8 +80,8 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let attempt = self
-            .merge_history()
-            .load_verified_device_join_attempt(&authorization.attempt, attempt_owner)
+            .join_history()
+            .load_verified_attempt(&authorization.attempt, attempt_owner)
             .await?;
         if attempt.value.store_root != context.root
             || attempt.value.attempt_id != context.attempt_id
@@ -90,8 +90,8 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::AttemptMismatch);
         }
         let activation = self
-            .merge_history()
-            .load_ref(&authorization.attempt_activation)
+            .join_history()
+            .load_commit(&authorization.attempt_activation)
             .await?;
         if activation.author() != attempt_owner
             || !activation
@@ -132,7 +132,7 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
-            .merge_history()
+            .join_history()
             .load_registration(&request.offer.owner_registration)
             .await?
             .value;
@@ -299,7 +299,7 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::OfferMismatch);
         }
         let owner = self
-            .merge_history()
+            .join_history()
             .load_registration(&offer.owner_registration)
             .await?
             .value;
@@ -490,12 +490,12 @@ impl<'operation, 'storage>
             _ => {}
         }
         let (attempt, owner) = self
-            .merge_history()
-            .load_device_join_attempt_and_owner(&attempt_ref)
+            .join_history()
+            .load_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
-            .merge_history()
-            .load_device_join_outcome(&cancellation.outcome, &owner.value)
+            .join_history()
+            .load_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(
@@ -594,12 +594,12 @@ impl<'operation, 'storage>
         require_cancelled_outcome(&cancellation.outcome)?;
         let attempt_ref = cancellation.outcome.attempt().clone();
         let (attempt, owner) = self
-            .merge_history()
-            .load_device_join_attempt_and_owner(&attempt_ref)
+            .join_history()
+            .load_attempt_and_owner(&attempt_ref)
             .await?;
         let outcome = self
-            .merge_history()
-            .load_device_join_outcome(&cancellation.outcome, &owner.value)
+            .join_history()
+            .load_outcome(&cancellation.outcome, &owner.value)
             .await?
             .value;
         if !matches!(

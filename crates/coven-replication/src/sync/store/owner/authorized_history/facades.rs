@@ -1,13 +1,6 @@
 use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
-    /// The verifier every role-scoped view reads through. Roles whose loads
-    /// need nothing but the verifier's own vocabulary use it directly instead
-    /// of renaming its operations behind another view.
-    pub(crate) fn merge_history(&mut self) -> &mut MergeHistoryVerifier<'storage> {
-        &mut self.history_verifier
-    }
-
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
         coven_database::LocalBlobCleanup::new(&self.database, self.store_dir)
             .drain()
@@ -111,8 +104,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn device_join(
         &mut self,
-    ) -> crate::sync::store::owner::device_join::history::DeviceJoinHistory<'_, 'storage> {
-        crate::sync::store::owner::device_join::history::DeviceJoinHistory::new(
+    ) -> crate::sync::store::device_join::history::DeviceJoinHistory<'_, 'storage> {
+        crate::sync::store::device_join::history::DeviceJoinHistory::new(
             self.database.clone(),
             self.storage.as_ref(),
             &mut self.history_verifier,

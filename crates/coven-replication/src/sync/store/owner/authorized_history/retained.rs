@@ -43,7 +43,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let (device_state_ref, device_state) = self
             .retained_merge_device_state(&frontier, &checkpoints)
             .await?;
-        if !crate::sync::store::owner::verified_history::registration::device_state_has_active_registration(
+        if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
             &device_state,
             author_registration,
         ) {
@@ -90,7 +90,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let (device_state_ref, device_state) = self
             .retained_merge_device_state(&frontier, &checkpoints)
             .await?;
-        if !crate::sync::store::owner::verified_history::registration::device_state_has_active_registration(
+        if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
             &device_state,
             author_registration,
         ) {
@@ -172,9 +172,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         membership: &coven_protocol::membership::MembershipChain,
         recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
         state_after: coven_protocol::store_commit::ResolvedStoreDeviceState,
-        evidence: crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence,
+        evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
-        crate::sync::store::owner::verified_history::PreparedMergeHistorySuccessor,
+        crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         crate::sync::store::owner::pull::StorePullError,
     > {
         let root = self.history_verifier.verified_root().reference();
@@ -244,7 +244,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 );
             }
         }
-        if !crate::sync::store::owner::verified_history::registration::device_state_has_active_registration(
+        if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
             &predecessor_state,
             &commit.author_registration,
         ) && recovery_author != Some(&commit.author_registration)
@@ -253,7 +253,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 "Merge successor author is inactive at its exact predecessor cut".to_string(),
             ));
         }
-        crate::sync::store::owner::verified_history::verify_merge_membership_state_ref(
+        crate::sync::store::commit_verification::merge_history::verify_merge_membership_state_ref(
             &commit.membership_state,
             membership,
             &predecessor_state,

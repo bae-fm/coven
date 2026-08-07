@@ -464,8 +464,7 @@ mod test_device {
 
         pub fn device_join_transport(
             &self,
-        ) -> crate::sync::store::owner::device_join_transport::StoreDeviceJoinTransport<'_>
-        {
+        ) -> crate::sync::store::device_join::transport::StoreDeviceJoinTransport<'_> {
             self.store.device_join_transport()
         }
 

@@ -6,7 +6,7 @@ use coven_protocol::store_commit::{
 use coven_storage::SyncStorage;
 
 use crate::sync::store::acknowledgements::StoreAckError;
-use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use crate::sync::store::snapshots as snapshot;
 
 /// The reads reclamation performs, holding exactly the capabilities they use:
@@ -282,7 +282,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         reference: &coven_protocol::reclaim::ReclaimAuthorizationRef,
     ) -> Result<
-        crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
+        crate::sync::store::commit_verification::commit::VerifiedReclaimAuthorization,
         coven_protocol::objects::StoreObjectError,
     > {
         self.history.load_reclaim_authorization(reference).await
@@ -389,7 +389,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<
-        Option<crate::sync::store::owner::verified_history::SelectedStableStoreSnapshot>,
+        Option<crate::sync::store::commit_verification::merge_history::SelectedStableStoreSnapshot>,
         crate::sync::store::owner::pull::StorePullError,
     > {
         self.history

@@ -1,10 +1,12 @@
 use super::*;
+use crate::sync::store::owner::pull::StorePullError;
 use crate::sync::store::StoreRegistrationError;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{
     ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckExclusionState, StoreAckRef,
     SuccessorLink,
 };
+use coven_protocol::store_commit::{DeviceJoinOutcome, VerifiedStoreBatchCommit};
 
 pub(crate) struct DeviceJoinHistory<'operation, 'storage> {
     database: StoreDatabase,
@@ -27,6 +29,119 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 
     fn root(&self) -> &crate::sync::store::protocol_root::VerifiedStoreRoot {
         self.history.verified_root()
+    }
+
+    pub(crate) async fn load_registration(
+        &self,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>, StoreObjectError>
+    {
+        self.history.load_registration(reference).await
+    }
+
+    pub(crate) async fn load_commit(
+        &mut self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<VerifiedStoreBatchCommit, StorePullError> {
+        self.history.load_ref(reference).await
+    }
+
+    pub(crate) async fn load_acknowledgement(
+        &self,
+        reference: &StoreAckRef,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<coven_protocol::objects::VerifiedObject<StoreAck>, StoreObjectError> {
+        self.history.load_store_ack(reference, registration).await
+    }
+
+    pub(crate) async fn load_verified_attempt(
+        &mut self,
+        reference: &DeviceJoinAttemptRef,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>, StorePullError> {
+        self.history
+            .load_verified_device_join_attempt(reference, owner)
+            .await
+    }
+
+    pub(crate) async fn load_verified_attempt_and_owner(
+        &mut self,
+        reference: &DeviceJoinAttemptRef,
+    ) -> Result<
+        (
+            coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+            coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        ),
+        StorePullError,
+    > {
+        self.history
+            .load_verified_device_join_attempt_and_owner(reference)
+            .await
+    }
+
+    pub(crate) async fn load_attempt_and_owner(
+        &self,
+        reference: &DeviceJoinAttemptRef,
+    ) -> Result<
+        (
+            coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+            coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+        ),
+        StoreObjectError,
+    > {
+        self.history
+            .load_device_join_attempt_and_owner(reference)
+            .await
+    }
+
+    pub(crate) async fn load_outcome(
+        &self,
+        reference: &DeviceJoinOutcomeRef,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<coven_protocol::objects::VerifiedObject<DeviceJoinOutcome>, StoreObjectError> {
+        self.history
+            .load_device_join_outcome(reference, owner)
+            .await
+    }
+
+    pub(crate) async fn verify_accepted_provider_access_activation(
+        &mut self,
+        access: &coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
+        provider_admin: &coven_protocol::provider::ProviderAdminGrantRecord,
+        administrator: &StoreDeviceRegistration,
+    ) -> Result<(), StorePullError> {
+        self.history
+            .verify_accepted_provider_access_activation(access, provider_admin, administrator)
+            .await
+    }
+
+    pub(crate) async fn history_cut_covers(
+        &mut self,
+        cut: &coven_protocol::store_commit::StoreHistoryCut,
+        target: &StoreBatchCommitRef,
+    ) -> Result<bool, StorePullError> {
+        self.history.history_cut_covers(cut, target).await
+    }
+
+    pub(crate) async fn verify_attempt_and_prepare_bootstrap(
+        &mut self,
+        attempt: &DeviceJoinAttemptRef,
+        attempt_owner: &StoreDeviceRegistration,
+        attempt_activation: &StoreBatchCommitRef,
+    ) -> Result<
+        (
+            coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+            DeviceJoinBootstrapPlan,
+        ),
+        StorePullError,
+    > {
+        self.history
+            .verify_attempt_and_prepare_device_join_bootstrap(
+                attempt,
+                attempt_owner,
+                attempt_activation,
+            )
+            .await
     }
 
     pub(super) async fn verify_offer(

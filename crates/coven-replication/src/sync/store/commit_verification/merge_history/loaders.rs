@@ -269,7 +269,10 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_reclaim_authorization(
         &self,
         reference: &coven_protocol::reclaim::ReclaimAuthorizationRef,
-    ) -> Result<super::verification::VerifiedReclaimAuthorization, StoreObjectError> {
+    ) -> Result<
+        crate::sync::store::commit_verification::commit::VerifiedReclaimAuthorization,
+        StoreObjectError,
+    > {
         self.commit_verifier
             .load_reclaim_authorization(reference)
             .await
@@ -278,7 +281,10 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_reclaim_receipt(
         &self,
         reference: &coven_protocol::reclaim::ReclaimReceiptRef,
-    ) -> Result<super::verification::VerifiedReclaimReceipt, StoreObjectError> {
+    ) -> Result<
+        crate::sync::store::commit_verification::commit::VerifiedReclaimReceipt,
+        StoreObjectError,
+    > {
         self.commit_verifier.load_reclaim_receipt(reference).await
     }
 

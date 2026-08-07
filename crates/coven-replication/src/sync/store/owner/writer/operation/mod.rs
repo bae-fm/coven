@@ -1,7 +1,7 @@
 use super::*;
+use crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifier;
 use crate::sync::store::membership::InviteError;
 use crate::sync::store::owner::load_wrapped_store_key;
-use crate::sync::store::owner::verification::StoreMembershipObjectVerifier;
 use coven_database::VerifiedMergeMembershipObjects;
 use coven_protocol::membership::{
     self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,

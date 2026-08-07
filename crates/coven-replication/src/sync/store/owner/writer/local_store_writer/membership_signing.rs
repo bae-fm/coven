@@ -124,7 +124,10 @@ impl LocalStoreWriter {
 
     pub(crate) async fn load_membership_head(
         &self,
-        verifier: crate::sync::store::owner::verification::StoreMembershipObjectVerifier<'_, '_>,
+        verifier: crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifier<
+            '_,
+            '_,
+        >,
         reference: &coven_protocol::membership::MembershipHeadRef,
     ) -> Result<
         coven_protocol::objects::VerifiedObject<coven_protocol::membership::AuthorHead>,

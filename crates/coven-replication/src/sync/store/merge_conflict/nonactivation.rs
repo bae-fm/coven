@@ -135,10 +135,10 @@ impl MergeConflictHistory<'_, '_> {
                 .load_predecessor_membership(&witness.commit().membership_state)
                 .await
                 .map_err(|error| match error {
-                    crate::sync::store::owner::verified_history::RegistrationLoadError::Object(
+                    crate::sync::store::commit_verification::merge_history::RegistrationLoadError::Object(
                         error,
                     ) => StoreError::Object(error),
-                    crate::sync::store::owner::verified_history::RegistrationLoadError::Invalid(
+                    crate::sync::store::commit_verification::merge_history::RegistrationLoadError::Invalid(
                         error,
                     ) => StoreError::InvalidOutbound(error),
                 })?;

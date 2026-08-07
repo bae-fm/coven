@@ -1835,7 +1835,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 current,
                 None,
                 resolved_devices,
-                crate::sync::store::owner::verified_history::MergeHistorySuccessorEvidence::none(),
+                crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
             )
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;

@@ -288,7 +288,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     pub(crate) fn from_pending_device_join(
-        _authority: crate::sync::store::owner::device_join::PendingDeviceJoinHistoryConstruction,
+        _authority: crate::sync::store::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,

@@ -305,7 +305,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 .contains(&StoreDeviceExclusionOutcomeRef::Excluded(
                     locator.exclusion().clone(),
                 ))
-            || !crate::sync::store::owner::verified_history::registration::device_state_has_active_registration(
+            || !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
                 activation_predecessor_state,
                 &locator.exclusion().proposal.target,
             )
