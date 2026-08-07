@@ -861,7 +861,7 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     assert_eq!(reference.sequence, 1);
     // Reading and verifying an activated Circle acknowledgement — including under
     // a rotated-away epoch and its exact seed coverage — is exercised on the
-    // production close/two-device fixtures in circle_controls::tests, where the
+    // production close/two-device fixtures in circles::tests, where the
     // retained control activations the reader resolves the epoch key from exist.
 }
 

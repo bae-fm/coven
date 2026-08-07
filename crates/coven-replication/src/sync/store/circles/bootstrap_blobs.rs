@@ -1,4 +1,4 @@
-use crate::sync::store::circle_controls::CircleOperationError;
+use crate::sync::store::circles::CircleOperationError;
 
 pub(crate) trait CircleBootstrapBlobVerification {
     async fn verify_stored_blob(

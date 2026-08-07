@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::sync::store::circle_controls::CircleOperationError;
+use crate::sync::store::circles::CircleOperationError;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
@@ -32,18 +32,17 @@ mod heads;
 pub(crate) use access::LocalCircleAccess;
 use heads::{CircleHeadKind, CircleHeadValue};
 
+use super::exact_object::read_exact_circle_object;
+use coven_protocol::circle_activation::verify_control_context_for_verified_commit;
 #[cfg(test)]
-use crate::sync::store::circle_controls::activation::CircleCurrentControl;
-use crate::sync::store::circle_controls::activation::{
-    read_exact_circle_object, verify_control_context_for_verified_commit,
-};
-use crate::sync::store::circle_controls::activation::{
+use coven_protocol::circle_activation::CircleCurrentControl;
+#[cfg(test)]
+use coven_protocol::circle_activation::CircleCurrentState;
+use coven_protocol::circle_activation::{
     LocalCircleExclusion, VerifiedCircleAccess, VerifiedCircleActivations, VerifiedCircleActive,
     VerifiedCircleImage, VerifiedCircleReference, VerifiedStreamActivationPrefix,
     VerifiedStreamActivations,
 };
-#[cfg(test)]
-use coven_protocol::circle_activation::CircleCurrentState;
 
 pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,

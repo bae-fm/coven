@@ -10,11 +10,11 @@ impl LocalStoreWriter {
         stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
     ) -> Result<
         coven_protocol::store_commit::StoreBatchCommit,
-        crate::sync::store::circle_controls::CircleOperationError,
+        crate::sync::store::circles::CircleOperationError,
     > {
         if old_commit.author_registration != *self.registration.reference() {
             return Err(
-                crate::sync::store::circle_controls::CircleOperationError::InvalidState(
+                crate::sync::store::circles::CircleOperationError::InvalidState(
                     "test Circle commit is not authored by the local writer".to_string(),
                 ),
             );
@@ -29,11 +29,9 @@ impl LocalStoreWriter {
             old_commit
                 .operations_membership_authority()
                 .map_err(|error| {
-                    crate::sync::store::circle_controls::CircleOperationError::InvalidState(
-                        format!(
-                            "prepared Circle commit has no validated operations authority: {error}"
-                        ),
-                    )
+                    crate::sync::store::circles::CircleOperationError::InvalidState(format!(
+                        "prepared Circle commit has no validated operations authority: {error}"
+                    ))
                 })?,
             reference,
             stream_activations,

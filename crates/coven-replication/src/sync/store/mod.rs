@@ -10,7 +10,7 @@ use coven_storage::{BlobPathScheme, CloudCipherAccess};
 pub(crate) mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
-mod circle_controls;
+pub(crate) mod circles;
 mod commit_verification;
 pub(crate) mod device_exclusion;
 pub(crate) mod device_join;
@@ -35,14 +35,14 @@ use registration_object::prepare_registration_object;
 
 pub use acknowledgements::StoreAckError;
 pub use blob::{BlobCacheError, BlobStream};
-pub use circle_controls::CircleOperationError;
-pub use circle_controls::CircleTransitionHistory;
+pub use circles::CircleOperationError;
 #[cfg(test)]
 pub(crate) use commit_verification::merge_history::prepare_merge_abandonment_history_summary;
 pub use commit_verification::merge_history::{
     MergeHistorySuccessorEvidence, MergeOutboundAuthorization, PreparedMergeHistorySuccessor,
     VerifiedMergeMembershipPrefix,
 };
+pub use coven_protocol::circle_journal::CircleTransitionHistory;
 #[cfg(any(test, feature = "test-utils"))]
 pub use device_exclusion::StoreDeviceExclusionOperationInfo;
 pub use device_exclusion::{StoreDeviceExclusionError, StoreDeviceExclusionResult};
@@ -81,15 +81,16 @@ pub use owner_role_promotion::OwnerPromotionError;
 pub use reclaim::StoreReclaimError;
 pub use reclaim::StoreReclaimResult;
 
+pub use circles::CirclePackageReadError;
+pub use circles::StoreCircleCommands;
 #[cfg(test)]
 pub(crate) use owner::pull::HeldStoreCoordinate;
 pub(crate) use owner::pull::{HeldStorePosition, VerifiedStoreDeviceHead};
 pub use owner::pull::{LoadedCirclePackage, Readiness};
 pub use owner::pull::{PullError, StorePullError, StorePullResult};
-pub use owner::CirclePackageReadError;
 pub(crate) use owner::StoreInitializationError;
 pub use owner::StoreRegistrationError;
-pub use owner::{AuthorizedWriterOperation, StoreCircleCommands, StoreWriterAuthorizationError};
+pub use owner::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
 pub use owner::{HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership};
 pub(crate) use restore::RestoringStore;
 pub(crate) use snapshots::SnapshotCut;

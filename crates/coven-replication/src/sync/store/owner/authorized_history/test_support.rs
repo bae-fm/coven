@@ -155,11 +155,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn open_circle_package_for_test(
         &mut self,
-        access: &crate::sync::store::circle_controls::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &coven_protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
-        let reader = crate::sync::store::owner::circles::packages::CirclePackageReader::new(
+        let reader = crate::sync::store::circles::packages::CirclePackageReader::new(
             &self.database,
             self.storage.as_ref(),
             &mut self.history_verifier,
@@ -168,12 +168,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .open_package(access, commit, reference, commit.author())
             .await
             .map_err(|error| match error {
-                crate::sync::store::owner::circles::packages::CirclePackageReadError::Database(
-                    error,
-                ) => StoreError::Database(error),
-                crate::sync::store::owner::circles::packages::CirclePackageReadError::Invalid(
-                    error,
-                ) => StoreError::InvalidOutbound(error),
+                crate::sync::store::circles::packages::CirclePackageReadError::Database(error) => {
+                    StoreError::Database(error)
+                }
+                crate::sync::store::circles::packages::CirclePackageReadError::Invalid(error) => {
+                    StoreError::InvalidOutbound(error)
+                }
             })?;
         Ok(opened.object.value)
     }

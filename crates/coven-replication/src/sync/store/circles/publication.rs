@@ -1,14 +1,16 @@
-use crate::sync::store::circle_controls::{
-    read_exact_circle_object, verify_control_context_for_verified_commit, CircleOperationError,
-    CircleOperationJournal, CircleOperationPolicy, VerifiedCircleAccess, VerifiedCircleActive,
-    VerifiedCircleReference,
-};
+use super::error::CircleOperationError;
+use super::exact_object::read_exact_circle_object;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_protocol::circle::{
     circle_semantic_prefix, CircleAccessDisposition, CircleOperationId, CircleOperationState,
     CircleSemanticSlot, CircleTransitionPolicyObjects, PreparedCircleTransition,
 };
+use coven_protocol::circle_activation::{
+    verify_control_context_for_verified_commit, VerifiedCircleAccess, VerifiedCircleActive,
+    VerifiedCircleReference,
+};
+use coven_protocol::circle_journal::{CircleOperationJournal, CircleOperationPolicy};
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use coven_protocol::store_commit::{

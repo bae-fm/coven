@@ -464,14 +464,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn circles(
         &mut self,
-    ) -> crate::sync::store::owner::writer::AuthorizedCircleWriter<'_, 'storage> {
+    ) -> crate::sync::store::circles::AuthorizedCircleWriter<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
         let store_dir = self.store_dir;
         let root = self.store_root().clone();
         let membership = self.membership.clone();
         let local_writer = Arc::clone(&self.writer);
-        crate::sync::store::owner::writer::AuthorizedCircleWriter::from_parts(
+        crate::sync::store::circles::AuthorizedCircleWriter::from_parts(
             self,
             database,
             storage,

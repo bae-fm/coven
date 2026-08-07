@@ -468,7 +468,7 @@ mod test_device {
             self.store.device_join_transport()
         }
 
-        pub fn circles(&self) -> crate::sync::store::owner::StoreCircleCommands<'_> {
+        pub fn circles(&self) -> crate::sync::store::StoreCircleCommands<'_> {
             self.store.circles()
         }
 

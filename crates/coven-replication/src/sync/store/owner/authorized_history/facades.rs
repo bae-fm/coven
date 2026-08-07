@@ -9,15 +9,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn circles(
         &mut self,
-    ) -> crate::sync::store::owner::circles::VerifiedCircleHistory<'_, 'storage> {
-        crate::sync::store::owner::circles::VerifiedCircleHistory::new(self)
+    ) -> crate::sync::store::circles::VerifiedCircleHistory<'_, 'storage> {
+        crate::sync::store::circles::VerifiedCircleHistory::new(self)
     }
 
     pub(crate) async fn discard_circle_operation(
         &mut self,
         operation_id: &coven_protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
-        use crate::sync::store::circle_controls::CircleOperationError;
+    ) -> Result<(), crate::sync::store::circles::CircleOperationError> {
+        use crate::sync::store::circles::CircleOperationError;
 
         let journal = self
             .database
@@ -62,9 +62,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn circle_activations(
         &mut self,
-    ) -> crate::sync::store::owner::circles::activation::CircleActivationVerifier<'_, 'storage>
-    {
-        crate::sync::store::owner::circles::activation::CircleActivationVerifier::new(
+    ) -> crate::sync::store::circles::activation::CircleActivationVerifier<'_, 'storage> {
+        crate::sync::store::circles::activation::CircleActivationVerifier::new(
             &self.database,
             self.storage.as_ref(),
             &mut self.history_verifier,
@@ -73,8 +72,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn circle_packages(
         &mut self,
-    ) -> crate::sync::store::owner::circles::packages::CirclePackageReader<'_, 'storage> {
-        crate::sync::store::owner::circles::packages::CirclePackageReader::new(
+    ) -> crate::sync::store::circles::packages::CirclePackageReader<'_, 'storage> {
+        crate::sync::store::circles::packages::CirclePackageReader::new(
             &self.database,
             self.storage.as_ref(),
             &mut self.history_verifier,

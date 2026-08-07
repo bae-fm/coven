@@ -96,10 +96,10 @@ impl<'storage> AuthorizedStore<'storage> {
         }
     }
 
-    pub(super) async fn discard_circle_operation(
+    pub(crate) async fn discard_circle_operation(
         &mut self,
         operation_id: &coven_protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::circle_controls::CircleOperationError> {
+    ) -> Result<(), crate::sync::store::circles::CircleOperationError> {
         self.history.discard_circle_operation(operation_id).await
     }
 

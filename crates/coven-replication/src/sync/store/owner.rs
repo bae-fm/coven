@@ -6,7 +6,6 @@ use std::sync::Arc;
 pub(crate) mod authorized_history;
 mod authorized_store;
 mod candidate_cleanup;
-pub(crate) mod circles;
 pub(super) mod history;
 mod history_construction;
 pub(crate) mod keyring;
@@ -22,9 +21,6 @@ use crate::sync::store::device_join::transport;
 use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use candidate_cleanup::delete_candidate_cleanup_targets;
-pub(crate) use circles::AuthorizedCircleWriter;
-pub use circles::CirclePackageReadError;
-pub use circles::StoreCircleCommands;
 pub use history_construction::HistoryConstructionAuthority;
 pub use keyring::StoreKeyrings;
 pub use registration::StoreRegistrationError;
@@ -290,7 +286,7 @@ impl Store {
         self.storage.blob_path_scheme()
     }
 
-    async fn circle_close_status(
+    pub(crate) async fn circle_close_status(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<coven_protocol::circle::CircleCloseStatus, CircleOperationError> {
@@ -762,10 +758,8 @@ impl Store {
         &self,
         circle_id: coven_protocol::circle::CircleId,
         expected_control: coven_protocol::circle::CircleControlCoord,
-    ) -> Result<
-        Option<crate::sync::store::circle_controls::CircleEpochAccess>,
-        coven_database::DbError,
-    > {
+    ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, coven_database::DbError>
+    {
         self.database
             .circle_epoch_access(self.root.reference().clone(), circle_id, expected_control)
             .await

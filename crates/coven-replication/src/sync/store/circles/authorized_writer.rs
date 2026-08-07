@@ -198,7 +198,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
 fn retained_branch_authoring_state(
     circle_id: CircleId,
     identity_pubkey: &str,
-    activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
+    activation: &coven_protocol::circle_activation::VerifiedCircleReference,
 ) -> Result<CircleAuthoringState, CircleOperationError> {
     let access = activation.local_access.as_ref().ok_or_else(|| {
         CircleOperationError::InvalidState(format!(
@@ -226,7 +226,7 @@ fn retained_branch_authoring_state(
 
 fn losing_branch_selected_metadata(
     circle_id: CircleId,
-    activation: &crate::sync::store::circle_controls::VerifiedCircleReference,
+    activation: &coven_protocol::circle_activation::VerifiedCircleReference,
 ) -> Result<coven_protocol::circle::CircleMetadata, CircleOperationError> {
     activation
         .local_access

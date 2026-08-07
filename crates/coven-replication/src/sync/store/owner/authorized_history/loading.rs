@@ -80,8 +80,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn verify_membership_control(
         &mut self,
         verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    ) -> Result<crate::sync::store::circle_controls::activation::VerifiedCircleActivations, String>
-    {
+    ) -> Result<coven_protocol::circle_activation::VerifiedCircleActivations, String> {
         let root = self.history_verifier.verified_root().reference().clone();
         if verified_commit.store_root_hash() != root.store_root_hash {
             return Err(

@@ -5,7 +5,7 @@ use super::{
     read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
-use crate::sync::store::owner::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
+use crate::sync::store::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys;

@@ -1,4 +1,4 @@
-use crate::sync::store::circle_controls::CircleOperationError;
+use super::error::CircleOperationError;
 use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext};
 use coven_storage::SyncStorage;
 

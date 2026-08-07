@@ -222,10 +222,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .await
                 .map_err(StoreError::InvalidOutbound)?
         } else {
-            crate::sync::store::circle_controls::activation::VerifiedCircleActivations::none(
-                &commit, &reference,
-            )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+            coven_protocol::circle_activation::VerifiedCircleActivations::none(&commit, &reference)
+                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
         };
         self.upload_commit(&activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;

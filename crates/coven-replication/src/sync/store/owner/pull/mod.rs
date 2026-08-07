@@ -7,13 +7,13 @@ use crate::sync::store::commit_verification::merge_history::registration::*;
 use crate::sync::store::commit_verification::merge_history::*;
 
 mod authorized;
-use crate::sync::store::circle_controls::activation::{
-    VerifiedCircleActivations, VerifiedStreamActivationPrefix,
-};
 pub(super) use authorized::AuthorizedPull;
 use coven_database::DbError;
 use coven_foundation::changeset::RowChange;
 use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
+use coven_protocol::circle_activation::{
+    VerifiedCircleActivations, VerifiedStreamActivationPrefix,
+};
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{BlobSpoolProtection, ExactObjectRef, StorageError};

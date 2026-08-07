@@ -430,7 +430,7 @@ impl Store {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn open_circle_package_for_test(
         &self,
-        access: &crate::sync::store::circle_controls::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &coven_protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
@@ -510,7 +510,7 @@ impl Store {
         circle_id: coven_protocol::circle::CircleId,
         control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<
-        Option<crate::sync::store::circle_controls::VerifiedCircleReference>,
+        Option<coven_protocol::circle_activation::VerifiedCircleReference>,
         coven_database::DbError,
     > {
         self.database
@@ -631,7 +631,7 @@ impl Store {
         author: &coven_protocol::store_commit::StoreDeviceRegistration,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<
-        crate::sync::store::circle_controls::VerifiedCircleActivations,
+        coven_protocol::circle_activation::VerifiedCircleActivations,
         crate::sync::store::CircleOperationError,
     > {
         let verified = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
@@ -657,7 +657,7 @@ impl Store {
     pub(crate) async fn load_applicable_circle_packages_for_test(
         &self,
         verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
         author: &coven_protocol::store_commit::StoreDeviceRegistration,
         local_store_membership: pull::LocalStoreMembership,
     ) -> Result<Vec<pull::LoadedCirclePackage>, circles::CirclePackageReadError> {

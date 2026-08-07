@@ -105,12 +105,12 @@ impl LocalStoreWriter {
 
     pub(crate) async fn load_circle_activations(
         &self,
-        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
+        history: &mut crate::sync::store::circles::VerifiedCircleHistory<'_, '_>,
         verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<
-        crate::sync::store::circle_controls::VerifiedCircleActivations,
-        crate::sync::store::circle_controls::CircleOperationError,
+        coven_protocol::circle_activation::VerifiedCircleActivations,
+        crate::sync::store::circles::CircleOperationError,
     > {
         history
             .activations()
@@ -305,7 +305,7 @@ impl LocalStoreWriter {
         stream_activations: Vec<coven_protocol::store_commit::StreamActivation>,
     ) -> Result<
         coven_protocol::store_commit::StoreBatchCommit,
-        crate::sync::store::circle_controls::CircleOperationError,
+        crate::sync::store::circles::CircleOperationError,
     > {
         self.sign_store_write_commit(
             store_root_hash,
@@ -322,9 +322,7 @@ impl LocalStoreWriter {
             },
         )
         .map_err(|error| {
-            crate::sync::store::circle_controls::CircleOperationError::InvalidState(
-                error.to_string(),
-            )
+            crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
         })
     }
 
@@ -336,13 +334,11 @@ impl LocalStoreWriter {
         object: coven_protocol::objects::ExactObjectRef,
     ) -> Result<
         coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::sync::store::circle_controls::CircleOperationError,
+        crate::sync::store::circles::CircleOperationError,
     > {
         self.verify_prepared_commit(bytes, store_root_hash, coord, object)
             .map_err(|error| {
-                crate::sync::store::circle_controls::CircleOperationError::InvalidState(
-                    error.to_string(),
-                )
+                crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
             })
     }
 
@@ -354,20 +350,18 @@ impl LocalStoreWriter {
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<
         coven_protocol::store_commit::StoreDeviceHead,
-        crate::sync::store::circle_controls::CircleOperationError,
+        crate::sync::store::circles::CircleOperationError,
     > {
         self.sign_device_head(root_hash, commit, history_summary, successor)
             .map_err(|error| {
-                crate::sync::store::circle_controls::CircleOperationError::InvalidState(
-                    error.to_string(),
-                )
+                crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
             })
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn load_local_circle_snapshot_refs(
         &self,
-        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
+        history: &mut crate::sync::store::circles::VerifiedCircleHistory<'_, '_>,
         circle_id: coven_protocol::circle::CircleId,
         access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
@@ -391,7 +385,7 @@ impl LocalStoreWriter {
     #[cfg(test)]
     pub(crate) async fn load_local_circle_snapshots(
         &self,
-        history: &mut crate::sync::store::owner::circles::VerifiedCircleHistory<'_, '_>,
+        history: &mut crate::sync::store::circles::VerifiedCircleHistory<'_, '_>,
         circle_id: coven_protocol::circle::CircleId,
         access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<

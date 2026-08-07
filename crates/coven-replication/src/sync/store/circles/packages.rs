@@ -44,7 +44,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
 
     pub(crate) async fn open_package(
         &self,
-        access: &crate::sync::store::circle_controls::CircleEpochAccess,
+        access: &coven_protocol::circle_activation::CircleEpochAccess,
         verified: &VerifiedStoreBatchCommit,
         reference: &CirclePackageRef,
         author: &StoreDeviceRegistration,
@@ -105,7 +105,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
     pub(crate) async fn load_applicable(
         &mut self,
         verified: &VerifiedStoreBatchCommit,
-        activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
+        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
         author: &StoreDeviceRegistration,
         local_store_membership: LocalStoreMembership,
     ) -> Result<Vec<LoadedCirclePackage>, CirclePackageReadError> {
@@ -257,7 +257,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                         reference.circle_id
                     ))
                 })?;
-                crate::sync::store::circle_controls::CircleEpochAccess::from_historical(
+                coven_protocol::circle_activation::CircleEpochAccess::from_historical(
                     reference.circle_id,
                     reference.key_fingerprint,
                     &keyring,

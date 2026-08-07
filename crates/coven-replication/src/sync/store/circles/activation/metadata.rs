@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     CircleActivationVerifier, CircleHeadKind, CircleHeadValue, VerifiedStreamActivationPrefix,
 };
-use crate::sync::store::circle_controls::CircleOperationError;
+use crate::sync::store::circles::CircleOperationError;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::circle::{
     circle_semantic_prefix, verify_circle_semantic_prefix, CircleId, CircleMetadata,

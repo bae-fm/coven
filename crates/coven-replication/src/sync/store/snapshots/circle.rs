@@ -10,7 +10,7 @@ use coven_storage::SyncStorage;
 use tracing::warn;
 
 use super::{coverage_dominates, SnapshotCut, SnapshotError};
-use crate::sync::store::owner::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
+use crate::sync::store::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
 use coven_database::{verify_circle_bootstrap_image, CreatedSnapshot};
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
@@ -213,11 +213,11 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 // The restoring identity cannot decrypt this Circle — delete any
                 // preserved coverage row so replay never reconstructs an image it has
                 // no access to.
-                crate::sync::store::owner::circles::activation::LocalCircleAccess::NoAccess => {
+                crate::sync::store::circles::activation::LocalCircleAccess::NoAccess => {
                     decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
                     continue;
                 }
-                crate::sync::store::owner::circles::activation::LocalCircleAccess::Active {
+                crate::sync::store::circles::activation::LocalCircleAccess::Active {
                     epoch_encryption,
                     leaf_bootstrap,
                 } => (epoch_encryption, leaf_bootstrap),
@@ -280,8 +280,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         circle_id: CircleId,
         head_control: &CircleControlCoord,
         head_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<crate::sync::store::owner::circles::activation::LocalCircleAccess, SnapshotError>
-    {
+    ) -> Result<crate::sync::store::circles::activation::LocalCircleAccess, SnapshotError> {
         let commit_lookup = head_commit.clone();
         let root = self.root().clone();
         let owned = self
@@ -303,7 +302,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                  activation"
             ))
             })?;
-        crate::sync::store::owner::circles::activation::CircleActivationVerifier::new(
+        crate::sync::store::circles::activation::CircleActivationVerifier::new(
             self.database,
             self.storage,
             self.history,
@@ -419,7 +418,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             routing_key,
         )
         .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-        let image = crate::sync::store::circle_controls::VerifiedCircleImage::from_stored_image(
+        let image = coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
             circle_id,
             selected.control.clone(),
             selected.bootstrap.clone(),
@@ -926,7 +925,7 @@ pub(crate) fn select_maximal_circle_snapshot(
 /// that activates its control, and the verified image bound to that control.
 struct StagedCircleImageCandidate {
     activation_commit: coven_protocol::store_commit::StoreBatchCommitRef,
-    image: crate::sync::store::circle_controls::VerifiedCircleImage,
+    image: coven_protocol::circle_activation::VerifiedCircleImage,
 }
 
 impl StagedCircleImageCandidate {

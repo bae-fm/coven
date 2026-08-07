@@ -116,7 +116,7 @@ async fn installed_document_row(
 async fn applicable_circle_packages(
     device: &crate::sync::test_helpers::TestDevice,
     verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    activations: &[crate::sync::store::circle_controls::VerifiedCircleReference],
+    activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     author: &coven_protocol::store_commit::StoreDeviceRegistration,
     purpose: &str,
 ) -> Vec<crate::sync::store::owner::pull::LoadedCirclePackage> {
@@ -130,10 +130,10 @@ async fn applicable_circle_packages(
         .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Database(error)) => {
+        Err(crate::sync::store::circles::CirclePackageReadError::Database(error)) => {
             panic!("{purpose}: {error}")
         }
-        Err(crate::sync::store::owner::circles::CirclePackageReadError::Invalid(error)) => {
+        Err(crate::sync::store::circles::CirclePackageReadError::Invalid(error)) => {
             panic!("{purpose}: {error}")
         }
     }

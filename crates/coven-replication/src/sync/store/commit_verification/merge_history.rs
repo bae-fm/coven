@@ -1,7 +1,6 @@
 use super::commit::{
     StoreCommitVerifier, StoreMembershipObjectVerifier, VerifiedMergeMembershipClosure,
 };
-use crate::sync::store::circle_controls::activation::VerifiedCircleActivations;
 use crate::sync::store::owner::pull;
 use crate::sync::store::owner::pull::*;
 use crate::sync::store::StoreError;
@@ -9,6 +8,7 @@ use coven_database::VerifiedStoreSnapshotStability;
 use coven_database::{
     DeviceJoinBootstrapActivation, DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan,
 };
+use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::circle_control::StoreMembershipStateRef;
 use coven_protocol::membership::{MembershipChain, MembershipStatus};
 use coven_protocol::objects::{
