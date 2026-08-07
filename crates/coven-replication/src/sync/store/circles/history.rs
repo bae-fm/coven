@@ -1,5 +1,5 @@
+use crate::sync::store::authorization::history::{cleanup, retained};
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
-use crate::sync::store::owner::authorized_history::{cleanup, retained};
 use coven_database::StoreDatabase;
 use coven_storage::SyncStorage;
 

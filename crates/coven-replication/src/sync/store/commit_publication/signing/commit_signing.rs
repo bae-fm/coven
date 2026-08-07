@@ -3,7 +3,7 @@ use super::*;
 impl LocalStoreWriter {
     pub(crate) async fn pull(
         &self,
-        history: &mut crate::sync::store::owner::authorized_history::AuthorizedStoreHistory<'_>,
+        history: &mut crate::sync::store::authorization::history::AuthorizedStoreHistory<'_>,
         membership: &coven_protocol::membership::MembershipChain,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<

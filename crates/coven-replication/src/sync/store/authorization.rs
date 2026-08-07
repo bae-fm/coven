@@ -3,10 +3,9 @@ use coven_database::BlockedWriteDiscard;
 use coven_protocol::store_commit::StoreRootRef;
 use std::sync::Arc;
 
-pub(crate) mod authorized_history;
 mod authorized_store;
 mod candidate_cleanup;
-pub(super) mod history;
+pub(crate) mod history;
 mod history_construction;
 pub(crate) mod keyring;
 pub(crate) use keyring::load_wrapped_store_key;
@@ -16,9 +15,9 @@ pub(crate) mod registration_outbox;
 mod store_test_support;
 
 use crate::sync::store::device_join::transport;
-use authorized_history::AuthorizedStoreHistory;
 pub(crate) use authorized_store::AuthorizedStore;
 pub(crate) use candidate_cleanup::delete_candidate_cleanup_targets;
+use history::AuthorizedStoreHistory;
 pub use history_construction::HistoryConstructionAuthority;
 pub use keyring::StoreKeyrings;
 pub use registration::StoreRegistrationError;

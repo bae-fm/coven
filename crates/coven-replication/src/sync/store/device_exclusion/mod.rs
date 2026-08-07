@@ -626,7 +626,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                     ),
                 )
                 .await?;
-                crate::sync::store::owner::delete_candidate_cleanup_targets::<
+                crate::sync::store::authorization::delete_candidate_cleanup_targets::<
                     StoreDeviceExclusionError,
                 >(self.storage.as_ref(), &database, targets)
                 .await?;
@@ -644,7 +644,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                     ),
                 )
                 .await?;
-                crate::sync::store::owner::delete_candidate_cleanup_targets::<
+                crate::sync::store::authorization::delete_candidate_cleanup_targets::<
                     StoreDeviceExclusionError,
                 >(self.storage.as_ref(), &database, targets)
                 .await?;

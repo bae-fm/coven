@@ -444,7 +444,8 @@ impl SyncLoopHandle {
 
     pub async fn restore_membership(
         &self,
-    ) -> Result<super::store::owner::StoreRestoreMembership, super::store::MembershipOpsError> {
+    ) -> Result<super::store::authorization::StoreRestoreMembership, super::store::MembershipOpsError>
+    {
         self.inner.components.restore_membership().await
     }
 

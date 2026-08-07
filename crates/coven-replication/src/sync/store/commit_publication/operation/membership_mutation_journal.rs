@@ -599,7 +599,7 @@ impl MutationPersistence {
                 ));
             }
         }
-        crate::sync::store::owner::delete_candidate_cleanup_targets::<InviteError>(
+        crate::sync::store::authorization::delete_candidate_cleanup_targets::<InviteError>(
             self.storage.as_ref(),
             &self.database,
             cleanup,
@@ -671,7 +671,7 @@ impl MutationPersistence {
         cleanup: Vec<coven_database::CandidateCleanupObject>,
     ) -> Result<(), InviteError> {
         let (candidate_objects, retained) = plan.candidate_cleanup_objects();
-        crate::sync::store::owner::delete_candidate_cleanup_targets::<InviteError>(
+        crate::sync::store::authorization::delete_candidate_cleanup_targets::<InviteError>(
             self.storage.as_ref(),
             &self.database,
             cleanup,

@@ -651,7 +651,8 @@ impl SyncComponents {
 
     pub(crate) async fn restore_membership(
         &self,
-    ) -> Result<super::store::owner::StoreRestoreMembership, super::store::MembershipOpsError> {
+    ) -> Result<super::store::authorization::StoreRestoreMembership, super::store::MembershipOpsError>
+    {
         self.store.restore_membership().await
     }
 

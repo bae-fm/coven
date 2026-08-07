@@ -163,7 +163,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         let targets = database
             .store_reclaim_replacement_cleanup_targets(operation.clone())
             .await?;
-        crate::sync::store::owner::delete_candidate_cleanup_targets::<StoreReclaimError>(
+        crate::sync::store::authorization::delete_candidate_cleanup_targets::<StoreReclaimError>(
             self.storage.as_ref(),
             database,
             targets,

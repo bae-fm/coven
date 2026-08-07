@@ -536,7 +536,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .database
             .acknowledgement_cleanup_target(acknowledgement.clone())
             .await?;
-        crate::sync::store::owner::delete_candidate_cleanup_targets::<StoreError>(
+        crate::sync::store::authorization::delete_candidate_cleanup_targets::<StoreError>(
             self.storage.as_ref(),
             &self.database,
             target,

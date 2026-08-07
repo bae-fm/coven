@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::sync::store::owner::load_wrapped_store_key;
+use crate::sync::store::authorization::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use coven_foundation::clock::SystemClock;

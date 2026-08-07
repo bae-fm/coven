@@ -8,6 +8,7 @@ use coven_storage::SyncStorage;
 use coven_storage::{BlobPathScheme, CloudCipherAccess};
 
 pub(crate) mod acknowledgements;
+pub(crate) mod authorization;
 #[doc(hidden)]
 pub mod blob;
 pub(crate) mod circles;
@@ -20,7 +21,6 @@ mod founder_creation;
 mod host_write;
 mod membership;
 mod merge_conflict;
-pub(crate) mod owner;
 mod reclaim;
 use commit_publication::operation::commit_plan;
 pub(crate) mod owner_role_promotion;
@@ -83,12 +83,14 @@ pub use owner_role_promotion::OwnerPromotionError;
 pub use reclaim::StoreReclaimError;
 pub use reclaim::StoreReclaimResult;
 
+pub(crate) use authorization::StoreInitializationError;
+pub use authorization::StoreRegistrationError;
+pub use authorization::{
+    HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership,
+};
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
 pub use commit_publication::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
-pub(crate) use owner::StoreInitializationError;
-pub use owner::StoreRegistrationError;
-pub use owner::{HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership};
 #[cfg(test)]
 pub(crate) use pull::HeldStoreCoordinate;
 pub(crate) use pull::{HeldStorePosition, VerifiedStoreDeviceHead};

@@ -90,12 +90,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self,
         membership: coven_protocol::membership::MembershipChain,
         identity: UserKeypair,
-    ) -> crate::sync::store::owner::RestoringStore<'storage> {
+    ) -> crate::sync::store::authorization::RestoringStore<'storage> {
         let database = self.database.clone();
         let storage = self.storage.as_ref();
         let root = self.history_verifier.verified_root().reference().clone();
         let protocol = self.history_verifier.verified_root().object().value.clone();
-        crate::sync::store::owner::RestoringStore::from_parts(
+        crate::sync::store::authorization::RestoringStore::from_parts(
             self, database, storage, root, protocol, membership, identity,
         )
     }

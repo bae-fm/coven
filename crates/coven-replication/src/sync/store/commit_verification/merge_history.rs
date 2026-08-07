@@ -208,7 +208,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     }
 
     pub(crate) async fn from_commit_verifier(
-        _authority: crate::sync::store::owner::HistoryConstructionAuthority,
+        _authority: crate::sync::store::authorization::HistoryConstructionAuthority,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {

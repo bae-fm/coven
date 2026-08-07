@@ -392,12 +392,14 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 storage.as_ref(),
                 root_ref.clone(),
             );
-            let keyrings =
-                crate::sync::store::owner::keyring::StoreKeyrings::new(storage.as_ref(), root_ref);
+            let keyrings = crate::sync::store::authorization::keyring::StoreKeyrings::new(
+                storage.as_ref(),
+                root_ref,
+            );
             let blob_cache =
                 crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
             Ok(
-                crate::sync::store::owner::history::AuthorizedStoreHistory::from_snapshot(
+                crate::sync::store::authorization::history::AuthorizedStoreHistory::from_snapshot(
                     super::SnapshotHistoryConstruction,
                     database,
                     storage,

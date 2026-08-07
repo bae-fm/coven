@@ -230,7 +230,7 @@ impl<'a> StoreCommitVerifier<'a> {
     }
 
     pub(crate) fn from_verified_root(
-        _authority: crate::sync::store::owner::HistoryConstructionAuthority,
+        _authority: crate::sync::store::authorization::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     ) -> Self {

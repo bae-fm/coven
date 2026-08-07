@@ -12,7 +12,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-        keyrings: crate::sync::store::owner::keyring::StoreKeyrings<'storage>,
+        keyrings: crate::sync::store::authorization::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self {
             database,
@@ -84,7 +84,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn install_existing_founder_device(
         &self,
         signer: &UserKeypair,
-    ) -> Result<(), crate::sync::store::owner::registration::StoreRegistrationError> {
+    ) -> Result<(), crate::sync::store::authorization::registration::StoreRegistrationError> {
         use coven_protocol::objects::ProtocolObjectDomain;
         use coven_protocol::store_commit::{
             ack_slot_prefix, DeviceStreamAnchor, StoreAck, StoreAckRef,
@@ -96,7 +96,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let founder = self.history_verifier.load_founder_registration().await?;
         if founder.value.author_pubkey != coven_keys::keys::public_key_hex(signer) {
             return Err(
-                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                     "Store founder registration belongs to another identity".to_string(),
                 ),
             );
@@ -109,13 +109,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .device
         {
             return Err(
-                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                     "Store founder registration belongs to another provider principal".to_string(),
                 ),
             );
         }
         founder.value.device_signer(signer).map_err(|error| {
-            crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+            crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                 error.to_string(),
             )
         })?;
@@ -129,7 +129,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 match founder.value.origin {
                     StoreDeviceRegistrationOrigin::Founder { creation_id } => creation_id,
                     _ => return Err(
-                        crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                        crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                             "Store founder registration has a non-founder origin".to_string(),
                         ),
                     ),
@@ -147,7 +147,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             || registration_prepared.reference() != &founder.object
         {
             return Err(
-                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                     "prepared founder registration differs from its verified exact object"
                         .to_string(),
                 ),
@@ -159,7 +159,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             &founder.value.acknowledgements
         else {
             return Err(
-                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                     "Store founder registration has no acknowledgement anchor".to_string(),
                 ),
             );
@@ -174,7 +174,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes).map_err(|error| {
-            crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+            crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                 error.to_string(),
             )
         })?;
@@ -186,13 +186,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         };
         let ack =
             StoreAck::parse_at(&ack_bytes, root, &ack_ref, &founder.value).map_err(|error| {
-                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                     error.to_string(),
                 )
             })?;
         if ack.registration != registration_ref {
             return Err(
-                crate::sync::store::owner::registration::StoreRegistrationError::Invalid(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
                     "Store founder acknowledgement names another registration".to_string(),
                 ),
             );
@@ -215,7 +215,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             )
             .await
             .map_err(|error| {
-                crate::sync::store::owner::registration::StoreRegistrationError::Database(
+                crate::sync::store::authorization::registration::StoreRegistrationError::Database(
                     error.to_string(),
                 )
             })
@@ -295,7 +295,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-        keyrings: crate::sync::store::owner::keyring::StoreKeyrings<'storage>,
+        keyrings: crate::sync::store::authorization::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self::new(
             database,
@@ -316,7 +316,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
         blob_source: crate::sync::store::blob::RemoteBlobSource<'storage>,
-        keyrings: crate::sync::store::owner::keyring::StoreKeyrings<'storage>,
+        keyrings: crate::sync::store::authorization::keyring::StoreKeyrings<'storage>,
     ) -> Self {
         Self::new(
             database,

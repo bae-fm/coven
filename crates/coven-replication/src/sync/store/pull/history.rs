@@ -283,7 +283,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         state_after: ResolvedStoreDeviceState,
         evidence: MergeHistorySuccessorEvidence,
     ) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
-        crate::sync::store::owner::authorized_history::retained::prepare_merge_history_successor(
+        crate::sync::store::authorization::history::retained::prepare_merge_history_successor(
             &self.database,
             self.history,
             verified_commit,
@@ -333,7 +333,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
                 .database
                 .merge_retraction_cleanup_targets(candidate.clone())
                 .await?;
-            crate::sync::store::owner::delete_candidate_cleanup_targets::<StorePullError>(
+            crate::sync::store::authorization::delete_candidate_cleanup_targets::<StorePullError>(
                 self.storage,
                 &self.database,
                 targets,

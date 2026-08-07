@@ -91,7 +91,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         &self,
         targets: Vec<coven_database::CandidateCleanupObject>,
     ) -> Result<(), OwnerPromotionError> {
-        crate::sync::store::owner::delete_candidate_cleanup_targets(
+        crate::sync::store::authorization::delete_candidate_cleanup_targets(
             self.storage.as_ref(),
             &self.database,
             targets,
