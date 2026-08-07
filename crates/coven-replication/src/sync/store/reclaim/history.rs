@@ -1,11 +1,21 @@
-use super::*;
+use coven_database::StoreDatabase;
 use coven_protocol::store_commit::{
     CommitFrontier, StoreBatchCommitRef, StoreDeviceHead, StoreDeviceHeadRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
 };
+use coven_storage::SyncStorage;
 
+use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+use crate::sync::store::owner::{snapshot, StoreAckError};
+
+/// The reads reclamation performs, holding exactly the capabilities they use:
+/// the database that records materialization and coverage, the storage the
+/// snapshot and acknowledgement objects live in, and the verifier that
+/// authenticates them.
 pub(crate) struct ReclaimHistory<'operation, 'storage> {
-    owner: &'operation mut AuthorizedStoreHistory<'storage>,
+    database: &'operation StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 /// One device's per-Circle snapshot stream, read in generation order.
@@ -26,24 +36,54 @@ pub(crate) struct SelectedCircleSnapshot {
 }
 
 impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
-    pub(super) fn new(owner: &'operation mut AuthorizedStoreHistory<'storage>) -> Self {
-        Self { owner }
+    pub(crate) fn new(
+        database: &'operation StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        history: &'operation mut MergeHistoryVerifier<'storage>,
+    ) -> Self {
+        Self {
+            database,
+            storage,
+            history,
+        }
+    }
+
+    fn circle_acknowledgements(
+        &mut self,
+    ) -> crate::sync::store::owner::circles::acknowledgements::CircleAcknowledgementReader<
+        '_,
+        'storage,
+    > {
+        crate::sync::store::owner::circles::acknowledgements::CircleAcknowledgementReader::new(
+            self.database,
+            self.storage,
+            self.history.verified_root().reference(),
+        )
+    }
+
+    fn circle_snapshots(
+        &mut self,
+    ) -> crate::sync::store::owner::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
+        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
+            self.database,
+            self.storage,
+            self.history,
+        )
     }
 
     pub(crate) async fn load_circle_acknowledgement(
         &mut self,
         reference: &coven_protocol::store_commit::CircleAckRef,
-    ) -> Result<coven_protocol::store_commit::CircleAck, super::StoreAckError> {
-        self.owner.circle_acknowledgements().load(reference).await
+    ) -> Result<coven_protocol::store_commit::CircleAck, StoreAckError> {
+        self.circle_acknowledgements().load(reference).await
     }
 
     pub(crate) async fn stable_circle_acknowledgements(
         &mut self,
         circle_id: coven_protocol::circle::CircleId,
         coverage: &CommitFrontier,
-    ) -> Result<Option<Vec<coven_protocol::store_commit::CircleAckRef>>, super::StoreAckError> {
-        self.owner
-            .circle_acknowledgements()
+    ) -> Result<Option<Vec<coven_protocol::store_commit::CircleAckRef>>, StoreAckError> {
+        self.circle_acknowledgements()
             .stable_dominating(circle_id, coverage)
             .await
     }
@@ -59,10 +99,9 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             coven_protocol::store_commit::CircleSnapshotRef,
             coven_protocol::store_commit::CircleSnapshotMeta,
         )>,
-        super::SnapshotError,
+        snapshot::SnapshotError,
     > {
-        self.owner
-            .circle_snapshots()
+        self.circle_snapshots()
             .load_stream_refs(circle_id, access, registration_ref, registration)
             .await
     }
@@ -71,15 +110,15 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreBatchCommitRef,
     ) -> Result<VerifiedStoreBatchCommit, crate::sync::store::owner::pull::StorePullError> {
-        self.owner.load_commit(reference).await
+        self.history.load_ref(reference).await
     }
 
     pub(crate) async fn load_store_snapshot_stream(
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, super::SnapshotError> {
-        self.owner
+    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
+        self.history
             .load_store_snapshot_stream(registration_ref, registration)
             .await
     }
@@ -91,7 +130,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         Vec<(StoreBatchCommitRef, VerifiedStoreBatchCommit)>,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        self.owner.reclaim_covered_commits(coverage).await
+        self.history.load_covered_commits(coverage).await
     }
 
     pub(crate) async fn store_package_targets(
@@ -143,9 +182,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         covering: &StoreBatchCommitRef,
         covered: &StoreBatchCommitRef,
     ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
-        self.owner
-            .reclaim_commit_position_covers(covering, covered)
-            .await
+        self.history.commit_position_covers(covering, covered).await
     }
 
     pub(crate) async fn snapshot_covers_target(
@@ -169,8 +206,12 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         registrations: &[coven_protocol::store_commit::ReferencedStoreDeviceRegistration],
     ) -> Result<Vec<CircleSnapshotStream>, crate::sync::store::StoreReclaimError> {
         let access = self
-            .owner
-            .reclaim_circle_epoch_access(circle_id, current_control)
+            .database
+            .circle_epoch_access(
+                self.history.verified_root().reference().clone(),
+                circle_id,
+                current_control.clone(),
+            )
             .await?
             .ok_or_else(|| {
                 crate::sync::store::StoreReclaimError::Authorization(format!(
@@ -246,7 +287,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
         coven_protocol::objects::StoreObjectError,
     > {
-        self.owner.reclaim_authorization(reference).await
+        self.history.load_reclaim_authorization(reference).await
     }
 
     pub(crate) async fn load_head(
@@ -258,8 +299,8 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         coven_protocol::objects::VerifiedObject<StoreDeviceHead>,
         coven_protocol::objects::StoreObjectError,
     > {
-        self.owner
-            .reclaim_device_head(reference, registration, commit)
+        self.history
+            .load_head(reference, registration, commit)
             .await
     }
 
@@ -275,8 +316,8 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         ),
         crate::sync::store::StoreError,
     > {
-        self.owner
-            .reclaim_next_announcement_slot(registration_ref, registration, previous)
+        self.history
+            .exact_next_announcement_slot(registration_ref, registration, previous)
             .await
     }
 
@@ -289,11 +330,15 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         };
 
         let stream_id = commit_stream_id(&reference.coord);
-        let coverage = self.owner.pull_snapshot_coverage().await?;
-        let status = self
-            .owner
-            .materialized_reference_status(&coverage, &stream_id, reference)
-            .await?;
+        let coverage = self.database.snapshot_coverage_frontier().await?;
+        let status = crate::sync::store::owner::pull::materialized_reference_status(
+            self.database,
+            self.history,
+            &coverage,
+            &stream_id,
+            reference,
+        )
+        .await?;
         match status {
             MaterializedCheck::Yes => Ok(()),
             MaterializedCheck::Missing => Err(StorePullError::InvalidState(
@@ -312,7 +357,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
         coven_protocol::objects::StoreObjectError,
     > {
-        self.owner.load_registration(reference).await
+        self.history.load_registration(reference).await
     }
 
     pub(crate) async fn load_store_snapshot(
@@ -327,7 +372,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         ),
         coven_protocol::objects::StoreObjectError,
     > {
-        self.owner
+        self.history
             .load_store_snapshot(registration_ref, registration, reference)
             .await
     }
@@ -339,16 +384,18 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         coven_database::VerifiedStoreSnapshotStability,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        self.owner.reclaim_snapshot_stability(snapshot).await
+        self.history.verify_snapshot_stability(snapshot).await
     }
 
     pub(crate) async fn select_maximal_stable_store_snapshot(
         &mut self,
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<
-        Option<super::SelectedStableStoreSnapshot>,
+        Option<crate::sync::store::owner::verified_history::SelectedStableStoreSnapshot>,
         crate::sync::store::owner::pull::StorePullError,
     > {
-        self.owner.select_reclaim_store_snapshot(candidates).await
+        self.history
+            .select_maximal_stable_store_snapshot(candidates)
+            .await
     }
 }

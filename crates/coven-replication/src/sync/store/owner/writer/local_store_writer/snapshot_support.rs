@@ -56,6 +56,7 @@ impl LocalStoreWriter {
     ) -> Result<coven_protocol::store_commit::SnapshotMeta, coven_protocol::objects::StoreObjectError>
     {
         history
+            .reclaim()
             .load_store_snapshot(
                 self.registration.reference(),
                 self.registration.value(),

@@ -163,7 +163,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "create",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/writer/operation/reclaim/tests.rs",
+        "crates/coven-replication/src/sync/store/reclaim/tests.rs",
         "ReclaimJourneyFixture",
         "build",
     ),

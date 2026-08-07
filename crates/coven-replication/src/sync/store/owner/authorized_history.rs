@@ -11,8 +11,6 @@ use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
 use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 
-mod reclaim;
-
 mod cleanup;
 mod construction;
 mod facades;
@@ -20,8 +18,6 @@ mod loading;
 mod pull_interface;
 mod retained;
 mod test_support;
-
-pub(super) use reclaim::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot};
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,

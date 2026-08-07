@@ -282,9 +282,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
     }
 
-    pub(super) fn reclaim_history(
+    pub(crate) fn reclaim_history(
         &mut self,
-    ) -> crate::sync::store::owner::writer::history::ReclaimHistory<'_, 'storage> {
+    ) -> crate::sync::store::reclaim::ReclaimHistory<'_, 'storage> {
         self.history.reclaim()
     }
 

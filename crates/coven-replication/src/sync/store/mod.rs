@@ -15,6 +15,7 @@ mod host_write;
 mod membership;
 mod merge_conflict;
 pub(crate) mod owner;
+mod reclaim;
 use owner::operations;
 mod package_preparation;
 #[cfg(not(any(test, feature = "test-utils")))]
@@ -63,14 +64,14 @@ pub(crate) use owner::history::prepare_merge_abandonment_history_summary_for_tes
 pub(crate) use owner::operations::StoreOperationBatch;
 pub use owner::operations::StoreOperationCommitPlan;
 pub use owner::owner_promotion::OwnerPromotionError;
+pub use reclaim::StoreReclaimError;
+pub use reclaim::StoreReclaimResult;
 
 #[cfg(test)]
 pub(crate) use owner::pull::HeldStoreCoordinate;
 pub(crate) use owner::pull::{HeldStorePosition, VerifiedStoreDeviceHead};
 pub use owner::pull::{LoadedCirclePackage, Readiness};
 pub use owner::pull::{PullError, StorePullError, StorePullResult};
-pub use owner::reclaim::StoreReclaimError;
-pub use owner::reclaim::StoreReclaimResult;
 pub(crate) use owner::snapshot::SnapshotCut;
 #[doc(hidden)]
 pub use owner::snapshot::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};

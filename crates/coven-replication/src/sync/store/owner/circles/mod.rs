@@ -7,7 +7,7 @@ use crate::sync::store::circle_controls::{
     CircleTransitionHistory, PreparedCircleOperation,
 };
 
-pub(super) mod acknowledgements;
+pub(crate) mod acknowledgements;
 pub(super) mod activation;
 mod authorized_writer;
 mod bootstrap_blobs;
@@ -16,7 +16,7 @@ mod history;
 pub(super) mod packages;
 mod preparation;
 mod publication;
-pub(super) mod snapshots;
+pub(crate) mod snapshots;
 
 pub(crate) use authorized_writer::AuthorizedCircleWriter;
 pub use commands::StoreCircleCommands;

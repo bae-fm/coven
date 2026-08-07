@@ -6,7 +6,7 @@ use std::sync::Arc;
 mod authorized_history;
 mod authorized_store;
 mod candidate_cleanup;
-mod circles;
+pub(crate) mod circles;
 pub(super) mod device_exclusion;
 pub(super) mod device_join;
 pub(crate) mod device_join_transport;
@@ -20,9 +20,9 @@ pub(crate) mod pull;
 mod registration;
 mod registration_outbox;
 mod restore;
-mod verification;
+pub(crate) mod verification;
 pub(crate) mod verified_history;
-pub(super) mod writer;
+pub(crate) mod writer;
 
 mod store_test_support;
 
@@ -49,7 +49,7 @@ pub use verified_history::VerifiedMergeMembershipPrefix;
 pub use writer::AuthorizedWriterOperation;
 pub use writer::StoreAckError;
 pub use writer::StoreWriterAuthorizationError;
-pub(super) use writer::{operations, reclaim, snapshot};
+pub(super) use writer::{operations, snapshot};
 
 #[doc(hidden)]
 pub struct Store {

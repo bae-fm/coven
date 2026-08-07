@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 mod local_store_writer;
-mod operation;
+pub(crate) mod operation;
 
 pub(crate) use local_store_writer::LocalStoreWriter;
 pub(crate) use local_store_writer::LocalWriterKeyrings;
@@ -10,7 +10,7 @@ use local_store_writer::StoreOperationSigningContext;
 pub use operation::acknowledgements::StoreAckError;
 pub(crate) use operation::prepare_partition_blob_locator;
 pub use operation::StoreWriterAuthorizationError;
-pub(crate) use operation::{operations, reclaim, snapshot};
+pub(crate) use operation::{operations, snapshot};
 
 #[derive(Clone, Copy)]
 pub(crate) struct SnapshotHistoryConstruction;

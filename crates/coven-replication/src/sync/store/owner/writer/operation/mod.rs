@@ -29,7 +29,6 @@ pub(super) mod membership_mutation;
 pub(super) mod membership_mutation_journal;
 pub(crate) mod operations;
 mod preparation;
-pub(crate) mod reclaim;
 pub(crate) mod snapshot;
 
 mod commit_publication;

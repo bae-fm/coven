@@ -63,6 +63,43 @@ pub(crate) enum MaterializedCheck {
     Held(HeldStorePositionReason),
 }
 
+/// Whether a commit reference is the one currently materialized at its
+/// position, held behind something, or absent from accepted history.
+pub(crate) async fn materialized_reference_status(
+    database: &coven_database::StoreDatabase,
+    history: &mut MergeHistoryVerifier<'_>,
+    coverage: &CommitFrontier,
+    stream_id: &str,
+    reference: &StoreBatchCommitRef,
+) -> Result<MaterializedCheck, StorePullError> {
+    if commit_stream_id(&reference.coord) != stream_id {
+        return Ok(MaterializedCheck::Held(HeldStorePositionReason::WrongSlot(
+            format!(
+                "commit reference stream {} differs from dependency stream {stream_id}",
+                commit_stream_id(&reference.coord)
+            ),
+        )));
+    }
+    if let Some(actual) = database
+        .exact_materialized_ref(stream_id, reference.coord.sequence())
+        .await?
+    {
+        if actual != *reference {
+            return Ok(MaterializedCheck::Held(
+                HeldStorePositionReason::HashMismatch {
+                    referenced_device_id: stream_id.to_string(),
+                    referenced_commit: reference.clone(),
+                    materialized_hash: actual.commit_hash,
+                },
+            ));
+        }
+        return Ok(MaterializedCheck::Yes);
+    }
+    Ok(history
+        .covered_reference_status(coverage, stream_id, reference)
+        .await)
+}
+
 impl LoadedMergePredecessorMemberships {
     pub(super) fn membership_for(
         &self,

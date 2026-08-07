@@ -101,6 +101,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn circle_snapshots(
         &mut self,
     ) -> crate::sync::store::owner::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
@@ -139,107 +140,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )
     }
 
-    pub(crate) fn reclaim(&mut self) -> ReclaimHistory<'_, 'storage> {
-        ReclaimHistory::new(self)
-    }
-
-    pub(crate) async fn reclaim_circle_epoch_access(
-        &self,
-        circle_id: coven_protocol::circle::CircleId,
-        control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, coven_database::DbError>
-    {
-        self.database
-            .circle_epoch_access(self.root().clone(), circle_id, control.clone())
-            .await
-    }
-
-    pub(crate) async fn reclaim_covered_commits(
-        &mut self,
-        coverage: &CommitFrontier,
-    ) -> Result<
-        Vec<(
-            StoreBatchCommitRef,
-            coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        )>,
-        crate::sync::store::owner::pull::StorePullError,
-    > {
-        self.history_verifier.load_covered_commits(coverage).await
-    }
-
-    pub(crate) async fn reclaim_commit_position_covers(
-        &mut self,
-        covering: &StoreBatchCommitRef,
-        covered: &StoreBatchCommitRef,
-    ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
-        self.history_verifier
-            .commit_position_covers(covering, covered)
-            .await
-    }
-
-    pub(crate) async fn reclaim_authorization(
-        &mut self,
-        reference: &coven_protocol::reclaim::ReclaimAuthorizationRef,
-    ) -> Result<
-        crate::sync::store::owner::verification::VerifiedReclaimAuthorization,
-        coven_protocol::objects::StoreObjectError,
-    > {
-        self.history_verifier
-            .load_reclaim_authorization(reference)
-            .await
-    }
-
-    pub(crate) async fn reclaim_device_head(
-        &mut self,
-        reference: &coven_protocol::store_commit::StoreDeviceHeadRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        commit: &StoreBatchCommitRef,
-    ) -> Result<
-        coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::StoreDeviceHead>,
-        coven_protocol::objects::StoreObjectError,
-    > {
-        self.history_verifier
-            .load_head(reference, registration, commit)
-            .await
-    }
-
-    pub(crate) async fn reclaim_next_announcement_slot(
-        &mut self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        previous: Option<&coven_protocol::store_commit::VerifiedStoreBatchCommit>,
-    ) -> Result<
-        (
-            coven_protocol::objects::ObjectSlot,
-            Option<coven_protocol::store_commit::StoreDeviceHeadRef>,
-        ),
-        crate::sync::store::StoreError,
-    > {
-        self.history_verifier
-            .exact_next_announcement_slot(registration_ref, registration, previous)
-            .await
-    }
-
-    pub(crate) async fn reclaim_snapshot_stability(
-        &mut self,
-        snapshot: &coven_database::PublishedStoreSnapshot,
-    ) -> Result<
-        coven_database::VerifiedStoreSnapshotStability,
-        crate::sync::store::owner::pull::StorePullError,
-    > {
-        self.history_verifier
-            .verify_snapshot_stability(snapshot)
-            .await
-    }
-
-    pub(crate) async fn select_reclaim_store_snapshot(
-        &mut self,
-        candidates: Vec<coven_database::PublishedStoreSnapshot>,
-    ) -> Result<Option<SelectedStableStoreSnapshot>, crate::sync::store::owner::pull::StorePullError>
-    {
-        self.history_verifier
-            .select_maximal_stable_store_snapshot(candidates)
-            .await
+    pub(crate) fn reclaim(&mut self) -> crate::sync::store::reclaim::ReclaimHistory<'_, 'storage> {
+        crate::sync::store::reclaim::ReclaimHistory::new(
+            &self.database,
+            self.storage.as_ref(),
+            &mut self.history_verifier,
+        )
     }
 
     pub(crate) fn restore_history(&self) -> RestoreHistory<'_, 'storage> {

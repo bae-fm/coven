@@ -365,34 +365,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         stream_id: &str,
         reference: &StoreBatchCommitRef,
     ) -> Result<pull::MaterializedCheck, pull::StorePullError> {
-        if pull::commit_stream_id(&reference.coord) != stream_id {
-            return Ok(pull::MaterializedCheck::Held(
-                pull::HeldStorePositionReason::WrongSlot(format!(
-                    "commit reference stream {} differs from dependency stream {stream_id}",
-                    pull::commit_stream_id(&reference.coord)
-                )),
-            ));
-        }
-        if let Some(actual) = self
-            .database
-            .exact_materialized_ref(stream_id, reference.coord.sequence())
-            .await?
-        {
-            if actual != *reference {
-                return Ok(pull::MaterializedCheck::Held(
-                    pull::HeldStorePositionReason::HashMismatch {
-                        referenced_device_id: stream_id.to_string(),
-                        referenced_commit: reference.clone(),
-                        materialized_hash: actual.commit_hash,
-                    },
-                ));
-            }
-            return Ok(pull::MaterializedCheck::Yes);
-        }
-        Ok(self
-            .history_verifier
-            .covered_reference_status(coverage, stream_id, reference)
-            .await)
+        pull::materialized_reference_status(
+            &self.database,
+            &mut self.history_verifier,
+            coverage,
+            stream_id,
+            reference,
+        )
+        .await
     }
 
     pub(crate) async fn pull_readiness(

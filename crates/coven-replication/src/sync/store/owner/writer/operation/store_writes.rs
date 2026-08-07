@@ -277,7 +277,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.reclaim().run().await
     }
 
-    pub(super) fn reclaim(&mut self) -> reclaim::AuthorizedReclaim<'_, 'storage> {
+    pub(crate) fn reclaim(&mut self) -> reclaim::AuthorizedReclaim<'_, 'storage> {
         let database = self.database.clone();
         let storage = self.storage.clone();
         let root = self.store_root().clone();

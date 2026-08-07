@@ -3,9 +3,10 @@
 use coven_database::StoreReclaimJournalError;
 use std::sync::Arc;
 
-use crate::sync::store::owner::history::{
-    CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot,
-};
+mod candidates;
+mod claims;
+mod history;
+
 use crate::sync::store::AuthorizedWriterOperation;
 use coven_database::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation, StoreDatabase,
@@ -19,6 +20,7 @@ use coven_protocol::store_commit::{
     StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
 };
 use coven_storage::{SyncStorage, VerifiedObjectWrites};
+pub(crate) use history::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct StoreReclaimResult {
@@ -33,7 +35,7 @@ pub enum StoreReclaimError {
     #[error(transparent)]
     Database(#[from] coven_database::DbError),
     #[error(transparent)]
-    Outbound(#[from] super::StoreError),
+    Outbound(#[from] crate::sync::store::StoreError),
     #[error("Store reclaim journal: {0}")]
     Journal(String),
     #[error(transparent)]
@@ -56,32 +58,32 @@ pub enum StoreReclaimError {
     },
 }
 
-impl From<super::pull::CommitCoverageError> for StoreReclaimError {
-    fn from(error: super::pull::CommitCoverageError) -> Self {
+impl From<crate::sync::store::owner::pull::CommitCoverageError> for StoreReclaimError {
+    fn from(error: crate::sync::store::owner::pull::CommitCoverageError) -> Self {
         match error {
-            super::pull::CommitCoverageError::Object(error) => Self::Object(error),
-            super::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
-                Self::MissingAncestry { commit_hash }
+            crate::sync::store::owner::pull::CommitCoverageError::Object(error) => {
+                Self::Object(error)
             }
+            crate::sync::store::owner::pull::CommitCoverageError::MissingAncestry {
+                commit_hash,
+            } => Self::MissingAncestry { commit_hash },
         }
     }
 }
 
-impl From<super::pull::StorePullError> for StoreReclaimError {
-    fn from(error: super::pull::StorePullError) -> Self {
+impl From<crate::sync::store::owner::pull::StorePullError> for StoreReclaimError {
+    fn from(error: crate::sync::store::owner::pull::StorePullError) -> Self {
         match error {
-            super::pull::StorePullError::Object(error) => Self::Object(error),
-            super::pull::StorePullError::Storage(error) => Self::Storage(error),
+            crate::sync::store::owner::pull::StorePullError::Object(error) => Self::Object(error),
+            crate::sync::store::owner::pull::StorePullError::Storage(error) => Self::Storage(error),
             error => Self::Authorization(error.to_string()),
         }
     }
 }
 
-mod candidates;
-mod claims;
 use candidates::*;
 
-pub(super) struct AuthorizedReclaim<'operation, 'storage> {
+pub(crate) struct AuthorizedReclaim<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
     storage: Arc<dyn SyncStorage>,
@@ -90,7 +92,7 @@ pub(super) struct AuthorizedReclaim<'operation, 'storage> {
 }
 
 impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
-    pub(super) fn new(
+    pub(crate) fn new(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,

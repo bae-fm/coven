@@ -195,33 +195,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(crate) async fn load_store_snapshot(
-        &self,
-        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        reference: &coven_protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<
-        (
-            coven_protocol::store_commit::StoreSnapshotRef,
-            coven_protocol::store_commit::SnapshotMeta,
-        ),
-        coven_protocol::objects::StoreObjectError,
-    > {
-        self.history_verifier
-            .load_store_snapshot(registration_ref, registration, reference)
-            .await
-    }
-
-    pub(crate) async fn load_store_snapshot_stream(
-        &self,
-        registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, snapshot::SnapshotError> {
-        self.history_verifier
-            .load_store_snapshot_stream(registration_ref, registration)
-            .await
-    }
-
     pub(crate) async fn verify_snapshots_for_acknowledgement(
         &mut self,
         snapshots: &[coven_database::PublishedStoreSnapshot],

@@ -43,7 +43,7 @@ mod device_lifecycle;
 mod registrations;
 pub(crate) use membership::StoreMembershipObjectVerifier;
 
-pub(super) enum DeviceStateResolver<'a> {
+pub(crate) enum DeviceStateResolver<'a> {
     Database(&'a coven_database::StoreDatabase),
     Loaded {
         genesis: &'a ResolvedStoreDeviceState,

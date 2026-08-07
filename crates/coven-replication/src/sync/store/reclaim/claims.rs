@@ -551,12 +551,15 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         };
         let authority = match history.verify_snapshot_stability(&snapshot).await {
             Ok(stability) => stability.into_authority(),
-            Err(crate::sync::store::owner::writer::operation::pull::StorePullError::SnapshotNotStable { member, device_id }) => {
+            Err(crate::sync::store::owner::pull::StorePullError::SnapshotNotStable {
+                member,
+                device_id,
+            }) => {
                 return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
             }
             Err(
-                crate::sync::store::owner::writer::operation::pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store::owner::writer::operation::pull::StorePullError::SnapshotAuthorNotOwner,
+                crate::sync::store::owner::pull::StorePullError::SnapshotAuthorInactive
+                | crate::sync::store::owner::pull::StorePullError::SnapshotAuthorNotOwner,
             ) => return Err(StoreReclaimError::NoSnapshot),
             Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
         };
