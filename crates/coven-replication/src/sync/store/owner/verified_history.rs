@@ -71,7 +71,7 @@ pub(crate) use successor::{insert_latest_acknowledgement, merge_retained_merge_h
 pub(super) mod join_validation;
 mod membership;
 use membership::VerifiedPrefixMembershipActivation;
-pub(super) mod registration;
+pub(crate) mod registration;
 use join_validation::*;
 pub(crate) use registration::RegistrationLoadError;
 use registration::*;
@@ -204,7 +204,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .map_err(StorePullError::Protocol)
     }
 
-    pub(super) async fn from_commit_verifier(
+    pub(crate) async fn from_commit_verifier(
         _authority: super::HistoryConstructionAuthority,
         root: super::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,

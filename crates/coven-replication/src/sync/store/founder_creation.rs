@@ -13,11 +13,14 @@ use coven_protocol::store_commit::{
 use coven_protocol::store_creation::*;
 use std::sync::Arc;
 
-use super::authorized_history::AuthorizedStoreHistory;
-use super::verified_history::MergeHistoryVerifier;
-use super::HistoryConstructionAuthority;
+use super::owner::authorized_history::AuthorizedStoreHistory;
+use super::owner::verification::StoreCommitVerifier;
+use super::owner::verified_history::MergeHistoryVerifier;
+use super::owner::InitializedStore;
+use super::{HistoryConstructionAuthority, StoreKeyrings};
+use coven_protocol::store_commit::StoreRootRef;
 
-pub(super) struct FounderStoreCreation<'operation> {
+pub(crate) struct FounderStoreCreation<'operation> {
     database: StoreDatabase,
     storage: Arc<dyn SyncStorage>,
     store_dir: &'operation StoreDir,
@@ -86,7 +89,7 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
 }
 
 impl<'operation> FounderStoreCreation<'operation> {
-    pub(super) async fn begin(
+    pub(crate) async fn begin(
         database: StoreDatabase,
         storage: Arc<dyn SyncStorage>,
         store_dir: &'operation StoreDir,
@@ -780,7 +783,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         Ok(staged)
     }
 
-    pub(super) async fn execute(self) -> Result<InitializedStore, StoreInitializationError> {
+    pub(crate) async fn execute(self) -> Result<InitializedStore, StoreInitializationError> {
         self.stage().await?.publish().await
     }
 
@@ -948,7 +951,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             storage_access,
             root.clone(),
         );
-        let keyrings = super::keyring::StoreKeyrings::new(storage_access, root);
+        let keyrings = StoreKeyrings::new(storage_access, root);
         Ok(AuthorizedStoreHistory::new(
             database.clone(),
             storage,

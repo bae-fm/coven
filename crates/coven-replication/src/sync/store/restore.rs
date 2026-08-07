@@ -3,9 +3,12 @@ use std::collections::BTreeMap;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+use super::owner::authorized_history::AuthorizedStoreHistory;
+use super::owner::pull;
 use super::*;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain};
+use coven_protocol::store_commit::StoreRootRef;
 use coven_protocol::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, head_slot_prefix, owner_recovery_semantic_prefix,
     registration_semantic_prefix, snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef,
@@ -22,9 +25,12 @@ use coven_protocol::store_commit::{
 /// verify the image. Restore-only operations consume this authority directly
 /// instead of reconstructing it from database rows and cloud objects.
 mod continuation;
+mod history;
 use recovery_preparation::*;
 mod recovery_preparation;
 mod restore_test_support;
+
+pub(crate) use history::RestoreHistory;
 
 pub struct RestoringStore<'storage> {
     history: AuthorizedStoreHistory<'storage>,

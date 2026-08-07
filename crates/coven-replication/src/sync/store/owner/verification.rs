@@ -229,7 +229,7 @@ impl<'a> StoreCommitVerifier<'a> {
         }))
     }
 
-    pub(super) fn from_verified_root(
+    pub(crate) fn from_verified_root(
         _authority: super::HistoryConstructionAuthority,
         storage: &'a dyn SyncStorage,
         root: super::VerifiedStoreRoot,

@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::authorized_store::LocalStoreDevice;
-use super::history::{OwnerPromotionHistory, RestoreHistory};
 use super::pull;
 use super::verification::StoreMembershipObjectVerifier;
 use super::verified_history::registration::RegistrationLoadError;
 use super::verified_history::*;
+use crate::sync::store::owner_role_promotion::OwnerPromotionHistory;
+use crate::sync::store::restore::RestoreHistory;
 use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 
 mod cleanup;

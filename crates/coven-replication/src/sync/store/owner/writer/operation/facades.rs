@@ -290,20 +290,19 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn owner_promotion(
         &mut self,
-    ) -> crate::sync::store::owner::writer::owner_promotion::AuthorizedOwnerPromotion<'_, 'storage>
-    {
+    ) -> crate::sync::store::owner_role_promotion::AuthorizedOwnerPromotion<'_, 'storage> {
         let database = self.database.clone();
         let storage = self.storage.clone();
         let root = self.store_root().clone();
         let membership = self.membership.clone();
-        crate::sync::store::owner::writer::owner_promotion::AuthorizedOwnerPromotion::new(
+        crate::sync::store::owner_role_promotion::AuthorizedOwnerPromotion::new(
             self, database, storage, root, membership,
         )
     }
 
     pub(crate) fn owner_promotion_history(
         &mut self,
-    ) -> crate::sync::store::owner::writer::history::OwnerPromotionHistory<'_, 'storage> {
+    ) -> crate::sync::store::owner_role_promotion::OwnerPromotionHistory<'_, 'storage> {
         self.history.owner_promotion()
     }
 
@@ -442,18 +441,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn device_exclusion_history(
         &mut self,
-    ) -> crate::sync::store::owner::writer::device_exclusion::DeviceExclusionHistory<'_, 'storage>
-    {
+    ) -> crate::sync::store::device_exclusion::DeviceExclusionHistory<'_, 'storage> {
         self.history.device_exclusion()
     }
 
     pub(crate) fn device_exclusion(
         &mut self,
-    ) -> crate::sync::store::owner::writer::device_exclusion::AuthorizedDeviceExclusion<'_, 'storage>
-    {
+    ) -> crate::sync::store::device_exclusion::AuthorizedDeviceExclusion<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
-        crate::sync::store::owner::writer::device_exclusion::AuthorizedDeviceExclusion::new(
+        crate::sync::store::device_exclusion::AuthorizedDeviceExclusion::new(
             self, database, storage,
         )
     }

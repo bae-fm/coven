@@ -5,12 +5,15 @@ use coven_protocol::store_commit::{
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreSnapshotRef,
 };
 
+use crate::sync::store::owner::verified_history::registration::RegistrationLoadError;
+use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
+
 pub(crate) struct RestoreHistory<'operation, 'storage> {
-    history: &'operation super::MergeHistoryVerifier<'storage>,
+    history: &'operation MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
-    pub(crate) fn new(history: &'operation super::MergeHistoryVerifier<'storage>) -> Self {
+    pub(crate) fn new(history: &'operation MergeHistoryVerifier<'storage>) -> Self {
         Self { history }
     }
 
@@ -40,7 +43,7 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         latest_ref: StoreAckRef,
         latest: StoreAck,
         registration: &StoreDeviceRegistration,
-    ) -> Result<BTreeMap<u64, (StoreAckRef, StoreAck)>, super::RegistrationLoadError> {
+    ) -> Result<BTreeMap<u64, (StoreAckRef, StoreAck)>, RegistrationLoadError> {
         self.history
             .load_acknowledgement_proof_chain(latest_ref, latest, registration)
             .await

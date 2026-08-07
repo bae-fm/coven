@@ -3,23 +3,19 @@ use coven_database::BlockedWriteDiscard;
 use coven_protocol::store_commit::StoreRootRef;
 use std::sync::Arc;
 
-mod authorized_history;
+pub(crate) mod authorized_history;
 mod authorized_store;
 mod candidate_cleanup;
 pub(crate) mod circles;
-pub(super) mod device_exclusion;
 pub(super) mod device_join;
 pub(crate) mod device_join_transport;
-mod founder_creation;
 pub(super) mod history;
 mod history_construction;
 mod keyring;
 pub(crate) use keyring::load_wrapped_store_key;
-pub(super) mod owner_promotion;
 pub(crate) mod pull;
 mod registration;
 mod registration_outbox;
-mod restore;
 pub(crate) mod verification;
 pub(crate) mod verified_history;
 pub(crate) mod writer;
@@ -35,12 +31,10 @@ pub(crate) use circles::AuthorizedCircleWriter;
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
 pub use device_join_transport::StoreDeviceJoinTransport;
-use founder_creation::FounderStoreCreation;
 pub use history_construction::HistoryConstructionAuthority;
 pub use keyring::StoreKeyrings;
 pub use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
-pub(crate) use restore::RestoringStore;
 use verification::StoreCommitVerifier;
 pub use verified_history::MergeHistorySuccessorEvidence;
 pub use verified_history::MergeOutboundAuthorization;
@@ -80,24 +74,6 @@ pub(crate) enum StoreInitializationError {
     ProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
-}
-
-struct BlobDownload {
-    authority: coven_protocol::blob::RowBlobAuthority,
-    stored: coven_protocol::blob::locator::StoredBlobRef,
-}
-
-impl BlobDownload {
-    fn from_row(reference: coven_protocol::blob::RowBlobRef) -> Result<Self, String> {
-        let stored = reference
-            .stored()
-            .cloned()
-            .ok_or_else(|| "remote eager blob row has no exact stored reference".to_string())?;
-        Ok(Self {
-            authority: reference.authority().clone(),
-            stored,
-        })
-    }
 }
 
 impl Store {
@@ -226,7 +202,7 @@ impl Store {
     ) -> Result<InitializedStore, StoreInitializationError> {
         let blob_cache =
             crate::sync::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone());
-        FounderStoreCreation::begin(
+        crate::sync::store::founder_creation::FounderStoreCreation::begin(
             database,
             storage,
             &store_dir,
@@ -435,6 +411,98 @@ impl Store {
         }
     }
 
+    pub(crate) async fn propose_device_exclusion_for_device(
+        &self,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
+    ) -> Result<
+        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        device_exclusion::StoreDeviceExclusionError,
+    > {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        device_exclusion::propose_for_device(&self.database, &mut writer, device_id).await
+    }
+
+    pub(crate) async fn cancel_device_exclusion_proposal(
+        &self,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), device_exclusion::StoreDeviceExclusionError> {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        device_exclusion::cancel_proposal(&mut writer, proposal).await
+    }
+
+    pub(crate) async fn finalize_device_exclusion_proposal(
+        &self,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<(), device_exclusion::StoreDeviceExclusionError> {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        device_exclusion::finalize_proposal(&mut writer, proposal).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn propose_device_exclusion(
+        &self,
+        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<
+        device_exclusion::StoreDeviceExclusionResult,
+        device_exclusion::StoreDeviceExclusionError,
+    > {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        writer.device_exclusion().propose(target).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn cancel_device_exclusion(
+        &self,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<
+        device_exclusion::StoreDeviceExclusionResult,
+        device_exclusion::StoreDeviceExclusionError,
+    > {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        writer.device_exclusion().cancel(proposal).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn finalize_device_exclusion(
+        &self,
+        proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<
+        device_exclusion::StoreDeviceExclusionResult,
+        device_exclusion::StoreDeviceExclusionError,
+    > {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        writer.device_exclusion().exclude(proposal).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn device_exclusion_operations_for_test(
+        &self,
+    ) -> Result<
+        Vec<device_exclusion::StoreDeviceExclusionOperationInfo>,
+        device_exclusion::StoreDeviceExclusionError,
+    > {
+        device_exclusion::operations_for_test(&self.database).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn stage_uploaded_device_exclusion_proposal_for_test(
+        &self,
+    ) -> Result<
+        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        device_exclusion::StoreDeviceExclusionError,
+    > {
+        let mut writer = self.authorize_exclusion_writer().await?;
+        device_exclusion::stage_uploaded_proposal_for_test(&self.database, &mut writer).await
+    }
+
+    async fn authorize_exclusion_writer(
+        &self,
+    ) -> Result<AuthorizedWriterOperation<'_>, device_exclusion::StoreDeviceExclusionError> {
+        self.authorize_writer().await.map_err(|error| {
+            device_exclusion::StoreDeviceExclusionError::InvalidState(error.to_string())
+        })
+    }
+
     pub(crate) async fn abandon_merge_candidate(
         &self,
         write_id: coven_protocol::write::WriteId,
@@ -598,14 +666,14 @@ impl Store {
         device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<
         coven_protocol::store_commit::OwnerPromotionRequest,
-        owner_promotion::OwnerPromotionError,
+        owner_role_promotion::OwnerPromotionError,
     > {
         let registration = self
             .database
             .activated_store_device_registration_for_device(device_id)
             .await?
             .ok_or_else(|| {
-                owner_promotion::OwnerPromotionError::Protocol(
+                owner_role_promotion::OwnerPromotionError::Protocol(
                     "the target Store device is not active".to_string(),
                 )
             })?;
@@ -618,12 +686,11 @@ impl Store {
         member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<
         coven_protocol::store_commit::OwnerPromotionRequest,
-        owner_promotion::OwnerPromotionError,
+        owner_role_promotion::OwnerPromotionError,
     > {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| owner_promotion::OwnerPromotionError::Protocol(error.to_string()))?;
+        let mut writer = self.authorize_writer().await.map_err(|error| {
+            owner_role_promotion::OwnerPromotionError::Protocol(error.to_string())
+        })?;
         writer.owner_promotion().begin(member_registration).await
     }
 
@@ -632,12 +699,11 @@ impl Store {
         request: coven_protocol::store_commit::OwnerPromotionRequest,
     ) -> Result<
         coven_protocol::store_commit::OwnerPromotionAcceptance,
-        owner_promotion::OwnerPromotionError,
+        owner_role_promotion::OwnerPromotionError,
     > {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| owner_promotion::OwnerPromotionError::Protocol(error.to_string()))?;
+        let mut writer = self.authorize_writer().await.map_err(|error| {
+            owner_role_promotion::OwnerPromotionError::Protocol(error.to_string())
+        })?;
         writer.owner_promotion().accept(request).await
     }
 
@@ -647,12 +713,11 @@ impl Store {
         acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<
         coven_protocol::circle_control::StoreMembershipStateRef,
-        owner_promotion::OwnerPromotionError,
+        owner_role_promotion::OwnerPromotionError,
     > {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| owner_promotion::OwnerPromotionError::Protocol(error.to_string()))?;
+        let mut writer = self.authorize_writer().await.map_err(|error| {
+            owner_role_promotion::OwnerPromotionError::Protocol(error.to_string())
+        })?;
         writer
             .owner_promotion()
             .finalize(encryption, acceptance)

@@ -18,7 +18,7 @@ impl HistoryConstructionAuthority {
         Self(())
     }
 
-    pub(super) fn founder() -> Self {
+    pub(crate) fn founder() -> Self {
         Self(())
     }
 

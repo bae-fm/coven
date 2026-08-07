@@ -248,7 +248,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/owner_promotion/tests.rs",
+        "crates/coven-replication/src/sync/store/owner_role_promotion/tests.rs",
         "PromotionCandidate",
         "build",
     ),

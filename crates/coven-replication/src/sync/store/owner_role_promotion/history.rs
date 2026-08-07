@@ -7,7 +7,10 @@ use coven_protocol::store_commit::{
     StoreDeviceRegistrationRef,
 };
 
-use super::{MergeHistoryVerifier, StorePullError, VerifiedOwnerPromotionRequestActivation};
+use crate::sync::store::owner::pull::StorePullError;
+use crate::sync::store::owner::verified_history::{
+    MergeHistoryVerifier, VerifiedOwnerPromotionRequestActivation,
+};
 
 pub(crate) struct OwnerPromotionHistory<'operation, 'storage> {
     history: &'operation mut MergeHistoryVerifier<'storage>,

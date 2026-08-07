@@ -134,8 +134,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn device_exclusion(
         &mut self,
-    ) -> crate::sync::store::owner::device_exclusion::DeviceExclusionHistory<'_, 'storage> {
-        crate::sync::store::owner::device_exclusion::DeviceExclusionHistory::new(
+    ) -> crate::sync::store::device_exclusion::DeviceExclusionHistory<'_, 'storage> {
+        crate::sync::store::device_exclusion::DeviceExclusionHistory::new(
             &mut self.history_verifier,
         )
     }

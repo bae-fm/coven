@@ -1,5 +1,23 @@
 use super::*;
 
+struct BlobDownload {
+    authority: coven_protocol::blob::RowBlobAuthority,
+    stored: coven_protocol::blob::locator::StoredBlobRef,
+}
+
+impl BlobDownload {
+    fn from_row(reference: coven_protocol::blob::RowBlobRef) -> Result<Self, String> {
+        let stored = reference
+            .stored()
+            .cloned()
+            .ok_or_else(|| "remote eager blob row has no exact stored reference".to_string())?;
+        Ok(Self {
+            authority: reference.authority().clone(),
+            stored,
+        })
+    }
+}
+
 impl<'storage> RestoringStore<'storage> {
     pub async fn begin_device_join(
         self,
@@ -149,10 +167,7 @@ impl<'storage> RestoringStore<'storage> {
         }
     }
 
-    pub(super) async fn download_blob(
-        &self,
-        download: BlobDownload,
-    ) -> Result<(), pull::BlobDownloadFailure> {
+    async fn download_blob(&self, download: BlobDownload) -> Result<(), pull::BlobDownloadFailure> {
         let BlobDownload { authority, stored } = download;
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();

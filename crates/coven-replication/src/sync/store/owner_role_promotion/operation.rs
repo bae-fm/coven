@@ -26,7 +26,7 @@ use super::journal::{
 use super::OwnerPromotionError;
 
 pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
-    writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
+    writer: &'operation mut crate::sync::store::AuthorizedWriterOperation<'storage>,
     database: coven_database::StoreDatabase,
     storage: std::sync::Arc<dyn coven_storage::SyncStorage>,
     root: coven_protocol::store_commit::StoreRootRef,
@@ -72,7 +72,7 @@ enum OwnerPromotionResumeOutcome {
 
 impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     pub(crate) fn new(
-        writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
+        writer: &'operation mut crate::sync::store::AuthorizedWriterOperation<'storage>,
         database: coven_database::StoreDatabase,
         storage: std::sync::Arc<dyn coven_storage::SyncStorage>,
         root: coven_protocol::store_commit::StoreRootRef,

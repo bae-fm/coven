@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::sync::store::merge_conflict::MergeCandidateAbandonment;
+use crate::sync::store::Store;
 use crate::sync::test_helpers::{
     open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
 };

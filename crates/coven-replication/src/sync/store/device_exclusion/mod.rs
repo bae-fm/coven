@@ -1,7 +1,7 @@
 //! Durable publication of Store-device exclusion proposals and outcomes.
 
 mod history;
-pub(super) use history::DeviceExclusionHistory;
+pub(crate) use history::DeviceExclusionHistory;
 
 use coven_protocol::device_exclusion_journal::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
@@ -11,8 +11,8 @@ use coven_protocol::device_exclusion_journal::{
 use super::operations::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
-use super::verified_history::MergeHistoryVerifier;
-use super::{AuthorizedWriterOperation, Store, StoreError};
+use super::owner::verified_history::MergeHistoryVerifier;
+use super::{AuthorizedWriterOperation, StoreError};
 use coven_database::DbError;
 use coven_database::StoreDatabase;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -85,143 +85,104 @@ pub enum StoreDeviceExclusionError {
     InvalidState(String),
 }
 
-impl Store {
-    pub(crate) async fn propose_device_exclusion_for_device(
-        &self,
-        device_id: coven_protocol::store_commit::StoreDeviceId,
-    ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
-        let target = self
-            .database
-            .activated_store_device_registration_for_device(device_id)
-            .await?
-            .ok_or(StoreDeviceExclusionError::TargetNotActive)?;
-        match self.propose_device_exclusion(target.reference()).await? {
-            StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => Ok(proposal),
-            other => Err(StoreDeviceExclusionError::InvalidState(format!(
-                "proposal did not activate: {other:?}"
-            ))),
-        }
+/// Propose exclusion of the active registration a Store device id names.
+pub(crate) async fn propose_for_device(
+    database: &StoreDatabase,
+    writer: &mut AuthorizedWriterOperation<'_>,
+    device_id: coven_protocol::store_commit::StoreDeviceId,
+) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
+    let target = database
+        .activated_store_device_registration_for_device(device_id)
+        .await?
+        .ok_or(StoreDeviceExclusionError::TargetNotActive)?;
+    match writer
+        .device_exclusion()
+        .propose(target.reference())
+        .await?
+    {
+        StoreDeviceExclusionResult::ProposalActivated { proposal, .. } => Ok(proposal),
+        other => Err(StoreDeviceExclusionError::InvalidState(format!(
+            "proposal did not activate: {other:?}"
+        ))),
     }
+}
 
-    pub(crate) async fn cancel_device_exclusion_proposal(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<(), StoreDeviceExclusionError> {
-        match self.cancel_device_exclusion(proposal).await? {
-            StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
-            other => Err(StoreDeviceExclusionError::InvalidState(format!(
-                "cancellation did not activate: {other:?}"
-            ))),
-        }
+pub(crate) async fn cancel_proposal(
+    writer: &mut AuthorizedWriterOperation<'_>,
+    proposal: &StoreDeviceExclusionProposalRef,
+) -> Result<(), StoreDeviceExclusionError> {
+    match writer.device_exclusion().cancel(proposal).await? {
+        StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
+        other => Err(StoreDeviceExclusionError::InvalidState(format!(
+            "cancellation did not activate: {other:?}"
+        ))),
     }
+}
 
-    pub(crate) async fn finalize_device_exclusion_proposal(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<(), StoreDeviceExclusionError> {
-        match self.finalize_device_exclusion(proposal).await? {
-            StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
-            other => Err(StoreDeviceExclusionError::InvalidState(format!(
-                "exclusion did not activate: {other:?}"
-            ))),
-        }
+pub(crate) async fn finalize_proposal(
+    writer: &mut AuthorizedWriterOperation<'_>,
+    proposal: &StoreDeviceExclusionProposalRef,
+) -> Result<(), StoreDeviceExclusionError> {
+    match writer.device_exclusion().exclude(proposal).await? {
+        StoreDeviceExclusionResult::OutcomeActivated { .. } => Ok(()),
+        other => Err(StoreDeviceExclusionError::InvalidState(format!(
+            "exclusion did not activate: {other:?}"
+        ))),
     }
+}
 
-    pub(crate) async fn propose_device_exclusion(
-        &self,
-        target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let mut authority = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        authority.device_exclusion().propose(target).await
-    }
-
-    pub(crate) async fn cancel_device_exclusion(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let mut authority = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        authority
-            .device_exclusion()
-            .publish_outcome(proposal, OutcomeIntent::Cancel)
-            .await
-    }
-
-    pub(crate) async fn finalize_device_exclusion(
-        &self,
-        proposal: &StoreDeviceExclusionProposalRef,
-    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
-        let mut authority = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        authority
-            .device_exclusion()
-            .publish_outcome(proposal, OutcomeIntent::Exclude)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn device_exclusion_operations_for_test(
-        &self,
-    ) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
-        self.database
-            .outbound_store_device_exclusion_operations()
-            .await?
-            .into_iter()
-            .map(|operation| {
-                let operation_id = operation.operation_id();
-                let status = if operation.is_completed() {
-                    StoreDeviceExclusionOperationStatus::Completed(completion_result(&operation)?)
-                } else {
-                    StoreDeviceExclusionOperationStatus::Pending
-                };
-                Ok(StoreDeviceExclusionOperationInfo {
-                    operation_id,
-                    status,
-                })
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn operations_for_test(
+    database: &StoreDatabase,
+) -> Result<Vec<StoreDeviceExclusionOperationInfo>, StoreDeviceExclusionError> {
+    database
+        .outbound_store_device_exclusion_operations()
+        .await?
+        .into_iter()
+        .map(|operation| {
+            let operation_id = operation.operation_id();
+            let status = if operation.is_completed() {
+                StoreDeviceExclusionOperationStatus::Completed(completion_result(&operation)?)
+            } else {
+                StoreDeviceExclusionOperationStatus::Pending
+            };
+            Ok(StoreDeviceExclusionOperationInfo {
+                operation_id,
+                status,
             })
-            .collect()
-    }
+        })
+        .collect()
+}
 
-    /// Stage and upload one exclusion proposal against this device's own
-    /// registration, stopping before activation so a restart resumes it. The
-    /// target is the local device — which [`AuthorizedDeviceExclusion::propose`]
-    /// refuses — so the test enters the production pipeline one step below that
-    /// gate, at [`AuthorizedDeviceExclusion::stage_proposal`], under a fixed
-    /// proposal id.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn stage_uploaded_device_exclusion_proposal_for_test(
-        &self,
-    ) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreDeviceExclusionError::InvalidState(error.to_string()))?;
-        let plan = Box::new(writer.prepare_plan().await?);
-        let target = plan.local_registration_reference_for_test();
-        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
-            b"restart exclusion proposal",
+/// Stage and upload one exclusion proposal against this device's own
+/// registration, stopping before activation so a restart resumes it. The
+/// target is the local device — which [`AuthorizedDeviceExclusion::propose`]
+/// refuses — so the test enters the production pipeline one step below that
+/// gate, at [`AuthorizedDeviceExclusion::stage_proposal`], under a fixed
+/// proposal id.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) async fn stage_uploaded_proposal_for_test(
+    database: &StoreDatabase,
+    writer: &mut AuthorizedWriterOperation<'_>,
+) -> Result<StoreDeviceExclusionProposalRef, StoreDeviceExclusionError> {
+    let plan = Box::new(writer.prepare_plan().await?);
+    let target = plan.local_registration_reference_for_test();
+    let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+        b"restart exclusion proposal",
+    ));
+    let mut exclusion = writer.device_exclusion();
+    let durable = exclusion.stage_proposal(plan, &target, proposal_id).await?;
+    let DurableStoreDeviceExclusionObject::Proposal { reference, .. } = durable.object() else {
+        return Err(StoreDeviceExclusionError::InvalidState(
+            "staged exclusion operation is not a proposal".to_string(),
         ));
-        let mut exclusion = writer.device_exclusion();
-        let durable = exclusion.stage_proposal(plan, &target, proposal_id).await?;
-        let DurableStoreDeviceExclusionObject::Proposal { reference, .. } = durable.object() else {
-            return Err(StoreDeviceExclusionError::InvalidState(
-                "staged exclusion operation is not a proposal".to_string(),
-            ));
-        };
-        let reference = reference.clone();
-        exclusion.create_exact_object(&durable).await?;
-        self.database
-            .mark_store_device_exclusion_authority_uploaded(durable)
-            .await?;
-        Ok(reference)
-    }
+    };
+    let reference = reference.clone();
+    exclusion.create_exact_object(&durable).await?;
+    database
+        .mark_store_device_exclusion_authority_uploaded(durable)
+        .await?;
+    Ok(reference)
 }
 
 pub(crate) struct AuthorizedDeviceExclusion<'operation, 'storage> {
@@ -264,7 +225,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .map_err(StoreDeviceExclusionJournalError::Storage)
     }
 
-    pub(super) async fn resume(
+    pub(crate) async fn resume(
         &mut self,
     ) -> Result<Option<StoreDeviceExclusionResult>, StoreDeviceExclusionError> {
         let database = self.database.clone();
@@ -288,7 +249,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         Ok(())
     }
 
-    async fn propose(
+    pub(crate) async fn propose(
         &mut self,
         target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
@@ -297,6 +258,20 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         self.reject_active_operation().await?;
         let durable = self.prepare_proposal(target).await?;
         self.drive(Box::new(durable)).await
+    }
+
+    pub(crate) async fn cancel(
+        &mut self,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+        self.publish_outcome(proposal, OutcomeIntent::Cancel).await
+    }
+
+    pub(crate) async fn exclude(
+        &mut self,
+        proposal: &StoreDeviceExclusionProposalRef,
+    ) -> Result<StoreDeviceExclusionResult, StoreDeviceExclusionError> {
+        self.publish_outcome(proposal, OutcomeIntent::Exclude).await
     }
 
     async fn prepare_proposal(

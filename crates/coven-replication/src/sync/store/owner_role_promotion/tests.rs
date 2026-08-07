@@ -454,7 +454,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     assert!(
         matches!(
             &lost,
-            crate::sync::store::owner::owner_promotion::OwnerPromotionError::Stale(reason)
+            crate::sync::store::owner_role_promotion::OwnerPromotionError::Stale(reason)
                 if matches!(
                     reason.as_ref(),
                     coven_protocol::store_commit::OwnerPromotionStaleReason::MergeActivationRejected
