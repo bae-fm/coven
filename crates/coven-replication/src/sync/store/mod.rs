@@ -11,6 +11,7 @@ pub(crate) mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
 pub(crate) mod circles;
+pub(crate) mod commit_publication;
 mod commit_verification;
 pub(crate) mod device_exclusion;
 pub(crate) mod device_join;
@@ -21,7 +22,7 @@ mod membership;
 mod merge_conflict;
 pub(crate) mod owner;
 mod reclaim;
-use owner::operations;
+use commit_publication::operation::commit_plan;
 pub(crate) mod owner_role_promotion;
 mod package_preparation;
 #[cfg(not(any(test, feature = "test-utils")))]
@@ -36,6 +37,9 @@ use registration_object::prepare_registration_object;
 pub use acknowledgements::StoreAckError;
 pub use blob::{BlobCacheError, BlobStream};
 pub use circles::CircleOperationError;
+#[cfg(test)]
+pub(crate) use commit_publication::operation::commit_plan::StoreOperationBatch;
+pub use commit_publication::operation::commit_plan::StoreOperationCommitPlan;
 #[cfg(test)]
 pub(crate) use commit_verification::merge_history::prepare_merge_abandonment_history_summary;
 pub use commit_verification::merge_history::{
@@ -74,15 +78,13 @@ pub use membership::AnchoredChainError;
 pub use membership::InviteError;
 pub(crate) use membership::MembershipOpsError;
 pub use merge_conflict::{ExcludedCandidateHeadObservation, MergeCandidateAbandonment};
-#[cfg(test)]
-pub(crate) use owner::operations::StoreOperationBatch;
-pub use owner::operations::StoreOperationCommitPlan;
 pub use owner_role_promotion::OwnerPromotionError;
 pub use reclaim::StoreReclaimError;
 pub use reclaim::StoreReclaimResult;
 
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
+pub use commit_publication::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
 #[cfg(test)]
 pub(crate) use owner::pull::HeldStoreCoordinate;
 pub(crate) use owner::pull::{HeldStorePosition, VerifiedStoreDeviceHead};
@@ -90,7 +92,6 @@ pub use owner::pull::{LoadedCirclePackage, Readiness};
 pub use owner::pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use owner::StoreInitializationError;
 pub use owner::StoreRegistrationError;
-pub use owner::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
 pub use owner::{HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership};
 pub(crate) use restore::RestoringStore;
 pub(crate) use snapshots::SnapshotCut;

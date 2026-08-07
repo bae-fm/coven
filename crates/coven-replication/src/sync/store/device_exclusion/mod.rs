@@ -8,10 +8,10 @@ use coven_protocol::device_exclusion_journal::{
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
 
-use super::operations::{
+use super::{AuthorizedWriterOperation, StoreError};
+use crate::sync::store::commit_publication::operation::commit_plan::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
-use super::{AuthorizedWriterOperation, StoreError};
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_database::DbError;
 use coven_database::StoreDatabase;
@@ -301,7 +301,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
     /// proposal's identity.
     async fn stage_proposal(
         &mut self,
-        plan: Box<crate::sync::store::operations::StoreOperationCommitPlan>,
+        plan: Box<crate::sync::store::commit_publication::operation::commit_plan::StoreOperationCommitPlan>,
         target: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
         proposal_id: StoreDeviceExclusionProposalId,
     ) -> Result<DurableStoreDeviceExclusionOperation, StoreDeviceExclusionError> {

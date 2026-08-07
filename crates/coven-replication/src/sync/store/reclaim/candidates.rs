@@ -108,17 +108,17 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 Box::pin(self.writer.publish_prepared(candidate, None, None)).await?
             };
             match outcome {
-                crate::sync::store::owner::writer::operation::operations::StoreOperationPublicationOutcome::Activated(_) => {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(_) => {
                     return Ok(());
                 }
-                crate::sync::store::owner::writer::operation::operations::StoreOperationPublicationOutcome::RepreparedCandidate(
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(
                     replacement,
                 ) => {
                     operation =
                         Box::pin(database.replace_store_reclaim_candidate(operation, *replacement))
                             .await?;
                 }
-                crate::sync::store::owner::writer::operation::operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
                     nonactivation,
                     ..
                 } => {
@@ -126,11 +126,11 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     let batch = match &*object {
                         DurableStoreReclaimObject::Authorization {
                             authorization_ref, ..
-                        } => crate::sync::store::owner::writer::operation::operations::StoreOperationBatch::ReclaimAuthorization(
+                        } => crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimAuthorization(
                             Box::new(authorization_ref.clone()),
                         ),
                         DurableStoreReclaimObject::Receipt { receipt_ref, .. } => {
-                            crate::sync::store::owner::writer::operation::operations::StoreOperationBatch::ReclaimReceipt(Box::new(
+                            crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimReceipt(Box::new(
                                 receipt_ref.clone(),
                             ))
                         }
@@ -145,8 +145,8 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                     Box::pin(self.finish_candidate_replacement(operation)).await?;
                     return Ok(());
                 }
-                crate::sync::store::owner::writer::operation::operations::StoreOperationPublicationOutcome::Nonactivated(_)
-                | crate::sync::store::owner::writer::operation::operations::StoreOperationPublicationOutcome::Reprepared => {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(_)
+                | crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Reprepared => {
                     return Err(StoreReclaimError::Authorization(
                         "Store reclaim publication returned acknowledgement-only state".to_string(),
                     ));
@@ -237,7 +237,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .writer
             .prepare_candidate(
                 plan,
-                crate::sync::store::owner::writer::operation::operations::StoreOperationBatch::ReclaimReceipt(Box::new(
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimReceipt(Box::new(
                     receipt_ref.clone(),
                 )),
             )

@@ -471,7 +471,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let mut candidate = self
             .prepare_candidate(
                 operation_plan,
-                operations::StoreOperationBatch::MergeMembershipActivation {
+                commit_plan::StoreOperationBatch::MergeMembershipActivation {
                     transition: transition.transition.clone(),
                     stream_activations,
                 },
@@ -698,7 +698,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 )
                 .await?;
             match outcome {
-                operations::StoreOperationPublicationOutcome::Activated(reference)
+                commit_plan::StoreOperationPublicationOutcome::Activated(reference)
                     if reference == plan.candidate.reference =>
                 {
                     membership
@@ -707,7 +707,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     self.membership = membership;
                     return Ok(plan.reference);
                 }
-                operations::StoreOperationPublicationOutcome::RepreparedCandidate(replacement)
+                commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(replacement)
                     if replacement.reference == plan.candidate.reference =>
                 {
                     let previous_remotes = plan.remote_objects()?;
@@ -725,7 +725,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         )
                         .await?;
                 }
-                operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
                     candidate,
                     nonactivation,
                 } if candidate.as_ref() == plan.candidate.as_ref() => {

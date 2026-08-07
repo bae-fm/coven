@@ -1,5 +1,7 @@
 use super::close_prepared_packages;
-use crate::sync::store::operations::{next_store_sequence, successor_store_sequence};
+use crate::sync::store::commit_publication::operation::commit_plan::{
+    next_store_sequence, successor_store_sequence,
+};
 use crate::sync::store::StoreError;
 use coven_database::{PreparedProtocolObject, PreparedStoreWrite, StoreWritePreparation};
 use coven_protocol::objects::StoreObjectError;

@@ -102,7 +102,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn attach_merge_membership_proof(
         &self,
-        candidate: &mut operations::PreparedStoreOperationCommit,
+        candidate: &mut commit_plan::PreparedStoreOperationCommit,
         publication: &PreparedMembershipPublication,
         resolution: Option<&membership::StoreMembershipConflictResolution>,
     ) -> Result<(), StoreError> {
@@ -120,7 +120,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) fn attach_membership_proof(
         &self,
-        candidate: &mut operations::PreparedStoreOperationCommit,
+        candidate: &mut commit_plan::PreparedStoreOperationCommit,
         publication: &PreparedMembershipPublication,
     ) -> Result<(), InviteError> {
         self.attach_merge_membership_proof(candidate, publication, None)

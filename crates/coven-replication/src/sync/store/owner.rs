@@ -13,7 +13,6 @@ pub(crate) use keyring::load_wrapped_store_key;
 pub(crate) mod pull;
 mod registration;
 pub(crate) mod registration_outbox;
-pub(crate) mod writer;
 
 mod store_test_support;
 
@@ -25,9 +24,6 @@ pub use history_construction::HistoryConstructionAuthority;
 pub use keyring::StoreKeyrings;
 pub use registration::StoreRegistrationError;
 use registration_outbox::RegistrationOutbox;
-pub(super) use writer::operations;
-pub use writer::AuthorizedWriterOperation;
-pub use writer::StoreWriterAuthorizationError;
 
 #[doc(hidden)]
 pub struct Store {
@@ -241,7 +237,7 @@ impl Store {
                 .local_store_root_ref()
                 .await?
                 .ok_or(StoreError::MissingState {
-                    key: operations::STORE_ROOT_AUTHORITY,
+                    key: commit_plan::STORE_ROOT_AUTHORITY,
                 })?;
         let root = crate::sync::store::protocol_root::VerifiedStoreRoot::open(
             &database,
@@ -592,17 +588,22 @@ impl Store {
 
     pub(crate) async fn authorize_writer(
         &self,
-    ) -> Result<AuthorizedWriterOperation<'_>, writer::StoreWriterAuthorizationError> {
+    ) -> Result<
+        AuthorizedWriterOperation<'_>,
+        crate::sync::store::commit_publication::StoreWriterAuthorizationError,
+    > {
         RegistrationOutbox::new(self.database.clone(), &*self.storage)
             .drain()
             .await
-            .map_err(writer::StoreWriterAuthorizationError::Registration)?;
+            .map_err(
+                crate::sync::store::commit_publication::StoreWriterAuthorizationError::Registration,
+            )?;
         self.authorize()
             .await
-            .map_err(writer::StoreWriterAuthorizationError::StoreAuthority)?
+            .map_err(crate::sync::store::commit_publication::StoreWriterAuthorizationError::StoreAuthority)?
             .into_writer()
             .await
-            .map_err(writer::StoreWriterAuthorizationError::Registration)
+            .map_err(crate::sync::store::commit_publication::StoreWriterAuthorizationError::Registration)
     }
 
     #[doc(hidden)]

@@ -1,4 +1,4 @@
-use crate::sync::store::operations::{
+use crate::sync::store::commit_publication::operation::commit_plan::{
     PreparedStoreOperationCommit, StoreOperationBatch, StoreOperationPublicationOutcome,
 };
 use coven_keys::encryption::EncryptionService;

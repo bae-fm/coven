@@ -24,7 +24,7 @@ pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
     membership: coven_protocol::membership::MembershipChain,
-    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+    local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
 
@@ -33,7 +33,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         database: StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
         membership: coven_protocol::membership::MembershipChain,
-        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+        local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
     ) -> Self {
         Self {

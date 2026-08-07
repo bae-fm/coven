@@ -104,18 +104,19 @@ impl HostWriteBlobStaging {
                     let authority = BlobWriteAuthority::new(registration);
                     let (audience, protection) =
                         self.destination_protection(transaction, destination, partitions, fact)?;
-                    let locator = super::owner::writer::prepare_partition_blob_locator(
-                        fact,
-                        audience.clone(),
-                        &protection,
-                        &authority,
-                    )
-                    .map_err(|error| {
-                        move_materialization_error(
+                    let locator =
+                        crate::sync::store::commit_publication::prepare_partition_blob_locator(
                             fact,
-                            DbError::AudienceBlobStaging(Box::new(error)),
+                            audience.clone(),
+                            &protection,
+                            &authority,
                         )
-                    })?;
+                        .map_err(|error| {
+                            move_materialization_error(
+                                fact,
+                                DbError::AudienceBlobStaging(Box::new(error)),
+                            )
+                        })?;
                     let spool_path = self
                         .store_dir
                         .outbound_blob_spool_path(locator.locator_hash());

@@ -49,7 +49,7 @@ impl<'operation, 'storage>
 
     async fn activate(
         &mut self,
-        batch: crate::sync::store::operations::StoreOperationBatch,
+        batch: crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch,
     ) -> Result<StoreBatchCommitRef, crate::sync::store::StoreError> {
         let plan = self.writer.prepare_plan().await?;
         self.writer.activate(plan, batch).await
@@ -246,7 +246,7 @@ impl<'operation, 'storage>
             StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
         let activation = self
             .activate(
-                crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ProviderAccessGrant(
                     grant_ref.clone(),
                 ),
             )

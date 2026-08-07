@@ -4,10 +4,10 @@ mod circle;
 
 pub(crate) use circle::CircleAcknowledgementReader;
 
-use super::owner::writer::LocalStoreWriter;
 use super::snapshots as snapshot;
 use super::{AuthorizedWriterOperation, StoreError};
 use crate::sync::cycle::SyncCycleFailure;
+use crate::sync::store::commit_publication::LocalStoreWriter;
 use coven_database::StoreDatabase;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -215,7 +215,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                         .validate_acknowledgement(&outbound.ack.value)?;
                     let candidate = Box::pin(self.writer.prepare_candidate(
                         plan,
-                        crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
+                        crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Acknowledgement {
                             reference: outbound.reference.clone(),
                             value: outbound.ack.value.clone(),
                             circle_acknowledgements: outbound.circle_acknowledgements.clone(),
@@ -306,17 +306,17 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .await?;
             match publication
             {
-                crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(_) => {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(_) => {
                     self.database
                         .complete_outbound_store_ack(outbound.reference)
                         .await?;
                 }
-                crate::sync::store::operations::StoreOperationPublicationOutcome::Nonactivated(_) => {}
-                crate::sync::store::operations::StoreOperationPublicationOutcome::Reprepared => {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(_) => {}
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Reprepared => {
                     continue;
                 }
-                crate::sync::store::operations::StoreOperationPublicationOutcome::RepreparedCandidate(_)
-                | crate::sync::store::operations::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(_)
+                | crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
                     return Err(StoreAckError::InvalidOutbound(
                         "acknowledgement publication returned non-acknowledgement conflict state"
                             .to_string(),

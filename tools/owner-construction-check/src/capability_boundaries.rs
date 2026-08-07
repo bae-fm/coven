@@ -250,7 +250,7 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-replication/src/blob/transition.rs",
     "crates/coven-replication/src/sync/store/blob.rs",
     "crates/coven-replication/src/sync/store/host_write.rs",
-    "crates/coven-replication/src/sync/store/owner/writer/operation/blob_preparation.rs",
+    "crates/coven-replication/src/sync/store/commit_publication/operation/blob_preparation.rs",
     "crates/coven-replication/src/sync/store/snapshots/mod.rs",
     "crates/coven-replication/src/sync/store/snapshots/image.rs",
 ];

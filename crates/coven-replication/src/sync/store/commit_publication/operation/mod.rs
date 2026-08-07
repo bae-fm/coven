@@ -24,9 +24,9 @@ mod abandonment;
 mod blob_lifecycle;
 mod blob_preparation;
 mod blob_upload;
+pub(crate) mod commit_plan;
 pub(super) mod membership_mutation;
 pub(super) mod membership_mutation_journal;
-pub(crate) mod operations;
 mod preparation;
 
 mod commit_publication;
@@ -140,7 +140,7 @@ impl MergeConflictResolutionCommitPlan {
         self,
         membership: &coven_protocol::membership::MembershipChain,
         resolution: &coven_protocol::membership::StoreMembershipConflictResolutionRef,
-    ) -> Result<operations::StoreOperationCommitPlan, StoreError> {
+    ) -> Result<commit_plan::StoreOperationCommitPlan, StoreError> {
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(StoreError::InvalidOutbound(
@@ -183,7 +183,7 @@ impl MergeConflictResolutionCommitPlan {
             resolved.state_hash,
         )
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        let common = operations::StoreOperationPlanCommon::new(
+        let common = commit_plan::StoreOperationPlanCommon::new(
             self.authorship,
             self.writer,
             self.root,
@@ -196,7 +196,7 @@ impl MergeConflictResolutionCommitPlan {
             },
             Some(replacement_grant),
         );
-        Ok(operations::StoreOperationCommitPlan::new(
+        Ok(commit_plan::StoreOperationCommitPlan::new(
             common,
             membership.clone(),
             self.device_state_value,

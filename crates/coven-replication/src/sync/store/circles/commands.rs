@@ -26,7 +26,7 @@ impl<'store> StoreCircleCommands<'store> {
     async fn writer(
         &self,
     ) -> Result<
-        crate::sync::store::owner::writer::AuthorizedWriterOperation<'store>,
+        crate::sync::store::commit_publication::AuthorizedWriterOperation<'store>,
         CircleOperationError,
     > {
         self.require_protected_paths()?;

@@ -12,7 +12,8 @@ use coven_storage as cloud_storage;
 use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, RevokeOutcome};
 
 pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
-    operation: &'operation mut crate::sync::store::owner::AuthorizedWriterOperation<'storage>,
+    operation:
+        &'operation mut crate::sync::store::commit_publication::AuthorizedWriterOperation<'storage>,
     chain: &'input mut MembershipChain,
     revokee_pubkey: &'input str,
     store_id: &'input str,
@@ -36,7 +37,7 @@ pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
 impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn begin(
-        operation: &'operation mut crate::sync::store::owner::AuthorizedWriterOperation<'storage>,
+        operation: &'operation mut crate::sync::store::commit_publication::AuthorizedWriterOperation<'storage>,
         chain: &'input mut MembershipChain,
         revokee_pubkey: &'input str,
         store_id: &'input str,
@@ -146,7 +147,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 .operation
                 .prepare_candidate(
                 plan,
-                crate::sync::store::operations::StoreOperationBatch::MergeMembershipActivation {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::MergeMembershipActivation {
                     transition: transition.transition.clone(),
                     stream_activations: Vec::new(),
                 },
@@ -554,7 +555,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     )
                     .await?;
                     match outcome {
-                    crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(reference) => {
+                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(reference) => {
                         if reference != candidate.reference {
                             return Err(InviteError::InvalidDurableMutation(
                                 "membership removal activated another Store candidate".to_string(),
@@ -570,7 +571,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         *chain = validated_chain;
                         return Ok(keyring);
                     }
-                    crate::sync::store::operations::StoreOperationPublicationOutcome::RepreparedCandidate(
+                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(
                         replacement,
                     ) => {
                         if replacement.reference != candidate.reference {
@@ -606,7 +607,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                             )
                             .map_err(InviteError::InvalidDurableMutation)?;
                     }
-                    crate::sync::store::operations::StoreOperationPublicationOutcome::NonactivatedCandidate {
+                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
                         candidate: returned,
                         nonactivation,
                     } => {
@@ -630,7 +631,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                             "membership removal candidate did not activate".to_string(),
                         ));
                     }
-                    crate::sync::store::operations::StoreOperationPublicationOutcome::Nonactivated(
+                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(
                         reference,
                     ) => {
                         return Err(InviteError::InvalidDurableMutation(format!(
@@ -638,7 +639,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                             reference.commit_hash
                         )))
                     }
-                    crate::sync::store::operations::StoreOperationPublicationOutcome::Reprepared => {
+                    crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Reprepared => {
                         return Err(InviteError::InvalidDurableMutation(
                             "membership removal returned acknowledgement-only reprepare state"
                                 .to_string(),

@@ -148,7 +148,7 @@ pub enum TestPullError {
     #[error("open Store: {0}")]
     Open(String),
     #[error("authorize Store writer: {0}")]
-    Authorize(#[from] crate::sync::store::owner::StoreWriterAuthorizationError),
+    Authorize(#[from] crate::sync::store::StoreWriterAuthorizationError),
     #[error("pull: {0}")]
     Pull(#[from] crate::sync::cycle::SyncCycleFailure),
 }

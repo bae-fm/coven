@@ -295,9 +295,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
-        candidate: Box<operations::PreparedStoreOperationCommit>,
+        candidate: Box<commit_plan::PreparedStoreOperationCommit>,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
-    ) -> Result<operations::StoreOperationPublicationOutcome, InviteError> {
+    ) -> Result<commit_plan::StoreOperationPublicationOutcome, InviteError> {
         transition.validate()?;
         publication.validate()?;
         candidate

@@ -266,23 +266,23 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         identity: &'storage UserKeypair,
         registration: coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
         device_signer: UserKeypair,
-    ) -> crate::sync::store::owner::writer::AuthorizedWriterOperation<'storage> {
+    ) -> crate::sync::store::commit_publication::AuthorizedWriterOperation<'storage> {
         let database = self.database.clone();
         let storage = self.storage;
         let store_dir = self.store_dir;
         let keyrings = Arc::clone(&self.keyrings);
         let writer = Arc::new(
-            crate::sync::store::owner::writer::LocalStoreWriter::from_verified_parts(
+            crate::sync::store::commit_publication::LocalStoreWriter::from_verified_parts(
                 identity.clone(),
                 registration,
                 device_signer,
             ),
         );
-        let keyrings = crate::sync::store::owner::writer::LocalWriterKeyrings::new(
+        let keyrings = crate::sync::store::commit_publication::LocalWriterKeyrings::new(
             Arc::clone(&writer),
             keyrings,
         );
-        crate::sync::store::owner::writer::AuthorizedWriterOperation::from_parts(
+        crate::sync::store::commit_publication::AuthorizedWriterOperation::from_parts(
             database, self, storage, store_dir, membership, writer, keyrings,
         )
     }
@@ -309,7 +309,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     pub(crate) fn from_snapshot(
-        _authority: crate::sync::store::owner::writer::SnapshotHistoryConstruction,
+        _authority: crate::sync::store::commit_publication::SnapshotHistoryConstruction,
         database: StoreDatabase,
         storage: &'storage Arc<dyn SyncStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,

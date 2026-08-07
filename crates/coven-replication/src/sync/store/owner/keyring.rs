@@ -22,7 +22,7 @@ impl<'storage> StoreKeyrings<'storage> {
         Self { storage, root }
     }
 
-    pub(super) async fn open(
+    pub(crate) async fn open(
         &self,
         identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
@@ -46,7 +46,7 @@ impl<'storage> StoreKeyrings<'storage> {
         self.open_references(identity, &references).await
     }
 
-    pub(super) async fn open_or(
+    pub(crate) async fn open_or(
         &self,
         identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
@@ -60,7 +60,7 @@ impl<'storage> StoreKeyrings<'storage> {
         }
     }
 
-    pub(super) async fn prepare(
+    pub(crate) async fn prepare(
         &self,
         recipient: &str,
         value: WrappedStoreKey,

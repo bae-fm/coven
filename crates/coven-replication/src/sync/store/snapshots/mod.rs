@@ -14,8 +14,8 @@ use coven_database::{CreatedSnapshot, SnapshotBlobAudience};
 
 use tracing::{info, warn};
 
-use super::owner::writer::{LocalStoreWriter, SnapshotHistoryConstruction};
 use super::AuthorizedWriterOperation;
+use crate::sync::store::commit_publication::{LocalStoreWriter, SnapshotHistoryConstruction};
 use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
 #[cfg(test)]
@@ -478,7 +478,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             )));
         }
         if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
-            let locator = crate::sync::store::owner::writer::prepare_partition_blob_locator(
+            let locator = crate::sync::store::commit_publication::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
                 &protection,

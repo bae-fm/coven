@@ -49,7 +49,7 @@ impl LocalStoreWriter {
     #[cfg(test)]
     pub(crate) async fn load_own_snapshot(
         &self,
-        history: &mut crate::sync::store::owner::writer::AuthorizedStoreHistory<'_>,
+        history: &mut crate::sync::store::owner::authorized_history::AuthorizedStoreHistory<'_>,
         reference: &coven_protocol::store_commit::StoreSnapshotRef,
     ) -> Result<coven_protocol::store_commit::SnapshotMeta, coven_protocol::objects::StoreObjectError>
     {

@@ -33,7 +33,7 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     membership: coven_protocol::membership::MembershipChain,
     root: coven_protocol::store_commit::StoreRootRef,
     storage: std::sync::Arc<dyn SyncStorage>,
-    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+    local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
 
@@ -1074,7 +1074,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         membership: coven_protocol::membership::MembershipChain,
         root: coven_protocol::store_commit::StoreRootRef,
         storage: std::sync::Arc<dyn SyncStorage>,
-        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+        local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
     ) -> Self {
         Self {

@@ -572,7 +572,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .writer
             .prepare_candidate(
                 plan,
-                super::operations::StoreOperationBatch::ReclaimAuthorization(Box::new(
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ReclaimAuthorization(Box::new(
                     authorization_ref.clone(),
                 )),
             )

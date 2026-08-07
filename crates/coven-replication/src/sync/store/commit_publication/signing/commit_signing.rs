@@ -3,12 +3,12 @@ use super::*;
 impl LocalStoreWriter {
     pub(crate) async fn pull(
         &self,
-        history: &mut crate::sync::store::owner::writer::AuthorizedStoreHistory<'_>,
+        history: &mut crate::sync::store::owner::authorized_history::AuthorizedStoreHistory<'_>,
         membership: &coven_protocol::membership::MembershipChain,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<
-        crate::sync::store::owner::writer::pull::StorePullExecution,
-        crate::sync::store::owner::writer::pull::StorePullError,
+        crate::sync::store::owner::pull::StorePullExecution,
+        crate::sync::store::owner::pull::StorePullError,
     > {
         history
             .pull(membership, Some(&self.identity), routing_encryption)
@@ -180,7 +180,7 @@ impl LocalStoreWriter {
         &self,
         write_id: coven_protocol::write::WriteId,
         context: StoreOperationSigningContext,
-        batch: crate::sync::store::owner::writer::operation::operations::StoreOperationBatch,
+        batch: crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch,
     ) -> Result<
         (
             coven_protocol::store_commit::StoreBatchCommit,
@@ -188,7 +188,7 @@ impl LocalStoreWriter {
         ),
         crate::sync::store::StoreError,
     > {
-        use crate::sync::store::owner::writer::operation::operations::StoreOperationBatch;
+        use crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch;
         use coven_protocol::store_commit::{
             DeviceJoinAttemptDecisionRef, StoreBatchCommit, StoreCommitOperationsInput,
             StoreControl,

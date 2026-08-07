@@ -125,7 +125,10 @@ impl Store {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_operation_plan_for_test(
         &self,
-    ) -> Result<writer::operations::StoreOperationCommitPlan, StoreError> {
+    ) -> Result<
+        crate::sync::store::commit_publication::operation::commit_plan::StoreOperationCommitPlan,
+        StoreError,
+    > {
         let mut writer = self
             .authorize_writer()
             .await

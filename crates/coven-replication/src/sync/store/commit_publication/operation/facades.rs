@@ -53,7 +53,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::owner::writer::membership::InviteError,
+        crate::sync::store::commit_publication::membership::InviteError,
     > {
         self.keyrings.open(&self.membership).await
     }
@@ -63,7 +63,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::owner::writer::membership::InviteError,
+        crate::sync::store::commit_publication::membership::InviteError,
     > {
         self.keyrings.open(membership).await
     }
@@ -74,7 +74,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         initial: &coven_keys::encryption::EncryptionService,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::owner::writer::membership::InviteError,
+        crate::sync::store::commit_publication::membership::InviteError,
     > {
         self.keyrings.open_or(membership, initial).await
     }
@@ -98,7 +98,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         chain: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         coven_protocol::membership::AuthorStreamId,
-        crate::sync::store::owner::writer::membership::InviteError,
+        crate::sync::store::commit_publication::membership::InviteError,
     > {
         let author = self.writer.author_pubkey();
         let grant = chain.active_owner_grant(&author).ok_or_else(|| {
@@ -196,7 +196,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
-        crate::sync::store::owner::writer::pull::StorePullError,
+        crate::sync::store::owner::pull::StorePullError,
     > {
         self.writer
             .authorize_retained_outbound(&self.history, order, membership_heads)
@@ -212,7 +212,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
-        crate::sync::store::owner::writer::pull::StorePullError,
+        crate::sync::store::owner::pull::StorePullError,
     > {
         self.history
             .prepare_merge_history_successor(
@@ -240,7 +240,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn upload_commit(
         &self,
-        candidate: &operations::PreparedStoreOperationCommit,
+        candidate: &commit_plan::PreparedStoreOperationCommit,
     ) -> Result<(), StoreError> {
         let stream_id = candidate.reference.coord.stream_id;
         let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
@@ -484,7 +484,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn circle_history(
         &mut self,
-    ) -> crate::sync::store::owner::writer::circles::VerifiedCircleHistory<'_, 'storage> {
+    ) -> crate::sync::store::commit_publication::circles::VerifiedCircleHistory<'_, 'storage> {
         self.history.circles()
     }
 
@@ -512,7 +512,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) fn join_operation(
         &mut self,
-    ) -> crate::sync::store::owner::writer::device_join::AuthorizedJoin<'_, 'storage> {
+    ) -> crate::sync::store::commit_publication::device_join::AuthorizedJoin<'_, 'storage> {
         let database = self.database.clone();
         let storage = Arc::clone(self.storage);
         let root = self.store_root().clone();
@@ -520,7 +520,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let verified_root = self.history.verified_root_object().clone();
         let membership = self.membership.clone();
         let local_writer = Arc::clone(&self.writer);
-        crate::sync::store::owner::writer::device_join::AuthorizedJoin::from_parts(
+        crate::sync::store::commit_publication::device_join::AuthorizedJoin::from_parts(
             self,
             database,
             storage,
@@ -535,11 +535,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn provider_administrator_join(
         &mut self,
     ) -> Result<
-        crate::sync::store::owner::writer::device_join::AuthorizedProviderAdministratorJoin<
+        crate::sync::store::commit_publication::device_join::AuthorizedProviderAdministratorJoin<
             '_,
             'storage,
         >,
-        crate::sync::store::owner::writer::device_join::DeviceJoinError,
+        crate::sync::store::commit_publication::device_join::DeviceJoinError,
     > {
         self.join_operation().into_provider_administrator()
     }

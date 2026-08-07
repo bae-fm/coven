@@ -99,7 +99,7 @@ impl LosingAckFixture {
         let competing = writer
             .prepare_candidate(
                 competing_plan,
-                crate::sync::store::operations::StoreOperationBatch::ProviderAccessGrant(grant),
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::ProviderAccessGrant(grant),
             )
             .await
             .expect("prepare competing candidate");

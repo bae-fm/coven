@@ -219,7 +219,7 @@ impl LocalStoreWriter {
 
     pub(crate) fn attach_merge_membership_proof(
         &self,
-        candidate: &mut crate::sync::store::owner::writer::operation::operations::PreparedStoreOperationCommit,
+        candidate: &mut crate::sync::store::commit_publication::operation::commit_plan::PreparedStoreOperationCommit,
         publication: &coven_protocol::membership_mutation::PreparedMembershipPublication,
         resolution: Option<&coven_protocol::membership::StoreMembershipConflictResolution>,
         prepare_head: impl FnOnce(

@@ -26,7 +26,7 @@ pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: coven_protocol::store_commit::StoreRootRef,
     membership: coven_protocol::membership::MembershipChain,
-    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+    local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
 }
 
 impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
@@ -38,7 +38,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: coven_protocol::store_commit::StoreRootRef,
         membership: coven_protocol::membership::MembershipChain,
-        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+        local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     ) -> Self {
         Self {
             writer,

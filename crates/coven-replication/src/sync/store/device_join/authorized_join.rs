@@ -26,7 +26,7 @@ pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuth
     protocol_root: StoreProtocolRoot,
     verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
     membership: coven_protocol::membership::MembershipChain,
-    local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+    local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     authority: Authority,
 }
 
@@ -39,7 +39,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         protocol_root: StoreProtocolRoot,
         verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
         membership: coven_protocol::membership::MembershipChain,
-        local_writer: std::sync::Arc<crate::sync::store::owner::writer::LocalStoreWriter>,
+        local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     ) -> Self {
         Self {
             writer,
@@ -277,7 +277,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .writer
             .activate(
                 plan,
-                crate::sync::store::operations::StoreOperationBatch::Abandonment(
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Abandonment(
                     abandonment_ref.clone(),
                 ),
             )
@@ -399,7 +399,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .writer
             .activate(
                 plan,
-                crate::sync::store::operations::StoreOperationBatch::Attempt(attempt_ref.clone()),
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Attempt(attempt_ref.clone()),
             )
             .await?;
         let bootstrap = ProvisionalDeviceBootstrap {
@@ -514,7 +514,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .writer
             .activate(
                 plan,
-                crate::sync::store::operations::StoreOperationBatch::Outcome {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Outcome {
                     outcome: outcome_ref.clone(),
                     registration: None,
                 },
@@ -712,7 +712,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .writer
             .activate(
                 plan,
-                crate::sync::store::operations::StoreOperationBatch::Outcome {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Outcome {
                     outcome: outcome_ref.clone(),
                     registration: Some(Box::new(activated_registration)),
                 },
@@ -1026,7 +1026,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .writer
             .activate(
                 plan,
-                crate::sync::store::operations::StoreOperationBatch::CleanupReceipt(
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::CleanupReceipt(
                     receipt.receipt.clone(),
                 ),
             )
