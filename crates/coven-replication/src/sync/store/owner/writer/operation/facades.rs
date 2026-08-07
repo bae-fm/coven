@@ -10,13 +10,22 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.root()
     }
 
-    pub(crate) async fn snapshot_publication(&self) -> snapshot::AuthorizedSnapshotPublication<'_> {
-        snapshot::AuthorizedSnapshotPublication::begin(&self.database, self.storage.as_ref()).await
+    pub(crate) async fn snapshot_publication(
+        &self,
+    ) -> crate::sync::store::snapshots::AuthorizedSnapshotPublication<'_> {
+        crate::sync::store::snapshots::AuthorizedSnapshotPublication::begin(
+            &self.database,
+            self.storage.as_ref(),
+        )
+        .await
     }
 
     pub(crate) async fn resume_snapshot_publication(
         &self,
-    ) -> Result<Option<coven_protocol::store_commit::SnapshotMeta>, snapshot::SnapshotError> {
+    ) -> Result<
+        Option<coven_protocol::store_commit::SnapshotMeta>,
+        crate::sync::store::snapshots::SnapshotError,
+    > {
         self.snapshot_publication().await.resume_store().await
     }
 
@@ -157,13 +166,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.history.cleanup_merge_candidate(write_id).await
     }
 
-    pub(super) async fn select_acknowledgement_snapshot(
+    pub(crate) async fn select_acknowledgement_snapshot(
         &mut self,
         frontier: &coven_protocol::store_commit::CommitFrontier,
         device_state: &coven_protocol::store_commit::StoreDeviceStateRef,
     ) -> Result<
         Option<coven_protocol::store_commit::StoreSnapshotLocator>,
-        acknowledgements::StoreAckError,
+        crate::sync::store::acknowledgements::StoreAckError,
     > {
         self.history
             .select_acknowledgement_snapshot(frontier, device_state)
@@ -274,12 +283,58 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(execution.result)
     }
 
-    pub(super) fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
+    pub(crate) fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
         if self.membership.is_owner_now(author_pubkey) {
             Ok(())
         } else {
             Err(format!("author {author_pubkey} is not a current owner"))
         }
+    }
+
+    pub(crate) async fn prepare_merge_snapshot_history_summary(
+        &self,
+        coverage: &coven_protocol::store_commit::CommitFrontier,
+        membership: &coven_protocol::membership::MembershipChain,
+        state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
+    ) -> Result<
+        coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        crate::sync::store::owner::pull::StorePullError,
+    > {
+        self.writer
+            .prepare_merge_snapshot_history_summary(&self.history, coverage, membership, state)
+            .await
+    }
+
+    pub(crate) fn snapshots(
+        &mut self,
+    ) -> crate::sync::store::snapshots::AuthorizedSnapshots<'_, 'storage> {
+        let database = self.database.clone();
+        let storage = Arc::clone(self.storage);
+        let store_dir = self.store_dir;
+        let membership = self.membership.clone();
+        let local_writer = Arc::clone(&self.writer);
+        crate::sync::store::snapshots::AuthorizedSnapshots::new(
+            self,
+            database,
+            storage,
+            store_dir,
+            membership,
+            local_writer,
+        )
+    }
+
+    pub(crate) fn acknowledgements(
+        &mut self,
+    ) -> crate::sync::store::acknowledgements::AuthorizedAcknowledgements<'_, 'storage> {
+        let database = self.database.clone();
+        let storage = Arc::clone(self.storage);
+        let local_writer = Arc::clone(&self.writer);
+        crate::sync::store::acknowledgements::AuthorizedAcknowledgements::new(
+            self,
+            database,
+            storage,
+            local_writer,
+        )
     }
 
     pub(crate) fn reclaim_history(

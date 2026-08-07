@@ -85,6 +85,7 @@ async fn selector_keeps_semantic_and_stored_snapshot_hashes_distinct() {
             .authorize_writer()
             .await
             .expect("authorize exact snapshot selector writer")
+            .snapshots()
             .push_store_snapshot(
                 snapshot(b"snapshot selector image"),
                 CommitFrontier(BTreeMap::new()),
@@ -243,6 +244,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
         .author_registration
         .registration_hash = ObjectHash::digest(b"another author");
     assert!(writer
+        .snapshots()
         .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_author.to_bytes())
         .is_err());
 
@@ -251,6 +253,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
         coven_protocol::objects::ObjectSlot::logical("wrong-successor.json".to_string())
             .expect("valid wrong successor slot");
     assert!(writer
+        .snapshots()
         .verify_own_snapshot_bytes_for_test(&published.reference, &wrong_successor.to_bytes())
         .is_err());
 }

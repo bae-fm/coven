@@ -1,4 +1,5 @@
-use super::{AuthorizedWriterOperation, Store, StoreAckError};
+use super::{AuthorizedWriterOperation, Store};
+use crate::sync::store::acknowledgements::StoreAckError;
 #[cfg(test)]
 use crate::sync::store::circle_controls::VerifiedCircleActivations;
 use crate::sync::store::circle_controls::{
@@ -7,16 +8,14 @@ use crate::sync::store::circle_controls::{
     CircleTransitionHistory, PreparedCircleOperation,
 };
 
-pub(crate) mod acknowledgements;
-pub(super) mod activation;
+pub(crate) mod activation;
 mod authorized_writer;
-mod bootstrap_blobs;
+pub(crate) mod bootstrap_blobs;
 mod commands;
 mod history;
 pub(super) mod packages;
 mod preparation;
 mod publication;
-pub(crate) mod snapshots;
 
 pub(crate) use authorized_writer::AuthorizedCircleWriter;
 pub use commands::StoreCircleCommands;

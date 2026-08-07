@@ -742,23 +742,27 @@ impl Store {
         &self,
         frontier: coven_protocol::store_commit::CommitFrontier,
         sync_time: String,
-    ) -> Result<coven_protocol::store_commit::StoreAck, writer::StoreAckError> {
-        let mut writer = self
-            .authorize_writer()
+    ) -> Result<
+        coven_protocol::store_commit::StoreAck,
+        crate::sync::store::acknowledgements::StoreAckError,
+    > {
+        let mut writer = self.authorize_writer().await.map_err(|error| {
+            crate::sync::store::acknowledgements::StoreAckError::InvalidOutbound(error.to_string())
+        })?;
+        writer
+            .acknowledgements()
+            .stage_acknowledgement(frontier, sync_time)
             .await
-            .map_err(|error| writer::StoreAckError::InvalidOutbound(error.to_string()))?;
-        writer.stage_acknowledgement(frontier, sync_time).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn drain_acknowledgements_for_test(
         &self,
-    ) -> Result<u64, writer::StoreAckError> {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| writer::StoreAckError::InvalidOutbound(error.to_string()))?;
-        writer.drain_acknowledgements().await
+    ) -> Result<u64, crate::sync::store::acknowledgements::StoreAckError> {
+        let mut writer = self.authorize_writer().await.map_err(|error| {
+            crate::sync::store::acknowledgements::StoreAckError::InvalidOutbound(error.to_string())
+        })?;
+        writer.acknowledgements().drain_acknowledgements().await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -777,10 +781,14 @@ impl Store {
         &self,
         frontier: &coven_protocol::store_commit::CommitFrontier,
         sync_time: &str,
-    ) -> Result<(), writer::StoreAckError> {
+    ) -> Result<(), crate::sync::store::acknowledgements::StoreAckError> {
         self.authorize_writer()
             .await
-            .map_err(|error| writer::StoreAckError::InvalidOutbound(error.to_string()))?
+            .map_err(|error| {
+                crate::sync::store::acknowledgements::StoreAckError::InvalidOutbound(
+                    error.to_string(),
+                )
+            })?
             .circles()
             .stage_acknowledgements(frontier, sync_time)
             .await
@@ -792,11 +800,15 @@ impl Store {
         snapshot: coven_database::CreatedSnapshot,
         coverage: coven_protocol::store_commit::CommitFrontier,
         created_at: String,
-    ) -> Result<coven_protocol::store_commit::SnapshotMeta, writer::snapshot::SnapshotError> {
+    ) -> Result<
+        coven_protocol::store_commit::SnapshotMeta,
+        crate::sync::store::snapshots::SnapshotError,
+    > {
         let mut writer = self.authorize_writer().await.map_err(|error| {
-            writer::snapshot::SnapshotError::PublicationState(error.to_string())
+            crate::sync::store::snapshots::SnapshotError::PublicationState(error.to_string())
         })?;
         writer
+            .snapshots()
             .push_store_snapshot(
                 snapshot,
                 coverage,

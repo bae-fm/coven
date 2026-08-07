@@ -114,13 +114,13 @@ impl<'a> StoreCommitVerifier<'a> {
         registration: &StoreDeviceRegistration,
     ) -> Result<
         Vec<coven_database::PublishedStoreSnapshot>,
-        crate::sync::store::owner::writer::snapshot::SnapshotError,
+        crate::sync::store::snapshots::SnapshotError,
     > {
         let mut slot = match &registration.snapshots {
             DeviceStreamAnchor::StoreSnapshots { first_slot } => first_slot.clone(),
             _ => {
                 return Err(
-                    crate::sync::store::owner::writer::snapshot::SnapshotError::PublicationState(
+                    crate::sync::store::snapshots::SnapshotError::PublicationState(
                         "local Store registration has no snapshot stream anchor".to_string(),
                     ),
                 );
@@ -143,9 +143,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 Ok(value) => value,
                 Err(StorageError::NotFound(_)) => break,
                 Err(error) => {
-                    return Err(
-                        crate::sync::store::owner::writer::snapshot::SnapshotError::Bucket(error),
-                    );
+                    return Err(crate::sync::store::snapshots::SnapshotError::Bucket(error));
                 }
             };
             let expected_root = self.root.reference().clone();
@@ -175,13 +173,11 @@ impl<'a> StoreCommitVerifier<'a> {
                 }),
             )
             .await
-            .map_err(crate::sync::store::owner::writer::snapshot::SnapshotError::StoreObject)?;
+            .map_err(crate::sync::store::snapshots::SnapshotError::StoreObject)?;
             if meta.predecessor != predecessor {
-                return Err(
-                    crate::sync::store::owner::writer::snapshot::SnapshotError::Parse(
-                        "Store snapshot stream has an invalid exact predecessor".to_string(),
-                    ),
-                );
+                return Err(crate::sync::store::snapshots::SnapshotError::Parse(
+                    "Store snapshot stream has an invalid exact predecessor".to_string(),
+                ));
             }
             let successor_slot = meta.successor.next_slot.clone();
             slot = successor_slot.clone();
@@ -192,7 +188,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 meta,
             });
             generation = generation.checked_add(1).ok_or_else(|| {
-                crate::sync::store::owner::writer::snapshot::SnapshotError::Parse(
+                crate::sync::store::snapshots::SnapshotError::Parse(
                     "Store snapshot generation overflow".to_string(),
                 )
             })?;

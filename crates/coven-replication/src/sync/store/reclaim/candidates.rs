@@ -34,7 +34,7 @@ pub(super) fn maximal_stable_circle_snapshot(
         .iter()
         .filter(|candidate| {
             !coverages.iter().any(|other| {
-                crate::sync::store::owner::writer::operation::snapshot::coverage_dominates(
+                crate::sync::store::snapshots::coverage_dominates(
                     other,
                     &candidate.meta.bootstrap.coverage,
                 )

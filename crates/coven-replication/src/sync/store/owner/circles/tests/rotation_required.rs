@@ -1022,11 +1022,12 @@ async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
         .bind_device(&fixture.db, &fixture.signer)
         .await
         .expect("load the ordinary snapshot Store");
-    let authorized = loaded_store
+    let mut authorized = loaded_store
         .authorize_writer()
         .await
         .expect("authorize the ordinary Store snapshot cut");
     let error = match authorized
+        .snapshots()
         .capture_snapshot_cut(
             fixture.db.synced_tables().to_vec(),
             Some(&EncryptionService::from_key([42; 32])),
@@ -1247,11 +1248,13 @@ async fn publish_acknowledged_store_snapshot(
         .await
         .expect("authorize the Store snapshot");
     let cut = authorized
+        .snapshots()
         .capture_snapshot_cut(db.synced_tables().to_vec(), Some(routing))
         .await
         .expect("capture the Store snapshot cut");
     let coverage = cut.coverage().clone();
     authorized
+        .snapshots()
         .push_snapshot_cut(cut, cut_stamp.to_string())
         .await
         .expect("publish the Store snapshot");

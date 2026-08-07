@@ -208,8 +208,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &mut self,
         frontier: &CommitFrontier,
         device_state: &StoreDeviceStateRef,
-    ) -> Result<Option<coven_protocol::store_commit::StoreSnapshotLocator>, writer::StoreAckError>
-    {
+    ) -> Result<
+        Option<coven_protocol::store_commit::StoreSnapshotLocator>,
+        crate::sync::store::acknowledgements::StoreAckError,
+    > {
         let registrations = self
             .database
             .activated_store_device_registration_records()
@@ -235,14 +237,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
         self.verify_snapshots_for_acknowledgement(&candidates)
             .await
-            .map_err(|error| snapshot::SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+            .map_err(|error| {
+                crate::sync::store::snapshots::SnapshotError::UnauthorizedAuthor(error.to_string())
+            })?;
         Ok(
-            snapshot::select_maximal_store_snapshot(candidates).map(|snapshot| {
-                coven_protocol::store_commit::StoreSnapshotLocator {
+            crate::sync::store::snapshots::select_maximal_store_snapshot(candidates).map(
+                |snapshot| coven_protocol::store_commit::StoreSnapshotLocator {
                     author_registration: snapshot.meta.author_registration.clone(),
                     snapshot: snapshot.reference,
-                }
-            }),
+                },
+            ),
         )
     }
 

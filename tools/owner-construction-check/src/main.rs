@@ -138,7 +138,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "finish_initialization",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot/image.rs",
+        "crates/coven-replication/src/sync/store/snapshots/image.rs",
         "PreparedSnapshotBootstrap",
         "install",
     ),
@@ -158,7 +158,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/writer/operation/acknowledgements/tests.rs",
+        "crates/coven-replication/src/sync/store/acknowledgements/tests.rs",
         "LosingAckFixture",
         "create",
     ),
@@ -188,7 +188,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "publish",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/circles/snapshots/tests.rs",
+        "crates/coven-replication/src/sync/store/snapshots/circle_tests.rs",
         "CircleSnapshotFixture",
         "initialize",
     ),
@@ -258,7 +258,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "create",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/writer/operation/snapshot/image_tests.rs",
+        "crates/coven-replication/src/sync/store/snapshots/image_tests.rs",
         "PublishedScopedSnapshot",
         "publish",
     ),

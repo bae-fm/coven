@@ -7,6 +7,7 @@ use coven_protocol::store_commit::{CommitFrontier, StoreProtocolRoot};
 use coven_storage::SyncStorage;
 use coven_storage::{BlobPathScheme, CloudCipherAccess};
 
+pub(crate) mod acknowledgements;
 #[doc(hidden)]
 pub mod blob;
 mod circle_controls;
@@ -27,8 +28,10 @@ mod protocol_root;
 pub(super) mod protocol_root;
 mod registration_object;
 pub(crate) mod restore;
+pub(crate) mod snapshots;
 use registration_object::prepare_registration_object;
 
+pub use acknowledgements::StoreAckError;
 pub use blob::{BlobCacheError, BlobStream};
 pub use circle_controls::CircleOperationError;
 pub use circle_controls::CircleTransitionHistory;
@@ -76,10 +79,6 @@ pub(crate) use owner::pull::HeldStoreCoordinate;
 pub(crate) use owner::pull::{HeldStorePosition, VerifiedStoreDeviceHead};
 pub use owner::pull::{LoadedCirclePackage, Readiness};
 pub use owner::pull::{PullError, StorePullError, StorePullResult};
-pub(crate) use owner::snapshot::SnapshotCut;
-#[doc(hidden)]
-pub use owner::snapshot::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
-pub use owner::StoreAckError;
 pub(crate) use owner::StoreInitializationError;
 pub use owner::StoreRegistrationError;
 pub use owner::{
@@ -92,3 +91,6 @@ pub use owner::{
 };
 pub use owner::{HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership};
 pub(crate) use restore::RestoringStore;
+pub(crate) use snapshots::SnapshotCut;
+#[doc(hidden)]
+pub use snapshots::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};

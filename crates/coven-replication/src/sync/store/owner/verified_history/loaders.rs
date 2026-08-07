@@ -257,8 +257,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         registration_ref: &StoreDeviceRegistrationRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<Vec<coven_database::PublishedStoreSnapshot>, super::writer::snapshot::SnapshotError>
-    {
+    ) -> Result<
+        Vec<coven_database::PublishedStoreSnapshot>,
+        crate::sync::store::snapshots::SnapshotError,
+    > {
         self.commit_verifier
             .load_store_snapshot_stream(registration_ref, registration)
             .await

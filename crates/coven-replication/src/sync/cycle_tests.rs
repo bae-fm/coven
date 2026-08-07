@@ -342,6 +342,7 @@ impl CycleTestStoreOps for TestStore {
             .await
             .expect("authorize snapshot fixture writer");
         writer
+            .snapshots()
             .push_store_snapshot(
                 coven_database::CreatedSnapshot {
                     db_image: marker.to_vec(),
@@ -3969,6 +3970,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .await
             .expect("authorize cadence snapshot writer");
         snapshot_writer
+            .snapshots()
             .push_store_snapshot(
                 coven_database::CreatedSnapshot {
                     db_image: b"cadence-snapshot".to_vec(),
@@ -4076,6 +4078,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .await
             .expect("authorize timed snapshot writer");
         snapshot_writer
+            .snapshots()
             .push_store_snapshot(
                 coven_database::CreatedSnapshot {
                     db_image: b"time-cadence-snapshot".to_vec(),
@@ -4770,6 +4773,7 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .await
         .expect("pull founder removal");
     authorized
+        .snapshots()
         .publish_due_snapshots("2026-07-26T01:00:00Z", Some(&encryption), false)
         .await
         .expect("evaluate snapshot after pull");

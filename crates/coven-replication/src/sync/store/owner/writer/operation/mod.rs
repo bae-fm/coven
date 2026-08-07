@@ -21,7 +21,6 @@ use coven_storage as store_objects;
 use std::sync::Arc;
 
 mod abandonment;
-pub(crate) mod acknowledgements;
 mod blob_lifecycle;
 mod blob_preparation;
 mod blob_upload;
@@ -29,7 +28,6 @@ pub(super) mod membership_mutation;
 pub(super) mod membership_mutation_journal;
 pub(crate) mod operations;
 mod preparation;
-pub(crate) mod snapshot;
 
 mod commit_publication;
 mod facades;

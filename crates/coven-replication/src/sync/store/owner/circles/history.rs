@@ -23,7 +23,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
 
     pub(crate) fn acknowledgements(
         &mut self,
-    ) -> super::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
+    ) -> crate::sync::store::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
         self.history.circle_acknowledgements()
     }
 
@@ -114,7 +114,9 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn snapshots(&mut self) -> super::snapshots::CircleSnapshotReader<'_, 'storage> {
+    pub(crate) fn snapshots(
+        &mut self,
+    ) -> crate::sync::store::snapshots::CircleSnapshotReader<'_, 'storage> {
         self.history.circle_snapshots()
     }
 }

@@ -5,8 +5,9 @@ use coven_protocol::store_commit::{
 };
 use coven_storage::SyncStorage;
 
+use crate::sync::store::acknowledgements::StoreAckError;
 use crate::sync::store::owner::verified_history::MergeHistoryVerifier;
-use crate::sync::store::owner::{snapshot, StoreAckError};
+use crate::sync::store::snapshots as snapshot;
 
 /// The reads reclamation performs, holding exactly the capabilities they use:
 /// the database that records materialization and coverage, the storage the
@@ -50,11 +51,8 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
 
     fn circle_acknowledgements(
         &mut self,
-    ) -> crate::sync::store::owner::circles::acknowledgements::CircleAcknowledgementReader<
-        '_,
-        'storage,
-    > {
-        crate::sync::store::owner::circles::acknowledgements::CircleAcknowledgementReader::new(
+    ) -> crate::sync::store::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
+        crate::sync::store::acknowledgements::CircleAcknowledgementReader::new(
             self.database,
             self.storage,
             self.history.verified_root().reference(),
@@ -63,8 +61,8 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
 
     fn circle_snapshots(
         &mut self,
-    ) -> crate::sync::store::owner::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
-        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
+    ) -> crate::sync::store::snapshots::CircleSnapshotReader<'_, 'storage> {
+        crate::sync::store::snapshots::CircleSnapshotReader::new(
             self.database,
             self.storage,
             self.history,

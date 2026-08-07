@@ -11,7 +11,7 @@ pub(super) mod device_join;
 pub(crate) mod device_join_transport;
 pub(super) mod history;
 mod history_construction;
-mod keyring;
+pub(crate) mod keyring;
 pub(crate) use keyring::load_wrapped_store_key;
 pub(crate) mod pull;
 mod registration;
@@ -40,10 +40,9 @@ pub use verified_history::MergeHistorySuccessorEvidence;
 pub use verified_history::MergeOutboundAuthorization;
 pub use verified_history::PreparedMergeHistorySuccessor;
 pub use verified_history::VerifiedMergeMembershipPrefix;
+pub(super) use writer::operations;
 pub use writer::AuthorizedWriterOperation;
-pub use writer::StoreAckError;
 pub use writer::StoreWriterAuthorizationError;
-pub(super) use writer::{operations, snapshot};
 
 #[doc(hidden)]
 pub struct Store {

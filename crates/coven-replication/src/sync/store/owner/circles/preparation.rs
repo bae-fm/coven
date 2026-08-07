@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::bootstrap_blobs::CircleBootstrapBlobVerification;
 use super::commands::CircleOperationRequest;
 use super::{
     read_exact_circle_object, CircleOperationError, CircleOperationJournal, CircleOperationPolicy,
     CircleOperationProgress, CircleTransitionHistory, PreparedCircleOperation,
 };
+use crate::sync::store::owner::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys;

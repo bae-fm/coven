@@ -90,11 +90,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn circle_acknowledgements(
         &mut self,
-    ) -> crate::sync::store::owner::circles::acknowledgements::CircleAcknowledgementReader<
-        '_,
-        'storage,
-    > {
-        crate::sync::store::owner::circles::acknowledgements::CircleAcknowledgementReader::new(
+    ) -> crate::sync::store::acknowledgements::CircleAcknowledgementReader<'_, 'storage> {
+        crate::sync::store::acknowledgements::CircleAcknowledgementReader::new(
             &self.database,
             self.storage.as_ref(),
             self.history_verifier.verified_root().reference(),
@@ -104,8 +101,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn circle_snapshots(
         &mut self,
-    ) -> crate::sync::store::owner::circles::snapshots::CircleSnapshotReader<'_, 'storage> {
-        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
+    ) -> crate::sync::store::snapshots::CircleSnapshotReader<'_, 'storage> {
+        crate::sync::store::snapshots::CircleSnapshotReader::new(
             &self.database,
             self.storage.as_ref(),
             &mut self.history_verifier,

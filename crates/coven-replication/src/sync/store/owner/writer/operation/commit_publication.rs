@@ -530,7 +530,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         })
     }
 
-    pub(super) async fn finish_nonactivating_acknowledgement(
+    pub(crate) async fn finish_nonactivating_acknowledgement(
         &self,
         acknowledgement: coven_protocol::store_commit::StoreAckRef,
     ) -> Result<(), StoreError> {

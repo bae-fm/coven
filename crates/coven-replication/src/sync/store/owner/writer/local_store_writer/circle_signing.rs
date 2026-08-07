@@ -375,7 +375,7 @@ impl LocalStoreWriter {
             coven_protocol::store_commit::CircleSnapshotRef,
             coven_protocol::store_commit::CircleSnapshotMeta,
         )>,
-        crate::sync::store::owner::snapshot::SnapshotError,
+        crate::sync::store::snapshots::SnapshotError,
     > {
         history
             .snapshots()
@@ -396,7 +396,7 @@ impl LocalStoreWriter {
         access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
         Vec<coven_protocol::store_commit::CircleSnapshotMeta>,
-        crate::sync::store::owner::snapshot::SnapshotError,
+        crate::sync::store::snapshots::SnapshotError,
     > {
         Ok(history
             .snapshots()

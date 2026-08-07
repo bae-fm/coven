@@ -2,14 +2,17 @@ use super::*;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     #[cfg(test)]
-    pub(super) async fn load_own_snapshot_for_test(
+    pub(crate) async fn load_own_snapshot_for_test(
         &mut self,
         reference: &coven_protocol::store_commit::StoreSnapshotRef,
-    ) -> Result<coven_protocol::store_commit::SnapshotMeta, snapshot::SnapshotError> {
+    ) -> Result<
+        coven_protocol::store_commit::SnapshotMeta,
+        crate::sync::store::snapshots::SnapshotError,
+    > {
         self.writer
             .load_own_snapshot(&mut self.history, reference)
             .await
-            .map_err(snapshot::SnapshotError::StoreObject)
+            .map_err(crate::sync::store::snapshots::SnapshotError::StoreObject)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

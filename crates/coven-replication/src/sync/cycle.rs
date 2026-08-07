@@ -218,7 +218,8 @@ impl AuthorizedSyncCycle<'_, '_> {
             }
             Box::pin(
                 self.authorization
-                    .stage_and_publish_ack(&completed.sync_time),
+                    .acknowledgements()
+                    .stage_and_publish(&completed.sync_time),
             )
             .await?;
             Box::pin(self.reclaim_packages()).await?;
@@ -399,6 +400,7 @@ impl AuthorizedSyncCycle<'_, '_> {
             .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
         self.authorization
+            .snapshots()
             .publish_due_snapshots(
                 &sync_time,
                 self.routing_encryption,

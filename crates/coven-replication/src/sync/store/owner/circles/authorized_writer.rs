@@ -83,8 +83,10 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         )
     }
 
-    pub(crate) fn snapshots(&mut self) -> snapshots::CircleSnapshotWriter<'_, 'storage> {
-        snapshots::CircleSnapshotWriter::new(
+    pub(crate) fn snapshots(
+        &mut self,
+    ) -> crate::sync::store::snapshots::CircleSnapshotWriter<'_, 'storage> {
+        crate::sync::store::snapshots::CircleSnapshotWriter::new(
             self.writer,
             self.database.clone(),
             self.storage.clone(),

@@ -191,7 +191,7 @@ impl AuthorizedWriterOperation<'_> {
         })
     }
 
-    pub(super) async fn prepare_partition_blob(
+    pub(crate) async fn prepare_partition_blob(
         &self,
         fact: &StoreWriteBlobFact,
         audience: coven_protocol::blob::locator::RemoteAudience,

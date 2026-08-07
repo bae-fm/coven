@@ -2,7 +2,7 @@ use super::*;
 use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
-    pub(super) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
+    pub(crate) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
         self.writer.device_id()
     }
 

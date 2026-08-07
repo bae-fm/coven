@@ -1,9 +1,11 @@
 //! Durable exact Store snapshot publication.
 
+mod circle;
 mod image;
 mod publication;
 
-pub(super) use publication::AuthorizedSnapshotPublication;
+pub(crate) use circle::{CircleSnapshotReader, CircleSnapshotWriter};
+pub(crate) use publication::AuthorizedSnapshotPublication;
 
 pub(crate) use image::should_create_snapshot;
 pub use image::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
@@ -12,7 +14,10 @@ use coven_database::{CreatedSnapshot, SnapshotBlobAudience};
 
 use tracing::{info, warn};
 
-use super::SnapshotHistoryConstruction;
+use super::owner::writer::{LocalStoreWriter, SnapshotHistoryConstruction};
+use super::AuthorizedWriterOperation;
+use coven_database::StoreDatabase;
+use coven_foundation::store_dir::StoreDir;
 #[cfg(test)]
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
@@ -22,6 +27,8 @@ use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
     SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
+use coven_storage::SyncStorage;
+use std::sync::Arc;
 
 pub(crate) struct SnapshotCut {
     pub(crate) snapshot: CreatedSnapshot,
@@ -40,7 +47,35 @@ impl StoreSnapshotCut {
     }
 }
 
-impl super::AuthorizedWriterOperation<'_> {
+pub(crate) struct AuthorizedSnapshots<'operation, 'storage> {
+    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    database: StoreDatabase,
+    storage: Arc<dyn SyncStorage>,
+    store_dir: &'storage StoreDir,
+    membership: coven_protocol::membership::MembershipChain,
+    local_writer: Arc<LocalStoreWriter>,
+}
+
+impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        writer: &'operation mut AuthorizedWriterOperation<'storage>,
+        database: StoreDatabase,
+        storage: Arc<dyn SyncStorage>,
+        store_dir: &'storage StoreDir,
+        membership: coven_protocol::membership::MembershipChain,
+        local_writer: Arc<LocalStoreWriter>,
+    ) -> Self {
+        Self {
+            writer,
+            database,
+            storage,
+            store_dir,
+            membership,
+            local_writer,
+        }
+    }
+
     pub(crate) async fn publish_due_snapshots(
         &mut self,
         created_at: &str,
@@ -48,6 +83,7 @@ impl super::AuthorizedWriterOperation<'_> {
         rotation_pending: bool,
     ) -> Result<(), crate::sync::cycle::SyncCycleFailure> {
         let resumed = self
+            .writer
             .resume_snapshot_publication()
             .await
             .map_err(|error| {
@@ -61,12 +97,16 @@ impl super::AuthorizedWriterOperation<'_> {
             return Ok(());
         }
 
-        let local_position = self.latest_local_store_position().await.map_err(|error| {
-            crate::sync::cycle::SyncCycleFailure::operation(
-                "read local Store snapshot cadence position",
-                error,
-            )
-        })?;
+        let local_position = self
+            .writer
+            .latest_local_store_position()
+            .await
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation(
+                    "read local Store snapshot cadence position",
+                    error,
+                )
+            })?;
         let local_seq = local_position
             .as_ref()
             .map_or(0, |reference| reference.coord.sequence());
@@ -114,8 +154,8 @@ impl super::AuthorizedWriterOperation<'_> {
             return Ok(());
         }
 
-        let author_pubkey = self.writer.author_pubkey();
-        if let Err(reason) = self.require_current_owner(&author_pubkey) {
+        let author_pubkey = self.local_writer.author_pubkey();
+        if let Err(reason) = self.writer.require_current_owner(&author_pubkey) {
             info!(
                 device = %author_pubkey,
                 %reason,
@@ -155,6 +195,7 @@ impl super::AuthorizedWriterOperation<'_> {
 
         let schema_version = self.database.schema_version();
         if let Err(error) = self
+            .writer
             .circles()
             .snapshots()
             .push_circle_snapshots(schema_version, created_at, routing_encryption)
@@ -171,7 +212,7 @@ impl super::AuthorizedWriterOperation<'_> {
             .coverage
             .clone()
             .into_refs()
-            .remove(&self.announcement_stream_id().to_string())
+            .remove(&self.writer.announcement_stream_id().to_string())
             .map(|reference| reference.coord.sequence())
             .unwrap_or(0)
     }
@@ -184,7 +225,7 @@ impl super::AuthorizedWriterOperation<'_> {
         let (snapshot, coverage) = self
             .database
             .capture_store_snapshot_cut(
-                self.store_root().clone(),
+                self.writer.store_root().clone(),
                 self.store_dir.as_ref().to_path_buf(),
                 tables,
                 routing_encryption.cloned(),
@@ -214,12 +255,12 @@ impl super::AuthorizedWriterOperation<'_> {
         schema_version: u32,
         created_at: String,
     ) -> Result<SnapshotMeta, SnapshotError> {
-        let store_root_hash = self.store_root().store_root_hash;
+        let store_root_hash = self.writer.store_root().store_root_hash;
         let membership = self.membership.clone();
         let database = self.database.clone();
         let membership = &membership;
         let database = &database;
-        let publication = self.snapshot_publication().await;
+        let publication = self.writer.snapshot_publication().await;
         publication.drain_spool_cleanup().await?;
         if let Some(pending) = database
             .outbound_snapshot_publication()
@@ -228,8 +269,8 @@ impl super::AuthorizedWriterOperation<'_> {
         {
             return publication.publish_store(pending).await;
         }
-        let device_id = self.local_device_id().to_string();
-        let author = self.writer.author_pubkey();
+        let device_id = self.writer.local_device_id().to_string();
+        let author = self.local_writer.author_pubkey();
         if !membership.is_owner_now(&author) {
             return Err(SnapshotError::UnauthorizedAuthor(author));
         }
@@ -257,12 +298,7 @@ impl super::AuthorizedWriterOperation<'_> {
         };
         let history_summary = self
             .writer
-            .prepare_merge_snapshot_history_summary(
-                &self.history,
-                &coverage,
-                membership,
-                &resolved_devices,
-            )
+            .prepare_merge_snapshot_history_summary(&coverage, membership, &resolved_devices)
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         let storage = self.storage.as_ref();
@@ -284,12 +320,12 @@ impl super::AuthorizedWriterOperation<'_> {
                 Some(previous.reference),
                 previous.successor_slot,
             ),
-            None => (0, None, self.writer.first_snapshot_slot()),
+            None => (0, None, self.local_writer.first_snapshot_slot()),
         };
 
         let snapshot_owner = coven_protocol::remote_object::SnapshotObjectOwner {
             activation: self
-                .writer
+                .local_writer
                 .snapshot_activation_id()
                 .map_err(|error| SnapshotError::Parse(error.to_string()))?,
             generation,
@@ -341,11 +377,11 @@ impl super::AuthorizedWriterOperation<'_> {
             .await
             .map_err(SnapshotError::Bucket)?;
         let activation = self
-            .writer
+            .local_writer
             .snapshot_activation_id()
             .map_err(|error| SnapshotError::Parse(error.to_string()))?;
         let meta = self
-            .writer
+            .local_writer
             .sign_snapshot(
                 store_root_hash,
                 generation,
@@ -400,7 +436,7 @@ impl super::AuthorizedWriterOperation<'_> {
     ) -> Result<(Vec<u8>, Vec<coven_database::PreparedSnapshotBlob>), SnapshotError> {
         let database = &self.database;
         let storage = self.storage.as_ref();
-        let authority = self.writer.blob_write_authority();
+        let authority = self.local_writer.blob_write_authority();
         let CreatedSnapshot {
             db_image,
             mut blobs,
@@ -442,7 +478,7 @@ impl super::AuthorizedWriterOperation<'_> {
             )));
         }
         if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
-            let locator = super::prepare_partition_blob_locator(
+            let locator = crate::sync::store::owner::writer::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
                 &protection,
@@ -485,6 +521,7 @@ impl super::AuthorizedWriterOperation<'_> {
             continue;
         }
         let (binding, blob) = self
+            .writer
             .prepare_partition_blob(
                 &captured.fact,
                 audience,
@@ -568,8 +605,8 @@ impl super::AuthorizedWriterOperation<'_> {
         reference: &StoreSnapshotRef,
         bytes: &[u8],
     ) -> Result<SnapshotMeta, SnapshotError> {
-        self.writer
-            .parse_snapshot_stream_entry(bytes, self.store_root(), reference)
+        self.local_writer
+            .parse_snapshot_stream_entry(bytes, self.writer.store_root(), reference)
             .map_err(|error| SnapshotError::Parse(error.to_string()))
     }
 }

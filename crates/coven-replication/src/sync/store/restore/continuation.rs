@@ -126,10 +126,7 @@ impl<'storage> RestoringStore<'storage> {
     pub async fn reconcile_snapshot_blobs(
         &self,
         cancel: &watch::Receiver<bool>,
-    ) -> Result<
-        crate::sync::store::owner::writer::snapshot::SnapshotBlobReconcile,
-        coven_database::DbError,
-    > {
+    ) -> Result<crate::sync::store::snapshots::SnapshotBlobReconcile, coven_database::DbError> {
         let blobs = self
             .database
             .eager_row_blob_refs()
@@ -140,9 +137,7 @@ impl<'storage> RestoringStore<'storage> {
             .map_err(coven_database::DbError::Message)?;
 
         if blobs.is_empty() {
-            return Ok(
-                crate::sync::store::owner::writer::snapshot::SnapshotBlobReconcile::Complete,
-            );
+            return Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete);
         }
 
         let total = blobs.len();
@@ -150,9 +145,7 @@ impl<'storage> RestoringStore<'storage> {
         for blob in blobs {
             if *cancel.borrow() {
                 info!(total, "snapshot blob reconciliation cancelled");
-                return Ok(
-                    crate::sync::store::owner::writer::snapshot::SnapshotBlobReconcile::Cancelled,
-                );
+                return Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Cancelled);
             }
             if self.download_blob(blob).await.is_err() {
                 all_ok = false;
@@ -160,10 +153,10 @@ impl<'storage> RestoringStore<'storage> {
         }
         if all_ok {
             info!(total, "snapshot blob reconciliation complete");
-            Ok(crate::sync::store::owner::writer::snapshot::SnapshotBlobReconcile::Complete)
+            Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete)
         } else {
             warn!(total, "some snapshot blob files are not local");
-            Ok(crate::sync::store::owner::writer::snapshot::SnapshotBlobReconcile::Incomplete)
+            Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Incomplete)
         }
     }
 

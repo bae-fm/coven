@@ -314,7 +314,7 @@ impl LocalStoreWriter {
             .map(|activation| activation.activation_id())
     }
 
-    pub(super) fn acknowledgement_activation_id(
+    pub(crate) fn acknowledgement_activation_id(
         &self,
     ) -> Result<
         coven_protocol::store_commit::StreamActivationId,
@@ -326,7 +326,7 @@ impl LocalStoreWriter {
             .map(|activation| activation.activation_id())
     }
 
-    pub(super) fn snapshot_activation_id(
+    pub(crate) fn snapshot_activation_id(
         &self,
     ) -> Result<
         coven_protocol::store_commit::StreamActivationId,
@@ -338,11 +338,11 @@ impl LocalStoreWriter {
             .map(|activation| activation.activation_id())
     }
 
-    pub(super) fn first_snapshot_slot(&self) -> coven_protocol::objects::ObjectSlot {
+    pub(crate) fn first_snapshot_slot(&self) -> coven_protocol::objects::ObjectSlot {
         self.registration.value().snapshots.first_slot().clone()
     }
 
-    pub(super) fn first_acknowledgement_slot(&self) -> coven_protocol::objects::ObjectSlot {
+    pub(crate) fn first_acknowledgement_slot(&self) -> coven_protocol::objects::ObjectSlot {
         self.registration
             .value()
             .acknowledgements
@@ -350,7 +350,7 @@ impl LocalStoreWriter {
             .clone()
     }
 
-    pub(super) fn blob_write_authority(&self) -> coven_protocol::objects::BlobWriteAuthority<'_> {
+    pub(crate) fn blob_write_authority(&self) -> coven_protocol::objects::BlobWriteAuthority<'_> {
         coven_protocol::objects::BlobWriteAuthority::new(&self.registration)
     }
 }

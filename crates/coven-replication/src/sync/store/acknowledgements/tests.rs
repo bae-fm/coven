@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::*;
 use crate::sync::test_helpers::TestDevice;
 use coven_database::Database;
+use coven_keys::keys::UserKeypair;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 

@@ -1,9 +1,19 @@
-use super::snapshot;
-use super::*;
+//! Store and Circle acknowledgement publication.
+
+mod circle;
+
+pub(crate) use circle::CircleAcknowledgementReader;
+
+use super::owner::writer::LocalStoreWriter;
+use super::snapshots as snapshot;
+use super::{AuthorizedWriterOperation, StoreError};
+use crate::sync::cycle::SyncCycleFailure;
+use coven_database::StoreDatabase;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
-use coven_protocol::store_commit::{ack_slot_prefix, StoreAck, SuccessorLink};
-use coven_storage::VerifiedObjectWrites;
+use coven_protocol::store_commit::{ack_slot_prefix, CommitFrontier, StoreAck, SuccessorLink};
+use coven_storage::{SyncStorage, VerifiedObjectWrites};
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreAckError {
@@ -23,8 +33,29 @@ pub enum StoreAckError {
     Snapshot(#[from] snapshot::SnapshotError),
 }
 
-impl AuthorizedWriterOperation<'_> {
-    pub(crate) async fn stage_and_publish_ack(
+pub(crate) struct AuthorizedAcknowledgements<'operation, 'storage> {
+    writer: &'operation mut AuthorizedWriterOperation<'storage>,
+    database: StoreDatabase,
+    storage: Arc<dyn SyncStorage>,
+    local_writer: Arc<LocalStoreWriter>,
+}
+
+impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
+    pub(crate) fn new(
+        writer: &'operation mut AuthorizedWriterOperation<'storage>,
+        database: StoreDatabase,
+        storage: Arc<dyn SyncStorage>,
+        local_writer: Arc<LocalStoreWriter>,
+    ) -> Self {
+        Self {
+            writer,
+            database,
+            storage,
+            local_writer,
+        }
+    }
+
+    pub(crate) async fn stage_and_publish(
         &mut self,
         sync_time: &str,
     ) -> Result<(), SyncCycleFailure> {
@@ -43,9 +74,13 @@ impl AuthorizedWriterOperation<'_> {
         Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
             .await
             .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-        Box::pin(self.circles().stage_acknowledgements(&frontier, sync_time))
-            .await
-            .map_err(|error| format!("stage Circle acknowledgements: {error}"))?;
+        Box::pin(
+            self.writer
+                .circles()
+                .stage_acknowledgements(&frontier, sync_time),
+        )
+        .await
+        .map_err(|error| format!("stage Circle acknowledgements: {error}"))?;
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
@@ -58,8 +93,8 @@ impl AuthorizedWriterOperation<'_> {
         sync_time: String,
     ) -> Result<StoreAck, StoreAckError> {
         let commits = frontier.commits();
-        let device_id = self.local_device_id().to_string();
-        let root = self.store_root().clone();
+        let device_id = self.writer.local_device_id().to_string();
+        let root = self.writer.store_root().clone();
         let history_cut =
             coven_protocol::store_commit::StoreHistoryCut::from_commits(commits.clone());
         let (device_state, _) = self
@@ -67,6 +102,7 @@ impl AuthorizedWriterOperation<'_> {
             .store_device_state_for_history_cut(&history_cut)
             .await?;
         let snapshot = self
+            .writer
             .select_acknowledgement_snapshot(&frontier, &device_state)
             .await?;
         let exclusions = coven_protocol::store_commit::StoreAckExclusionState {
@@ -88,7 +124,7 @@ impl AuthorizedWriterOperation<'_> {
                 Some(previous.reference.object),
                 previous.successor_slot,
             ),
-            None => (1, None, self.writer.first_acknowledgement_slot()),
+            None => (1, None, self.local_writer.first_acknowledgement_slot()),
         };
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -112,11 +148,11 @@ impl AuthorizedWriterOperation<'_> {
             .await
             .map_err(StoreObjectError::from)?;
         let activation = self
-            .writer
+            .local_writer
             .acknowledgement_activation_id()
             .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
         let acknowledgement = self
-            .writer
+            .local_writer
             .sign_device_acknowledgement(
                 root.store_root_hash,
                 sequence,
@@ -148,7 +184,7 @@ impl AuthorizedWriterOperation<'_> {
     }
 
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {
-        let device_id = self.local_device_id().to_string();
+        let device_id = self.writer.local_device_id().to_string();
         let mut published = 0_u64;
         while let Some(outbound) = self.database.oldest_outbound_store_ack().await? {
             if let Some(activated) = self
@@ -174,10 +210,10 @@ impl AuthorizedWriterOperation<'_> {
             }
             let candidate = match outbound.activation.clone() {
                 coven_database::OutboundStoreAckActivation::AwaitingCandidate => {
-                    let plan = self.prepare_plan().await?;
+                    let plan = self.writer.prepare_plan().await?;
                     plan.common()
                         .validate_acknowledgement(&outbound.ack.value)?;
-                    let candidate = Box::pin(self.prepare_candidate(
+                    let candidate = Box::pin(self.writer.prepare_candidate(
                         plan,
                         crate::sync::store::operations::StoreOperationBatch::Acknowledgement {
                             reference: outbound.reference.clone(),
@@ -193,7 +229,8 @@ impl AuthorizedWriterOperation<'_> {
                 }
                 coven_database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
                 coven_database::OutboundStoreAckActivation::Nonactivating(_) => {
-                    self.finish_nonactivating_acknowledgement(outbound.reference)
+                    self.writer
+                        .finish_nonactivating_acknowledgement(outbound.reference)
                         .await?;
                     published = published
                         .checked_add(1)
@@ -256,12 +293,17 @@ impl AuthorizedWriterOperation<'_> {
             self.database
                 .mark_remote_object_uploaded(acknowledgement_remote)
                 .await?;
-            self.circles()
+            self.writer
+                .circles()
                 .publish_acknowledgement_objects(&outbound, &candidate)
                 .await?;
             let _authorship = self.database.author_own_stream().await;
-            let publication =
-                Box::pin(self.publish_prepared(Box::new(candidate), None, None)).await?;
+            let publication = Box::pin(self.writer.publish_prepared(
+                Box::new(candidate),
+                None,
+                None,
+            ))
+            .await?;
             match publication
             {
                 crate::sync::store::operations::StoreOperationPublicationOutcome::Activated(_) => {

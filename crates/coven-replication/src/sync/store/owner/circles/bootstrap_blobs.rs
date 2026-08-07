@@ -1,6 +1,6 @@
 use crate::sync::store::circle_controls::CircleOperationError;
 
-pub(super) trait CircleBootstrapBlobVerification {
+pub(crate) trait CircleBootstrapBlobVerification {
     async fn verify_stored_blob(
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,

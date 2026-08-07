@@ -17,7 +17,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<Option<SelectedStableStoreSnapshot>, StorePullError> {
         let Some(maximal_candidate) =
-            super::snapshot::select_maximal_store_snapshot(candidates.clone())
+            crate::sync::store::snapshots::select_maximal_store_snapshot(candidates.clone())
         else {
             return Ok(None);
         };
@@ -42,7 +42,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 },
             }
         }
-        let selected = super::snapshot::select_maximal_store_snapshot(
+        let selected = crate::sync::store::snapshots::select_maximal_store_snapshot(
             stable
                 .iter()
                 .map(|candidate| candidate.snapshot.clone())

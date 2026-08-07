@@ -348,7 +348,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                         )
                         .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
                         let store_database = coven_database::StoreDatabase::from_database(query_db);
-                        crate::sync::store::owner::circles::snapshots::CircleSnapshotReader::new(
+                        crate::sync::store::snapshots::CircleSnapshotReader::new(
                             &store_database,
                             storage.as_ref(),
                             &mut history_verifier,
