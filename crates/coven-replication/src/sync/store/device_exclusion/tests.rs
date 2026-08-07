@@ -852,14 +852,14 @@ impl<'a> ExcludedPeer<'a> {
         let is_exact_candidate_hold = |candidate: &StoreBatchCommitRef| {
             matches!(
                 pull.held_positions.as_slice(),
-                [crate::sync::store::owner::pull::HeldStorePosition {
+                [crate::sync::store::pull::HeldStorePosition {
                     coordinate:
-                        crate::sync::store::owner::pull::HeldStoreCoordinate::Commit {
+                        crate::sync::store::pull::HeldStoreCoordinate::Commit {
                             commit,
                             ..
                         },
                     reason:
-                        crate::sync::store::owner::pull::HeldStorePositionReason::InactiveDevice {
+                        crate::sync::store::pull::HeldStorePositionReason::InactiveDevice {
                             ..
                         },
                 }] if commit == candidate

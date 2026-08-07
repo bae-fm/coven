@@ -1,22 +1,19 @@
 use super::*;
-use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::authorized_store::LocalStoreDevice;
-use super::pull;
 use crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifier;
 use crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError;
 use crate::sync::store::commit_verification::merge_history::*;
 use crate::sync::store::owner_role_promotion::OwnerPromotionHistory;
+use crate::sync::store::pull;
 use crate::sync::store::restore::RestoreHistory;
-use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
 
 pub(crate) mod cleanup;
 mod construction;
 mod facades;
 mod loading;
-mod pull_interface;
 pub(crate) mod retained;
 mod test_support;
 

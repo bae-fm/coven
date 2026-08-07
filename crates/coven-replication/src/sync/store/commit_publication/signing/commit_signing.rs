@@ -7,8 +7,8 @@ impl LocalStoreWriter {
         membership: &coven_protocol::membership::MembershipChain,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<
-        crate::sync::store::owner::pull::StorePullExecution,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullExecution,
+        crate::sync::store::pull::StorePullError,
     > {
         history
             .pull(membership, Some(&self.identity), routing_encryption)

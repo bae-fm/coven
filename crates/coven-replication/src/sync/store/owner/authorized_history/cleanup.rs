@@ -5,7 +5,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn cleanup_merge_candidate(
         &mut self,
         write_id: coven_protocol::write::WriteId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
         let root = self.history_verifier.verified_root().reference().clone();
         for verification in self
             .database
@@ -28,46 +28,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         delete_candidate_cleanup_targets(self.storage.as_ref(), &self.database, targets).await
     }
 
-    pub(crate) async fn resume_merge_retraction_cleanups(
-        &mut self,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        for candidate in self.database.pending_merge_retraction_cleanups().await? {
-            let root = self.history_verifier.verified_root().reference().clone();
-            let verification = self
-                .database
-                .merge_retraction_cleanup_verification(root, candidate.clone())
-                .await?;
-            self.merge_conflict()
-                .apply_terminal_nonactivation(
-                    merge_conflict::TerminalNonactivationCandidate::MergeRetraction {
-                        reference: candidate.clone(),
-                        verification,
-                    },
-                )
-                .await?;
-            let targets = self
-                .database
-                .merge_retraction_cleanup_targets(candidate.clone())
-                .await?;
-            delete_candidate_cleanup_targets::<crate::sync::store::owner::pull::StorePullError>(
-                self.storage.as_ref(),
-                &self.database,
-                targets,
-            )
-            .await?;
-            self.database
-                .finish_merge_retraction_cleanup(candidate)
-                .await?;
-        }
-        Ok(())
-    }
-
     pub(crate) async fn materialize_device_join_activation(
         &mut self,
         reference: &StoreBatchCommitRef,
         expected_outcome: &coven_protocol::store_commit::DeviceJoinOutcomeRef,
         membership_state: &StoreMembershipStateRef,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
         self.materialize_device_join_activation_inner(reference, expected_outcome, membership_state)
             .await
     }
@@ -333,7 +299,7 @@ pub(crate) async fn cleanup_circle_operation_candidate<'storage>(
     storage: &'storage dyn SyncStorage,
     history: &mut MergeHistoryVerifier<'storage>,
     operation_id: &coven_protocol::circle::CircleOperationId,
-) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+) -> Result<(), crate::sync::store::pull::StorePullError> {
     let root = history.verified_root().reference().clone();
     for verification in database
         .circle_operation_discard_terminal_verifications(root, operation_id)

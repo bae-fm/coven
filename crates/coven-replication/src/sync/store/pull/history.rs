@@ -1,19 +1,53 @@
 use super::*;
+use crate::sync::store::blob::{RemoteBlobSource, StoreBlobCache};
+use crate::sync::store::merge_conflict;
+use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
+use coven_protocol::membership::MembershipStatus;
+use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
+use std::collections::{BTreeMap, BTreeSet};
 
-impl<'storage> AuthorizedStoreHistory<'storage> {
-    pub(crate) async fn pull(
-        &mut self,
-        membership: &coven_protocol::membership::MembershipChain,
-        identity: Option<&UserKeypair>,
-        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
-    ) -> Result<pull::StorePullExecution, pull::StorePullError> {
-        pull::AuthorizedPull::load(self, membership, identity, routing_encryption)
-            .await?
-            .execute()
-            .await
+/// The reads, verifications, and materializations a pull performs, over the
+/// five capabilities they need.
+pub(crate) struct PullHistory<'operation, 'storage> {
+    database: StoreDatabase,
+    storage: &'storage dyn SyncStorage,
+    history: &'operation mut MergeHistoryVerifier<'storage>,
+    blob_source: &'operation RemoteBlobSource<'storage>,
+    blob_cache: &'operation StoreBlobCache,
+}
+
+impl<'operation, 'storage> PullHistory<'operation, 'storage> {
+    pub(crate) fn new(
+        database: StoreDatabase,
+        storage: &'storage dyn SyncStorage,
+        history: &'operation mut MergeHistoryVerifier<'storage>,
+        blob_source: &'operation RemoteBlobSource<'storage>,
+        blob_cache: &'operation StoreBlobCache,
+    ) -> Self {
+        Self {
+            database,
+            storage,
+            history,
+            blob_source,
+            blob_cache,
+        }
     }
 
-    pub(crate) async fn pull_package_schema(
+    pub(crate) fn circles(
+        &mut self,
+    ) -> crate::sync::store::circles::VerifiedCircleHistory<'_, 'storage> {
+        crate::sync::store::circles::VerifiedCircleHistory::new(
+            self.database.clone(),
+            self.storage,
+            self.history,
+        )
+    }
+
+    pub(crate) fn root(&self) -> &StoreRootRef {
+        self.history.verified_root().reference()
+    }
+
+    pub(crate) async fn package_schema(
         &self,
     ) -> Result<std::sync::Arc<coven_database::TableSchema>, coven_database::DbError> {
         Ok(std::sync::Arc::new(
@@ -21,44 +55,46 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         ))
     }
 
-    pub(crate) fn pull_store_blob_protection(
+    pub(crate) fn store_blob_protection(
         &self,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
     {
         self.blob_source.store_protection()
     }
 
-    pub(crate) async fn prepare_pull_package(
+    pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
+        self.blob_cache.drain_local_cleanup().await
+    }
+
+    pub(crate) async fn prepare_package(
         &self,
         package: coven_protocol::audience_package::AudiencePackage,
         blob_protection: coven_protocol::objects::BlobSpoolProtection,
         schema: std::sync::Arc<coven_database::TableSchema>,
-    ) -> Result<
-        Result<PreparedMergeMaterializationPackage, pull::HeldStorePositionReason>,
-        pull::StorePullError,
-    > {
+    ) -> Result<Result<PreparedMergeMaterializationPackage, HeldStorePositionReason>, StorePullError>
+    {
         let changeset =
             match coven_database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
                 Ok(changeset) => changeset,
                 Err(coven_database::ChangesetIdentityError::Row(error)) => {
-                    return Ok(Err(pull::HeldStorePositionReason::InvalidRowIdentity {
+                    return Ok(Err(HeldStorePositionReason::InvalidRowIdentity {
                         table: error.table().to_string(),
                         reason: error.to_string(),
                     }))
                 }
                 Err(error) => {
-                    return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                    return Ok(Err(HeldStorePositionReason::InvalidChangeset(
                         error.to_string(),
                     )))
                 }
             };
         let changes = match coven_database::walk_changeset(changeset.bytes()) {
             Ok(changes) => changes,
-            Err(error) => return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(error))),
+            Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
         };
         let old_changes = match coven_database::walk_old_changeset(changeset.bytes()) {
             Ok(changes) => changes,
-            Err(error) => return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(error))),
+            Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
         };
         let mut eager = Vec::new();
         for change in &changes {
@@ -68,7 +104,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             let blob = match self.database.blob_ref_from_change(change) {
                 Ok(blob) => blob,
                 Err(error) => {
-                    return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+                    return Ok(Err(HeldStorePositionReason::InvalidChangeset(
                         error.to_string(),
                     )))
                 }
@@ -82,12 +118,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             let row_id = match change.pk() {
                 Some(row_id) => row_id,
                 None => {
-                    return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
-                        format!(
-                            "blob-bearing incoming row {:?} has no primary key",
-                            change.table
-                        ),
-                    )))
+                    return Ok(Err(HeldStorePositionReason::InvalidChangeset(format!(
+                        "blob-bearing incoming row {:?} has no primary key",
+                        change.table
+                    ))))
                 }
             };
             let matches = package
@@ -101,13 +135,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 })
                 .collect::<Vec<_>>();
             let [binding] = matches.as_slice() else {
-                return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
-                    format!(
-                        "incoming eager blob row {:?}/{row_id:?} has {} exact locator bindings",
-                        change.table,
-                        matches.len()
-                    ),
-                )));
+                return Ok(Err(HeldStorePositionReason::InvalidChangeset(format!(
+                    "incoming eager blob row {:?}/{row_id:?} has {} exact locator bindings",
+                    change.table,
+                    matches.len()
+                ))));
             };
             eager.push(binding.blob().clone());
         }
@@ -124,14 +156,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             if let Err(cause) = self
                 .blob_source
                 .verify_plaintext_with_protection(
-                    &self.blob_cache,
+                    self.blob_cache,
                     stored,
                     blob_protection.clone(),
                     retain,
                 )
                 .await
             {
-                failures.push(pull::BlobDownloadFailure {
+                failures.push(BlobDownloadFailure {
                     namespace: locator.namespace().to_string(),
                     id: locator.blob_id().to_string(),
                     cause,
@@ -139,17 +171,17 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             }
         }
         if !failures.is_empty() {
-            let failures = pull::BlobDownloadFailures::new(failures);
+            let failures = BlobDownloadFailures::new(failures);
             if failures.has_transport_failure() {
-                return Err(pull::StorePullError::BlobDownloads(failures));
+                return Err(StorePullError::BlobDownloads(failures));
             }
-            return Ok(Err(pull::HeldStorePositionReason::BlobDownloadFailed));
+            return Ok(Err(HeldStorePositionReason::BlobDownloadFailed));
         }
         if let Err(error) = self
             .database
             .validate_local_blob_cleanup_changes(&old_changes, &changes)
         {
-            return Ok(Err(pull::HeldStorePositionReason::InvalidChangeset(
+            return Ok(Err(HeldStorePositionReason::InvalidChangeset(
                 error.to_string(),
             )));
         }
@@ -159,40 +191,40 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }))
     }
 
-    pub(crate) fn pull_has_scoped_graph(&self) -> bool {
+    pub(crate) fn has_scoped_graph(&self) -> bool {
         self.database.has_scoped_graph()
     }
 
-    pub(crate) fn pull_schema_version(&self) -> u32 {
+    pub(crate) fn schema_version(&self) -> u32 {
         self.database.schema_version()
     }
 
-    pub(crate) fn pull_receive_wall_ms(&self) -> u64 {
+    pub(crate) fn receive_wall_ms(&self) -> u64 {
         self.database.receive_wall_ms()
     }
 
-    pub(crate) async fn pull_materialized_frontier(
+    pub(crate) async fn materialized_frontier(
         &self,
     ) -> Result<std::collections::BTreeMap<String, StoreBatchCommitRef>, coven_database::DbError>
     {
         self.database.materialized_frontier().await
     }
 
-    pub(crate) async fn pull_device_state_for_cut(
+    pub(crate) async fn device_state_for_cut(
         &self,
-        cut: &coven_protocol::store_commit::StoreHistoryCut,
+        cut: &StoreHistoryCut,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), coven_database::DbError> {
         self.database.store_device_state_for_history_cut(cut).await
     }
 
-    pub(crate) async fn pull_device_state_for_order(
+    pub(crate) async fn device_state_for_order(
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), coven_database::DbError> {
         self.database.store_device_state_for_order(order).await
     }
 
-    pub(crate) async fn pull_exact_materialized_ref(
+    pub(crate) async fn exact_materialized_ref(
         &self,
         stream_id: &str,
         sequence: u64,
@@ -202,20 +234,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(crate) async fn pull_snapshot_coverage(
+    pub(crate) async fn snapshot_coverage(
         &self,
     ) -> Result<CommitFrontier, coven_database::DbError> {
         self.database.snapshot_coverage_frontier().await
     }
 
-    pub(crate) async fn pull_exclusion_freezes(
+    pub(crate) async fn exclusion_freezes(
         &self,
     ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, coven_database::DbError>
     {
         self.database.store_device_exclusion_freezes().await
     }
 
-    pub(crate) async fn record_pull_circle_close_exclusions(
+    pub(crate) async fn record_circle_close_exclusions(
         &self,
         exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), coven_database::DbError> {
@@ -224,12 +256,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn commit_pull_materialization(
+    pub(crate) async fn commit_materialization(
         &self,
         materialization: PreparedMergeMaterialization,
         retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
-        local_store_membership: pull::LocalStoreMembership,
+        local_store_membership: LocalStoreMembership,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
     ) -> Result<coven_protocol::membership::ApplyOutcome, coven_database::DbError> {
@@ -244,16 +275,36 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(crate) async fn prepare_pull_retained_history(
+    pub(crate) async fn prepare_merge_history_successor(
+        &self,
+        verified_commit: &VerifiedStoreBatchCommit,
+        membership: &MembershipChain,
+        recovery_author: Option<&coven_protocol::store_commit::StoreDeviceRegistrationRef>,
+        state_after: ResolvedStoreDeviceState,
+        evidence: MergeHistorySuccessorEvidence,
+    ) -> Result<PreparedMergeHistorySuccessor, StorePullError> {
+        crate::sync::store::owner::authorized_history::retained::prepare_merge_history_successor(
+            &self.database,
+            self.history,
+            verified_commit,
+            membership,
+            recovery_author,
+            state_after,
+            evidence,
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_retained_history(
         &mut self,
-    ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, pull::StorePullError> {
+    ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, StorePullError> {
         let retained_refs = self.database.retained_merge_materialization_refs().await?;
-        self.history_verifier.verify_refs(retained_refs).await?;
-        let retained_commit_proofs = self.history_verifier.retained_commit_proofs();
+        self.history.verify_refs(retained_refs).await?;
+        let retained_commit_proofs = self.history.retained_commit_proofs();
         let retained = self
             .database
             .retained_merge_replay_inputs_with_verified_commits(
-                self.history_verifier.verified_root().reference().clone(),
+                self.history.verified_root().reference().clone(),
                 retained_commit_proofs,
             )
             .await?;
@@ -261,12 +312,44 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(retained)
     }
 
-    pub(crate) async fn load_active_pull_registrations(
+    /// Retire the terminal nonactivations a retracted Merge candidate left
+    /// behind, then delete the objects it staged.
+    pub(crate) async fn resume_merge_retraction_cleanups(&mut self) -> Result<(), StorePullError> {
+        for candidate in self.database.pending_merge_retraction_cleanups().await? {
+            let root = self.history.verified_root().reference().clone();
+            let verification = self
+                .database
+                .merge_retraction_cleanup_verification(root, candidate.clone())
+                .await?;
+            merge_conflict::MergeConflictHistory::new(&self.database, self.storage, self.history)
+                .apply_terminal_nonactivation(
+                    merge_conflict::TerminalNonactivationCandidate::MergeRetraction {
+                        reference: candidate.clone(),
+                        verification,
+                    },
+                )
+                .await?;
+            let targets = self
+                .database
+                .merge_retraction_cleanup_targets(candidate.clone())
+                .await?;
+            crate::sync::store::owner::delete_candidate_cleanup_targets::<StorePullError>(
+                self.storage,
+                &self.database,
+                targets,
+            )
+            .await?;
+            self.database
+                .finish_merge_retraction_cleanup(candidate)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn load_active_registrations(
         &self,
-    ) -> Result<
-        Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>,
-        pull::StorePullError,
-    > {
+    ) -> Result<Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>, StorePullError>
+    {
         let durable = self
             .database
             .activated_store_device_registration_records()
@@ -274,9 +357,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let mut verified = Vec::with_capacity(durable.len());
         for expected in durable {
             let reference = expected.reference();
-            let opened = self.history_verifier.load_registration(reference).await?;
+            let opened = self.history.load_registration(reference).await?;
             if &opened.value != expected.value() {
-                return Err(pull::StorePullError::InvalidState(format!(
+                return Err(StorePullError::InvalidState(format!(
                     "activated Store registration {} differs from its exact remote bytes",
                     reference.device_id
                 )));
@@ -285,7 +368,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 opened.value.store_commits,
                 coven_protocol::store_commit::DeviceStreamAnchor::StoreAnnouncements { .. }
             ) {
-                return Err(pull::StorePullError::InvalidState(format!(
+                return Err(StorePullError::InvalidState(format!(
                     "activated Store registration {} has no Merge announcement anchor",
                     reference.device_id
                 )));
@@ -295,68 +378,58 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(verified)
     }
 
-    pub(crate) async fn discover_pull_owner_recoveries(
+    pub(crate) async fn discover_owner_recoveries(
         &self,
         membership: &MembershipChain,
-    ) -> Result<
-        Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>,
-        pull::StorePullError,
-    > {
-        self.history_verifier
-            .discover_owner_recoveries(membership)
-            .await
+    ) -> Result<Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>, StorePullError>
+    {
+        self.history.discover_owner_recoveries(membership).await
     }
 
-    pub(crate) async fn discover_pull_stream(
+    pub(crate) async fn discover_stream(
         &mut self,
         registration_ref: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
-        registration: &coven_protocol::store_commit::StoreDeviceRegistration,
-        inactive_accepted_cut: Option<&coven_protocol::store_commit::StoreHistoryCut>,
-    ) -> Result<pull::MergeStreamDiscovery, pull::StorePullError> {
-        self.history_verifier
+        registration: &StoreDeviceRegistration,
+        inactive_accepted_cut: Option<&StoreHistoryCut>,
+    ) -> Result<MergeStreamDiscovery, StorePullError> {
+        self.history
             .discover_merge_stream(registration_ref, registration, inactive_accepted_cut)
             .await
     }
 
-    pub(crate) async fn verify_pull_refs(
+    pub(crate) async fn verify_refs(
         &mut self,
         references: impl IntoIterator<Item = StoreBatchCommitRef>,
-    ) -> Result<(), pull::StorePullError> {
-        self.history_verifier.verify_refs(references).await
+    ) -> Result<(), StorePullError> {
+        self.history.verify_refs(references).await
     }
 
-    pub(crate) fn verified_pull_commit(
+    pub(crate) fn verified_commit(
         &self,
         reference: &StoreBatchCommitRef,
-    ) -> Option<pull::VerifiedPullCandidate> {
-        self.history_verifier.verified_pull_candidate(reference)
+    ) -> Option<VerifiedPullCandidate> {
+        self.history.verified_pull_candidate(reference)
     }
 
-    pub(crate) fn verified_pull_membership_prefix(
+    pub(crate) fn verified_membership_prefix(
         &self,
         predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
-    ) -> Result<VerifiedMergeMembershipPrefix, pull::StorePullError> {
-        self.history_verifier
-            .verified_membership_prefix(predecessors)
+    ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
+        self.history.verified_membership_prefix(predecessors)
     }
 
-    pub(crate) async fn load_pull_store_package(
+    pub(crate) async fn load_store_package(
         &mut self,
         reference: &StoreBatchCommitRef,
-    ) -> Result<
-        Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>,
-        coven_protocol::objects::StoreObjectError,
-    > {
-        self.history_verifier.load_store_package(reference).await
+    ) -> Result<Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>, StoreObjectError> {
+        self.history.load_store_package(reference).await
     }
 
-    pub(crate) async fn load_pull_predecessor_membership(
+    pub(crate) async fn load_predecessor_membership(
         &mut self,
-        state: &StoreMembershipStateRef,
+        state: &coven_protocol::circle_control::StoreMembershipStateRef,
     ) -> Result<MembershipChain, RegistrationLoadError> {
-        self.history_verifier
-            .load_predecessor_membership(state)
-            .await
+        self.history.load_predecessor_membership(state).await
     }
 
     pub(crate) async fn materialized_reference_status(
@@ -364,44 +437,36 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         coverage: &CommitFrontier,
         stream_id: &str,
         reference: &StoreBatchCommitRef,
-    ) -> Result<pull::MaterializedCheck, pull::StorePullError> {
-        pull::materialized_reference_status(
-            &self.database,
-            &mut self.history_verifier,
-            coverage,
-            stream_id,
-            reference,
-        )
-        .await
+    ) -> Result<MaterializedCheck, StorePullError> {
+        materialized_reference_status(&self.database, self.history, coverage, stream_id, reference)
+            .await
     }
 
-    pub(crate) async fn pull_readiness(
+    pub(crate) async fn readiness(
         &mut self,
         coverage: &CommitFrontier,
         frontier: &std::collections::BTreeMap<String, StoreBatchCommitRef>,
         device_state: &ResolvedStoreDeviceState,
         exclusion_freezes: &[coven_protocol::store_commit::StoreDeviceProposalAck],
         commit_ref: &StoreBatchCommitRef,
-        commit: &coven_protocol::store_commit::StoreBatchCommit,
-    ) -> Result<pull::Readiness, pull::StorePullError> {
-        let stream_id = pull::commit_stream_id(&commit_ref.coord);
+        commit: &StoreBatchCommit,
+    ) -> Result<Readiness, StorePullError> {
+        let stream_id = commit_stream_id(&commit_ref.coord);
         if let Some(current) = frontier.get(&stream_id) {
             if commit_ref.coord.sequence() <= current.coord.sequence() {
                 match self
                     .materialized_reference_status(coverage, &stream_id, commit_ref)
                     .await?
                 {
-                    pull::MaterializedCheck::Yes => {
-                        return Ok(pull::Readiness::AlreadyMaterialized)
-                    }
-                    pull::MaterializedCheck::Missing => {
-                        return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                    MaterializedCheck::Yes => return Ok(Readiness::AlreadyMaterialized),
+                    MaterializedCheck::Missing => {
+                        return Ok(Readiness::Held(HeldStorePosition::commit(
                             commit_ref,
-                            pull::HeldStorePositionReason::MissingCommit,
+                            HeldStorePositionReason::MissingCommit,
                         )))
                     }
-                    pull::MaterializedCheck::Held(reason) => {
-                        return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                    MaterializedCheck::Held(reason) => {
+                        return Ok(Readiness::Held(HeldStorePosition::commit(
                             commit_ref, reason,
                         )))
                     }
@@ -409,44 +474,39 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             }
             if commit.order.predecessor() != Some(current) {
                 let reason = match commit.order.predecessor() {
-                    Some(missing) => {
-                        pull::HeldStorePositionReason::MissingPredecessor(missing.clone())
-                    }
-                    None => pull::HeldStorePositionReason::InvalidObject(
+                    Some(missing) => HeldStorePositionReason::MissingPredecessor(missing.clone()),
+                    None => HeldStorePositionReason::InvalidObject(
                         "non-genesis Merge commit omits its exact predecessor".to_string(),
                     ),
                 };
-                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                return Ok(Readiness::Held(HeldStorePosition::commit(
                     commit_ref, reason,
                 )));
             }
             if commit_ref.coord.sequence() != current.coord.sequence() + 1 {
-                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
-                        commit_ref,
-                        pull::HeldStorePositionReason::InvalidObject(
-                            "Merge commit sequence does not immediately follow its materialized frontier"
-                                .to_string(),
-                        ),
-                    )));
+                return Ok(Readiness::Held(HeldStorePosition::commit(
+                    commit_ref,
+                    HeldStorePositionReason::InvalidObject(
+                        "Merge commit sequence does not immediately follow its materialized frontier"
+                            .to_string(),
+                    ),
+                )));
             }
         } else if commit_ref.coord.sequence() != 1 || commit.order.predecessor().is_some() {
             let reason = match commit.order.predecessor() {
-                Some(missing) => pull::HeldStorePositionReason::MissingPredecessor(missing.clone()),
-                None => pull::HeldStorePositionReason::InvalidObject(
+                Some(missing) => HeldStorePositionReason::MissingPredecessor(missing.clone()),
+                None => HeldStorePositionReason::InvalidObject(
                     "Merge commit beyond genesis omits its exact predecessor".to_string(),
                 ),
             };
-            return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+            return Ok(Readiness::Held(HeldStorePosition::commit(
                 commit_ref, reason,
             )));
         }
 
         for record in device_state.devices.values() {
             let target_stream = StreamActivation::device_authorized_stream_id(
-                self.history_verifier
-                    .verified_root()
-                    .reference()
-                    .store_root_hash,
+                self.history.verified_root().reference().store_root_hash,
                 &record.registration,
                 StreamAnchorDomain::StoreAnnouncements,
             );
@@ -466,9 +526,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 None => 0,
             };
             if commit_ref.coord.sequence() > terminal_sequence {
-                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                return Ok(Readiness::Held(HeldStorePosition::commit(
                     commit_ref,
-                    pull::HeldStorePositionReason::InactiveDevice {
+                    HeldStorePositionReason::InactiveDevice {
                         terminals: terminals.clone(),
                         accepted_cut: accepted_cut.clone(),
                     },
@@ -479,10 +539,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
         for freeze in exclusion_freezes {
             let target_stream = StreamActivation::device_authorized_stream_id(
-                self.history_verifier
-                    .verified_root()
-                    .reference()
-                    .store_root_hash,
+                self.history.verified_root().reference().store_root_hash,
                 &freeze.proposal.target,
                 StreamAnchorDomain::StoreAnnouncements,
             );
@@ -495,9 +552,9 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 None => 0,
             };
             if commit_ref.coord.sequence() > frozen_sequence {
-                return Ok(pull::Readiness::Held(pull::HeldStorePosition::commit(
+                return Ok(Readiness::Held(HeldStorePosition::commit(
                     commit_ref,
-                    pull::HeldStorePositionReason::DeviceExclusionFreeze {
+                    HeldStorePositionReason::DeviceExclusionFreeze {
                         proposal: freeze.proposal.clone(),
                         target_cut: freeze.target_cut.clone(),
                     },
@@ -511,20 +568,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 .materialized_reference_status(coverage, &required_stream, required_ref)
                 .await?
             {
-                pull::MaterializedCheck::Yes => {}
-                pull::MaterializedCheck::Missing => {
-                    return Ok(pull::Readiness::Held(pull::HeldStorePosition::dependency(
+                MaterializedCheck::Yes => {}
+                MaterializedCheck::Missing => {
+                    return Ok(Readiness::Held(HeldStorePosition::dependency(
                         commit_ref,
                         &required_stream,
                         required_ref,
-                        pull::HeldStorePositionReason::MissingDependency {
+                        HeldStorePositionReason::MissingDependency {
                             device_id: required_stream.clone(),
                             commit: required_ref.clone(),
                         },
                     )))
                 }
-                pull::MaterializedCheck::Held(reason) => {
-                    return Ok(pull::Readiness::Held(pull::HeldStorePosition::dependency(
+                MaterializedCheck::Held(reason) => {
+                    return Ok(Readiness::Held(HeldStorePosition::dependency(
                         commit_ref,
                         &required_stream,
                         required_ref,
@@ -533,57 +590,50 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 }
             }
         }
-        Ok(pull::Readiness::Ready)
+        Ok(Readiness::Ready)
     }
 
-    pub(crate) async fn verified_pull_membership_objects(
+    pub(crate) async fn verified_membership_objects(
         &mut self,
         commit_ref: &StoreBatchCommitRef,
-        commit: &coven_protocol::store_commit::StoreBatchCommit,
-    ) -> Result<
-        Option<crate::sync::store::commit_verification::commit::VerifiedMergeMembershipClosure>,
-        pull::StorePullError,
-    > {
-        self.history_verifier
+        commit: &StoreBatchCommit,
+    ) -> Result<Option<VerifiedMergeMembershipClosure>, StorePullError> {
+        self.history
             .verified_membership_objects(commit_ref, commit)
             .await
     }
 
-    pub(crate) async fn verify_pull_owner_recovery_activation(
+    pub(crate) async fn verify_owner_recovery_activation(
         &self,
-        commit: &coven_protocol::store_commit::StoreBatchCommit,
+        commit: &StoreBatchCommit,
     ) -> Result<
         Option<(
             coven_protocol::membership::MembershipGrantId,
             coven_protocol::store_commit::OwnerRecoveryActivationId,
         )>,
-        pull::StorePullError,
+        StorePullError,
     > {
-        self.history_verifier
-            .verify_owner_recovery_activation(commit)
-            .await
+        self.history.verify_owner_recovery_activation(commit).await
     }
 
-    pub(crate) async fn retain_pull_acknowledgement(
+    pub(crate) async fn retain_acknowledgement(
         &self,
         commit_ref: &StoreBatchCommitRef,
-        commit: &coven_protocol::store_commit::StoreBatchCommit,
-        author: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<
-        Option<coven_protocol::store_commit::RetainedVerifiedActivatedAck>,
-        pull::StorePullError,
-    > {
+        commit: &StoreBatchCommit,
+        author: &StoreDeviceRegistration,
+    ) -> Result<Option<coven_protocol::store_commit::RetainedVerifiedActivatedAck>, StorePullError>
+    {
         let acknowledgement = self
-            .history_verifier
+            .history
             .validate_commit_acknowledgement(commit, author)
             .await
             .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => pull::StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => pull::StorePullError::InvalidState(error),
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
             })?;
         match acknowledgement {
             Some((reference, value)) => self
-                .history_verifier
+                .history
                 .retain_acknowledgement(commit_ref, commit, author, reference, value)
                 .await
                 .map(Some),
@@ -591,30 +641,28 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
     }
 
-    pub(crate) fn remember_pull_commit(
+    pub(crate) fn remember_commit(
         &mut self,
-        commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    ) -> Result<(), pull::StorePullError> {
-        self.history_verifier
+        commit: VerifiedStoreBatchCommit,
+    ) -> Result<(), StorePullError> {
+        self.history
             .remember(commit)
-            .map_err(pull::StorePullError::Protocol)
+            .map_err(StorePullError::Protocol)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn verified_pull_terminal_retractions(
+    pub(crate) async fn verified_terminal_retractions(
         &mut self,
-        activation_head: &coven_protocol::store_commit::StoreDeviceHead,
-        activation_head_object: &coven_protocol::objects::ExactObjectRef,
-        activation_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        activation_head: &StoreDeviceHead,
+        activation_head_object: &ExactObjectRef,
+        activation_commit: &VerifiedStoreBatchCommit,
         activation_predecessor_state: &ResolvedStoreDeviceState,
         activation_predecessor_membership: &MembershipChain,
-        device_operations: &coven_protocol::store_commit::VerifiedStoreDeviceOperations,
-        loaded_predecessor_memberships: &pull::LoadedMergePredecessorMemberships,
-    ) -> Result<
-        Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
-        pull::StorePullError,
-    > {
-        let root = self.history_verifier.verified_root().reference().clone();
+        device_operations: &VerifiedStoreDeviceOperations,
+        loaded_predecessor_memberships: &LoadedMergePredecessorMemberships,
+    ) -> Result<Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>, StorePullError>
+    {
+        let root = self.history.verified_root().reference().clone();
         let retained = self
             .database
             .retained_merge_replay_inputs(root.clone())
@@ -622,14 +670,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let mut verified_retained = BTreeMap::new();
         for materialization in &retained {
             let verified = self
-                .history_verifier
+                .history
                 .authenticate_bytes(
                     materialization.commit_ref(),
                     &materialization.commit().to_bytes(),
                 )
                 .await?;
             if verified.value() != materialization.commit() {
-                return Err(pull::StorePullError::InvalidState(
+                return Err(StorePullError::InvalidState(
                     "retained Merge materialization differs from its authenticated commit"
                         .to_string(),
                 ));
@@ -646,7 +694,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let MembershipStatus::Resolved(current_resolved) =
             activation_predecessor_membership.status()
         else {
-            return Err(pull::StorePullError::InvalidState(
+            return Err(StorePullError::InvalidState(
                 "Merge terminal retraction witness membership is conflicted".to_string(),
             ));
         };
@@ -664,12 +712,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 )
                 .await?;
             if locator.is_none() {
-                let expected_stream =
-                    coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
-                        root.store_root_hash,
-                        &candidate.value().author_registration,
-                        coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
-                    );
+                let expected_stream = StreamActivation::device_authorized_stream_id(
+                    root.store_root_hash,
+                    &candidate.value().author_registration,
+                    StreamAnchorDomain::StoreAnnouncements,
+                );
                 for (exclusion, accepted_cut) in device_operations.exclusions() {
                     if exclusion.proposal.target != candidate.value().author_registration {
                         continue;
@@ -700,7 +747,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 let MembershipStatus::Resolved(predecessor_resolved) =
                     predecessor_membership.status()
                 else {
-                    return Err(pull::StorePullError::InvalidState(
+                    return Err(StorePullError::InvalidState(
                         "retained candidate predecessor membership is conflicted".to_string(),
                     ));
                 };
@@ -708,12 +755,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .active_grants()
                     .filter(|(_, record)| &record.creation_authority == authority);
                 let Some((grant_id, _)) = matching.next() else {
-                    return Err(pull::StorePullError::InvalidState(
+                    return Err(StorePullError::InvalidState(
                         "retained candidate has no exact predecessor grant authority".to_string(),
                     ));
                 };
                 if matching.next().is_some() {
-                    return Err(pull::StorePullError::InvalidState(
+                    return Err(StorePullError::InvalidState(
                         "retained candidate authority identifies multiple predecessor grants"
                             .to_string(),
                     ));
@@ -725,7 +772,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     continue;
                 }
                 let nonactivation = self
-                    .history_verifier
+                    .history
                     .verify_membership_grant_revocation_nonactivation(
                         grant_id,
                         current_membership_ref,
@@ -740,7 +787,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 continue;
             };
             let nonactivation = self
-                .history_verifier
+                .history
                 .verify_author_exclusion_nonactivation(
                     &locator,
                     activation_head,
@@ -760,10 +807,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .map(|verified| {
                 let reference = verified
                     .candidate_reference()
-                    .map_err(pull::StorePullError::RemoteObject)?;
+                    .map_err(StorePullError::RemoteObject)?;
                 Ok((reference, verified))
             })
-            .collect::<Result<BTreeMap<_, _>, pull::StorePullError>>()?;
+            .collect::<Result<BTreeMap<_, _>, StorePullError>>()?;
         loop {
             let mut additions = Vec::new();
             for materialization in &retained {
@@ -773,7 +820,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 let candidate = verified_retained
                     .get(materialization.commit_ref())
                     .expect("every retained Merge materialization was authenticated");
-                let dependency = pull::commit_predecessor_references(candidate.value())
+                let dependency = commit_predecessor_references(candidate.value())
                     .into_iter()
                     .find_map(|reference| {
                         verified_by_reference
@@ -793,7 +840,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     candidate.author(),
                     materialization.activation_head_object().clone(),
                 )
-                .map_err(pull::StorePullError::RemoteObject)?;
+                .map_err(StorePullError::RemoteObject)?;
                 additions.push((materialization.commit_ref().clone(), verified));
             }
             if additions.is_empty() {
@@ -801,7 +848,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             }
             for (reference, verified) in additions {
                 if verified_by_reference.insert(reference, verified).is_some() {
-                    return Err(pull::StorePullError::InvalidState(
+                    return Err(StorePullError::InvalidState(
                         "transitive Merge retraction constructed duplicate proof".to_string(),
                     ));
                 }
@@ -819,10 +866,20 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .values()
                     .any(|reference| removed.contains(reference))
         }) {
-            return Err(pull::StorePullError::InvalidState(
+            return Err(StorePullError::InvalidState(
                 "surviving retained Merge summary contains a retracted dependency".to_string(),
             ));
         }
         Ok(verified_by_reference.into_values().collect())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn reach_after_remote_commit_test_point(&self, device_id: String, seq: u64) {
+        self.database
+            .reach_test_point(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
+                device_id,
+                seq,
+            })
+            .await;
     }
 }

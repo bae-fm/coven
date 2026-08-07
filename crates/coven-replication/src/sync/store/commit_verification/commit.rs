@@ -3,7 +3,7 @@ use super::merge_history::registration::{
     device_state_has_active_registration, device_state_has_pending_proposal,
     registration_attempt_error, RegistrationLoadError,
 };
-use crate::sync::store::owner::pull::*;
+use crate::sync::store::pull::*;
 use crate::sync::store::StoreError;
 use coven_database::{activated_merge_membership_remote_objects, MembershipAuthorityBytes};
 use coven_protocol::membership::{MembershipChain, MembershipChange, MembershipHeadRef};

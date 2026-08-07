@@ -71,20 +71,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn reach_pull_after_remote_commit_test_point(
-        &self,
-        device_id: String,
-        seq: u64,
-    ) {
-        self.database
-            .reach_test_point(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
-                device_id,
-                seq,
-            })
-            .await;
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn verify_device_join_attempt_for_test(
         &mut self,
         reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
@@ -192,15 +178,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         commit_ref: &coven_protocol::store_commit::StoreBatchCommitRef,
         commit: &coven_protocol::store_commit::StoreBatchCommit,
     ) -> Result<pull::Readiness, pull::StorePullError> {
-        self.pull_readiness(
-            coverage,
-            frontier,
-            device_state,
-            exclusion_freezes,
-            commit_ref,
-            commit,
-        )
-        .await
+        self.pull_history()
+            .readiness(
+                coverage,
+                frontier,
+                device_state,
+                exclusion_freezes,
+                commit_ref,
+                commit,
+            )
+            .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]

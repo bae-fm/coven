@@ -45,7 +45,7 @@ pub enum DeviceJoinError {
     #[error(transparent)]
     Registration(#[from] crate::sync::store::StoreRegistrationError),
     #[error(transparent)]
-    Pull(#[from] crate::sync::store::owner::pull::StorePullError),
+    Pull(#[from] crate::sync::store::pull::StorePullError),
     #[error(transparent)]
     Outbound(#[from] crate::sync::store::StoreError),
     #[error(transparent)]

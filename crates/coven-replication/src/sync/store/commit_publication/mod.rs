@@ -1,6 +1,6 @@
 use super::*;
 use crate::sync::store::owner::authorized_history::AuthorizedStoreHistory;
-use crate::sync::store::owner::pull;
+use crate::sync::store::pull;
 use std::sync::Arc;
 pub(crate) mod operation;
 mod signing;

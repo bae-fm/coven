@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::store::owner::pull::{
+use crate::sync::store::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };

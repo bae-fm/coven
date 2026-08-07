@@ -275,7 +275,7 @@ impl AuthorizedWriterOperation<'_> {
     pub(super) async fn cleanup_merge_candidate(
         &mut self,
         write_id: coven_protocol::write::WriteId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
         self.cleanup_merge_candidate_history(write_id).await
     }
 }

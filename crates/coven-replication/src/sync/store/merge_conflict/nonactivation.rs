@@ -1,6 +1,6 @@
 use super::abandonment;
 use super::MergeConflictHistory;
-use crate::sync::store::owner::pull;
+use crate::sync::store::pull;
 use crate::sync::store::StoreError;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::store_commit::{
@@ -228,7 +228,7 @@ impl MergeConflictHistory<'_, '_> {
         candidate_head_object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<
         coven_protocol::remote_object::VerifiedCandidateNonactivation,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         let retained = self
             .database
@@ -243,12 +243,9 @@ impl MergeConflictHistory<'_, '_> {
             .await?;
         let activation_commit = self.history.load_ref(retained.commit_ref()).await?;
         if activation_commit.value() != retained.commit() {
-            return Err(
-                crate::sync::store::owner::pull::StorePullError::InvalidState(
-                    "retained exclusion activation differs from its authenticated commit"
-                        .to_string(),
-                ),
-            );
+            return Err(crate::sync::store::pull::StorePullError::InvalidState(
+                "retained exclusion activation differs from its authenticated commit".to_string(),
+            ));
         }
         self.history
             .verify_author_exclusion_nonactivation(
@@ -268,7 +265,7 @@ impl MergeConflictHistory<'_, '_> {
     pub(crate) async fn apply_terminal_nonactivation(
         &mut self,
         candidate: TerminalNonactivationCandidate,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
         let verification = match &candidate {
             TerminalNonactivationCandidate::StoreWrite { verification, .. }
             | TerminalNonactivationCandidate::CircleOperation { verification, .. }
@@ -301,7 +298,7 @@ impl MergeConflictHistory<'_, '_> {
         verification: &coven_database::TerminalCandidateCleanupVerification,
     ) -> Result<
         coven_protocol::remote_object::VerifiedCandidateNonactivation,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         let reference = &verification.candidate.head.value.commit;
         let candidate = self
@@ -309,11 +306,9 @@ impl MergeConflictHistory<'_, '_> {
             .authenticate_bytes(reference, &verification.candidate.commit.bytes)
             .await?;
         if candidate.value() != verification.candidate.commit.value.value() {
-            return Err(
-                crate::sync::store::owner::pull::StorePullError::InvalidState(
-                    "terminal cleanup candidate differs from its authenticated commit".to_string(),
-                ),
-            );
+            return Err(crate::sync::store::pull::StorePullError::InvalidState(
+                "terminal cleanup candidate differs from its authenticated commit".to_string(),
+            ));
         }
         let target = coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
             coord: reference.coord.clone(),
@@ -355,7 +350,7 @@ impl MergeConflictHistory<'_, '_> {
                     candidate.author(),
                     verification.candidate.head.object.clone(),
                 )
-                .map_err(crate::sync::store::owner::pull::StorePullError::RemoteObject)
+                .map_err(crate::sync::store::pull::StorePullError::RemoteObject)
             }
         }
     }

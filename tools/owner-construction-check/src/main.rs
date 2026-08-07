@@ -253,7 +253,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
-        "crates/coven-replication/src/sync/store/owner/pull/tests.rs",
+        "crates/coven-replication/src/sync/store/pull/tests.rs",
         "EffectiveAccessFixture",
         "create",
     ),

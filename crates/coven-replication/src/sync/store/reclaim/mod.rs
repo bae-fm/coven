@@ -58,24 +58,22 @@ pub enum StoreReclaimError {
     },
 }
 
-impl From<crate::sync::store::owner::pull::CommitCoverageError> for StoreReclaimError {
-    fn from(error: crate::sync::store::owner::pull::CommitCoverageError) -> Self {
+impl From<crate::sync::store::pull::CommitCoverageError> for StoreReclaimError {
+    fn from(error: crate::sync::store::pull::CommitCoverageError) -> Self {
         match error {
-            crate::sync::store::owner::pull::CommitCoverageError::Object(error) => {
-                Self::Object(error)
+            crate::sync::store::pull::CommitCoverageError::Object(error) => Self::Object(error),
+            crate::sync::store::pull::CommitCoverageError::MissingAncestry { commit_hash } => {
+                Self::MissingAncestry { commit_hash }
             }
-            crate::sync::store::owner::pull::CommitCoverageError::MissingAncestry {
-                commit_hash,
-            } => Self::MissingAncestry { commit_hash },
         }
     }
 }
 
-impl From<crate::sync::store::owner::pull::StorePullError> for StoreReclaimError {
-    fn from(error: crate::sync::store::owner::pull::StorePullError) -> Self {
+impl From<crate::sync::store::pull::StorePullError> for StoreReclaimError {
+    fn from(error: crate::sync::store::pull::StorePullError) -> Self {
         match error {
-            crate::sync::store::owner::pull::StorePullError::Object(error) => Self::Object(error),
-            crate::sync::store::owner::pull::StorePullError::Storage(error) => Self::Storage(error),
+            crate::sync::store::pull::StorePullError::Object(error) => Self::Object(error),
+            crate::sync::store::pull::StorePullError::Storage(error) => Self::Storage(error),
             error => Self::Authorization(error.to_string()),
         }
     }

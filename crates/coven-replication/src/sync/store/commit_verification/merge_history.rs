@@ -1,8 +1,8 @@
 use super::commit::{
     StoreCommitVerifier, StoreMembershipObjectVerifier, VerifiedMergeMembershipClosure,
 };
-use crate::sync::store::owner::pull;
-use crate::sync::store::owner::pull::*;
+use crate::sync::store::pull;
+use crate::sync::store::pull::*;
 use crate::sync::store::StoreError;
 use coven_database::VerifiedStoreSnapshotStability;
 use coven_database::{

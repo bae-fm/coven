@@ -417,15 +417,15 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         {
             Ok(Some(selected)) => selected,
             Ok(None) => return Err(StoreReclaimError::NoSnapshot),
-            Err(crate::sync::store::owner::pull::StorePullError::SnapshotNotStable {
+            Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
                 member,
                 device_id,
             }) => {
                 return Err(StoreReclaimError::MissingAcknowledgement { member, device_id });
             }
             Err(
-                crate::sync::store::owner::pull::StorePullError::SnapshotAuthorInactive
-                | crate::sync::store::owner::pull::StorePullError::SnapshotAuthorNotOwner,
+                crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
+                | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner,
             ) => return Err(StoreReclaimError::NoSnapshot),
             Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
         };

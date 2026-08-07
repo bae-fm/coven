@@ -7,7 +7,8 @@ use crate::sync::store::commit_verification::merge_history::registration::*;
 use crate::sync::store::commit_verification::merge_history::*;
 
 mod authorized;
-pub(super) use authorized::AuthorizedPull;
+mod history;
+pub(crate) use authorized::AuthorizedPull;
 use coven_database::DbError;
 use coven_foundation::changeset::RowChange;
 use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
@@ -24,6 +25,7 @@ use coven_protocol::store_commit::{
     StoreProtocolError, StoreRootRef, VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
 };
 use coven_protocol::{circle, store_commit};
+pub(crate) use history::PullHistory;
 
 mod device_lifecycle_state;
 mod discovery;
@@ -35,14 +37,14 @@ mod snapshot_evidence;
 mod support;
 
 #[derive(Clone)]
-pub(super) struct MergeCandidate {
-    pub(super) candidate: Candidate,
-    pub(super) activation_head: StoreDeviceHead,
-    pub(super) activation_head_object: ExactObjectRef,
-    pub(super) predecessor_membership: MembershipChain,
-    pub(super) device_operations: VerifiedStoreDeviceOperations,
-    pub(super) membership_control: Option<VerifiedCircleActivations>,
-    pub(super) membership_prefix: VerifiedMergeMembershipPrefix,
+struct MergeCandidate {
+    candidate: Candidate,
+    activation_head: StoreDeviceHead,
+    activation_head_object: ExactObjectRef,
+    predecessor_membership: MembershipChain,
+    device_operations: VerifiedStoreDeviceOperations,
+    membership_control: Option<VerifiedCircleActivations>,
+    membership_prefix: VerifiedMergeMembershipPrefix,
 }
 
 pub(crate) struct VerifiedPullCandidate {
@@ -54,7 +56,7 @@ pub(crate) struct VerifiedPullCandidate {
 }
 
 pub(crate) struct LoadedMergePredecessorMemberships {
-    pub(super) by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
+    by_commit: BTreeMap<StoreBatchCommitRef, MembershipChain>,
 }
 
 pub(crate) enum MaterializedCheck {
@@ -101,7 +103,7 @@ pub(crate) async fn materialized_reference_status(
 }
 
 impl LoadedMergePredecessorMemberships {
-    pub(super) fn membership_for(
+    fn membership_for(
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Result<&MembershipChain, StorePullError> {

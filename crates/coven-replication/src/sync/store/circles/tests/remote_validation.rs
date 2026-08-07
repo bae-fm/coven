@@ -222,7 +222,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         pull.held_positions.iter().any(|held| {
             matches!(
                 &held.reason,
-                crate::sync::store::owner::pull::HeldStorePositionReason::InvalidObject(reason)
+                crate::sync::store::pull::HeldStorePositionReason::InvalidObject(reason)
                     if reason.contains("circle access envelope failed verification")
             )
         }),

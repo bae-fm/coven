@@ -120,7 +120,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         prepare_merge_history_successor(
             &self.database,
@@ -143,7 +143,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         author: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<
         coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         let frontier = &coverage.0;
         let root = self.history_verifier.verified_root().reference();
@@ -248,38 +248,34 @@ pub(crate) async fn prepare_merge_history_successor(
     evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
 ) -> Result<
     crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
-    crate::sync::store::owner::pull::StorePullError,
+    crate::sync::store::pull::StorePullError,
 > {
     let root = history.verified_root().reference();
     if verified_commit.store_root_hash() != root.store_root_hash {
-        return Err(
-            crate::sync::store::owner::pull::StorePullError::InvalidState(
-                "authenticated Merge successor belongs to another Store root".to_string(),
-            ),
-        );
+        return Err(crate::sync::store::pull::StorePullError::InvalidState(
+            "authenticated Merge successor belongs to another Store root".to_string(),
+        ));
     }
     let commit = verified_commit.value();
     let commit_ref = verified_commit.reference();
     let author = verified_commit.author();
     state_after.validate_canonical().map_err(|error| {
-        crate::sync::store::owner::pull::StorePullError::context(
+        crate::sync::store::pull::StorePullError::context(
             "validate Merge successor post-state",
             error,
         )
     })?;
-    let predecessor_refs = crate::sync::store::owner::pull::commit_predecessor_references(commit);
+    let predecessor_refs = crate::sync::store::pull::commit_predecessor_references(commit);
     let predecessors =
         retained_history_checkpoints(database, history, predecessor_refs.clone()).await?;
     let (expected_predecessor_ref, predecessor_state) = database
         .store_device_state_for_order(&commit.order)
         .await
-        .map_err(crate::sync::store::owner::pull::StorePullError::Database)?;
+        .map_err(crate::sync::store::pull::StorePullError::Database)?;
     if commit.device_state != expected_predecessor_ref {
-        return Err(
-            crate::sync::store::owner::pull::StorePullError::InvalidState(
-                "Merge successor names another predecessor device state".to_string(),
-            ),
-        );
+        return Err(crate::sync::store::pull::StorePullError::InvalidState(
+            "Merge successor names another predecessor device state".to_string(),
+        ));
     }
     if let Some(recovery_author) = recovery_author {
         let retained_recovery_registration = evidence.registrations.iter().any(|registration| {
@@ -303,12 +299,9 @@ pub(crate) async fn prepare_merge_history_successor(
             || !retained_recovery_registration
             || !recovery_activation
         {
-            return Err(
-                crate::sync::store::owner::pull::StorePullError::InvalidState(
-                    "Merge successor recovery author lacks its exact retained activation"
-                        .to_string(),
-                ),
-            );
+            return Err(crate::sync::store::pull::StorePullError::InvalidState(
+                "Merge successor recovery author lacks its exact retained activation".to_string(),
+            ));
         }
     }
     if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
@@ -316,7 +309,7 @@ pub(crate) async fn prepare_merge_history_successor(
             &commit.author_registration,
         ) && recovery_author != Some(&commit.author_registration)
         {
-            return Err(crate::sync::store::owner::pull::StorePullError::InvalidState(
+            return Err(crate::sync::store::pull::StorePullError::InvalidState(
                 "Merge successor author is inactive at its exact predecessor cut".to_string(),
             ));
         }

@@ -93,7 +93,7 @@ pub enum StoreError {
         source: coven_protocol::objects::StorageError,
     },
     #[error("candidate cleanup: {0}")]
-    CandidateCleanup(#[from] crate::sync::store::owner::pull::StorePullError),
+    CandidateCleanup(#[from] crate::sync::store::pull::StorePullError),
     #[error("Store sequence {current} has no representable successor")]
     SequenceExhausted { current: u64 },
     #[error("published Store write count has no representable successor")]

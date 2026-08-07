@@ -10,7 +10,7 @@ use coven_protocol::store_commit::{
 use crate::sync::store::commit_verification::merge_history::{
     MergeHistoryVerifier, VerifiedOwnerPromotionRequestActivation,
 };
-use crate::sync::store::owner::pull::StorePullError;
+use crate::sync::store::pull::StorePullError;
 
 pub(crate) struct OwnerPromotionHistory<'operation, 'storage> {
     history: &'operation mut MergeHistoryVerifier<'storage>,

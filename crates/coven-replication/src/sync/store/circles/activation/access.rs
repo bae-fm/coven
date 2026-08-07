@@ -463,13 +463,15 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let history_verifier = &mut *self.history;
         let commit = verified.value();
         history_verifier
-            .verify_refs(crate::sync::store::owner::pull::commit_predecessor_references(commit))
+            .verify_refs(crate::sync::store::pull::commit_predecessor_references(
+                commit,
+            ))
             .await
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let verified_membership_prefix = history_verifier
-            .verified_membership_prefix(
-                crate::sync::store::owner::pull::commit_predecessor_references(commit),
-            )
+            .verified_membership_prefix(crate::sync::store::pull::commit_predecessor_references(
+                commit,
+            ))
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         let verified_prefix = VerifiedStreamActivationPrefix::empty();
         Box::pin(self.load_with_prefix(

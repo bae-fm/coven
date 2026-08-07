@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::store::owner::pull::StorePullError;
+use crate::sync::store::pull::StorePullError;
 use crate::sync::store::StoreRegistrationError;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{

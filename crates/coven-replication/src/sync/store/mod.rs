@@ -29,6 +29,7 @@ mod package_preparation;
 mod protocol_root;
 #[cfg(any(test, feature = "test-utils"))]
 pub(super) mod protocol_root;
+pub(crate) mod pull;
 mod registration_object;
 pub(crate) mod restore;
 pub(crate) mod snapshots;
@@ -85,14 +86,14 @@ pub use reclaim::StoreReclaimResult;
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
 pub use commit_publication::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
-#[cfg(test)]
-pub(crate) use owner::pull::HeldStoreCoordinate;
-pub(crate) use owner::pull::{HeldStorePosition, VerifiedStoreDeviceHead};
-pub use owner::pull::{LoadedCirclePackage, Readiness};
-pub use owner::pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use owner::StoreInitializationError;
 pub use owner::StoreRegistrationError;
 pub use owner::{HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership};
+#[cfg(test)]
+pub(crate) use pull::HeldStoreCoordinate;
+pub(crate) use pull::{HeldStorePosition, VerifiedStoreDeviceHead};
+pub use pull::{LoadedCirclePackage, Readiness};
+pub use pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use restore::RestoringStore;
 pub(crate) use snapshots::SnapshotCut;
 #[doc(hidden)]

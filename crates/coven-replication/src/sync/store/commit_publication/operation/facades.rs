@@ -162,7 +162,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn cleanup_merge_candidate_history(
         &mut self,
         write_id: coven_protocol::write::WriteId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
         self.history.cleanup_merge_candidate(write_id).await
     }
 
@@ -196,7 +196,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.writer
             .authorize_retained_outbound(&self.history, order, membership_heads)
@@ -212,7 +212,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.history
             .prepare_merge_history_successor(
@@ -298,7 +298,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
     ) -> Result<
         coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.writer
             .prepare_merge_snapshot_history_summary(&self.history, coverage, membership, state)

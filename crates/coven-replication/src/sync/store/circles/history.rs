@@ -64,7 +64,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<
         coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.history.load_ref(reference).await
     }
@@ -77,7 +77,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
             coven_protocol::store_commit::StoreDeviceStateRef,
             coven_protocol::store_commit::ResolvedStoreDeviceState,
         ),
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         retained::retained_device_state_for_order(&self.database, self.history, order).await
     }
@@ -154,7 +154,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
     pub(crate) async fn cleanup_operation_candidate(
         &mut self,
         operation_id: &coven_protocol::circle::CircleOperationId,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
         cleanup::cleanup_circle_operation_candidate(
             &self.database,
             self.storage,
@@ -173,7 +173,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         evidence: crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence,
     ) -> Result<
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         retained::prepare_merge_history_successor(
             &self.database,

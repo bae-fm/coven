@@ -107,7 +107,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) async fn load_ref(
         &mut self,
         reference: &StoreBatchCommitRef,
-    ) -> Result<VerifiedStoreBatchCommit, crate::sync::store::owner::pull::StorePullError> {
+    ) -> Result<VerifiedStoreBatchCommit, crate::sync::store::pull::StorePullError> {
         self.history.load_ref(reference).await
     }
 
@@ -126,7 +126,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         coverage: &CommitFrontier,
     ) -> Result<
         Vec<(StoreBatchCommitRef, VerifiedStoreBatchCommit)>,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.history.load_covered_commits(coverage).await
     }
@@ -139,7 +139,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             StoreBatchCommitRef,
             coven_protocol::store_commit::StorePackageRef,
         )>,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         let mut targets = std::collections::BTreeMap::new();
         for (reference, commit) in self.load_covered_commits(coverage).await? {
@@ -159,7 +159,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
             StoreBatchCommitRef,
             coven_protocol::store_commit::CirclePackageRef,
         )>,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         let mut targets = std::collections::BTreeMap::new();
         for (reference, commit) in self.load_covered_commits(coverage).await? {
@@ -179,7 +179,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         covering: &StoreBatchCommitRef,
         covered: &StoreBatchCommitRef,
-    ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
+    ) -> Result<bool, crate::sync::store::pull::CommitCoverageError> {
         self.history.commit_position_covers(covering, covered).await
     }
 
@@ -187,7 +187,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         coverage: &CommitFrontier,
         target: &StoreBatchCommitRef,
-    ) -> Result<bool, crate::sync::store::owner::pull::CommitCoverageError> {
+    ) -> Result<bool, crate::sync::store::pull::CommitCoverageError> {
         match coverage.0.get(&target.coord.stream_id) {
             Some(covering) => self.commit_position_covers(covering, target).await,
             None => Ok(false),
@@ -322,14 +322,12 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) async fn verify_currently_materialized(
         &mut self,
         reference: &StoreBatchCommitRef,
-    ) -> Result<(), crate::sync::store::owner::pull::StorePullError> {
-        use crate::sync::store::owner::pull::{
-            commit_stream_id, MaterializedCheck, StorePullError,
-        };
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
+        use crate::sync::store::pull::{commit_stream_id, MaterializedCheck, StorePullError};
 
         let stream_id = commit_stream_id(&reference.coord);
         let coverage = self.database.snapshot_coverage_frontier().await?;
-        let status = crate::sync::store::owner::pull::materialized_reference_status(
+        let status = crate::sync::store::pull::materialized_reference_status(
             self.database,
             self.history,
             &coverage,
@@ -380,7 +378,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<
         coven_database::VerifiedStoreSnapshotStability,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.history.verify_snapshot_stability(snapshot).await
     }
@@ -390,7 +388,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<
         Option<crate::sync::store::commit_verification::merge_history::SelectedStableStoreSnapshot>,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         self.history
             .select_maximal_stable_store_snapshot(candidates)

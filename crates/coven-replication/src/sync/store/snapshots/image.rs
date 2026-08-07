@@ -30,7 +30,7 @@ pub enum SnapshotError {
     #[error("Store protocol object error: {0}")]
     StoreObject(#[source] coven_protocol::objects::StoreObjectError),
     #[error("Store history: {0}")]
-    StoreHistory(#[from] crate::sync::store::owner::pull::StorePullError),
+    StoreHistory(#[from] crate::sync::store::pull::StorePullError),
     /// The snapshot's author is not authorized to publish a catalog image: not a
     /// current Owner of the store's membership chain, or the
     /// chain itself is not anchored to the store's owner (a wiped/refounded

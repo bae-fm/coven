@@ -2,9 +2,34 @@ use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
-        coven_database::LocalBlobCleanup::new(&self.database, self.store_dir)
-            .drain()
-            .await
+        self.blob_cache.drain_local_cleanup().await
+    }
+
+    pub(crate) async fn pull(
+        &mut self,
+        membership: &coven_protocol::membership::MembershipChain,
+        identity: Option<&UserKeypair>,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<pull::StorePullExecution, pull::StorePullError> {
+        pull::AuthorizedPull::load(
+            self.pull_history(),
+            membership,
+            identity,
+            routing_encryption,
+        )
+        .await?
+        .execute()
+        .await
+    }
+
+    pub(super) fn pull_history(&mut self) -> pull::PullHistory<'_, 'storage> {
+        pull::PullHistory::new(
+            self.database.clone(),
+            self.storage.as_ref(),
+            &mut self.history_verifier,
+            &self.blob_source,
+            &self.blob_cache,
+        )
     }
 
     pub(crate) fn circles(

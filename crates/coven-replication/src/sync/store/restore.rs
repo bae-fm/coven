@@ -4,7 +4,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use super::owner::authorized_history::AuthorizedStoreHistory;
-use super::owner::pull;
+use super::pull;
 use super::*;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain};

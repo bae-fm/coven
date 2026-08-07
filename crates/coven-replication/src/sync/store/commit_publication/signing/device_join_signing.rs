@@ -122,7 +122,7 @@ impl LocalStoreWriter {
         reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
     ) -> Result<
         coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::DeviceJoinAttempt>,
-        crate::sync::store::owner::pull::StorePullError,
+        crate::sync::store::pull::StorePullError,
     > {
         history
             .load_verified_attempt(reference, self.registration.value())

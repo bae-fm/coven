@@ -119,13 +119,13 @@ async fn applicable_circle_packages(
     activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     author: &coven_protocol::store_commit::StoreDeviceRegistration,
     purpose: &str,
-) -> Vec<crate::sync::store::owner::pull::LoadedCirclePackage> {
+) -> Vec<crate::sync::store::pull::LoadedCirclePackage> {
     match device
         .load_applicable_circle_packages_for_test(
             verified,
             activations,
             author,
-            crate::sync::store::owner::pull::LocalStoreMembership::Current,
+            crate::sync::store::pull::LocalStoreMembership::Current,
         )
         .await
     {
@@ -3095,10 +3095,8 @@ impl SilentParticipantCircle {
     /// Store view.
     async fn silent_pull(
         &self,
-    ) -> Result<
-        crate::sync::store::owner::pull::StorePullResult,
-        crate::sync::cycle::SyncCycleFailure,
-    > {
+    ) -> Result<crate::sync::store::pull::StorePullResult, crate::sync::cycle::SyncCycleFailure>
+    {
         self.store
             .bind_device(&self.silent_db, &self.silent)
             .await
@@ -3919,7 +3917,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         .find(|position| {
             matches!(
                 &position.reason,
-                crate::sync::store::owner::pull::HeldStorePositionReason::InvalidObject(detail)
+                crate::sync::store::pull::HeldStorePositionReason::InvalidObject(detail)
                     if detail.contains("excluded device awaiting its successor bootstrap")
             )
         })
@@ -3929,7 +3927,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     assert!(
         matches!(
             held.coordinate,
-            crate::sync::store::owner::pull::HeldStoreCoordinate::Commit { .. }
+            crate::sync::store::pull::HeldStoreCoordinate::Commit { .. }
         ),
         "the held position names the successor commit: {held:?}"
     );
