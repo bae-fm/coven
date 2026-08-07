@@ -7,10 +7,12 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::Migration;
 use coven_database::supported_version;
 use coven_database::Database;
-use coven_foundation::config::{CloudProvider, Config, ConfigError, HomeStorage};
+use coven_database::Migration;
+#[cfg(feature = "oauth-providers")]
+use coven_foundation::config::CloudProvider;
+use coven_foundation::config::{Config, ConfigError, HomeStorage};
 use coven_foundation::store_dir::{StoreDir, StoreLayout};
 use coven_keys::encryption::{EncryptionError, EncryptionService, MasterKeyring};
 use coven_keys::identity_custody::IdentityCustody;
@@ -47,7 +49,7 @@ pub enum BootstrapError {
     #[error("Store device registration: {0}")]
     StoreRegistration(#[from] coven_replication::sync::store::StoreRegistrationError),
     #[error("Store device join: {0}")]
-    DeviceJoin(#[from] crate::DeviceJoinError),
+    DeviceJoin(#[from] coven_replication::sync::DeviceJoinError),
     #[error("Store device join transport: {0}")]
     DeviceJoinTransport(#[from] coven_replication::sync::store::DeviceJoinTransportError),
     #[error("storage: {0}")]
@@ -72,7 +74,9 @@ pub enum BootstrapError {
     #[error("provider: {0}")]
     Provider(String),
     #[error("{provider:?} cannot provide exact protocol and blob slots with this configuration")]
-    ExactSlotsUnavailable { provider: crate::CloudProvider },
+    ExactSlotsUnavailable {
+        provider: coven_foundation::config::CloudProvider,
+    },
     #[error("database: {0}")]
     Database(String),
     #[error("invalid signing key: {0}")]
@@ -188,7 +192,7 @@ async fn build_cloud_home_for_join(
     oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
 ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
     use coven_storage::cloud::*;
 
@@ -326,7 +330,7 @@ pub struct DeviceJoinClient {
     layout: StoreLayout,
     synced_tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     store_keys: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
@@ -334,7 +338,7 @@ pub struct DeviceJoinClient {
     oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     test_home: Option<Arc<dyn CloudHome>>,
 }
 
@@ -351,7 +355,7 @@ impl DeviceJoinClient {
         layout: StoreLayout,
         synced_tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
-        custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+        custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
         key_custody: coven_keys::custody::KeyCustody,
         identity_custody: IdentityCustody,
         oauth_clients: coven_storage::oauth::OAuthClients,
@@ -389,12 +393,12 @@ impl DeviceJoinClient {
             oauth_tokens,
             cloudkit_ops,
             clock,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             test_home: None,
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn with_test_bootstrap_home(mut self, home: Arc<dyn CloudHome>) -> Self {
         self.test_home = Some(home);
         self
@@ -402,8 +406,8 @@ impl DeviceJoinClient {
 
     pub async fn prepare_provider_access_request(
         &self,
-        offer: crate::DeviceJoinOffer,
-    ) -> Result<crate::DeviceProviderAccessRequest, BootstrapError> {
+        offer: coven_replication::sync::DeviceJoinOffer,
+    ) -> Result<coven_replication::sync::DeviceProviderAccessRequest, BootstrapError> {
         self.require_offer(&offer)?;
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
         let storage: Arc<dyn coven_storage::SyncStorage> =
@@ -427,8 +431,8 @@ impl DeviceJoinClient {
 
     pub async fn accept_device_join_abandonment(
         &self,
-        abandonment: crate::DeviceJoinAbandonment,
-    ) -> Result<crate::DeviceJoinAbandonment, BootstrapError> {
+        abandonment: coven_replication::sync::DeviceJoinAbandonment,
+    ) -> Result<coven_replication::sync::DeviceJoinAbandonment, BootstrapError> {
         let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
@@ -444,21 +448,23 @@ impl DeviceJoinClient {
 
     pub fn device_join_status(
         &self,
-        attempt_id: crate::DeviceJoinAttemptId,
-    ) -> Result<Option<crate::DeviceJoinStatus>, BootstrapError> {
+        attempt_id: coven_protocol::DeviceJoinAttemptId,
+    ) -> Result<Option<coven_replication::sync::DeviceJoinStatus>, BootstrapError> {
         let pending = self.open_pending_journal()?;
         Ok(pending.status(attempt_id)?)
     }
 
-    pub fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, BootstrapError> {
+    pub fn resume_device_joins(
+        &self,
+    ) -> Result<Vec<coven_replication::sync::DeviceJoinAction>, BootstrapError> {
         let pending = self.open_pending_journal()?;
         Ok(pending.actions()?)
     }
 
     pub async fn close_pending_device_join(
         &self,
-        cancellation: crate::DeviceJoinCancellation,
-    ) -> Result<crate::JoinerJoinTerminal, BootstrapError> {
+        cancellation: coven_replication::sync::DeviceJoinCancellation,
+    ) -> Result<coven_replication::sync::JoinerJoinTerminal, BootstrapError> {
         let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
         let storage: Arc<dyn coven_storage::SyncStorage> =
             Arc::new(self.transport_storage().await?);
@@ -476,15 +482,15 @@ impl DeviceJoinClient {
 
     pub async fn complete_cancelled_device_join(
         &self,
-        activation: crate::DeviceJoinCleanupActivation,
+        activation: coven_replication::sync::DeviceJoinCleanupActivation,
     ) -> Result<(), BootstrapError> {
         let pending = self.open_pending_journal()?;
         match pending.status(activation.receipt.attempt_id)? {
-            Some(crate::DeviceJoinStatus::CleanupActivated {
+            Some(coven_replication::sync::DeviceJoinStatus::CleanupActivated {
                 activation: durable,
             }) if durable == activation => {}
-            Some(crate::DeviceJoinStatus::CleanupActivated { .. }) => {
-                return Err(crate::DeviceJoinError::JournalConflict.into());
+            Some(coven_replication::sync::DeviceJoinStatus::CleanupActivated { .. }) => {
+                return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
             }
             _ => {
                 let storage: Arc<dyn coven_storage::SyncStorage> =
@@ -525,8 +531,8 @@ impl DeviceJoinClient {
 
     pub async fn prepare_registration_request(
         &self,
-        approval: crate::DeviceProviderAdmissionApproval,
-    ) -> Result<crate::DeviceRegistrationRequest, BootstrapError> {
+        approval: coven_replication::sync::DeviceProviderAdmissionApproval,
+    ) -> Result<coven_replication::sync::DeviceRegistrationRequest, BootstrapError> {
         let offer = &approval.request.offer;
         self.require_offer(offer)?;
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
@@ -551,7 +557,7 @@ impl DeviceJoinClient {
 
     pub async fn bootstrap_pending_device(
         &self,
-        bootstrap: crate::ProviderReadyDeviceBootstrap,
+        bootstrap: coven_replication::sync::ProviderReadyDeviceBootstrap,
         on_status: impl Fn(&str),
         cancel: &watch::Receiver<bool>,
     ) -> Result<
@@ -636,7 +642,7 @@ impl DeviceJoinClient {
 
     pub async fn complete_device_join(
         &self,
-        activation: crate::DeviceJoinActivation,
+        activation: coven_replication::sync::DeviceJoinActivation,
         on_status: impl Fn(&str),
     ) -> Result<Config, BootstrapError> {
         let attempt_id = activation.outcome.attempt().attempt_id;
@@ -651,7 +657,7 @@ impl DeviceJoinClient {
             .as_ref()
             .is_some_and(|config| config.store_id != self.code.store_id)
         {
-            return Err(crate::DeviceJoinError::JournalConflict.into());
+            return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
         }
         let signer = match completed_config.as_ref() {
             Some(_) => coven_keys::keys::require_identity(self.identity_custody.as_ref())?,
@@ -662,7 +668,9 @@ impl DeviceJoinClient {
         let device_id = match (pending_readiness.as_ref(), completed_config.as_ref()) {
             (Some(readiness), _) => readiness.proof.registration.device_id.to_string(),
             (None, Some(config)) => config.device_id.clone(),
-            (None, None) => return Err(crate::DeviceJoinError::JournalConflict.into()),
+            (None, None) => {
+                return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into())
+            }
         };
         let db_path = store_dir.db_path();
         let db = Database::open(
@@ -707,7 +715,7 @@ impl DeviceJoinClient {
             .is_some_and(|readiness| joined.registration != readiness.proof.registration)
             || joined.registration.device_id.to_string() != device_id
         {
-            return Err(crate::DeviceJoinError::JournalConflict.into());
+            return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
         }
         on_status("Saving configuration...");
         self.custody.persist(&join.keyring)?;
@@ -720,7 +728,7 @@ impl DeviceJoinClient {
             self.store_keys.set_cloud_home_oauth_tokens(tokens)?;
         }
         let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
-        let mut config = build_config(
+        let mut config = super::build_config(
             &self.code.store_id,
             &device_id,
             &store_dir,
@@ -744,22 +752,27 @@ impl DeviceJoinClient {
         Ok(config)
     }
 
-    fn require_offer(&self, offer: &crate::DeviceJoinOffer) -> Result<(), BootstrapError> {
+    fn require_offer(
+        &self,
+        offer: &coven_replication::sync::DeviceJoinOffer,
+    ) -> Result<(), BootstrapError> {
         if offer.store_root != self.code.store_root || offer.member_pubkey != self.member_pubkey {
-            return Err(crate::DeviceJoinError::OfferMismatch.into());
+            return Err(coven_replication::sync::DeviceJoinError::OfferMismatch.into());
         }
         Ok(())
     }
 
-    fn open_pending_journal(&self) -> Result<crate::DeviceJoinJournalDatabase, BootstrapError> {
+    fn open_pending_journal(
+        &self,
+    ) -> Result<coven_replication::sync::DeviceJoinJournalDatabase, BootstrapError> {
         let directory = self.layout.stores_root().join(".pending-device-joins");
-        Ok(crate::DeviceJoinJournalDatabase::open(
+        Ok(coven_replication::sync::DeviceJoinJournalDatabase::open(
             directory.join(format!("{}.sqlite", self.code.store_id)),
         )?)
     }
 
     async fn build_cloud_home(&self) -> Result<Arc<dyn CloudHome>, BootstrapError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         if let Some(home) = &self.test_home {
             return Ok(home.clone());
         }
@@ -876,79 +889,6 @@ pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> Option<CloudH
         }),
         _ => None,
     }
-}
-
-/// Build the Config struct from join/restore parameters. The cipher records the
-/// home's storage mode: `Encrypted` ⇒ opaque (a store key is stored, with its
-/// fingerprint), `Plaintext` ⇒ browsable (no key, no fingerprint).
-pub(crate) fn build_config(
-    store_id: &str,
-    device_id: &str,
-    store_dir: &StoreDir,
-    store_name: &str,
-    join_info: &CloudHomeJoinInfo,
-    cipher: &CloudCipher,
-) -> Config {
-    let mut config = Config::with_defaults(
-        store_id.to_string(),
-        device_id.to_string(),
-        store_dir.clone(),
-        store_name.to_string(),
-    );
-
-    config.cloud_home.storage = match cipher {
-        CloudCipher::Encrypted(_) => HomeStorage::Opaque,
-        CloudCipher::Plaintext => HomeStorage::Browsable,
-    };
-
-    config.cloud_home.provider = Some(match join_info {
-        CloudHomeJoinInfo::S3 { .. } => CloudProvider::S3,
-        CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
-        CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
-        CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-        CloudHomeJoinInfo::CloudKit | CloudHomeJoinInfo::CloudKitShare { .. } => {
-            CloudProvider::CloudKit
-        }
-    });
-
-    match join_info {
-        CloudHomeJoinInfo::S3 {
-            bucket,
-            region,
-            endpoint,
-            key_prefix,
-            ..
-        } => {
-            config.cloud_home.s3_bucket = Some(bucket.clone());
-            config.cloud_home.s3_region = Some(region.clone());
-            config.cloud_home.s3_endpoint = endpoint.clone();
-            config.cloud_home.s3_key_prefix = key_prefix.clone();
-        }
-        CloudHomeJoinInfo::GoogleDrive { folder_id } => {
-            config.cloud_home.google_drive_folder_id = Some(folder_id.clone());
-        }
-        CloudHomeJoinInfo::Dropbox { folder_path } => {
-            config.cloud_home.dropbox_folder_path = Some(folder_path.clone());
-        }
-        CloudHomeJoinInfo::OneDrive {
-            drive_id,
-            folder_id,
-        } => {
-            config.cloud_home.onedrive_drive_id = Some(drive_id.clone());
-            config.cloud_home.onedrive_folder_id = Some(folder_id.clone());
-        }
-        CloudHomeJoinInfo::CloudKit => {}
-        CloudHomeJoinInfo::CloudKitShare {
-            owner_name,
-            zone_name,
-            ..
-        } => {
-            config.cloud_home.cloudkit_owner_name = Some(owner_name.clone());
-            config.cloud_home.cloudkit_zone_name = Some(zone_name.clone());
-        }
-    }
-
-    config
 }
 
 #[cfg(test)]

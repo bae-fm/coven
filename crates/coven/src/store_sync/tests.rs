@@ -202,7 +202,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         secret_key: "secret".to_string(),
         key_prefix: None,
     };
-    let config = crate::joining::build_config(
+    let config = coven_domain::joining::config::build_config(
         store_id,
         "device",
         &store_dir,

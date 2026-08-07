@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use tracing::info;
 
 use crate::joining::{build_config, derive_credentials, BootstrapCleanup, BootstrapError};
-use crate::Migration;
+use coven_database::Migration;
 use coven_foundation::config::{Config, HomeStorage};
 use coven_foundation::store_dir::StoreLayout;
 use coven_keys::custody::KeyCustody;
@@ -31,7 +31,7 @@ use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 /// driver).
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
-    pub custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    pub custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     pub oauth_clients: coven_storage::oauth::OAuthClients,
     pub oauth_tokens: Option<OAuthTokens>,
     pub cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
@@ -108,7 +108,7 @@ impl RestoreSource {
             CloudHomeJoinInfo::GoogleDrive { folder_id } => {
                 let tokens = require_oauth("Google Drive")?;
                 let oauth_config = oauth_clients
-                    .config_for(crate::CloudProvider::GoogleDrive)
+                    .config_for(coven_foundation::config::CloudProvider::GoogleDrive)
                     .map_err(|error| BootstrapError::Provider(error.to_string()))?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
@@ -127,7 +127,7 @@ impl RestoreSource {
             CloudHomeJoinInfo::Dropbox { folder_path } => {
                 let tokens = require_oauth("Dropbox")?;
                 let oauth_config = oauth_clients
-                    .config_for(crate::CloudProvider::Dropbox)
+                    .config_for(coven_foundation::config::CloudProvider::Dropbox)
                     .map_err(|error| BootstrapError::Provider(error.to_string()))?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
@@ -146,7 +146,7 @@ impl RestoreSource {
             } => {
                 let tokens = require_oauth("OneDrive")?;
                 let oauth_config = oauth_clients
-                    .config_for(crate::CloudProvider::OneDrive)
+                    .config_for(coven_foundation::config::CloudProvider::OneDrive)
                     .map_err(|error| BootstrapError::Provider(error.to_string()))?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
@@ -444,7 +444,7 @@ pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,

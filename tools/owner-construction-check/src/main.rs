@@ -148,7 +148,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "new",
     ),
     (
-        "crates/coven/src/joining/transport_tests.rs",
+        "crates/coven-domain/src/joining/transport_tests.rs",
         "TransportFixture",
         "build_with",
     ),

@@ -14,10 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::joining::BootstrapError;
 use crate::restoration::restore_from_code;
-use crate::restoration::{
-    decode_restore_code, encode_restore_code, OwnerRecoveryAuthority, RestoreAuthority,
-    RestoreCode, RestoreCodeError,
-};
+use crate::restoration::{OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError};
 use coven_database::Database;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::HomeStorage;
@@ -38,6 +35,9 @@ use coven_storage::cloud::cloudkit::{
 };
 use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use coven_storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
+use coven_storage::restore_code::{
+    decode_restore_code, encode_restore_code, RestoreCode, RESTORE_CODE_VERSION,
+};
 use coven_storage::SyncStorage;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 
@@ -73,7 +73,7 @@ impl CloudKitOps for RestoreCloudKitOps {
         };
         Ok(CloudKitProviderIdentity {
             container_id: "iCloud.restore.coven".to_string(),
-            environment: crate::CloudKitEnvironment::Development,
+            environment: coven_protocol::CloudKitEnvironment::Development,
             owner_name: owner_name.to_string(),
             zone_name: zone_name.to_string(),
             current_user_record_name: "restore-user".to_string(),
@@ -424,7 +424,7 @@ fn restore_code_with_sid(sid: &str) -> String {
     let root = store_root_ref("restore test store protocol root");
     let owner = coven_keys::keys::UserKeypair::generate();
     let code = RestoreCode {
-        v: coven_storage::restore_code::RESTORE_CODE_VERSION,
+        v: RESTORE_CODE_VERSION,
         sid: sid.to_string(),
         ek: Some(serialized_keyring(0xaa)),
         name: "Evil".to_string(),
@@ -457,7 +457,7 @@ async fn restore_result_for(
         code_str,
         &test_synced_tables(),
         &test_migrations(),
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -479,7 +479,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
     let root = store_root_ref("restore root");
     let owner = coven_keys::keys::UserKeypair::generate();
     let code = encode_restore_code(&RestoreCode {
-        v: coven_storage::restore_code::RESTORE_CODE_VERSION,
+        v: RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
         ek: Some(serialized_keyring(0xaa)),
         name: "Blob Store".to_string(),
@@ -491,10 +491,10 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         membership_floor: membership_floor(hex::encode([0xAB_u8; 32])),
         authority: owner_recovery_authority(&root, &owner),
     });
-    let tables = test_synced_tables_with_blob(crate::BlobDecl::new(
+    let tables = test_synced_tables_with_blob(coven_protocol::synced_schema::BlobDecl::new(
         "photos",
-        crate::Provenance::HostProvided,
-        crate::CacheFill::CacheLazy,
+        coven_protocol::blob::Provenance::HostProvided,
+        coven_protocol::blob::CacheFill::CacheLazy,
     ));
     let app = tempfile::tempdir().expect("app directory");
 
@@ -688,7 +688,7 @@ async fn restore_with_cancel(
         code,
         &test_synced_tables(),
         &test_migrations(),
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -1009,7 +1009,7 @@ struct OwnerRecoveryRestoreFixture {
     code: String,
     owner_pubkey: String,
     tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
+    migrations: Vec<coven_database::Migration>,
     cloudkit_ops: Arc<RestoreCloudKitOps>,
     app: tempfile::TempDir,
 }
@@ -1127,7 +1127,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         .expect("publish recovery snapshot acknowledgement");
     let authority = owner_device.published_owner_recovery_authority(&owner);
     let code = encode_restore_code(&RestoreCode {
-        v: coven_storage::restore_code::RESTORE_CODE_VERSION,
+        v: RESTORE_CODE_VERSION,
         sid: store_id.to_string(),
         ek: None,
         name: "Recovered Store".to_string(),
@@ -1230,7 +1230,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .expect("export exact activated continuation");
         let expected_latest_snapshot = continuation.latest_snapshot.clone();
         let restore_code = encode_restore_code(&RestoreCode {
-            v: coven_storage::restore_code::RESTORE_CODE_VERSION,
+            v: RESTORE_CODE_VERSION,
             sid: store_id.to_string(),
             ek: None,
             name: "Restored Store".to_string(),

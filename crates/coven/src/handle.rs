@@ -849,7 +849,7 @@ impl CovenHandle {
         &self,
         join_request_code: &str,
         role: MemberRole,
-    ) -> Result<crate::joining::DeviceJoinInvite, SyncError> {
+    ) -> Result<coven_domain::joining::DeviceJoinInvite, SyncError> {
         self.joining.begin_invite(join_request_code, role).await
     }
 
@@ -860,7 +860,7 @@ impl CovenHandle {
     /// or the abandonment that ended it early.
     pub async fn drive_device_join(
         &self,
-        invite: &crate::joining::DeviceJoinInvite,
+        invite: &coven_domain::joining::DeviceJoinInvite,
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,

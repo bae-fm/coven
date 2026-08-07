@@ -2,6 +2,7 @@
 members = [
     "crates/coven",
     "crates/coven-database",
+    "crates/coven-domain",
     "crates/coven-foundation",
     "crates/coven-keys",
     "crates/coven-protocol",
@@ -65,6 +66,7 @@ coven-protocol = { path = "crates/coven-protocol", version = "1.0.0-rc.1" }
 coven-database = { path = "crates/coven-database", version = "1.0.0-rc.1" }
 coven-storage = { path = "crates/coven-storage", version = "1.0.0-rc.1" }
 coven-replication = { path = "crates/coven-replication", version = "1.0.0-rc.1" }
+coven-domain = { path = "crates/coven-domain", version = "1.0.0-rc.1" }
 
 [workspace.lints.rust]
 # Every `pub` not reachable from the crate's own root must be `pub(crate)` (or
@@ -98,6 +100,9 @@ incremental = true
 # `poll` frame than optimized builds. Optimize Coven's test build so the complete
 # composed flows fit within the test runner's thread stack.
 [profile.test.package.coven]
+opt-level = 1
+
+[profile.test.package.coven-domain]
 opt-level = 1
 
 [profile.test.package.coven-replication]

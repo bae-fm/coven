@@ -1,8 +1,9 @@
 mod client;
+pub mod config;
 mod transport;
 
-#[cfg(test)]
-pub(crate) mod test_runtime;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_runtime;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -17,10 +18,12 @@ pub use transport::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
     DeviceJoinTransportOutcome,
 };
-#[cfg(test)]
-pub(crate) use transport::{
+#[cfg(any(test, feature = "test-utils"))]
+pub use transport::{
     close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
 };
 
-pub(crate) use client::*;
-pub(crate) use coven_storage::join_code::*;
+// What `restoration` shares with the join flow it grew out of.
+pub(crate) use client::{derive_credentials, BootstrapCleanup};
+pub(crate) use config::build_config;
+pub(crate) use coven_storage::join_code::decode;

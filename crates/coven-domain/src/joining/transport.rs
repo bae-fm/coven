@@ -35,7 +35,7 @@ pub struct DeviceJoinInvite {
 }
 
 impl DeviceJoinInvite {
-    pub(crate) fn new(invite_code: String, bundle: DeviceJoinOfferBundle) -> Self {
+    pub fn new(invite_code: String, bundle: DeviceJoinOfferBundle) -> Self {
         Self {
             version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
             invite_code,
@@ -71,8 +71,8 @@ fn scanned_invite_client(
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    migrations: Vec<coven_database::Migration>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     key_custody: coven_keys::custody::KeyCustody,
     identity_custody: coven_keys::identity_custody::IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
@@ -97,7 +97,7 @@ fn scanned_invite_client(
 }
 
 /// Join a store from a scanned invite: one call from the payload the owner's
-/// device displayed to this device's saved [`crate::Config`], or to the owner's
+/// device displayed to this device's saved [`coven_foundation::config::Config`], or to the owner's
 /// abandonment of the attempt.
 #[allow(clippy::too_many_arguments)]
 pub async fn join_with_scanned_invite(
@@ -105,8 +105,8 @@ pub async fn join_with_scanned_invite(
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    migrations: Vec<coven_database::Migration>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     key_custody: coven_keys::custody::KeyCustody,
     identity_custody: coven_keys::identity_custody::IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
@@ -144,8 +144,8 @@ pub async fn close_scanned_invite_join(
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
-    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    migrations: Vec<coven_database::Migration>,
+    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
     key_custody: coven_keys::custody::KeyCustody,
     identity_custody: coven_keys::identity_custody::IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
@@ -174,17 +174,17 @@ pub async fn close_scanned_invite_join(
 }
 
 /// Test-only: the joining device's client over an injected cloud home, the way
-/// [`CovenHandle::connect_sync_with_test_home`](crate::CovenHandle) injects one
-/// for the admitting side. The provider knobs a real device reads from its
-/// invite code are fixed here, since the home is supplied outright — including
-/// the exact-slot capability, which the injected home has by construction.
-#[cfg(test)]
+/// the host's own test entry point injects one for the admitting side. The
+/// provider knobs a real device reads from its invite code are fixed here,
+/// since the home is supplied outright — including the exact-slot capability,
+/// which the injected home has by construction.
+#[cfg(any(test, feature = "test-utils"))]
 fn scanned_invite_test_client(
     invite: &DeviceJoinInvite,
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
+    migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::CloudHome>,
 ) -> Result<DeviceJoinClient, BootstrapError> {
@@ -194,7 +194,7 @@ fn scanned_invite_test_client(
         layout,
         synced_tables,
         migrations,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -206,14 +206,14 @@ fn scanned_invite_test_client(
 }
 
 /// Test-only counterpart of [`join_with_scanned_invite`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn join_with_scanned_invite_over_test_home(
+pub async fn join_with_scanned_invite_over_test_home(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
+    migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::CloudHome>,
     timing: DeviceJoinTransportTiming,
@@ -235,14 +235,14 @@ pub(crate) async fn join_with_scanned_invite_over_test_home(
 }
 
 /// Test-only counterpart of [`close_scanned_invite_join`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn close_scanned_invite_join_over_test_home(
+pub async fn close_scanned_invite_join_over_test_home(
     invite: &[u8],
     join_request_code: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<crate::Migration>,
+    migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::CloudHome>,
     timing: DeviceJoinTransportTiming,
@@ -367,7 +367,9 @@ impl DeviceJoinClient {
                 Some(DeviceJoinStatus::Activated { store }) => {
                     return self.finish(&transport, store.activation, &on_status).await;
                 }
-                Some(_) => return Err(crate::DeviceJoinError::JournalConflict.into()),
+                Some(_) => {
+                    return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into())
+                }
             }
         }
     }

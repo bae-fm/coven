@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
-use crate::joining::encode;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
@@ -20,6 +19,7 @@ use coven_replication::sync::store::{
 };
 use coven_replication::sync::test_helpers::*;
 use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
+use coven_storage::join_code::encode;
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -47,7 +47,7 @@ struct TransportFixture {
     /// point into it.
     owner_storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
     owner_store_dir: coven_foundation::store_dir::StoreDir,
-    home: Arc<crate::InMemoryCloudHome>,
+    home: Arc<coven_storage::InMemoryCloudHome>,
     member_pubkey: String,
     invite_code: String,
     join_request: String,
@@ -56,7 +56,7 @@ struct TransportFixture {
     /// The cloud home the joining device sees. Same principal as the owner's
     /// in the ordinary case; a different account for the cross-principal one,
     /// which is what makes the admission run its provider probe.
-    joiner_home: Arc<crate::InMemoryCloudHome>,
+    joiner_home: Arc<coven_storage::InMemoryCloudHome>,
     /// The provider-side grant a cross-principal admission needs, or `None`
     /// when both sides are the same principal and no sharing step exists.
     access_administrator:
@@ -82,7 +82,7 @@ impl TransportFixture {
     async fn build_cross_principal(store_id: &str) -> Self {
         Self::build_with(
             store_id,
-            Some(crate::ProviderPrincipalId::Dropbox {
+            Some(coven_protocol::ProviderPrincipalId::Dropbox {
                 account_id: "joining-device-account".to_string(),
             }),
         )
@@ -91,7 +91,7 @@ impl TransportFixture {
 
     async fn build_with(
         store_id: &str,
-        joiner_principal: Option<crate::ProviderPrincipalId>,
+        joiner_principal: Option<coven_protocol::ProviderPrincipalId>,
     ) -> Self {
         coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
@@ -102,12 +102,12 @@ impl TransportFixture {
         let store_id_owned = store_id.to_string();
         let cross_principal = joiner_principal.is_some();
         let home = if cross_principal {
-            test_cloud_home_with_binding(crate::ResolvedProviderBinding {
-                store: crate::StoreProviderBinding::Dropbox {
+            test_cloud_home_with_binding(coven_protocol::ResolvedProviderBinding {
+                store: coven_protocol::StoreProviderBinding::Dropbox {
                     namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
                 },
-                device: crate::ProviderDeviceBinding {
-                    principal: crate::ProviderPrincipalId::Dropbox {
+                device: coven_protocol::ProviderDeviceBinding {
+                    principal: coven_protocol::ProviderPrincipalId::Dropbox {
                         account_id: "owner-device-account".to_string(),
                     },
                 },
@@ -128,7 +128,8 @@ impl TransportFixture {
         .await
         .expect("Store creation task")
         .expect("create Owner Store");
-        let join_request = crate::generate_join_request(None).expect("generate join request");
+        let join_request =
+            coven_storage::join_code::generate_join_request(None).expect("generate join request");
         let member_pubkey = crate::joining::decode_join_request(&join_request)
             .expect("decode join request")
             .public_key;
@@ -172,9 +173,9 @@ impl TransportFixture {
             .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
             Some(principal) => Arc::new(home.as_ref().clone().with_provider_binding(
-                crate::ResolvedProviderBinding {
+                coven_protocol::ResolvedProviderBinding {
                     store: provider_binding.store,
-                    device: crate::ProviderDeviceBinding { principal },
+                    device: coven_protocol::ProviderDeviceBinding { principal },
                 },
             )),
             None => home.clone(),
@@ -235,14 +236,14 @@ impl TransportFixture {
 
     /// A fresh joining client, as a relaunched app would construct it: nothing
     /// but the codes and the on-disk journal carry across.
-    fn client(&self) -> crate::DeviceJoinClient {
-        crate::DeviceJoinClient::new(
+    fn client(&self) -> crate::joining::DeviceJoinClient {
+        crate::joining::DeviceJoinClient::new(
             &self.invite_code,
             &self.join_request,
             self.layout.clone(),
             self.tables.clone(),
             test_migrations(),
-            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+            Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -271,7 +272,7 @@ impl TransportFixture {
     async fn drive_owner(
         &self,
         bundle: &DeviceJoinOfferBundle,
-    ) -> Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
+    ) -> Result<coven_replication::sync::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         self.drive_owner_with(bundle, timing()).await
     }
 
@@ -281,14 +282,14 @@ impl TransportFixture {
         &self,
         bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
-    ) -> Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
+    ) -> Result<coven_replication::sync::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         self.owner_store
             .device_join_transport()
             .drive(
                 bundle,
-                crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+                coven_replication::sync::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
                 self.access_administrator.as_ref().map(|administrator| {
-                    administrator as &dyn crate::DeviceProviderAccessAdministrator
+                    administrator as &dyn coven_replication::sync::DeviceProviderAccessAdministrator
                 }),
                 timing,
             )
@@ -328,11 +329,11 @@ impl TransportFixture {
 /// The saved config of a join that ran to membership, or a panic naming what
 /// the joining device got instead.
 fn joined(
-    outcome: Result<crate::DeviceJoinTransportOutcome, crate::BootstrapError>,
-) -> crate::Config {
+    outcome: Result<crate::joining::DeviceJoinTransportOutcome, crate::joining::BootstrapError>,
+) -> coven_foundation::config::Config {
     match outcome.expect("the joining device finishes without error") {
-        crate::DeviceJoinTransportOutcome::Joined(config) => config,
-        crate::DeviceJoinTransportOutcome::Abandoned(_) => {
+        crate::joining::DeviceJoinTransportOutcome::Joined(config) => config,
+        crate::joining::DeviceJoinTransportOutcome::Abandoned(_) => {
             panic!("the join was abandoned, not completed")
         }
     }
@@ -340,11 +341,11 @@ fn joined(
 
 /// The activation of a drive that ran to membership.
 fn activated(
-    outcome: Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError>,
-) -> crate::DeviceJoinActivation {
+    outcome: Result<coven_replication::sync::DeviceJoinDriveOutcome, DeviceJoinTransportError>,
+) -> coven_replication::sync::DeviceJoinActivation {
     match outcome.expect("the admitting side finishes without error") {
-        crate::DeviceJoinDriveOutcome::Activated(activation) => activation,
-        crate::DeviceJoinDriveOutcome::Abandoned(_) => {
+        coven_replication::sync::DeviceJoinDriveOutcome::Activated(activation) => activation,
+        coven_replication::sync::DeviceJoinDriveOutcome::Abandoned(_) => {
             panic!("the attempt was abandoned, not activated")
         }
     }
@@ -747,20 +748,19 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
 }
 
 fn assert_joiner_waited_for(
-    result: Result<crate::DeviceJoinTransportOutcome, crate::BootstrapError>,
+    result: Result<crate::joining::DeviceJoinTransportOutcome, crate::joining::BootstrapError>,
     kind: DeviceJoinTransportKind,
 ) {
     match result {
-        Err(crate::BootstrapError::DeviceJoinTransport(DeviceJoinTransportError::Timeout {
-            kind: waited,
-            ..
-        })) if waited == kind => {}
+        Err(crate::joining::BootstrapError::DeviceJoinTransport(
+            DeviceJoinTransportError::Timeout { kind: waited, .. },
+        )) if waited == kind => {}
         other => panic!("the joiner should have died waiting for {kind:?}, got {other:?}"),
     }
 }
 
 fn assert_owner_waited_for(
-    result: Result<crate::DeviceJoinDriveOutcome, DeviceJoinTransportError>,
+    result: Result<coven_replication::sync::DeviceJoinDriveOutcome, DeviceJoinTransportError>,
     kind: DeviceJoinTransportKind,
 ) {
     match result {
@@ -873,10 +873,10 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
     .await
     .expect("the joining device accepts the abandonment")
     {
-        crate::DeviceJoinTransportOutcome::Abandoned(observed) => {
+        crate::joining::DeviceJoinTransportOutcome::Abandoned(observed) => {
             assert_eq!(observed, abandonment)
         }
-        crate::DeviceJoinTransportOutcome::Joined(_) => {
+        crate::joining::DeviceJoinTransportOutcome::Joined(_) => {
             panic!("an abandoned attempt must not produce a member config")
         }
     }
@@ -894,8 +894,10 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         .await
         .expect("the admitting driver reports the abandonment")
     {
-        crate::DeviceJoinDriveOutcome::Abandoned(observed) => assert_eq!(observed, abandonment),
-        crate::DeviceJoinDriveOutcome::Activated(_) => {
+        coven_replication::sync::DeviceJoinDriveOutcome::Abandoned(observed) => {
+            assert_eq!(observed, abandonment)
+        }
+        coven_replication::sync::DeviceJoinDriveOutcome::Activated(_) => {
             panic!("an abandoned attempt has no activation")
         }
     }
@@ -964,10 +966,12 @@ async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
     )
     .await
     {
-        Err(crate::BootstrapError::DeviceJoinTransport(DeviceJoinTransportError::Timeout {
-            kind: DeviceJoinTransportKind::CleanupActivation,
-            ..
-        })) => {}
+        Err(crate::joining::BootstrapError::DeviceJoinTransport(
+            DeviceJoinTransportError::Timeout {
+                kind: DeviceJoinTransportKind::CleanupActivation,
+                ..
+            },
+        )) => {}
         other => {
             panic!("the joiner should have died waiting for the cleanup activation: {other:?}")
         }
@@ -1059,7 +1063,7 @@ async fn run_auto_approval_refuses_an_attempt_this_device_did_not_issue() {
         matches!(
             refused,
             Err(DeviceJoinTransportError::DeviceJoin(
-                crate::DeviceJoinError::OfferMismatch
+                coven_replication::sync::DeviceJoinError::OfferMismatch
             ))
         ),
         "an attempt this device did not issue must be refused, got {refused:?}",
@@ -1094,17 +1098,17 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
     );
 
     let asked = std::sync::atomic::AtomicUsize::new(0);
-    let refuse = |request: &crate::DeviceProviderAccessRequest| {
+    let refuse = |request: &coven_replication::sync::DeviceProviderAccessRequest| {
         assert_eq!(request.offer.attempt_id, bundle.offer.attempt_id);
         asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        crate::DeviceJoinApproval::Refuse
+        coven_replication::sync::DeviceJoinApproval::Refuse
     };
     let refused = fixture
         .owner_store
         .device_join_transport()
         .drive(
             &bundle,
-            crate::DeviceJoinApprovalPolicy::Ask(&refuse),
+            coven_replication::sync::DeviceJoinApprovalPolicy::Ask(&refuse),
             None,
             one_shot(),
         )
@@ -1118,7 +1122,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
         matches!(
             refused,
             Err(DeviceJoinTransportError::DeviceJoin(
-                crate::DeviceJoinError::OfferMismatch
+                coven_replication::sync::DeviceJoinError::OfferMismatch
             ))
         ),
         "a refused request stops the join, got {refused:?}",
@@ -1132,9 +1136,9 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
     );
 
     // The same request approved by the host proceeds to an approval.
-    let approve = |_request: &crate::DeviceProviderAccessRequest| {
+    let approve = |_request: &coven_replication::sync::DeviceProviderAccessRequest| {
         asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        crate::DeviceJoinApproval::Approve
+        coven_replication::sync::DeviceJoinApproval::Approve
     };
     assert_owner_waited_for(
         fixture
@@ -1142,7 +1146,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
             .device_join_transport()
             .drive(
                 &bundle,
-                crate::DeviceJoinApprovalPolicy::Ask(&approve),
+                coven_replication::sync::DeviceJoinApprovalPolicy::Ask(&approve),
                 None,
                 one_shot(),
             )
@@ -1257,7 +1261,7 @@ async fn a_role_cannot_publish_another_roles_artifact() {
                 refused,
                 Err(DeviceJoinTransportError::WrongProducer {
                     kind: DeviceJoinTransportKind::ProviderAccessRequest,
-                    role: crate::DeviceJoinRole::Joiner,
+                    role: coven_replication::sync::DeviceJoinRole::Joiner,
                 })
             ),
             "the admitting side must not write the joiner's artifact, got {refused:?}",
@@ -1289,14 +1293,14 @@ async fn awaiting_an_absent_counterpart_times_out_naming_its_role() {
             deadline: Duration::from_millis(20),
         };
         let timed_out = transport
-            .await_artifact::<crate::DeviceProviderAccessRequest>(expired)
+            .await_artifact::<coven_replication::sync::DeviceProviderAccessRequest>(expired)
             .await;
         assert!(
             matches!(
                 timed_out,
                 Err(DeviceJoinTransportError::Timeout {
                     kind: DeviceJoinTransportKind::ProviderAccessRequest,
-                    producer: crate::DeviceJoinRole::Joiner,
+                    producer: coven_replication::sync::DeviceJoinRole::Joiner,
                 })
             ),
             "an absent joiner surfaces as a timeout naming it, got {timed_out:?}",

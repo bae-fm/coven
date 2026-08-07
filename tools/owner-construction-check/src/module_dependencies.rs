@@ -73,8 +73,6 @@ pub(crate) enum Region {
 /// Every top-level module must appear here; an unassigned module fails the
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
-    ("joining", Region::Domain),
-    ("restoration", Region::Domain),
     ("circles", Region::Host),
     ("coven", Region::Host),
     ("handle", Region::Host),
@@ -101,6 +99,7 @@ pub(crate) const EXTRACTED_CRATE_REGIONS: &[(&str, Region)] = &[
     ("coven_database", Region::Database),
     ("coven_storage", Region::Storage),
     ("coven_replication", Region::Replication),
+    ("coven_domain", Region::Domain),
 ];
 
 /// Database and Storage are siblings: replication composes both, but neither
@@ -338,9 +337,9 @@ impl ModuleDependencyVisitor<'_> {
         });
     }
 
-    /// Every `crate :: ident :: ident …` run in a macro's tokens, checked as a
-    /// reference. Nested delimiters carry paths of their own, so groups are
-    /// walked too.
+    /// Every `crate :: ident …` or `<extracted crate> :: ident …` run in a
+    /// macro's tokens, checked as a reference. Nested delimiters carry paths of
+    /// their own, so groups are walked too.
     fn check_token_stream(&mut self, tokens: proc_macro2::TokenStream) {
         let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
         let mut index = 0;
@@ -354,7 +353,13 @@ impl ModuleDependencyVisitor<'_> {
                 index += 1;
                 continue;
             };
-            if ident != "crate" {
+            let root = ident.to_string();
+            let rooted_at_crate = root == "crate";
+            if !rooted_at_crate
+                && !EXTRACTED_CRATE_REGIONS
+                    .iter()
+                    .any(|(name, _)| *name == root)
+            {
                 index += 1;
                 continue;
             }
@@ -366,7 +371,11 @@ impl ModuleDependencyVisitor<'_> {
                 cursor += 3;
             }
             if !segments.is_empty() {
-                self.check_reference(&segments, line);
+                if rooted_at_crate {
+                    self.check_reference(&segments, line);
+                } else {
+                    self.check_extracted_crate_reference(&root, line);
+                }
             }
             index = cursor.max(index + 1);
         }
@@ -458,10 +467,7 @@ mod tests {
     }
 
     fn lib() -> RustFile {
-        file(
-            "crates/coven/src/lib.rs",
-            "pub use joining::JoinRequestCode;",
-        )
+        file("crates/coven/src/lib.rs", "pub use circles::Circles;")
     }
 
     #[test]
@@ -469,15 +475,14 @@ mod tests {
         let files = vec![
             lib(),
             file(
-                "crates/coven/src/joining/mod.rs",
-                "use crate::handle::CovenHandle;",
+                "crates/coven-replication/src/sync/mod.rs",
+                "use coven_domain::joining::DeviceJoinClient;",
             ),
-            file("crates/coven/src/handle.rs", ""),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "joining");
-        assert_eq!(violations[0].to, "handle");
+        assert_eq!(violations[0].from, "coven_replication");
+        assert_eq!(violations[0].to, "coven_domain");
     }
 
     #[test]
@@ -485,7 +490,7 @@ mod tests {
         let files = vec![
             lib(),
             file(
-                "crates/coven/src/joining/mod.rs",
+                "crates/coven-domain/src/joining/mod.rs",
                 "use coven_replication::sync::store::Store;",
             ),
         ];
@@ -564,7 +569,6 @@ mod tests {
     fn a_crate_rooted_path_inside_an_extracted_crate_is_its_own() {
         let files = vec![
             lib(),
-            file("crates/coven/src/joining/mod.rs", ""),
             file(
                 "crates/coven-storage/src/remote.rs",
                 "use crate::joining::SomethingOfItsOwn;",
@@ -576,38 +580,22 @@ mod tests {
     }
 
     #[test]
-    fn a_root_reexport_cannot_bypass_the_gate() {
-        let files = vec![
-            file("crates/coven/src/lib.rs", "pub use handle::CovenHandle;"),
-            file("crates/coven/src/handle.rs", ""),
-            file(
-                "crates/coven/src/joining/mod.rs",
-                "fn open() { let _ = crate::CovenHandle::open(\"p\"); }",
-            ),
-        ];
-        let violations = find_module_dependency_violations(&files).expect("check runs");
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].to, "handle");
-    }
-
-    #[test]
     fn an_upward_reference_inside_a_macro_body_is_rejected() {
         let files = vec![
             lib(),
-            file("crates/coven/src/handle.rs", ""),
             file(
-                "crates/coven/src/joining/mod.rs",
+                "crates/coven-replication/src/sync/mod.rs",
                 r#"
-                fn is_open(handle: &Handle) -> bool {
-                    matches!(handle, crate::handle::CovenHandle::Open { .. })
+                fn joined(outcome: &Outcome) -> bool {
+                    matches!(outcome, coven_domain::joining::DeviceJoinTransportOutcome::Joined(_))
                 }
                 "#,
             ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "joining");
-        assert_eq!(violations[0].to, "handle");
+        assert_eq!(violations[0].from, "coven_replication");
+        assert_eq!(violations[0].to, "coven_domain");
     }
 
     #[test]
@@ -620,47 +608,44 @@ mod tests {
     fn test_sources_and_cfg_test_items_hold_the_same_direction() {
         let files = vec![
             lib(),
-            file("crates/coven/src/handle.rs", ""),
             file(
-                "crates/coven/src/joining_tests.rs",
-                "use crate::handle::CovenHandle;",
+                "crates/coven-replication/src/sync/pull_tests.rs",
+                "use coven_domain::joining::DeviceJoinClient;",
             ),
             file(
-                "crates/coven/src/joining/mod.rs",
+                "crates/coven-replication/src/sync/mod.rs",
                 r#"
                 #[cfg(test)]
-                mod tests { use crate::handle::CovenHandle; }
+                mod tests { use coven_domain::joining::DeviceJoinClient; }
                 "#,
             ),
         ];
         let violations = find_module_dependency_violations(&files).expect("check runs");
         assert_eq!(violations.len(), 2);
-        assert!(violations
-            .iter()
-            .all(|violation| violation.from == "joining" && violation.to == "handle"));
+        assert!(violations.iter().all(|violation| {
+            violation.from == "coven_replication" && violation.to == "coven_domain"
+        }));
     }
 
     /// A `<module>_tests` file or directory carries the tests for `<module>`, so
-    /// its references answer to that module's region rather than declaring a
-    /// region of their own.
+    /// it answers to that module's region rather than declaring an unclassified
+    /// region of its own.
     #[test]
     fn a_modules_test_file_answers_to_that_modules_region() {
         let files = vec![
             lib(),
-            file("crates/coven/src/joining/mod.rs", ""),
             file("crates/coven/src/handle.rs", ""),
             file(
                 "crates/coven/src/handle_tests/whole_handle.rs",
-                "use crate::joining::JoinRequestCode;",
+                "use coven_domain::joining::DeviceJoinClient;",
             ),
             file(
-                "crates/coven/src/joining_tests.rs",
-                "use crate::handle::CovenHandle;",
+                "crates/coven/src/store_sync_tests.rs",
+                "use coven_domain::joining::DeviceJoinClient;",
             ),
         ];
-        let violations = find_module_dependency_violations(&files).expect("check runs");
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].from, "joining");
-        assert_eq!(violations[0].to, "handle");
+        assert!(find_module_dependency_violations(&files)
+            .expect("test containers resolve to their module's region")
+            .is_empty());
     }
 }

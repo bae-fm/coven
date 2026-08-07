@@ -11,9 +11,7 @@
 pub(crate) mod circles;
 pub(crate) mod coven;
 mod handle;
-pub(crate) mod joining;
 mod read_handle;
-pub(crate) mod restoration;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
 pub(crate) mod store_cloud_storage;
@@ -37,6 +35,18 @@ pub use coven_database::{
     QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
 };
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
+pub use coven_domain::joining::{
+    abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
+    BootstrapError, DeviceJoinClient, InviteCodeInfo, JoinCodeError, JoinRequestCode,
+};
+pub use coven_domain::joining::{
+    close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
+    DeviceJoinTransportOutcome,
+};
+pub use coven_domain::restoration::{
+    decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
+    OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError, RestoreCodeInfo, RestoreSource,
+};
 pub use coven_foundation::atomic_file::{write_atomic, WriteError};
 pub use coven_foundation::changeset::{ChangeOp, RowChange};
 #[cfg(any(test, feature = "test-utils"))]
@@ -127,16 +137,4 @@ pub use coven_storage::{
     ExactSlotStorage, PartSink, S3CloudHome, UploadProgress,
 };
 pub use handle::CovenHandle;
-pub use joining::{
-    abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
-    BootstrapError, DeviceJoinClient, InviteCodeInfo, JoinCodeError, JoinRequestCode,
-};
-pub use joining::{
-    close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
-    DeviceJoinTransportOutcome,
-};
 pub use read_handle::CovenReadHandle;
-pub use restoration::{
-    decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
-    OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError, RestoreCodeInfo, RestoreSource,
-};

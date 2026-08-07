@@ -947,6 +947,7 @@ dependencies = [
  "bytes",
  "chrono",
  "coven-database",
+ "coven-domain",
  "coven-foundation",
  "coven-keys",
  "coven-protocol",
@@ -984,6 +985,26 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "coven-domain"
+version = "1.0.0-rc.1"
+dependencies = [
+ "bytes",
+ "coven-database",
+ "coven-foundation",
+ "coven-keys",
+ "coven-protocol",
+ "coven-replication",
+ "coven-storage",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

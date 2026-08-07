@@ -1,0 +1,57 @@
+[package]
+name = "coven-domain"
+version = "1.0.0-rc.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Coven's device-join and store-restore flows: the domain operations a host drives end to end"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
+
+[lib]
+name = "coven_domain"
+path = "src/lib.rs"
+
+[dependencies]
+coven-database = { workspace = true }
+coven-foundation = { workspace = true }
+coven-keys = { workspace = true }
+coven-protocol = { workspace = true }
+coven-replication = { workspace = true }
+coven-storage = { workspace = true }
+
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+# A `cfg(test)` build of this crate reaches the test hooks below it, which
+# exist only under those crates' own `test-utils`. `cfg(test)` enables no
+# `[features]` of this crate, so they arrive through these edges.
+coven-database = { workspace = true, features = ["test-utils"] }
+coven-foundation = { workspace = true, features = ["test-utils"] }
+coven-keys = { workspace = true, features = ["test-utils"] }
+coven-protocol = { workspace = true, features = ["test-utils"] }
+coven-replication = { workspace = true, features = ["test-utils"] }
+coven-storage = { workspace = true, features = ["test-utils"] }
+
+[features]
+# The join and restore drivers a host's own tests exercise, over the in-memory
+# cloud home the layers below provide.
+test-utils = [
+    "coven-database/test-utils",
+    "coven-foundation/test-utils",
+    "coven-keys/test-utils",
+    "coven-protocol/test-utils",
+    "coven-replication/test-utils",
+    "coven-storage/test-utils",
+]
+oauth-providers = ["coven-keys/oauth-providers", "coven-storage/oauth-providers"]
+
+[lints]
+workspace = true

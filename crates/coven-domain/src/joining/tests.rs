@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::joining::encode;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_replication::sync::test_helpers::*;
 use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
+use coven_storage::join_code::encode;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -45,7 +45,8 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     .await
     .expect("join Owner Store creation task")
     .expect("create Owner Store");
-    let join_request = crate::generate_join_request(None).expect("generate join request");
+    let join_request =
+        coven_storage::join_code::generate_join_request(None).expect("generate join request");
     let member_pubkey = crate::joining::decode_join_request(&join_request)
         .expect("decode join request")
         .public_key;
@@ -86,13 +87,13 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let app = tempfile::tempdir().expect("join app directory");
     let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
     let new_client = || {
-        crate::DeviceJoinClient::new(
+        crate::joining::DeviceJoinClient::new(
             &invite_code,
             &join_request,
             layout.clone(),
             tables.clone(),
             test_migrations(),
-            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+            Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -123,9 +124,11 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         new_client()
             .resume_device_joins()
             .expect("enumerate pending join actions"),
-        vec![crate::DeviceJoinAction::TransferProviderAccessRequest(
-            access_request.clone(),
-        )],
+        vec![
+            coven_replication::sync::DeviceJoinAction::TransferProviderAccessRequest(
+                access_request.clone(),
+            )
+        ],
     );
     let approval = owner_store
         .authorize_device_provider_access(access_request, None)
@@ -179,21 +182,23 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         owner_database
             .device_join_status(
                 completion.readiness.proof.attempt.attempt_id,
-                crate::DeviceJoinRole::Owner,
+                coven_replication::sync::DeviceJoinRole::Owner,
             )
         .await
         .expect("load interrupted owner finalization"),
-        Some(crate::DeviceJoinStatus::AwaitingActivation { completion: durable })
+        Some(coven_replication::sync::DeviceJoinStatus::AwaitingActivation { completion: durable })
             if durable == completion
     ));
     assert!(owner_database
         .device_join_actions()
         .await
         .expect("enumerate Store join actions")
-        .contains(&crate::DeviceJoinAction::ResumeOperation {
-            attempt_id: completion.readiness.proof.attempt.attempt_id,
-            role: crate::DeviceJoinRole::Owner,
-        }));
+        .contains(
+            &coven_replication::sync::DeviceJoinAction::ResumeOperation {
+                attempt_id: completion.readiness.proof.attempt.attempt_id,
+                role: coven_replication::sync::DeviceJoinRole::Owner,
+            }
+        ));
     let activation = owner_store
         .finalize_device_join(completion)
         .await
@@ -217,14 +222,16 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         new_client()
             .device_join_status(activation.outcome.attempt().attempt_id)
             .expect("load interrupted joiner completion"),
-        Some(crate::DeviceJoinStatus::AwaitingCompletion { activation: durable })
+        Some(coven_replication::sync::DeviceJoinStatus::AwaitingCompletion { activation: durable })
             if durable == activation
     ));
     assert_eq!(
         new_client()
             .resume_device_joins()
             .expect("enumerate interrupted completion"),
-        vec![crate::DeviceJoinAction::CompleteJoin(activation.clone())],
+        vec![coven_replication::sync::DeviceJoinAction::CompleteJoin(
+            activation.clone()
+        )],
     );
     home.create_at(
         activation_slot,

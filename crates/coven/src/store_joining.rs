@@ -31,13 +31,16 @@ impl StoreJoining {
         &self,
         join_request_code: &str,
         role: MemberRole,
-    ) -> Result<crate::joining::DeviceJoinInvite, SyncError> {
-        let member_pubkey = crate::joining::decode_join_request(join_request_code)
+    ) -> Result<coven_domain::joining::DeviceJoinInvite, SyncError> {
+        let member_pubkey = coven_domain::joining::decode_join_request(join_request_code)
             .map_err(|error| SyncError::InvalidJoinRequest(error.to_string()))?
             .public_key;
         let invite_code = self.membership.invite(&member_pubkey, None, role).await?;
         let bundle = self.sync.begin_device_join_bundle(&member_pubkey).await?;
-        Ok(crate::joining::DeviceJoinInvite::new(invite_code, bundle))
+        Ok(coven_domain::joining::DeviceJoinInvite::new(
+            invite_code,
+            bundle,
+        ))
     }
 
     pub(crate) async fn status(

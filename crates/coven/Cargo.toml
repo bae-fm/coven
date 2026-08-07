@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 coven-database = { workspace = true }
+coven-domain = { workspace = true }
 coven-foundation = { workspace = true }
 coven-keys = { workspace = true }
 coven-protocol = { workspace = true }
@@ -43,6 +44,7 @@ url = { workspace = true }
 # hooks, which exist only under those crates' own `test-utils`. `cfg(test)`
 # enables no `[features]` of this crate, so they arrive through these edges.
 coven-database = { workspace = true, features = ["test-utils"] }
+coven-domain = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-keys = { workspace = true, features = ["test-utils"] }
 coven-protocol = { workspace = true, features = ["test-utils"] }
@@ -59,13 +61,18 @@ apple-native-keyring-store = { workspace = true }
 # tests with: the foundation clock and id fakes, and the keys test hooks.
 test-utils = [
     "coven-database/test-utils",
+    "coven-domain/test-utils",
     "coven-foundation/test-utils",
     "coven-keys/test-utils",
     "coven-protocol/test-utils",
     "coven-replication/test-utils",
     "coven-storage/test-utils",
 ]
-oauth-providers = ["coven-keys/oauth-providers", "coven-storage/oauth-providers"]
+oauth-providers = [
+    "coven-domain/oauth-providers",
+    "coven-keys/oauth-providers",
+    "coven-storage/oauth-providers",
+]
 
 [lints]
 workspace = true

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::joining::test_runtime::on_a_deep_stack;
+use coven_domain::joining::test_runtime::on_a_deep_stack;
 use coven_replication::sync::test_helpers::*;
 
 fn timing() -> crate::DeviceJoinTransportTiming {
@@ -100,7 +100,7 @@ impl FacadeFixture {
         timing: crate::DeviceJoinTransportTiming,
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinTransportOutcome, crate::BootstrapError> {
-        crate::joining::join_with_scanned_invite_over_test_home(
+        coven_domain::joining::join_with_scanned_invite_over_test_home(
             scanned,
             join_request,
             self.layout.clone(),
@@ -121,7 +121,7 @@ impl FacadeFixture {
         join_request: &str,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<(), crate::BootstrapError> {
-        crate::joining::close_scanned_invite_join_over_test_home(
+        coven_domain::joining::close_scanned_invite_join_over_test_home(
             scanned,
             join_request,
             self.layout.clone(),
@@ -312,18 +312,20 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
 
     let cancel = tokio::sync::watch::channel(false).1;
     let (joined, drove) = tokio::join!(
-        Box::pin(crate::joining::join_with_scanned_invite_over_test_home(
-            &scanned,
-            &join_request,
-            fixture.layout.clone(),
-            fixture.tables.clone(),
-            test_migrations(),
-            Arc::new(crate::SystemClock),
-            fixture.home.clone(),
-            timing(),
-            |_status| {},
-            &cancel,
-        )),
+        Box::pin(
+            coven_domain::joining::join_with_scanned_invite_over_test_home(
+                &scanned,
+                &join_request,
+                fixture.layout.clone(),
+                fixture.tables.clone(),
+                test_migrations(),
+                Arc::new(crate::SystemClock),
+                fixture.home.clone(),
+                timing(),
+                |_status| {},
+                &cancel,
+            )
+        ),
         Box::pin(fixture.handle.drive_device_join(
             &invite,
             crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
