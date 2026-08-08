@@ -293,7 +293,9 @@ fn external_package_keeps_exact_ciphertext_identity_and_idempotent_replay_owner(
     };
     inner.identity.domain = domain;
     inner.identity.object = test_commit_ref("wrong-package", 2).object;
-    assert!(wrong_reference.validate().is_err());
+    assert!(wrong_reference
+        .validate_payload(&package.to_bytes())
+        .is_err());
 }
 
 #[test]
@@ -395,7 +397,9 @@ fn stored_blob_record_rejects_object_outside_locator_semantic_slot() {
             semantic_hash: ObjectHash::digest(&canonical_semantic_bytes),
             object: object.clone(),
         },
-        payloads: RemoteObjectPayloads::SpooledInline,
+        payloads: RemoteObjectPayloads::RowBlob {
+            locator_bytes: canonical_semantic_bytes,
+        },
         state: OwnedObjectState::UploadedVerified {
             ownership: SharedObjectOwnership {
                 pending: BTreeSet::new(),
@@ -440,7 +444,7 @@ fn membership_resolution_is_candidate_activated_retained_authority() {
 fn membership_resolution_authority_rejects_a_different_semantic_reference() {
     let (reference, canonical) = test_membership_resolution();
     let candidate = test_commit_ref("membership-resolution-mismatch", 1);
-    let mut record = test_membership_resolution_record(reference, canonical, candidate)
+    let mut record = test_membership_resolution_record(reference, canonical.clone(), candidate)
         .expect("close membership-resolution ownership");
     let RemoteObjectRecord::RetainedAuthority(inner) = &mut record else {
         panic!("membership resolution must use retained authority ownership")
@@ -453,7 +457,7 @@ fn membership_resolution_authority_rejects_a_different_semantic_reference() {
     reference.conflict_hash = ObjectHash::digest(b"another membership conflict");
 
     assert!(matches!(
-        record.validate(),
+        record.validate_payload(&canonical),
         Err(RemoteObjectRecordError::StoredReferenceMismatch)
     ));
 }

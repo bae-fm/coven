@@ -1571,7 +1571,7 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
         },
     };
     assert!(matches!(
-        records[0].validate(),
+        records[0].validate_payload(&semantic),
         Err(remote_object::RemoteObjectRecordError::DomainMismatch)
     ));
 }

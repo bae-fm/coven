@@ -69,6 +69,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     .expect("build package");
     let semantic = package.to_bytes();
     let stored_package = b"stored package representation".to_vec();
+    let store_dir = db.store_dir_for_test().clone();
     let StoreCommitCoord { stream_id, .. } = test_commit_coord();
     let package_slot = coven_protocol::objects::ObjectSlot::logical(format!(
         "{}.pkg",
@@ -184,6 +185,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
             )
     ));
     let package_remote_id = package_remote.object_id();
+    let semantic_for_spool = semantic.clone();
     let prepared_package = PreparedAudiencePackage::new(
         package_remote_id,
         semantic,
@@ -193,7 +195,6 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     .expect("prepare package");
 
     let directory = tempfile::tempdir().expect("temp dir");
-    let (_payload_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let spool = directory.path().join("blob.spool");
     coven_foundation::local_file::AtomicStagedFile::write_for_test(
         &spool,
@@ -253,6 +254,12 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         Some(spool.clone()),
     )
     .expect("prepare second blob");
+    // The row names its payloads; the package reload reads them back out of the
+    // spool, so they have to be installed the way a real persist installs them.
+    for bytes in [&semantic_for_spool, &stored_package] {
+        crate::payload_spool::write_payload_blocking(&store_dir, bytes)
+            .expect("install package payload");
+    }
     let persisted_write_id = write_id.clone();
     let package_state = serde_json::to_string(&package_remote).expect("package remote state");
     let blob_state = serde_json::to_string(&blob_remote).expect("blob remote state");
